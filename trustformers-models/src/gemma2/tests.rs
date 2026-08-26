@@ -22,7 +22,9 @@ fn tiny_config() -> Gemma2Config {
         sliding_window: 16,
         attention_logit_softcapping: 50.0,
         final_logit_softcapping: 30.0,
-        query_pre_attn_scalar: 1.0 / (head_dim as f64).sqrt(),
+        // Raw HF-style value (== head_dim, the typical convention), not a
+        // precomputed scale -- see `Gemma2Config::query_pre_attn_scalar`.
+        query_pre_attn_scalar: head_dim as f64,
         model_type: "gemma2".to_string(),
     }
 }
@@ -474,14 +476,316 @@ fn test_gemma2_generate_empty_input_error() {
 }
 
 // ── query_pre_attn_scalar formula ─────────────────────────────────────────
+//
+// `Gemma2Config::query_pre_attn_scalar` holds the raw HuggingFace
+// `config.json` value (the attention scale is derived from it as
+// `scale = query_pre_attn_scalar ^ -0.5`), not a precomputed scale -- see
+// the field's doc comment and `gemma2::model::tests::
+// test_gemma2_attention_forward_uses_derived_scale_not_raw_query_pre_attn_scalar`
+// for the end-to-end regression test covering the derivation itself.
 
 #[test]
 fn test_gemma2_query_pre_attn_scalar_formula() {
     let head_dim = 256usize;
-    let expected = 1.0 / (head_dim as f64).sqrt();
     let cfg = Gemma2Config::gemma2_9b();
     assert!(
-        (cfg.query_pre_attn_scalar - expected).abs() < 1e-9,
-        "query_pre_attn_scalar must be 1/sqrt(head_dim)"
+        (cfg.query_pre_attn_scalar - head_dim as f64).abs() < 1e-9,
+        "query_pre_attn_scalar must store the raw value (== head_dim for the 9B preset), \
+         not a precomputed scale"
     );
+}
+
+// ── Real attention regression tests ───────────────────────────────────────
+//
+// These exercise the RoPE + scaled-dot-product attention with logit
+// soft-capping and local/global sliding-window masking that replaced the
+// previous mock (`o_proj(RoPE(q))` with V discarded and no softmax at all).
+// Every test below would have FAILED against that old code.
+
+fn lcg_vec(n: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed;
+    (0..n)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
+        })
+        .collect()
+}
+
+#[test]
+fn test_gemma2_attention_output_shape() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let cfg = tiny_config();
+    let attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("attn creation"); // global layer
+    let seq_len = 4;
+    let input = Tensor::from_vec(
+        vec![0.1f32; seq_len * cfg.hidden_size],
+        &[seq_len, cfg.hidden_size],
+    )
+    .expect("tensor");
+    let out = attn.forward(input).expect("forward");
+    assert_eq!(out.shape(), vec![seq_len, cfg.hidden_size]);
+}
+
+/// Changing an EARLY token must change a LATER position's output. This is
+/// the discriminating test that only real QK^T/softmax/V attention passes;
+/// the old `o_proj(RoPE(q))` mock is purely position-local.
+#[test]
+fn test_gemma2_attention_early_token_change_propagates_forward() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let cfg = tiny_config();
+    let attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("attn creation"); // global (no window)
+    let seq_len = 4;
+    let hidden = cfg.hidden_size;
+
+    let base = lcg_vec(seq_len * hidden, 11);
+    let mut modified = base.clone();
+    for x in modified[0..hidden].iter_mut() {
+        *x += 5.0; // perturb only token 0
+    }
+
+    let out_base = attn
+        .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+    let out_mod = attn
+        .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+
+    let (a, b) = match (&out_base, &out_mod) {
+        (Tensor::F32(x), Tensor::F32(y)) => (
+            x.as_slice().expect("contiguous").to_vec(),
+            y.as_slice().expect("contiguous").to_vec(),
+        ),
+        _ => panic!("expected F32 outputs"),
+    };
+    let last_a = &a[3 * hidden..4 * hidden];
+    let last_b = &b[3 * hidden..4 * hidden];
+    let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+    assert!(
+        differs,
+        "changing token 0 must change token 3's output for real attention"
+    );
+}
+
+/// Causal masking: changing the LAST token must not change any earlier
+/// position's output.
+#[test]
+fn test_gemma2_attention_causal_mask_future_does_not_leak_backward() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let cfg = tiny_config();
+    let attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("attn creation"); // global
+    let seq_len = 4;
+    let hidden = cfg.hidden_size;
+
+    let base = lcg_vec(seq_len * hidden, 12);
+    let mut modified = base.clone();
+    for x in modified[3 * hidden..4 * hidden].iter_mut() {
+        *x += 5.0; // perturb only the LAST token
+    }
+
+    let out_base = attn
+        .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+    let out_mod = attn
+        .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+
+    let (a, b) = match (&out_base, &out_mod) {
+        (Tensor::F32(x), Tensor::F32(y)) => (
+            x.as_slice().expect("contiguous").to_vec(),
+            y.as_slice().expect("contiguous").to_vec(),
+        ),
+        _ => panic!("expected F32 outputs"),
+    };
+    for row in 0..3 {
+        let ra = &a[row * hidden..(row + 1) * hidden];
+        let rb = &b[row * hidden..(row + 1) * hidden];
+        for (x, y) in ra.iter().zip(rb.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "row {row} must be unaffected by a change to a later token"
+            );
+        }
+    }
+}
+
+/// A local layer's sliding window must actually exclude distant keys: with
+/// `sliding_window = 1`, the last token (position 3) can only see itself, so
+/// perturbing token 0 must leave its output completely unchanged.
+#[test]
+fn test_gemma2_attention_sliding_window_excludes_distant_tokens() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let mut cfg = tiny_config();
+    cfg.sliding_window = 1;
+    let attn = Gemma2Attention::new(&cfg, 0, Device::CPU).expect("attn creation"); // local layer
+    assert!(attn.is_local(), "layer 0 must be local");
+    let seq_len = 4;
+    let hidden = cfg.hidden_size;
+
+    let base = lcg_vec(seq_len * hidden, 13);
+    let mut modified = base.clone();
+    for x in modified[0..hidden].iter_mut() {
+        *x += 5.0; // perturb token 0, outside token 3's window of size 1
+    }
+
+    let out_base = attn
+        .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+    let out_mod = attn
+        .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("tensor"))
+        .expect("forward");
+
+    let (a, b) = match (&out_base, &out_mod) {
+        (Tensor::F32(x), Tensor::F32(y)) => (
+            x.as_slice().expect("contiguous").to_vec(),
+            y.as_slice().expect("contiguous").to_vec(),
+        ),
+        _ => panic!("expected F32 outputs"),
+    };
+    let last_a = &a[3 * hidden..4 * hidden];
+    let last_b = &b[3 * hidden..4 * hidden];
+    for (x, y) in last_a.iter().zip(last_b.iter()) {
+        assert!(
+            (x - y).abs() < 1e-6,
+            "token 3 with sliding_window=1 must not be affected by token 0 at all"
+        );
+    }
+}
+
+/// Causal property with a growing sequence: forwarding a prefix of length N
+/// and then forwarding that same prefix plus one appended token must leave
+/// rows `0..N` of the output bit-identical. This is the variable-length
+/// analogue of "appending a token to the KV cache does not change earlier
+/// positions' outputs" for this crate's stateless `Layer::forward` (there
+/// is no incremental KV cache in the `Layer` API; `seq_len` and
+/// `position_ids` are recomputed fresh from the input on every call). It
+/// complements the fixed-length "modify a token" tests above: it also
+/// catches a mask, soft-cap, or RoPE angle that leaked *total* sequence
+/// length instead of depending only on each row's own position. Checked on
+/// the global layer (no window) here; the local/windowed layer gets its own
+/// variant below since its mask construction is a separate code path.
+#[test]
+fn test_gemma2_attention_prefix_extension_preserves_earlier_outputs_global() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let cfg = tiny_config();
+    let attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("attn creation"); // global
+    let hidden = cfg.hidden_size;
+    let prefix_len = 3;
+
+    let prefix = lcg_vec(prefix_len * hidden, 71);
+    let mut extended = prefix.clone();
+    extended.extend(lcg_vec(hidden, 72));
+
+    let out_prefix = attn
+        .forward(Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("tensor"))
+        .expect("forward prefix");
+    let out_extended = attn
+        .forward(Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("tensor"))
+        .expect("forward extended");
+
+    let (a, b) = match (&out_prefix, &out_extended) {
+        (Tensor::F32(x), Tensor::F32(y)) => (
+            x.as_slice().expect("contiguous").to_vec(),
+            y.as_slice().expect("contiguous").to_vec(),
+        ),
+        _ => panic!("expected F32 outputs"),
+    };
+    for row in 0..prefix_len {
+        let ra = &a[row * hidden..(row + 1) * hidden];
+        let rb = &b[row * hidden..(row + 1) * hidden];
+        for (x, y) in ra.iter().zip(rb.iter()) {
+            assert!(
+                (x - y).abs() < 1e-5,
+                "row {row} must be unchanged when a new token is appended after it"
+            );
+        }
+    }
+}
+
+/// Same property as above, but on a LOCAL (sliding-window) layer, whose
+/// per-query key range is built separately from the global path (`window`
+/// is `Some(_)` in `Gemma2Attention::forward`). `sliding_window` is left
+/// larger than the test sequence length so the window never actually
+/// excludes a key here — this isolates "does the local code path leak
+/// seq_len" from "does the window boundary itself work" (already covered by
+/// `test_gemma2_attention_sliding_window_excludes_distant_tokens`).
+#[test]
+fn test_gemma2_attention_prefix_extension_preserves_earlier_outputs_local() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let cfg = tiny_config(); // sliding_window = 16, well above this test's lengths
+    let attn = Gemma2Attention::new(&cfg, 0, Device::CPU).expect("attn creation"); // local
+    assert!(attn.is_local(), "layer 0 must be local");
+    let hidden = cfg.hidden_size;
+    let prefix_len = 3;
+
+    let prefix = lcg_vec(prefix_len * hidden, 73);
+    let mut extended = prefix.clone();
+    extended.extend(lcg_vec(hidden, 74));
+
+    let out_prefix = attn
+        .forward(Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("tensor"))
+        .expect("forward prefix");
+    let out_extended = attn
+        .forward(Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("tensor"))
+        .expect("forward extended");
+
+    let (a, b) = match (&out_prefix, &out_extended) {
+        (Tensor::F32(x), Tensor::F32(y)) => (
+            x.as_slice().expect("contiguous").to_vec(),
+            y.as_slice().expect("contiguous").to_vec(),
+        ),
+        _ => panic!("expected F32 outputs"),
+    };
+    for row in 0..prefix_len {
+        let ra = &a[row * hidden..(row + 1) * hidden];
+        let rb = &b[row * hidden..(row + 1) * hidden];
+        for (x, y) in ra.iter().zip(rb.iter()) {
+            assert!(
+                (x - y).abs() < 1e-5,
+                "local-layer row {row} must be unchanged when a new token is appended after it"
+            );
+        }
+    }
+}
+
+/// With an aggressive soft-cap, extreme-magnitude inputs must not blow up
+/// the attention output to non-finite values.
+#[test]
+fn test_gemma2_attention_softcap_keeps_output_finite() {
+    use crate::gemma2::Gemma2Attention;
+    use trustformers_core::traits::Layer;
+
+    let mut cfg = tiny_config();
+    cfg.attention_logit_softcapping = 0.01; // aggressive cap
+    let attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("attn creation");
+    let seq_len = 3;
+    let hidden = cfg.hidden_size;
+    let input =
+        Tensor::from_vec(vec![50.0f32; seq_len * hidden], &[seq_len, hidden]).expect("tensor");
+    let out = attn.forward(input).expect("forward");
+    match out {
+        Tensor::F32(arr) => {
+            for &v in arr.as_slice().expect("contiguous") {
+                assert!(
+                    v.is_finite(),
+                    "softcapped attention output must stay finite, got {v}"
+                );
+            }
+        },
+        _ => panic!("expected F32 output"),
+    }
 }

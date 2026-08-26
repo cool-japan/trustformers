@@ -14,18 +14,30 @@ use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::ResourceAllocation;
 
 use super::custom_resources::CustomResourceManager;
-use super::database_management::DatabaseConnectionManager;
+use super::database_management::DatabaseSlotAllocator;
 use super::directory_management::TempDirectoryManager;
 use super::gpu_manager::types::GpuPoolConfig as GpuManagerPoolConfig;
 use super::gpu_manager::GpuResourceManager;
 use super::port_management::NetworkPortManager;
 use super::types::*;
 
-/// Comprehensive resource management system
+/// Comprehensive resource management system.
+///
+/// ## Removed in 0.2.1: components that were held but never consulted
+///
+/// `ResourceManagementSystem` used to also own a `config`, a
+/// [`ResourceMonitor`], a `CleanupManager` and a `SystemStatistics`. All four
+/// were constructed in `new`, stored, and never read again by any code path in
+/// this crate — the system never sampled the monitor, never ran the cleanup
+/// manager, and never published the statistics. Holding them made the struct
+/// read as if it monitored and cleaned up; it did not.
+///
+/// They were removed rather than wired up, because wiring them means deciding
+/// what a monitoring cadence and a cleanup policy should be, and that decision
+/// belongs to whoever needs the behaviour — at which point the components can
+/// come back as fields that something actually reads. What remains is the set
+/// of managers the allocation path really calls.
 pub struct ResourceManagementSystem {
-    /// Configuration
-    config: Arc<RwLock<ResourceManagementConfig>>,
-
     /// Network port manager
     port_manager: Arc<NetworkPortManager>,
 
@@ -36,13 +48,10 @@ pub struct ResourceManagementSystem {
     gpu_manager: Arc<GpuResourceManager>,
 
     /// Database connection manager
-    database_manager: Arc<DatabaseConnectionManager>,
+    database_manager: Arc<DatabaseSlotAllocator>,
 
     /// Custom resource manager
     custom_resource_manager: Arc<CustomResourceManager>,
-
-    /// Resource monitor
-    resource_monitor: Arc<ResourceMonitor>,
 
     /// Conflict detector
     conflict_detector: Arc<ConflictDetector>,
@@ -50,11 +59,8 @@ pub struct ResourceManagementSystem {
     /// Resource allocator
     resource_allocator: Arc<ResourceAllocator>,
 
-    /// Cleanup manager
-    cleanup_manager: Arc<CleanupManager>,
-
-    /// System statistics
-    system_stats: Arc<SystemStatistics>,
+    /// Live claims, shared with the allocator and the conflict detector
+    allocation_ledger: Arc<AllocationLedger>,
 
     /// Background tasks
     background_tasks: Vec<JoinHandle<()>>,
@@ -64,18 +70,164 @@ pub struct ResourceManagementSystem {
 }
 
 /// Resource monitor for system health
-pub struct ResourceMonitor {
-    /// Health checker
-    health_checker: HealthChecker,
-    /// Alert system
-    alert_system: AlertSystem,
+pub struct ResourceMonitor {}
+
+/// A live claim on the resources one test holds between allocation and
+/// deallocation.
+///
+/// Every field is copied from the [`ResourceRequirement`] that was granted, so
+/// a claim describes what was actually asked for rather than an estimate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceClaim {
+    /// Identifier of the allocation record this claim belongs to.
+    pub resource_id: String,
+    /// Test that owns the claim.
+    pub test_id: String,
+    /// GPU device indices the test named explicitly.
+    pub gpu_devices: Vec<usize>,
+    /// Number of network ports granted.
+    pub network_ports: usize,
+    /// Number of temporary directories granted.
+    pub temp_directories: usize,
+    /// Number of database connections granted.
+    pub database_connections: usize,
+    /// When the claim was recorded.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Conflict detector for resource allocation
-pub struct ConflictDetector;
+/// Ledger of live [`ResourceClaim`]s, shared by [`ResourceAllocator`] (which
+/// writes it) and [`ConflictDetector`] (which reads it).
+///
+/// This is the single source of truth for "what is currently held". Without it
+/// conflict detection has nothing to compare against, which is why the detector
+/// and the allocator are constructed around one shared instance.
+#[derive(Debug, Default)]
+pub struct AllocationLedger {
+    /// Live claims keyed by `resource_id`.
+    claims: RwLock<std::collections::HashMap<String, ResourceClaim>>,
+}
 
-/// Resource allocator for distribution
-pub struct ResourceAllocator;
+impl AllocationLedger {
+    /// Record `claim`, returning the claim that blocked it, if any.
+    ///
+    /// A non-`None` return means the same `resource_id` was already live. The
+    /// new claim is *rejected*, not merged: the stored claim stays exactly as it
+    /// was, so the caller can report the collision without losing the original.
+    pub fn record(&self, claim: ResourceClaim) -> Option<ResourceClaim> {
+        let mut claims = self.claims.write();
+        if let Some(existing) = claims.get(&claim.resource_id) {
+            return Some(existing.clone());
+        }
+        claims.insert(claim.resource_id.clone(), claim);
+        None
+    }
+
+    /// Release the claim under `resource_id`, returning it when one was live.
+    pub fn release(&self, resource_id: &str) -> Option<ResourceClaim> {
+        self.claims.write().remove(resource_id)
+    }
+
+    /// Release every claim owned by `test_id`, returning how many were live.
+    pub fn release_for_test(&self, test_id: &str) -> usize {
+        let mut claims = self.claims.write();
+        let doomed: Vec<String> = claims
+            .values()
+            .filter(|claim| claim.test_id == test_id)
+            .map(|claim| claim.resource_id.clone())
+            .collect();
+        for resource_id in &doomed {
+            claims.remove(resource_id);
+        }
+        doomed.len()
+    }
+
+    /// Snapshot of every live claim.
+    pub fn snapshot(&self) -> Vec<ResourceClaim> {
+        self.claims.read().values().cloned().collect()
+    }
+
+    /// Number of live claims.
+    pub fn len(&self) -> usize {
+        self.claims.read().len()
+    }
+
+    /// Whether no claim is live.
+    pub fn is_empty(&self) -> bool {
+        self.claims.read().is_empty()
+    }
+
+    /// The conflict `requirements` would hit if granted to `test_id`, if any.
+    ///
+    /// Two conditions are checked, both by exact comparison against live
+    /// claims:
+    ///
+    /// 1. `test_id` already holds a live allocation. The allocation identifier
+    ///    is derived from the test id, so a second grant would overwrite the
+    ///    first one's bookkeeping and leak its resources.
+    /// 2. A GPU device index in `requirements.gpu_devices` is already held by
+    ///    another test. GPU devices are named by index, so exclusivity is
+    ///    decidable here.
+    ///
+    /// Ports, temporary directories and database connections are deliberately
+    /// *not* checked: a [`ResourceRequirement`] carries only a count for them,
+    /// and the concrete port numbers and paths are chosen by
+    /// [`NetworkPortManager`] and
+    /// [`TempDirectoryManager`]
+    /// *after* this check runs. Those managers hand out disjoint resources and
+    /// fail loudly when their pool is exhausted, so the exclusivity guarantee
+    /// lives there rather than being guessed at here.
+    pub fn conflict_with(
+        &self,
+        requirements: &ResourceRequirement,
+        test_id: &str,
+    ) -> Option<String> {
+        let claims = self.claims.read();
+
+        if let Some(existing) = claims.values().find(|claim| claim.test_id == test_id) {
+            return Some(format!(
+                "test '{}' already holds live allocation '{}' (claimed at {})",
+                test_id, existing.resource_id, existing.claimed_at
+            ));
+        }
+
+        for device in &requirements.gpu_devices {
+            if let Some(holder) = claims
+                .values()
+                .find(|claim| claim.test_id != test_id && claim.gpu_devices.contains(device))
+            {
+                return Some(format!(
+                    "GPU device {} is already held by test '{}' under allocation '{}'",
+                    device, holder.test_id, holder.resource_id
+                ));
+            }
+        }
+
+        None
+    }
+}
+
+/// Conflict detector for resource allocation.
+///
+/// Detection is an exact comparison against the live claims in the shared
+/// [`AllocationLedger`]; there is no heuristic and no scoring. Consequently the
+/// `detection_sensitivity` field of [`ConflictResolutionConfig`] is not
+/// consulted, and neither is `enable_auto_resolution`: no automatic resolution
+/// strategy is implemented, so a detected conflict is returned to the caller as
+/// an error instead of being silently worked around.
+pub struct ConflictDetector {
+    /// Configuration this detector was built with.
+    config: ConflictResolutionConfig,
+    /// Live claims to compare against.
+    ledger: Arc<AllocationLedger>,
+}
+
+/// Resource allocator for distribution.
+///
+/// Owns the write side of the shared [`AllocationLedger`].
+pub struct ResourceAllocator {
+    /// Live claims recorded by this allocator.
+    ledger: Arc<AllocationLedger>,
+}
 
 /// Cleanup manager for resource cleanup
 pub struct CleanupManager;
@@ -131,7 +283,7 @@ impl ResourceManagementSystem {
         );
 
         let database_manager = Arc::new(
-            DatabaseConnectionManager::new(config.resource_pools.database_pool.clone())
+            DatabaseSlotAllocator::new(config.resource_pools.database_pool.clone())
                 .await
                 .context("Failed to create database manager")?,
         );
@@ -142,42 +294,29 @@ impl ResourceManagementSystem {
                 .context("Failed to create custom resource manager")?,
         );
 
-        let resource_monitor = Arc::new(
-            ResourceMonitor::new(config.resource_monitoring.clone())
-                .await
-                .context("Failed to create resource monitor")?,
-        );
+        // One ledger, shared: the allocator writes the claims the detector reads.
+        // Handing each component its own copy would make every conflict check
+        // look at an empty table and answer "no conflict" forever.
+        let allocation_ledger = Arc::new(AllocationLedger::default());
 
-        let conflict_detector = Arc::new(
-            ConflictDetector::new(config.conflict_resolution.clone())
-                .await
-                .context("Failed to create conflict detector")?,
-        );
+        let conflict_detector = Arc::new(ConflictDetector::new(
+            config.conflict_resolution.clone(),
+            Arc::clone(&allocation_ledger),
+        ));
 
-        let resource_allocator = Arc::new(
-            ResourceAllocator::new().await.context("Failed to create resource allocator")?,
-        );
-
-        let cleanup_manager = Arc::new(
-            CleanupManager::new(config.resource_cleanup.clone())
-                .await
-                .context("Failed to create cleanup manager")?,
-        );
+        let resource_allocator = Arc::new(ResourceAllocator::new(Arc::clone(&allocation_ledger)));
 
         info!("Initialized resource management system");
 
         Ok(Self {
-            config: Arc::new(RwLock::new(config)),
             port_manager,
             temp_dir_manager,
             gpu_manager,
             database_manager,
             custom_resource_manager,
-            resource_monitor,
             conflict_detector,
             resource_allocator,
-            cleanup_manager,
-            system_stats: Arc::new(SystemStatistics::new()),
+            allocation_ledger,
             background_tasks: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
         })
@@ -220,9 +359,9 @@ impl ResourceManagementSystem {
 
         if requirements.database_connections > 0 {
             self.database_manager
-                .allocate_connections(requirements.database_connections, test_id)
+                .allocate_slots(requirements.database_connections, test_id)
                 .await
-                .context("Failed to allocate database connections")?;
+                .context("Failed to allocate database slots")?;
         }
 
         // Determine resource_type label from whichever sub-resource is primary.
@@ -239,15 +378,33 @@ impl ResourceManagementSystem {
             allocated_at: chrono::Utc::now(),
             deallocated_at: None,
             duration: std::time::Duration::from_secs(0),
-            utilization: 0.0,
-            efficiency: 0.0,
+            // Not observed: nothing here samples how much of the reserved
+            // capacity the test actually used. `0.0` would have claimed a
+            // measured zero.
+            utilization: None,
+            efficiency: None,
         };
 
         // Track allocation
-        self.resource_allocator.track_allocation(&allocation).await?;
+        self.resource_allocator
+            .track_allocation(&allocation, requirements, test_id)
+            .await?;
 
         info!("Resources allocated successfully for test: {}", test_id);
         Ok(allocation)
+    }
+
+    /// Snapshot of every resource claim currently held.
+    ///
+    /// This is the same table [`Self::allocate_resources`] checks against, so a
+    /// caller can see exactly why a conflict was reported.
+    pub fn active_claims(&self) -> Vec<ResourceClaim> {
+        self.allocation_ledger.snapshot()
+    }
+
+    /// Number of allocations currently live.
+    pub fn active_allocation_count(&self) -> usize {
+        self.allocation_ledger.len()
     }
 
     /// Deallocate resources for a test
@@ -367,7 +524,7 @@ impl ResourceManagementSystem {
 
     /// Deallocate database connections for test
     async fn deallocate_database_connections_for_test(&self, test_id: &str) -> Result<()> {
-        self.database_manager.deallocate_connections_for_test(test_id).await
+        self.database_manager.release_slots_for_test(test_id).await
     }
 
     /// Deallocate custom resources for test
@@ -437,6 +594,33 @@ impl ResourceManagementSystem {
             }
         };
 
+        let network_utilization =
+            port_stats.currently_allocated as f32 / port_stats.peak_usage.max(1) as f32;
+
+        // Overall efficiency is the mean of the subsystem occupancy signals that
+        // have actually recorded activity: GPU device occupancy, temp-directory
+        // utilization and port-pool occupancy. A subsystem that has never been
+        // used contributes nothing rather than a zero that would drag the mean
+        // down, and when nothing at all has been allocated the result is 0.0 —
+        // this value is measured, never a nominal constant.
+        let overall_efficiency = {
+            let mut signals: Vec<f32> = Vec::new();
+            if gpu_stats.total_allocations > 0 {
+                signals.push(gpu_stats.allocation_efficiency);
+            }
+            if directory_stats.total_created > 0 {
+                signals.push(directory_stats.utilization);
+            }
+            if port_stats.total_allocated > 0 {
+                signals.push(network_utilization);
+            }
+            if signals.is_empty() {
+                0.0_f32
+            } else {
+                signals.iter().sum::<f32>() / signals.len() as f32
+            }
+        };
+
         let snapshot = SystemPerformanceSnapshot {
             timestamp: chrono::Utc::now(),
             cpu_utilization,
@@ -447,10 +631,9 @@ impl ResourceManagementSystem {
             } else {
                 None
             },
-            network_utilization: port_stats.currently_allocated as f32
-                / port_stats.peak_usage.max(1) as f32,
+            network_utilization,
             disk_utilization: directory_stats.utilization,
-            overall_efficiency: 0.85, // Calculated based on all subsystem efficiencies
+            overall_efficiency,
             system_stats: SystemResourceStatistics::default(),
             gpu_stats,
             database_stats,
@@ -482,8 +665,8 @@ impl ResourceManagementSystem {
         report.push_str("\n\n");
 
         // Database management report
-        report.push_str("Database Connection Management:\n");
-        report.push_str(&self.database_manager.generate_connection_report().await);
+        report.push_str("Database Slot Management:\n");
+        report.push_str(&self.database_manager.generate_slot_report().await);
         report.push_str("\n\n");
 
         // Custom resource management report
@@ -512,68 +695,264 @@ impl ResourceManagementSystem {
     }
 }
 
-// Placeholder implementations for the remaining components
-
-impl ResourceMonitor {
-    async fn new(_config: ResourceMonitoringConfig) -> Result<Self> {
-        Ok(Self {
-            health_checker: HealthChecker::new(),
-            alert_system: AlertSystem::new(),
-        })
-    }
-}
+impl ResourceMonitor {}
 
 impl ConflictDetector {
-    async fn new(_config: ConflictResolutionConfig) -> Result<Self> {
-        Ok(Self)
+    /// Build a detector sharing `ledger` with the system's [`ResourceAllocator`].
+    fn new(config: ConflictResolutionConfig, ledger: Arc<AllocationLedger>) -> Self {
+        Self { config, ledger }
     }
 
+    /// The configuration this detector was built with.
+    pub fn config(&self) -> &ConflictResolutionConfig {
+        &self.config
+    }
+
+    /// Check `requirements` against every live claim in the ledger.
+    ///
+    /// Returns `Ok(None)` only after both checks below have run and found
+    /// nothing; it never reports "no conflict" without looking.
     async fn check_conflicts(
         &self,
-        _requirements: &ResourceRequirement,
-        _test_id: &str,
+        requirements: &ResourceRequirement,
+        test_id: &str,
     ) -> Result<Option<String>> {
-        // Placeholder implementation
-        Ok(None)
+        Ok(self.ledger.conflict_with(requirements, test_id))
     }
 }
 
 impl ResourceAllocator {
-    async fn new() -> Result<Self> {
-        Ok(Self)
+    /// Build an allocator writing into `ledger`.
+    fn new(ledger: Arc<AllocationLedger>) -> Self {
+        Self { ledger }
     }
 
-    async fn track_allocation(&self, _allocation: &ResourceAllocation) -> Result<()> {
-        // Placeholder implementation
+    /// Record a live claim for `test_id`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the ledger already holds a claim under the same
+    /// `resource_id`, which means the conflict check that precedes this call
+    /// was bypassed. The pre-existing claim is left untouched.
+    async fn track_allocation(
+        &self,
+        allocation: &ResourceAllocation,
+        requirements: &ResourceRequirement,
+        test_id: &str,
+    ) -> Result<()> {
+        let claim = ResourceClaim {
+            resource_id: allocation.resource_id.clone(),
+            test_id: test_id.to_string(),
+            gpu_devices: requirements.gpu_devices.clone(),
+            network_ports: requirements.network_ports,
+            temp_directories: requirements.temp_directories,
+            database_connections: requirements.database_connections,
+            claimed_at: allocation.allocated_at,
+        };
+        if let Some(existing) = self.ledger.record(claim) {
+            return Err(anyhow::anyhow!(
+                "allocation '{}' is already claimed by test '{}' since {}",
+                existing.resource_id,
+                existing.test_id,
+                existing.claimed_at
+            ));
+        }
         Ok(())
     }
 
-    async fn mark_deallocated(&self, _allocation: &ResourceAllocation) -> Result<()> {
-        // Placeholder implementation
+    /// Release the claim recorded for `allocation`.
+    ///
+    /// Releasing an allocation the ledger does not know about is reported as a
+    /// warning rather than an error: deallocation is idempotent, and an
+    /// allocation record can outlive the process that tracked it.
+    async fn mark_deallocated(&self, allocation: &ResourceAllocation) -> Result<()> {
+        if self.ledger.release(&allocation.resource_id).is_none() {
+            warn!(
+                "No live claim recorded for allocation '{}'; nothing to release",
+                allocation.resource_id
+            );
+        }
         Ok(())
     }
 }
 
-impl CleanupManager {
-    async fn new(_config: ResourceCleanupConfig) -> Result<Self> {
-        Ok(Self)
-    }
-}
+impl CleanupManager {}
 
-impl SystemStatistics {
-    fn new() -> Self {
-        Self
-    }
-}
+impl SystemStatistics {}
 
-impl HealthChecker {
-    fn new() -> Self {
-        Self
-    }
-}
+impl HealthChecker {}
 
-impl AlertSystem {
-    fn new() -> Self {
-        Self
+impl AlertSystem {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parallel_execution_engine::ResourceRequirement;
+    use std::collections::HashMap;
+
+    /// A requirement that touches no external resource, so allocating it is a
+    /// pure bookkeeping operation.
+    fn bookkeeping_only(gpu_devices: Vec<usize>) -> ResourceRequirement {
+        ResourceRequirement {
+            resource_type: "mixed".to_string(),
+            min_amount: 0.0,
+            cpu_cores: 0.0,
+            memory_mb: 0,
+            gpu_devices,
+            network_ports: 0,
+            temp_directories: 0,
+            database_connections: 0,
+            custom_resources: HashMap::new(),
+        }
+    }
+
+    /// A configuration whose temporary directories live under the OS temp dir.
+    ///
+    /// `case` keeps concurrently running tests in separate subtrees: nextest
+    /// runs each test in its own process, so a shared base path would have them
+    /// creating and cleaning the same directory at the same time.
+    fn test_config(case: &str) -> ResourceManagementConfig {
+        let mut config = ResourceManagementConfig::default();
+        config.resource_pools.temp_directory_pool.base_path =
+            std::env::temp_dir().join("trustformers-resource-management-tests").join(case);
+        config
+    }
+
+    fn claim(resource_id: &str, test_id: &str, gpu_devices: Vec<usize>) -> ResourceClaim {
+        ResourceClaim {
+            resource_id: resource_id.to_string(),
+            test_id: test_id.to_string(),
+            gpu_devices,
+            network_ports: 0,
+            temp_directories: 0,
+            database_connections: 0,
+            claimed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn ledger_records_releases_and_reports_claims() {
+        let ledger = AllocationLedger::default();
+        assert!(ledger.is_empty());
+
+        assert!(ledger.record(claim("allocation-a", "a", vec![])).is_none());
+        assert_eq!(ledger.len(), 1);
+
+        // A second claim on the same allocation id is refused, and the original
+        // survives it.
+        let displaced = ledger.record(claim("allocation-a", "b", vec![]));
+        assert_eq!(displaced.map(|c| c.test_id), Some("a".to_string()));
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger.snapshot()[0].test_id, "a");
+
+        assert!(ledger.release("allocation-a").is_some());
+        assert!(ledger.release("allocation-a").is_none());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn ledger_releases_every_claim_of_one_test() {
+        let ledger = AllocationLedger::default();
+        ledger.record(claim("allocation-a", "a", vec![]));
+        ledger.record(claim("allocation-a-retry", "a", vec![]));
+        ledger.record(claim("allocation-b", "b", vec![]));
+
+        assert_eq!(ledger.release_for_test("a"), 2);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger.release_for_test("a"), 0);
+    }
+
+    /// Regression: `ConflictDetector::check_conflicts` used to return `Ok(None)`
+    /// unconditionally, so a test already holding an allocation was granted a
+    /// second one whose identifier collided with the first.
+    #[test]
+    fn ledger_detects_a_second_allocation_for_the_same_test() {
+        let ledger = AllocationLedger::default();
+        ledger.record(claim("allocation-alpha", "alpha", vec![]));
+
+        let conflict = ledger.conflict_with(&bookkeeping_only(vec![]), "alpha");
+        let message = conflict.expect("a live claim for 'alpha' must be reported");
+        assert!(message.contains("alpha"), "{message}");
+        assert!(message.contains("allocation-alpha"), "{message}");
+
+        assert!(
+            ledger.conflict_with(&bookkeeping_only(vec![]), "beta").is_none(),
+            "an unrelated test must not be blocked"
+        );
+    }
+
+    /// Regression: GPU devices are named by index, so two tests naming the same
+    /// index conflict. The previous placeholder reported no conflict.
+    #[test]
+    fn ledger_detects_gpu_device_already_held_by_another_test() {
+        let ledger = AllocationLedger::default();
+        ledger.record(claim("allocation-alpha", "alpha", vec![0, 2]));
+
+        let message = ledger
+            .conflict_with(&bookkeeping_only(vec![2]), "beta")
+            .expect("device 2 is held by 'alpha'");
+        assert!(message.contains("GPU device 2"), "{message}");
+        assert!(message.contains("alpha"), "{message}");
+
+        assert!(
+            ledger.conflict_with(&bookkeeping_only(vec![1]), "beta").is_none(),
+            "a free device must not be reported as a conflict"
+        );
+    }
+
+    /// Regression: the whole allocate → conflict → deallocate cycle through the
+    /// public API. Against the placeholder implementation the second
+    /// `allocate_resources` call returned `Ok`.
+    #[tokio::test]
+    async fn allocating_twice_for_one_test_is_reported_as_a_conflict() {
+        let system = ResourceManagementSystem::new(test_config("duplicate-allocation"))
+            .await
+            .expect("system initialises");
+        assert_eq!(system.active_allocation_count(), 0);
+
+        let requirements = bookkeeping_only(vec![]);
+        let allocation = system
+            .allocate_resources(&requirements, "conflict-test")
+            .await
+            .expect("first allocation succeeds");
+        assert_eq!(system.active_allocation_count(), 1);
+        assert_eq!(system.active_claims()[0].test_id, "conflict-test");
+
+        let second = system.allocate_resources(&requirements, "conflict-test").await;
+        let error = second.expect_err("the second allocation must be refused");
+        assert!(
+            error.to_string().contains("Resource conflict detected"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(system.active_allocation_count(), 1);
+
+        system.deallocate_resources(&allocation).await.expect("deallocation succeeds");
+        assert_eq!(
+            system.active_allocation_count(),
+            0,
+            "deallocation must release the claim"
+        );
+
+        // With the claim released the same test can allocate again.
+        system
+            .allocate_resources(&requirements, "conflict-test")
+            .await
+            .expect("re-allocation after release succeeds");
+    }
+
+    /// Regression: `overall_efficiency` was the hard-coded constant `0.85`,
+    /// documented as "calculated based on all subsystem efficiencies". On a
+    /// system that has allocated nothing there is no efficiency to report.
+    #[tokio::test]
+    async fn performance_snapshot_reports_measured_efficiency() {
+        let system = ResourceManagementSystem::new(test_config("performance-snapshot"))
+            .await
+            .expect("system initialises");
+
+        let snapshot = system.get_performance_snapshot().await.expect("snapshot is produced");
+        assert_eq!(
+            snapshot.overall_efficiency, 0.0,
+            "an idle system has no measured efficiency to report"
+        );
     }
 }

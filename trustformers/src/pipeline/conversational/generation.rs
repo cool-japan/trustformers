@@ -164,8 +164,11 @@ where
         strategy: &GenerationStrategyConfig,
         config: &ConversationalConfig,
     ) -> Result<String> {
-        // Tokenize the prompt
-        let tokenized = (*self.tokenizer).encode(prompt)?;
+        // Validate the prompt tokenizes before spending compute on
+        // generation: `model.generate` below takes the raw string and
+        // re-tokenizes internally, so this discards the token ids and keeps
+        // only the fail-fast, tokenizer-specific error it surfaces.
+        let _ = (*self.tokenizer).encode(prompt)?;
 
         // Convert to models generation config
         let models_config = self.create_models_config(strategy, config)?;
@@ -183,7 +186,9 @@ where
         config: &ConversationalConfig,
     ) -> Result<ModelsGenerationConfig> {
         Ok(ModelsGenerationConfig {
-            max_new_tokens: strategy.max_tokens,
+            // Strategies must not exceed the conversation-level response
+            // budget even if they individually request more.
+            max_new_tokens: strategy.max_tokens.min(config.max_response_tokens),
             temperature: strategy.temperature,
             top_p: strategy.top_p,
             top_k: strategy.top_k,
@@ -1022,6 +1027,11 @@ impl QualityEnhancer {
         state: &ConversationState,
     ) -> Result<String> {
         let mut enhanced = response.to_string();
+        tracing::trace!(
+            turn_count = state.turns.len(),
+            conversation_health = state.health.overall_score,
+            "enhancing response"
+        );
 
         // Add persona-specific enhancements
         if let Some(persona) = &config.persona {
@@ -1038,8 +1048,15 @@ impl QualityEnhancer {
     }
 
     fn apply_persona_style(&self, response: &str, persona: &PersonaConfig) -> Result<String> {
-        // This would apply persona-specific style adjustments
-        // For now, just return the response as-is
+        // Real persona-conditioned style transfer needs model-based
+        // rewriting (free-text `speaking_style`/`personality` guidelines
+        // aren't mechanically applicable by string manipulation alone); this
+        // honestly returns the response unchanged rather than pretending to
+        // apply a style it can't actually produce.
+        tracing::trace!(
+            persona = %persona.name,
+            "persona style requested but not applied: requires model-based rewriting"
+        );
         Ok(response.to_string())
     }
 
@@ -1348,6 +1365,11 @@ where
         // Build context and prompt
         let context = context_builder.build_enhanced_context(state, config, &input.message)?;
         let prompt = prompt_formatter.format_prompt(&context, config, &input.message)?;
+        // Validate the prompt tokenizes before starting the stream:
+        // `model.generate` below takes the raw string and re-tokenizes
+        // internally, so this discards the token ids and keeps only the
+        // fail-fast, tokenizer-specific error it surfaces.
+        let _ = (*self.tokenizer).encode(&prompt)?;
         let optimized_config = optimizer.optimize_parameters(config, state, &input.message)?;
 
         // Create streaming configuration
@@ -1840,7 +1862,6 @@ mod tests {
 
         let config = ConversationalConfig::default();
         let state = ConversationState::new("test".to_string());
-        let metrics = PerformanceMetrics::default();
 
         let optimized = optimizer
             .optimize_strategy(strategy.clone(), &config, &state)

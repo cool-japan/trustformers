@@ -40,17 +40,40 @@ pub struct MonitoringState {
     pub last_heartbeat: RwLock<Option<SystemTime>>,
 }
 
-/// Information about actively monitored test
+/// Registration record for a test the monitor has been asked to watch.
+///
+/// This is written once, by [`RealTimePerformanceMonitor::register_test`], and
+/// the monitor never refreshes it: the live numbers travel on
+/// [`StreamingMetrics`] instead. Every field here is therefore either an
+/// identity, the registration instant, or something the *caller* declared --
+/// never something this module measured.
+///
+/// 0.2.1: `progress_percent` and `resource_usage` used to be plain values, and
+/// the crate's only caller filled them with `0.0` and an all-zero
+/// `ResourceUsageSnapshot` stamped `timestamp: SystemTime::now()` -- a claim
+/// that CPU, memory, I/O, network, open files and thread count had all been
+/// sampled and were all zero at that instant. They are now `Option`, and
+/// "nobody has sampled this yet" is spelled `None`.
 #[derive(Debug, Clone)]
 pub struct ActiveTestInfo {
+    /// Identifier the caller registered the test under.
     pub test_id: String,
+    /// Human-readable test name, as supplied by the caller.
     pub test_name: String,
+    /// When the caller says the test started.
     pub start_time: SystemTime,
+    /// Phase the caller declared at registration. Not tracked afterwards.
     pub current_phase: TestPhase,
-    pub progress_percent: f64,
+    /// Caller-reported progress, or `None` when no progress source exists.
+    /// Nothing in this crate can derive test progress, so today it is `None`.
+    pub progress_percent: Option<f64>,
+    /// When this record was written. Registration time: nothing updates it.
     pub last_update: SystemTime,
-    pub resource_usage: ResourceUsageSnapshot,
+    /// A resource sample the caller took, or `None` when none was taken.
+    pub resource_usage: Option<ResourceUsageSnapshot>,
+    /// Indicators the caller attached at registration.
     pub performance_indicators: Vec<LivePerformanceIndicator>,
+    /// Anomaly flags the caller attached at registration.
     pub anomaly_flags: Vec<AnomalyFlag>,
 }
 
@@ -75,23 +98,165 @@ pub trait MetricCollector: Debug {
     fn get_collection_interval(&self) -> Duration;
 }
 
-/// System resource metric collector
+/// Live `sysinfo` handle plus the previous sample, shared by the host-level
+/// collectors.
+///
+/// Rates (CPU percentage, network throughput, process disk throughput) are only
+/// defined *between* two samples, so the sampler keeps the previous refresh
+/// instant and reports `None` until a second sample exists — it never
+/// substitutes a placeholder reading for a rate it has not actually observed.
+pub struct HostSampler {
+    system: sysinfo::System,
+    networks: sysinfo::Networks,
+    /// Instant of the previous refresh, if any.
+    last_refresh: Option<Instant>,
+}
+
+impl fmt::Debug for HostSampler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostSampler")
+            .field("last_refresh", &self.last_refresh)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One host-level sample.
+#[derive(Debug, Clone, Copy)]
+pub struct HostSample {
+    /// System-wide CPU usage percentage, or `None` when the interval since the
+    /// previous refresh was shorter than `sysinfo`'s minimum CPU update
+    /// interval, which makes the delta meaningless.
+    pub cpu_percent: Option<f64>,
+    /// Memory in use across the host, in bytes.
+    pub used_memory_bytes: u64,
+    /// Bytes/second across all network interfaces since the previous sample, or
+    /// `None` on the first sample.
+    pub network_bytes_per_second: Option<f64>,
+}
+
+/// One process-level sample.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessSample {
+    /// Process CPU usage percentage (`sysinfo` reports this relative to a
+    /// single core), or `None` when the sampling interval was too short.
+    pub cpu_percent: Option<f64>,
+    /// Resident memory of the process, in bytes.
+    pub memory_bytes: u64,
+    /// Disk bytes/second read+written by the process since the previous sample,
+    /// or `None` on the first sample.
+    pub disk_bytes_per_second: Option<f64>,
+}
+
+impl Default for HostSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostSampler {
+    /// Build a sampler and take a priming refresh so the *next* sample has a
+    /// delta to measure against.
+    pub fn new() -> Self {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        system.refresh_cpu_usage();
+        let networks = sysinfo::Networks::new_with_refreshed_list();
+        Self {
+            system,
+            networks,
+            last_refresh: Some(Instant::now()),
+        }
+    }
+
+    /// Whether enough time has passed since the previous refresh for `sysinfo`
+    /// to produce a meaningful CPU delta.
+    fn cpu_delta_is_meaningful(elapsed: Option<Duration>) -> bool {
+        elapsed.is_some_and(|e| e >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
+    }
+
+    /// Take a host-wide sample.
+    pub fn sample_host(&mut self) -> HostSample {
+        let now = Instant::now();
+        let elapsed = self.last_refresh.map(|previous| now - previous);
+
+        self.system.refresh_memory();
+        self.system.refresh_cpu_usage();
+        let cpu_percent = if Self::cpu_delta_is_meaningful(elapsed) {
+            Some(f64::from(self.system.global_cpu_usage()))
+        } else {
+            None
+        };
+
+        self.networks.refresh(true);
+        let network_bytes_per_second = elapsed.filter(|e| !e.is_zero()).map(|e| {
+            let bytes: u64 = self
+                .networks
+                .values()
+                .map(|data| data.received().saturating_add(data.transmitted()))
+                .sum();
+            bytes as f64 / e.as_secs_f64()
+        });
+
+        self.last_refresh = Some(now);
+        HostSample {
+            cpu_percent,
+            used_memory_bytes: self.system.used_memory(),
+            network_bytes_per_second,
+        }
+    }
+
+    /// Take a sample for one process. Returns `None` when the host reports no
+    /// such process — an honest "gone", not a zeroed reading.
+    pub fn sample_process(&mut self, pid: u32) -> Option<ProcessSample> {
+        let now = Instant::now();
+        let elapsed = self.last_refresh.map(|previous| now - previous);
+        let pid = sysinfo::Pid::from_u32(pid);
+
+        self.system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        self.last_refresh = Some(now);
+
+        let process = self.system.process(pid)?;
+        let disk = process.disk_usage();
+        let disk_bytes_per_second = elapsed
+            .filter(|e| !e.is_zero())
+            .map(|e| (disk.read_bytes.saturating_add(disk.written_bytes)) as f64 / e.as_secs_f64());
+
+        Some(ProcessSample {
+            cpu_percent: if Self::cpu_delta_is_meaningful(elapsed) {
+                Some(f64::from(process.cpu_usage()))
+            } else {
+                None
+            },
+            memory_bytes: process.memory(),
+            disk_bytes_per_second,
+        })
+    }
+}
+
+/// System resource metric collector.
+///
+/// Reports host-wide CPU, memory and network readings taken from `sysinfo`.
 #[derive(Debug)]
 pub struct SystemResourceCollector {
     pub name: String,
     pub enabled: bool,
     pub collection_interval: Duration,
-    pub last_collection: RwLock<Option<Instant>>,
+    /// Live `sysinfo` handle. Behind a `parking_lot::Mutex` because
+    /// [`MetricCollector::collect_metrics`] is a synchronous method.
+    pub sampler: parking_lot::Mutex<HostSampler>,
 }
 
-/// Process-specific metric collector
+/// Process-specific metric collector.
+///
+/// Reports CPU, resident memory and disk throughput for one PID.
 #[derive(Debug)]
 pub struct ProcessMetricCollector {
     pub name: String,
     pub enabled: bool,
     pub collection_interval: Duration,
     pub process_id: u32,
-    pub baseline_metrics: RwLock<Option<ProcessBaseline>>,
+    /// Live `sysinfo` handle, see [`SystemResourceCollector::sampler`].
+    pub sampler: parking_lot::Mutex<HostSampler>,
 }
 
 /// Network performance metric collector
@@ -188,12 +353,14 @@ pub struct StreamQuality {
 pub enum StreamingEvent {
     MetricsUpdate {
         test_id: String,
-        metrics: StreamingMetrics,
+        /// Boxed: this is by far the largest payload of the enum, and every
+        /// other variant would otherwise be padded to its size.
+        metrics: Box<StreamingMetrics>,
         timestamp: SystemTime,
     },
     TestStarted {
         test_id: String,
-        test_info: ActiveTestInfo,
+        test_info: Box<ActiveTestInfo>,
     },
     TestCompleted {
         test_id: String,
@@ -567,10 +734,10 @@ impl RealTimePerformanceMonitor {
 
         // Send test started event
         let test_id = test_info.test_id.clone();
-        let _ = self
-            .stream_manager
-            .stream_sender
-            .send(StreamingEvent::TestStarted { test_id, test_info });
+        let _ = self.stream_manager.stream_sender.send(StreamingEvent::TestStarted {
+            test_id,
+            test_info: Box::new(test_info),
+        });
 
         self.monitoring_state.total_tests_monitored.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -663,7 +830,7 @@ impl RealTimePerformanceMonitor {
                 name: "SystemResourceCollector".to_string(),
                 enabled: true,
                 collection_interval: self.config.monitoring_interval,
-                last_collection: RwLock::new(None),
+                sampler: parking_lot::Mutex::new(HostSampler::new()),
             }),
         );
 
@@ -675,7 +842,7 @@ impl RealTimePerformanceMonitor {
                 enabled: true,
                 collection_interval: self.config.monitoring_interval,
                 process_id: std::process::id(),
-                baseline_metrics: RwLock::new(None),
+                sampler: parking_lot::Mutex::new(HostSampler::new()),
             }),
         );
 
@@ -707,7 +874,7 @@ impl RealTimePerformanceMonitor {
                     // Send streaming event
                     let _ = stream_manager.stream_sender.send(StreamingEvent::MetricsUpdate {
                         test_id: test_id.to_string(),
-                        metrics: metrics.clone(),
+                        metrics: Box::new(metrics.clone()),
                         timestamp: SystemTime::now(),
                     });
 
@@ -792,15 +959,23 @@ impl<T> CircularBuffer<T> {
         self.total_items_added += 1;
     }
 
-    fn len(&self) -> usize {
+    /// Number of items currently buffered.
+    pub fn len(&self) -> usize {
         self.buffer.len()
     }
 
-    fn capacity(&self) -> usize {
+    /// Whether the buffer currently holds no items.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Maximum number of items retained before the oldest is dropped.
+    pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    fn total_added(&self) -> u64 {
+    /// Total items ever pushed, including those since evicted.
+    pub fn total_added(&self) -> u64 {
         self.total_items_added
     }
 }
@@ -818,22 +993,27 @@ impl Default for StreamQuality {
 }
 
 impl MetricCollector for SystemResourceCollector {
+    /// Sample the host through `sysinfo`.
+    ///
+    /// The per-test fields stay `None`: this collector observes the machine, not
+    /// the test, and nothing in this crate instruments a running test's phase,
+    /// progress, or error/warning counts. `instantaneous_io_rate` is also `None`
+    /// because `sysinfo` exposes disk *capacity*, not host-wide disk throughput.
     fn collect_metrics(&self, test_id: &str) -> Result<StreamingMetrics, MonitoringError> {
-        // This would implement actual system resource collection
-        // For now, returning a mock implementation
+        let sample = self.sampler.lock().sample_host();
         Ok(StreamingMetrics {
             stream_id: format!("system-{}", test_id),
             test_id: test_id.to_string(),
             timestamp: SystemTime::now(),
-            elapsed_time: Duration::from_millis(100),
-            current_phase: TestPhase::Execution,
-            progress_percent: 50.0,
-            instantaneous_cpu: 25.0,
-            instantaneous_memory: 100 * 1024 * 1024, // 100MB
-            instantaneous_io_rate: 10.0,
-            instantaneous_network_rate: 5.0,
-            live_error_count: 0,
-            live_warning_count: 0,
+            elapsed_time: None,
+            current_phase: None,
+            progress_percent: None,
+            instantaneous_cpu: sample.cpu_percent,
+            instantaneous_memory: sample.used_memory_bytes,
+            instantaneous_io_rate: None,
+            instantaneous_network_rate: sample.network_bytes_per_second,
+            live_error_count: None,
+            live_warning_count: None,
             performance_indicators: vec![],
             anomaly_flags: vec![],
             prediction_metrics: None,
@@ -854,22 +1034,32 @@ impl MetricCollector for SystemResourceCollector {
 }
 
 impl MetricCollector for ProcessMetricCollector {
+    /// Sample [`Self::process_id`] through `sysinfo`.
+    ///
+    /// Fails with [`MonitoringError::CollectionFailed`] when the host no longer
+    /// reports the process, rather than returning zeroes that would read as a
+    /// perfectly idle process. `instantaneous_network_rate` stays `None`:
+    /// `sysinfo` has no per-process network accounting.
     fn collect_metrics(&self, test_id: &str) -> Result<StreamingMetrics, MonitoringError> {
-        // This would implement actual process metric collection
-        // For now, returning a mock implementation
+        let sample = self.sampler.lock().sample_process(self.process_id).ok_or_else(|| {
+            MonitoringError::CollectionFailed {
+                collector: self.name.clone(),
+                reason: format!("process {} is not reported by the host", self.process_id),
+            }
+        })?;
         Ok(StreamingMetrics {
             stream_id: format!("process-{}", test_id),
             test_id: test_id.to_string(),
             timestamp: SystemTime::now(),
-            elapsed_time: Duration::from_millis(150),
-            current_phase: TestPhase::Execution,
-            progress_percent: 60.0,
-            instantaneous_cpu: 30.0,
-            instantaneous_memory: 150 * 1024 * 1024, // 150MB
-            instantaneous_io_rate: 15.0,
-            instantaneous_network_rate: 8.0,
-            live_error_count: 0,
-            live_warning_count: 1,
+            elapsed_time: None,
+            current_phase: None,
+            progress_percent: None,
+            instantaneous_cpu: sample.cpu_percent,
+            instantaneous_memory: sample.memory_bytes,
+            instantaneous_io_rate: sample.disk_bytes_per_second,
+            instantaneous_network_rate: None,
+            live_error_count: None,
+            live_warning_count: None,
             performance_indicators: vec![],
             anomaly_flags: vec![],
             prediction_metrics: None,
@@ -934,6 +1124,38 @@ mod tests {
         assert!(alert_manager.alert_rules.is_empty());
         assert!(alert_manager.active_alerts.is_empty());
         assert!(alert_manager.alert_history.is_empty());
+    }
+
+    /// Registration must store exactly what the caller declared. The monitor
+    /// has no progress source and takes no resource sample at registration, so
+    /// both stay absent rather than becoming `0.0` / an all-zero snapshot.
+    #[tokio::test]
+    async fn register_test_never_invents_progress_or_resource_usage() {
+        let monitor = RealTimePerformanceMonitor::new(RealTimeMonitoringConfig::default());
+        let info = ActiveTestInfo {
+            test_id: "register-honesty".to_string(),
+            test_name: "register honesty".to_string(),
+            start_time: SystemTime::now(),
+            current_phase: TestPhase::Setup,
+            progress_percent: None,
+            last_update: SystemTime::now(),
+            resource_usage: None,
+            performance_indicators: vec![],
+            anomaly_flags: vec![],
+        };
+
+        monitor.register_test(info).await.expect("registration should succeed");
+
+        let active = monitor.monitoring_state.active_tests.read().await;
+        let stored = active.get("register-honesty").expect("test should be registered");
+        assert!(
+            stored.progress_percent.is_none(),
+            "the monitor must not synthesise a progress figure"
+        );
+        assert!(
+            stored.resource_usage.is_none(),
+            "the monitor must not synthesise a resource sample"
+        );
     }
 
     #[tokio::test]

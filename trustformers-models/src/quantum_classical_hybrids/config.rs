@@ -316,6 +316,22 @@ impl QuantumClassicalConfig {
         }
     }
 
+    /// Number of variational layers requested by the configured ansatz.
+    ///
+    /// This is the repetition count of the ansatz block, which is what the
+    /// statevector simulator needs in order to lay out the circuit. It is
+    /// always at least 1.
+    pub fn ansatz_layers(&self) -> usize {
+        let layers = match &self.quantum_ansatz {
+            QuantumAnsatzConfig::HardwareEfficient { layers }
+            | QuantumAnsatzConfig::Alternating { layers }
+            | QuantumAnsatzConfig::RealAmplitudes { layers }
+            | QuantumAnsatzConfig::EfficientSU2 { layers }
+            | QuantumAnsatzConfig::Custom { layers, .. } => *layers,
+        };
+        layers.max(1)
+    }
+
     /// Get quantum advantage factor estimate
     pub fn get_quantum_advantage_factor(&self) -> f64 {
         // Simple heuristic based on qubit count and circuit depth

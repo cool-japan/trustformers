@@ -347,6 +347,17 @@ pub enum ComplexityLevel {
 // ================================================================================================
 
 /// Quality analyzer for streaming performance
+/// How many recent chunk texts the analyzer keeps for consistency checks.
+const CONTENT_HISTORY_CAPACITY: usize = 16;
+
+/// Lower-cased content words of `text`, ignoring very short function words.
+fn content_words(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|w| w.len() > 3)
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct QualityAnalyzer {
     /// Quality metrics window
@@ -359,6 +370,8 @@ pub struct QualityAnalyzer {
     advanced_analysis_enabled: bool,
     /// Historical metrics for trend analysis
     historical_metrics: Arc<RwLock<VecDeque<StreamingQuality>>>,
+    /// Recent chunk texts, used to measure topic consistency across chunks.
+    content_history: Arc<RwLock<VecDeque<String>>>,
     /// Performance baselines
     performance_baselines: Arc<RwLock<Option<StreamingQuality>>>,
     /// Overall quality measurement
@@ -382,6 +395,9 @@ impl QualityAnalyzer {
 
         Self {
             metrics_window: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
+            content_history: Arc::new(RwLock::new(VecDeque::with_capacity(
+                CONTENT_HISTORY_CAPACITY,
+            ))),
             window_size: 100,
             thresholds: QualityThresholds::default(),
             advanced_analysis_enabled: true,
@@ -413,6 +429,9 @@ impl QualityAnalyzer {
 
         Self {
             metrics_window: Arc::new(RwLock::new(VecDeque::with_capacity(window_size))),
+            content_history: Arc::new(RwLock::new(VecDeque::with_capacity(
+                CONTENT_HISTORY_CAPACITY,
+            ))),
             window_size,
             thresholds: thresholds.clone(),
             advanced_analysis_enabled: true,
@@ -490,6 +509,10 @@ impl QualityAnalyzer {
         if window.len() > self.window_size {
             window.pop_front();
         }
+        drop(window);
+
+        // Remember the text so the next chunk can be measured against it.
+        self.remember_chunk(chunk).await;
 
         measurement
     }
@@ -538,8 +561,18 @@ impl QualityAnalyzer {
             return AdvancedQualityMetrics::default();
         }
 
-        let window = self.metrics_window.read().await;
-        let historical = self.historical_metrics.read().await;
+        // Clone the windows out and drop the read guards immediately (the
+        // temporary guard produced by `.read().await` lives only for this
+        // statement, since `.clone()` resolves through `Deref` to the owned
+        // `VecDeque`, not to the guard itself). `calculate_performance_benchmarks`
+        // below independently takes `self.metrics_window.read().await` again
+        // internally, and `tokio::sync::RwLock` does not support reentrant
+        // same-task reads (a writer queued in between can deadlock the second
+        // read). Passing `&window`/`&historical` guards straight through, as
+        // the previous version did, kept that hazard live for the whole call
+        // chain below.
+        let window: VecDeque<QualityMeasurement> = self.metrics_window.read().await.clone();
+        let historical: VecDeque<StreamingQuality> = self.historical_metrics.read().await.clone();
 
         AdvancedQualityMetrics {
             perceptual_quality: self.calculate_perceptual_quality(&window).await,
@@ -698,6 +731,9 @@ impl QualityAnalyzer {
 
         let mut historical = self.historical_metrics.write().await;
         historical.clear();
+
+        let mut content = self.content_history.write().await;
+        content.clear();
     }
 
     // ================================================================================================
@@ -770,11 +806,10 @@ impl QualityAnalyzer {
         // Content coherence analysis
         coherence *= self.analyze_content_coherence(chunk);
 
-        // Context consistency (if available from previous chunks)
-        coherence *= self.analyze_context_consistency(chunk).await;
-
-        // Semantic coherence
-        coherence *= self.analyze_semantic_coherence(chunk);
+        // Context consistency, only when there is history to compare against.
+        if let Some(consistency) = self.analyze_context_consistency(chunk).await {
+            coherence *= consistency;
+        }
 
         coherence.max(0.0).min(1.0)
     }
@@ -1119,10 +1154,75 @@ impl QualityAnalyzer {
         score.max(0.0_f32).min(1.0_f32)
     }
 
-    async fn analyze_content_flow(&self, _chunk: &StreamChunk) -> f32 {
-        // Placeholder for sophisticated content flow analysis
-        // Would analyze semantic coherence, topic consistency, etc.
-        0.9
+    /// Measure how cleanly this chunk flows on from the previous text.
+    ///
+    /// Everything here is read off the chunk itself: whether it starts inside a
+    /// word, whether it opens with a connective, and whether it closes on a
+    /// clause boundary. Nothing is assumed about content the analyzer cannot
+    /// see.
+    async fn analyze_content_flow(&self, chunk: &StreamChunk) -> f32 {
+        let content = chunk.content.as_str();
+        if content.trim().is_empty() {
+            return 0.0;
+        }
+
+        // Start below the ceiling so the positive signals below are visible in
+        // the result rather than being clamped away.
+        let mut score: f32 = 0.9;
+
+        let history = self.content_history.read().await;
+        if let Some(previous) = history.back() {
+            let previous_ends_cleanly = previous
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_punctuation() || c.is_whitespace());
+            let starts_with_space = content.starts_with(char::is_whitespace);
+            // A chunk boundary that splits a word mid-token reads as a break in
+            // the flow.
+            if !previous_ends_cleanly && !starts_with_space && !previous.ends_with(' ') {
+                score *= 0.85;
+            }
+        }
+        drop(history);
+
+        // Discourse connectives at the start signal continuity.
+        const CONNECTIVES: [&str; 10] = [
+            "and",
+            "but",
+            "so",
+            "then",
+            "because",
+            "however",
+            "therefore",
+            "also",
+            "which",
+            "while",
+        ];
+        let first_word = content
+            .split_whitespace()
+            .next()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .unwrap_or_default();
+        if CONNECTIVES.contains(&first_word.as_str()) {
+            score *= 1.05;
+        }
+
+        // Ending on a clause boundary flows better into the next chunk.
+        if content.trim_end().ends_with([',', ';', ':', '.', '!', '?']) {
+            score *= 1.05;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Record `chunk` so later chunks can be compared against it.
+    async fn remember_chunk(&self, chunk: &StreamChunk) {
+        let mut history = self.content_history.write().await;
+        if history.len() >= CONTENT_HISTORY_CAPACITY {
+            history.pop_front();
+        }
+        history.push_back(chunk.content.clone());
     }
 
     fn analyze_punctuation_structure(&self, content: &str) -> f32 {
@@ -1165,16 +1265,41 @@ impl QualityAnalyzer {
         coherence
     }
 
-    async fn analyze_context_consistency(&self, _chunk: &StreamChunk) -> f32 {
-        // Placeholder for context consistency analysis
-        // Would check against previous chunks for topic drift, style consistency, etc.
-        0.9
-    }
+    /// Lexical overlap between this chunk and the recent ones.
+    ///
+    /// A real topic-consistency signal: the Jaccard similarity of content words
+    /// against the remembered history. Returns `None` when there is no history
+    /// to compare against, so the caller can leave the sub-score out of the
+    /// aggregate instead of substituting a constant.
+    ///
+    /// Note that no *semantic* coherence term is computed. That would need a
+    /// sentence encoder, which this analyzer does not have; contributing a
+    /// fixed 0.9 in its place would have made a constant part of the reported
+    /// quality score.
+    async fn analyze_context_consistency(&self, chunk: &StreamChunk) -> Option<f32> {
+        let history = self.content_history.read().await;
+        if history.is_empty() {
+            return None;
+        }
 
-    fn analyze_semantic_coherence(&self, _chunk: &StreamChunk) -> f32 {
-        // Placeholder for semantic coherence analysis
-        // Would use NLP techniques to analyze semantic consistency
-        0.9
+        let current = content_words(&chunk.content);
+        if current.is_empty() {
+            return None;
+        }
+        let previous: std::collections::HashSet<String> =
+            history.iter().flat_map(|c| content_words(c)).collect();
+        if previous.is_empty() {
+            return None;
+        }
+
+        let intersection = current.intersection(&previous).count() as f32;
+        let union = current.union(&previous).count() as f32;
+        if union <= 0.0 {
+            return None;
+        }
+        // Map the overlap onto 0.75..=1.0: a chunk that shares no vocabulary
+        // with the recent stream is a weak signal, not a broken one.
+        Some(0.75 + 0.25 * (intersection / union))
     }
 
     fn calculate_mean(&self, values: &[f32]) -> f32 {
@@ -1558,344 +1683,5 @@ impl QualityAnalysis for QualityAnalyzer {
 // ================================================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn make_chunk(content: &str, complexity: f32) -> StreamChunk {
-        StreamChunk {
-            content: content.to_string(),
-            index: 0,
-            chunk_type: ChunkType::Content,
-            timing: ChunkTiming::default(),
-            metadata: ChunkMetadata::with_complexity(complexity),
-        }
-    }
-
-    // --- StreamingQuality tests ---
-
-    #[test]
-    fn test_streaming_quality_default_values_in_range() {
-        let quality = StreamingQuality::default();
-        assert!(
-            quality.smoothness >= 0.0 && quality.smoothness <= 1.0,
-            "smoothness must be in [0.0, 1.0]"
-        );
-        assert!(
-            quality.naturalness >= 0.0 && quality.naturalness <= 1.0,
-            "naturalness must be in [0.0, 1.0]"
-        );
-        assert!(
-            quality.responsiveness >= 0.0 && quality.responsiveness <= 1.0,
-            "responsiveness must be in [0.0, 1.0]"
-        );
-        assert!(
-            quality.coherence >= 0.0 && quality.coherence <= 1.0,
-            "coherence must be in [0.0, 1.0]"
-        );
-        assert!(
-            quality.overall_quality >= 0.0 && quality.overall_quality <= 1.0,
-            "overall_quality must be in [0.0, 1.0]"
-        );
-    }
-
-    #[test]
-    fn test_streaming_quality_default_chunk_consistency_in_range() {
-        let quality = StreamingQuality::default();
-        assert!(quality.chunk_consistency >= 0.0 && quality.chunk_consistency <= 1.0);
-        assert!(quality.flow_smoothness >= 0.0 && quality.flow_smoothness <= 1.0);
-        assert!(quality.timing_accuracy >= 0.0 && quality.timing_accuracy <= 1.0);
-        assert!(quality.buffer_efficiency >= 0.0 && quality.buffer_efficiency <= 1.0);
-    }
-
-    // --- QualityThresholds tests ---
-
-    #[test]
-    fn test_quality_thresholds_default_min_overall_quality_in_range() {
-        let thresholds = QualityThresholds::default();
-        assert!(
-            thresholds.min_overall_quality >= 0.0 && thresholds.min_overall_quality <= 1.0,
-            "min_overall_quality must be in [0.0, 1.0]"
-        );
-    }
-
-    #[test]
-    fn test_quality_thresholds_minimum_acceptable_less_than_target() {
-        let thresholds = QualityThresholds::default();
-        assert!(
-            thresholds.minimum_acceptable <= thresholds.target_quality,
-            "minimum_acceptable ({}) should be <= target_quality ({})",
-            thresholds.minimum_acceptable,
-            thresholds.target_quality
-        );
-    }
-
-    #[test]
-    fn test_quality_thresholds_target_less_than_excellent() {
-        let thresholds = QualityThresholds::default();
-        assert!(
-            thresholds.target_quality <= thresholds.excellent_threshold,
-            "target_quality ({}) should be <= excellent_threshold ({})",
-            thresholds.target_quality,
-            thresholds.excellent_threshold
-        );
-    }
-
-    #[test]
-    fn test_quality_thresholds_max_latency_positive() {
-        let thresholds = QualityThresholds::default();
-        assert!(
-            thresholds.max_latency_ms > 0.0,
-            "max_latency_ms should be positive, got {}",
-            thresholds.max_latency_ms
-        );
-    }
-
-    // --- QualityAnalyzer tests ---
-
-    #[test]
-    fn test_quality_analyzer_new() {
-        let analyzer = QualityAnalyzer::new();
-        assert_eq!(
-            analyzer.window_size(),
-            100,
-            "default window size should be 100"
-        );
-    }
-
-    #[test]
-    fn test_quality_analyzer_default() {
-        let analyzer = QualityAnalyzer::default();
-        assert_eq!(analyzer.window_size(), 100);
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_analyze_chunk_quality_returns_measurement() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Hello world, this is a test sentence.", 0.5);
-        let delivery_time = Duration::from_millis(80);
-        let measurement = analyzer.analyze_chunk_quality(&chunk, delivery_time).await;
-        assert!(
-            measurement.smoothness >= 0.0 && measurement.smoothness <= 1.0,
-            "smoothness must be in [0.0, 1.0]"
-        );
-        assert!(
-            measurement.naturalness >= 0.0 && measurement.naturalness <= 1.0,
-            "naturalness must be in [0.0, 1.0]"
-        );
-        assert!(
-            measurement.responsiveness >= 0.0 && measurement.responsiveness <= 1.0,
-            "responsiveness must be in [0.0, 1.0]"
-        );
-        assert!(
-            measurement.coherence >= 0.0 && measurement.coherence <= 1.0,
-            "coherence must be in [0.0, 1.0]"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_score_normalized() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Test content for score normalization check.", 0.4);
-        let delivery_time = Duration::from_millis(50);
-        let measurement = analyzer.analyze_chunk_quality(&chunk, delivery_time).await;
-        assert!(
-            measurement.score >= 0.0 && measurement.score <= 1.0,
-            "overall score must be normalized in [0.0, 1.0], got {}",
-            measurement.score
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_high_latency_lowers_responsiveness() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Test content for latency measurement.", 0.5);
-        let fast_delivery = Duration::from_millis(50);
-        let slow_delivery = Duration::from_millis(500);
-        let fast_measurement = analyzer.analyze_chunk_quality(&chunk, fast_delivery).await;
-        let slow_measurement = analyzer.analyze_chunk_quality(&chunk, slow_delivery).await;
-        assert!(
-            fast_measurement.responsiveness >= slow_measurement.responsiveness,
-            "faster delivery should produce >= responsiveness score: {} >= {}",
-            fast_measurement.responsiveness,
-            slow_measurement.responsiveness
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_calculate_overall_quality_bounded() {
-        let analyzer = QualityAnalyzer::new();
-        // Populate with some measurements
-        let chunk = make_chunk("Some streaming content for quality check.", 0.5);
-        for _ in 0..5 {
-            analyzer.analyze_chunk_quality(&chunk, Duration::from_millis(100)).await;
-        }
-        let quality = analyzer.calculate_overall_quality().await;
-        assert!(
-            quality.overall_quality >= 0.0 && quality.overall_quality <= 1.0,
-            "overall_quality must be in [0.0, 1.0]"
-        );
-        assert!(quality.smoothness >= 0.0 && quality.smoothness <= 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_meets_quality_thresholds_initially() {
-        let analyzer = QualityAnalyzer::new();
-        // Empty window - should meet thresholds with default quality
-        let meets = analyzer.meets_quality_thresholds().await;
-        // No strict assertion on value - just verify no panic
-        let _ = meets;
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_quality_trends_stable_initially() {
-        let analyzer = QualityAnalyzer::new();
-        let trends = analyzer.get_quality_trends().await;
-        // Without measurements, overall trend should be Stable
-        assert_eq!(
-            std::mem::discriminant(&trends.overall_trend),
-            std::mem::discriminant(&TrendDirection::Stable),
-            "initial trend should be Stable"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_get_optimization_recommendations() {
-        let analyzer = QualityAnalyzer::new();
-        let recommendations = analyzer.generate_optimization_recommendations().await;
-        // Should return a Vec (possibly empty) without panicking
-        let _ = recommendations.len();
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_accumulates_window() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Accumulate measurements in the quality window", 0.5);
-        for i in 0..10 {
-            let delivery_time = Duration::from_millis(50 + i * 10);
-            analyzer.analyze_chunk_quality(&chunk, delivery_time).await;
-        }
-        let window = analyzer.metrics_window().read().await;
-        assert_eq!(
-            window.len(),
-            10,
-            "window should contain exactly 10 measurements"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_analyzer_window_respects_capacity() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Testing window capacity limit", 0.5);
-        // Push more than window_size (100) measurements
-        for i in 0..150u64 {
-            let delivery_time = Duration::from_millis(50 + i % 100);
-            analyzer.analyze_chunk_quality(&chunk, delivery_time).await;
-        }
-        let window = analyzer.metrics_window().read().await;
-        assert!(
-            window.len() <= analyzer.window_size(),
-            "window should not exceed capacity: {} <= {}",
-            window.len(),
-            analyzer.window_size()
-        );
-    }
-
-    // --- PerceptualQuality tests ---
-
-    #[test]
-    fn test_perceptual_quality_default_values_in_range() {
-        let pq = PerceptualQuality::default();
-        assert!(pq.fluency >= 0.0 && pq.fluency <= 1.0);
-        assert!(pq.engagement >= 0.0 && pq.engagement <= 1.0);
-        assert!(pq.clarity >= 0.0 && pq.clarity <= 1.0);
-        assert!(pq.user_experience_score >= 0.0 && pq.user_experience_score <= 1.0);
-        assert!(pq.cognitive_load >= 0.0 && pq.cognitive_load <= 1.0);
-    }
-
-    // --- StatisticalAnalysis tests ---
-
-    #[test]
-    fn test_statistical_analysis_default_chunk_count_zero() {
-        let stats = StatisticalAnalysis::default();
-        assert_eq!(stats.chunk_count, 0);
-        assert_eq!(stats.total_characters, 0);
-    }
-
-    // --- DegradationIndicators tests ---
-
-    #[test]
-    fn test_degradation_indicators_default_not_degrading() {
-        let indicators = DegradationIndicators::default();
-        assert!(!indicators.is_degrading, "default should not be degrading");
-        assert_eq!(indicators.degradation_rate, 0.0);
-        assert!(indicators.time_to_threshold_breach.is_none());
-    }
-
-    // --- Quality trait delegation tests ---
-
-    #[tokio::test]
-    async fn test_quality_analysis_trait_analyze_quality() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Trait delegation test content", 0.5);
-        let measurement = analyzer.analyze_quality(&chunk, Duration::from_millis(75)).await;
-        assert!(measurement.score >= 0.0 && measurement.score <= 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_quality_analysis_trait_get_overall_quality() {
-        let analyzer = QualityAnalyzer::new();
-        let quality = analyzer.get_overall_quality().await;
-        assert!(quality.overall_quality >= 0.0 && quality.overall_quality <= 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_quality_analysis_trait_meets_thresholds() {
-        let analyzer = QualityAnalyzer::new();
-        let result = analyzer.meets_thresholds().await;
-        let _ = result; // no panic
-    }
-
-    #[tokio::test]
-    async fn test_quality_analysis_trait_get_trends() {
-        let analyzer = QualityAnalyzer::new();
-        let trends = analyzer.get_trends().await;
-        let _ = trends; // no panic, verify all sub-trends accessible
-    }
-
-    #[tokio::test]
-    async fn test_quality_analysis_trait_get_recommendations() {
-        let analyzer = QualityAnalyzer::new();
-        let recs = analyzer.get_recommendations().await;
-        let _ = recs.len();
-    }
-
-    // --- Score normalization edge cases ---
-
-    #[tokio::test]
-    async fn test_quality_score_very_slow_delivery_still_bounded() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Edge case: extremely slow delivery", 0.9);
-        // 10 second delivery
-        let measurement = analyzer.analyze_chunk_quality(&chunk, Duration::from_secs(10)).await;
-        assert!(
-            measurement.responsiveness >= 0.0 && measurement.responsiveness <= 1.0,
-            "responsiveness must stay in [0.0, 1.0] even with very slow delivery"
-        );
-        assert!(
-            measurement.score >= 0.0 && measurement.score <= 1.0,
-            "overall score must stay in [0.0, 1.0] even with very slow delivery"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_quality_score_instant_delivery_bounded() {
-        let analyzer = QualityAnalyzer::new();
-        let chunk = make_chunk("Edge case: instant delivery", 0.1);
-        let measurement = analyzer.analyze_chunk_quality(&chunk, Duration::from_millis(1)).await;
-        assert!(
-            measurement.responsiveness >= 0.0 && measurement.responsiveness <= 1.0,
-            "responsiveness must be in [0.0, 1.0] for instant delivery"
-        );
-    }
-}
+#[path = "quality_analyzer_tests.rs"]
+mod tests;

@@ -139,9 +139,9 @@ impl WebGpuBackend {
                 )
             })?;
 
-        println!("✓ WebGPU backend initialized");
-        println!("  Backend: {:?}", adapter.get_info().backend);
-        println!("  Device: {}", adapter.get_info().name);
+        tracing::info!("✓ WebGPU backend initialized");
+        tracing::info!("  Backend: {:?}", adapter.get_info().backend);
+        tracing::info!("  Device: {}", adapter.get_info().name);
 
         Ok(Self {
             device: Arc::new(device),

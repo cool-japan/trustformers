@@ -23,6 +23,7 @@ impl Clone for TracingManager {
             sample_counter: AtomicU64::new(self.sample_counter.load(Ordering::Relaxed)),
             last_sample_time: self.last_sample_time.clone(),
             event_sender: self.event_sender.clone(),
+            cpu_load_monitor: self.cpu_load_monitor.clone(),
         }
     }
 }

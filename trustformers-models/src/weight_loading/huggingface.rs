@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use trustformers_core::{
     errors::{invalid_format, runtime_error, Result, TrustformersError},
     tensor::Tensor,
+    traits::WeightReader,
+    utils::weight_loading::{torch, PyTorchReader},
 };
 
 use super::config::{WeightDataType, WeightFormat, WeightLoadingConfig};
@@ -66,14 +68,6 @@ pub struct TensorInfo {
     pub data_offsets: [u64; 2],
 }
 
-/// Internal tensor info for PyTorch parsing
-#[derive(Debug)]
-struct PyTorchTensorInfo {
-    pub shape: Vec<usize>,
-    pub dtype: WeightDataType,
-    pub data_offset: usize,
-}
-
 /// Weight loader trait
 pub trait WeightLoader {
     fn load_tensor(&mut self, name: &str) -> Result<Tensor>;
@@ -102,34 +96,68 @@ pub struct LazyTensor {
 }
 
 /// HuggingFace weight loader
+///
+/// Reads a model directory in either supported format:
+///
+/// * **safetensors** — the header is parsed and each tensor is read from its
+///   declared byte range.
+/// * **PyTorch `.bin` / `.pt`** — handed to
+///   [`trustformers_core::utils::weight_loading::PyTorchReader`], which walks the
+///   ZIP archive and interprets `data.pkl`. No pickle parsing happens in this
+///   crate.
+///
+/// A previous revision never parsed pickle at all: it guessed a tensor's shape
+/// from hardcoded BERT-base constants keyed off the parameter name, then scanned
+/// the file for the first four bytes that decoded to a finite float below 100 and
+/// treated that offset as the start of the tensor. Every `.bin` load returned a
+/// fabricated tensor. That code is gone; an unparsable checkpoint is now an error.
 pub struct HuggingFaceLoader {
     config: WeightLoadingConfig,
     index: HuggingFaceIndex,
-    file_handles: HashMap<String, BufReader<File>>,
     model_dir: PathBuf,
     tensor_cache: HashMap<String, Tensor>,
+    /// Real per-tensor metadata, read from the files at construction.
+    metadata: HashMap<String, TensorMetadata>,
+    /// Parsed PyTorch checkpoints, keyed by file name.
+    pytorch_readers: HashMap<String, PyTorchReader>,
 }
 
 impl HuggingFaceLoader {
+    /// Open a HuggingFace model directory.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory holds no recognised weight file, when an index
+    /// file is malformed, or when a weight file cannot be parsed.
     pub fn new(model_dir: impl AsRef<Path>, config: WeightLoadingConfig) -> Result<Self> {
         let model_dir = model_dir.as_ref().to_path_buf();
 
-        // Load index file
-        let index_path = model_dir.join("pytorch_model.bin.index.json");
-        let index = if index_path.exists() {
-            Self::load_index(&index_path)?
-        } else {
-            // Create single-file index
-            Self::create_single_file_index(&model_dir)?
-        };
+        let index = Self::discover_index(&model_dir)?;
 
-        Ok(Self {
+        let mut loader = Self {
             config,
             index,
-            file_handles: HashMap::new(),
             model_dir,
             tensor_cache: HashMap::new(),
-        })
+            metadata: HashMap::new(),
+            pytorch_readers: HashMap::new(),
+        };
+        loader.read_all_metadata()?;
+        Ok(loader)
+    }
+
+    /// Build the tensor-name -> file map for a model directory.
+    fn discover_index(model_dir: &Path) -> Result<HuggingFaceIndex> {
+        for index_name in [
+            "model.safetensors.index.json",
+            "pytorch_model.bin.index.json",
+        ] {
+            let index_path = model_dir.join(index_name);
+            if index_path.exists() {
+                return Self::load_index(&index_path);
+            }
+        }
+        Self::create_single_file_index(model_dir)
     }
 
     fn load_index(path: &Path) -> Result<HuggingFaceIndex> {
@@ -137,51 +165,53 @@ impl HuggingFaceLoader {
         let reader = BufReader::new(file);
         serde_json::from_reader(reader).map_err(|e| {
             TrustformersError::weight_load_error(format!(
-                "Failed to parse HuggingFace index: {}",
+                "Failed to parse HuggingFace index {}: {}",
+                path.display(),
                 e
             ))
         })
     }
 
+    /// Build an index for a directory holding a single weight file.
+    ///
+    /// The tensor names are enumerated from the file itself for both formats.
+    /// A previous revision fell back to a `"*"` wildcard entry for `.bin` files,
+    /// which made `list_tensors` report a single tensor called `*` and let
+    /// `find_tensor_file` resolve any name at all.
     fn create_single_file_index(model_dir: &Path) -> Result<HuggingFaceIndex> {
-        // Look for single weight file (prefer SafeTensors over PyTorch)
-        let bin_path = model_dir.join("pytorch_model.bin");
-        let safetensors_path = model_dir.join("model.safetensors");
+        let candidates: [(&str, bool); 4] = [
+            ("model.safetensors", true),
+            ("pytorch_model.bin", false),
+            ("pytorch_model.pt", false),
+            ("pytorch_model.pth", false),
+        ];
 
-        let (weight_file, is_safetensors) = if safetensors_path.exists() {
-            ("model.safetensors", true)
-        } else if bin_path.exists() {
-            ("pytorch_model.bin", false)
+        let (weight_file, is_safetensors) = candidates
+            .iter()
+            .find(|(name, _)| model_dir.join(name).exists())
+            .copied()
+            .ok_or_else(|| {
+                TrustformersError::file_not_found(format!(
+                    "No weight files found in {} (looked for model.safetensors, pytorch_model.bin, \
+                     pytorch_model.pt, pytorch_model.pth and the sharded index files)",
+                    model_dir.display()
+                ))
+            })?;
+
+        let path = model_dir.join(weight_file);
+        let tensor_names = if is_safetensors {
+            Self::read_safetensors_header(&path)?
+                .tensors
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
-            return Err(TrustformersError::file_not_found(
-                "No weight files found in model directory".to_string(),
-            ));
+            PyTorchReader::from_file(&path)?.list_tensors()
         };
 
-        // Create index with proper tensor names
         let mut weight_map = HashMap::new();
-
-        if is_safetensors {
-            // Read SafeTensors header to get actual tensor names
-            match Self::read_safetensors_tensor_names(&model_dir.join(weight_file)) {
-                Ok(tensor_names) => {
-                    // Map each tensor name to the weight file
-                    for name in tensor_names {
-                        weight_map.insert(name, weight_file.to_string());
-                    }
-                },
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to read SafeTensors header: {}. Using fallback index.",
-                        e
-                    );
-                    // Fallback to old behavior
-                    weight_map.insert("*".to_string(), weight_file.to_string());
-                },
-            }
-        } else {
-            // For PyTorch files, use wildcard (we can't easily parse .bin files)
-            weight_map.insert("*".to_string(), weight_file.to_string());
+        for name in tensor_names {
+            weight_map.insert(name, weight_file.to_string());
         }
 
         Ok(HuggingFaceIndex {
@@ -193,334 +223,139 @@ impl HuggingFaceLoader {
         })
     }
 
-    fn read_safetensors_tensor_names(path: &Path) -> Result<Vec<String>> {
-        use std::io::Read;
-
+    /// Parse a safetensors header from disk.
+    fn read_safetensors_header(path: &Path) -> Result<SafeTensorsHeader> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
-        // Read header length (first 8 bytes)
         let mut header_len_bytes = [0u8; 8];
         reader.read_exact(&mut header_len_bytes)?;
         let header_len = u64::from_le_bytes(header_len_bytes);
 
-        // Read header JSON
         let mut header_bytes = vec![0u8; header_len as usize];
         reader.read_exact(&mut header_bytes)?;
-        let header_str = String::from_utf8(header_bytes).map_err(|e| {
+        let header_str = std::str::from_utf8(&header_bytes).map_err(|e| {
             TrustformersError::weight_load_error(format!(
-                "Invalid UTF-8 in SafeTensors header: {}",
+                "Invalid UTF-8 in SafeTensors header of {}: {}",
+                path.display(),
                 e
             ))
         })?;
-
-        // Parse JSON and extract tensor names
-        let header: serde_json::Value = serde_json::from_str(&header_str).map_err(|e| {
-            TrustformersError::weight_load_error(format!(
-                "Failed to parse SafeTensors header: {}",
+        serde_json::from_str(header_str).map_err(|e| {
+            TrustformersError::serialization_error(format!(
+                "Failed to parse SafeTensors header of {}: {}",
+                path.display(),
                 e
-            ))
-        })?;
-
-        let mut tensor_names = Vec::new();
-        if let Some(obj) = header.as_object() {
-            for (key, _value) in obj {
-                // Skip metadata entries
-                if key != "__metadata__" {
-                    tensor_names.push(key.clone());
-                }
-            }
-        }
-
-        Ok(tensor_names)
-    }
-
-    fn get_file_handle(&mut self, filename: &str) -> Result<&mut BufReader<File>> {
-        if !self.file_handles.contains_key(filename) {
-            let file_path = self.model_dir.join(filename);
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            self.file_handles.insert(filename.to_string(), reader);
-        }
-
-        self.file_handles.get_mut(filename).ok_or_else(|| {
-            TrustformersError::runtime_error(format!(
-                "File handle for {} not found after insertion",
-                filename
             ))
         })
     }
 
-    /// Load tensor from PyTorch .bin file
+    /// Read the real shape, dtype and byte size of every tensor in the index.
+    fn read_all_metadata(&mut self) -> Result<()> {
+        let filenames: std::collections::BTreeSet<String> =
+            self.index.weight_map.values().cloned().collect();
+
+        for filename in filenames {
+            let path = self.model_dir.join(&filename);
+            match self.detect_format(&filename)? {
+                WeightFormat::SafeTensors => {
+                    let header = Self::read_safetensors_header(&path)?;
+                    for (name, info) in header.tensors {
+                        let dtype = Self::weight_dtype(&info.dtype)?;
+                        self.metadata.insert(
+                            name,
+                            TensorMetadata {
+                                shape: info.shape,
+                                dtype,
+                                size_bytes: info.data_offsets[1] - info.data_offsets[0],
+                                offset: info.data_offsets[0],
+                            },
+                        );
+                    }
+                },
+                WeightFormat::HuggingFaceBin => {
+                    let reader = PyTorchReader::from_file(&path)?;
+                    for name in reader.list_tensors() {
+                        let record = reader.state_dict().get(&name).ok_or_else(|| {
+                            TrustformersError::weight_load_error(format!(
+                                "PyTorch checkpoint {} listed {name} but does not hold it",
+                                path.display()
+                            ))
+                        })?;
+                        let shape = record.tensor.shape();
+                        let element_count: usize = shape.iter().product();
+                        self.metadata.insert(
+                            name,
+                            TensorMetadata {
+                                shape,
+                                dtype: Self::torch_dtype(record.dtype),
+                                size_bytes: (element_count * record.dtype.size_in_bytes()) as u64,
+                                offset: 0,
+                            },
+                        );
+                    }
+                    self.pytorch_readers.insert(filename.clone(), reader);
+                },
+                other => {
+                    return Err(invalid_format(
+                        "weight format",
+                        format!("Unsupported weight format {other:?} for {filename}"),
+                    ))
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Map a safetensors dtype string onto this crate's dtype enum.
+    fn weight_dtype(dtype: &str) -> Result<WeightDataType> {
+        match dtype {
+            "F32" => Ok(WeightDataType::Float32),
+            "F16" => Ok(WeightDataType::Float16),
+            "BF16" => Ok(WeightDataType::BFloat16),
+            "I8" | "U8" => Ok(WeightDataType::Int8),
+            other => Err(invalid_format(
+                "dtype",
+                format!("Unsupported safetensors dtype: {other}"),
+            )),
+        }
+    }
+
+    /// Map a torch dtype onto this crate's dtype enum.
+    fn torch_dtype(dtype: torch::TorchDType) -> WeightDataType {
+        match dtype {
+            torch::TorchDType::F64 | torch::TorchDType::F32 => WeightDataType::Float32,
+            torch::TorchDType::F16 => WeightDataType::Float16,
+            torch::TorchDType::BF16 => WeightDataType::BFloat16,
+            _ => WeightDataType::Int8,
+        }
+    }
+
+    /// Load a tensor from a PyTorch checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not hold the tensor. It never reconstructs
+    /// one from guessed shapes and scanned offsets.
     fn load_from_pytorch_bin(&mut self, name: &str, filename: &str) -> Result<Tensor> {
-        let reader = self.get_file_handle(filename)?;
-
-        // Read the file into memory for processing
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::weight_load_error(format!("Failed to read tensor file: {}", e))
-        })?;
-
-        // Basic pickle protocol parsing for PyTorch tensors
-        // This is a simplified implementation that handles the most common cases
-        match Self::parse_pytorch_pickle_static(&buffer, name) {
-            Ok(tensor) => Ok(tensor),
-            Err(e) => {
-                // Fallback: try to load as raw tensor data if pickle parsing fails
-                eprintln!(
-                    "Warning: Pickle parsing failed for {}: {}. Attempting raw tensor parsing.",
-                    name, e
-                );
-                Self::parse_raw_tensor_data_static(&buffer, name)
-            },
+        if !self.pytorch_readers.contains_key(filename) {
+            let path = self.model_dir.join(filename);
+            let reader = PyTorchReader::from_file(&path)?;
+            self.pytorch_readers.insert(filename.to_string(), reader);
         }
-    }
-
-    #[allow(dead_code)]
-    fn parse_pytorch_tensor(&mut self, reader: &mut BufReader<File>, name: &str) -> Result<Tensor> {
-        // Basic PyTorch .bin file parser implementation
-        // This handles the common PyTorch pickle format used by HuggingFace models
-
-        // Read the file into memory for processing
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::weight_load_error(format!("Failed to read tensor file: {}", e))
-        })?;
-
-        // Basic pickle protocol parsing for PyTorch tensors
-        // This is a simplified implementation that handles the most common cases
-        match Self::parse_pytorch_pickle_static(&buffer, name) {
-            Ok(tensor) => Ok(tensor),
-            Err(e) => {
-                // Fallback: try to load as raw tensor data if pickle parsing fails
-                eprintln!(
-                    "Warning: Pickle parsing failed for {}: {}. Attempting raw tensor parsing.",
-                    name, e
-                );
-                Self::parse_raw_tensor_data_static(&buffer, name)
-            },
-        }
-    }
-
-    #[allow(dead_code)]
-    fn parse_pytorch_pickle(&self, data: &[u8], name: &str) -> Result<Tensor> {
-        Self::parse_pytorch_pickle_static(data, name)
-    }
-
-    fn parse_pytorch_pickle_static(data: &[u8], name: &str) -> Result<Tensor> {
-        // Simplified PyTorch pickle parser
-        // This handles the basic structure of PyTorch .bin files
-
-        // Look for tensor data markers in the pickle stream
-        // PyTorch typically stores tensors with specific magic numbers
-
-        // Check for PyTorch magic numbers
-        if data.len() < 8 {
-            return Err(TrustformersError::weight_load_error(
-                "File too small to contain tensor data".to_string(),
-            ));
-        }
-
-        // Try to find tensor metadata in the pickle stream
-        // This is a heuristic approach for common PyTorch formats
-        if let Some(tensor_info) = Self::extract_pytorch_tensor_info_static(data, name) {
-            let offset = tensor_info.data_offset;
-            let shape = tensor_info.shape;
-            let dtype = tensor_info.dtype;
-            let total_elements: usize = shape.iter().product();
-
-            match dtype {
-                WeightDataType::Float32 => {
-                    let data_size = total_elements * 4;
-                    if offset + data_size <= data.len() {
-                        let tensor_data = &data[offset..offset + data_size];
-                        let float_data: Vec<f32> = tensor_data
-                            .chunks_exact(4)
-                            .map(|chunk| {
-                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                            })
-                            .collect();
-
-                        Tensor::from_vec(float_data, &shape).map_err(|e| {
-                            TrustformersError::weight_load_error(format!(
-                                "Failed to create tensor: {}",
-                                e
-                            ))
-                        })
-                    } else {
-                        Err(TrustformersError::weight_load_error(
-                            "Insufficient data for tensor".to_string(),
-                        ))
-                    }
-                },
-                WeightDataType::Float16 => {
-                    let data_size = total_elements * 2;
-                    if offset + data_size <= data.len() {
-                        let tensor_data = &data[offset..offset + data_size];
-                        let float_data: Vec<f32> = tensor_data
-                            .chunks_exact(2)
-                            .map(|chunk| {
-                                let half_val = half::f16::from_le_bytes([chunk[0], chunk[1]]);
-                                half_val.to_f32()
-                            })
-                            .collect();
-
-                        Tensor::from_vec(float_data, &shape).map_err(|e| {
-                            TrustformersError::weight_load_error(format!(
-                                "Failed to create tensor: {}",
-                                e
-                            ))
-                        })
-                    } else {
-                        Err(TrustformersError::weight_load_error(
-                            "Insufficient data for tensor".to_string(),
-                        ))
-                    }
-                },
-                _ => Err(TrustformersError::weight_load_error(format!(
-                    "Unsupported tensor dtype: {:?}",
-                    dtype
-                ))),
-            }
-        } else {
-            Err(TrustformersError::weight_load_error(
-                "Could not extract tensor information from pickle data".to_string(),
+        let reader = self.pytorch_readers.get_mut(filename).ok_or_else(|| {
+            TrustformersError::runtime_error(format!(
+                "PyTorch reader for {filename} missing after insertion"
             ))
-        }
+        })?;
+        reader.read_tensor(name)
     }
 
-    #[allow(dead_code)]
-    fn extract_pytorch_tensor_info(&self, data: &[u8], name: &str) -> Option<PyTorchTensorInfo> {
-        Self::extract_pytorch_tensor_info_static(data, name)
-    }
-
-    fn extract_pytorch_tensor_info_static(data: &[u8], name: &str) -> Option<PyTorchTensorInfo> {
-        // Extract tensor metadata from pickle stream
-        // This is a heuristic approach that looks for common patterns
-
-        // Try to infer tensor properties based on common HuggingFace model patterns
-        let shape = Self::infer_tensor_shape_static(name);
-        let dtype = WeightDataType::Float32; // Default to float32
-
-        // Look for potential tensor data start
-        // PyTorch pickles often have specific patterns
-        let mut data_offset = 0;
-
-        // Scan for patterns that might indicate tensor data
-        for i in 0..data.len().saturating_sub(16) {
-            // Look for potential float patterns or PyTorch-specific markers
-            if Self::looks_like_tensor_data_static(&data[i..i.min(i + 16)]) {
-                data_offset = i;
-                break;
-            }
-        }
-
-        // If we couldn't find a good offset, use a reasonable default
-        if data_offset == 0 && data.len() > 1024 {
-            data_offset = 1024; // Skip likely pickle header
-        }
-
-        Some(PyTorchTensorInfo {
-            shape,
-            dtype,
-            data_offset,
-        })
-    }
-
-    #[allow(dead_code)]
-    fn infer_tensor_shape(&self, name: &str) -> Vec<usize> {
-        Self::infer_tensor_shape_static(name)
-    }
-
-    fn infer_tensor_shape_static(name: &str) -> Vec<usize> {
-        // Infer tensor shape based on layer name patterns
-        // This is a heuristic approach for common transformer model patterns
-
-        if name.contains("embeddings.word_embeddings.weight") {
-            vec![30522, 768] // Common BERT vocab size and hidden size
-        } else if name.contains("embeddings.position_embeddings.weight") {
-            vec![512, 768] // Common max position embeddings
-        } else if name.contains("attention.self.query.weight")
-            || name.contains("attention.self.key.weight")
-            || name.contains("attention.self.value.weight")
-        {
-            vec![768, 768] // Common attention weight dimensions
-        } else if name.contains("attention.output.dense.weight") {
-            vec![768, 768] // Attention output projection
-        } else if name.contains("intermediate.dense.weight") {
-            vec![768, 3072] // Feed-forward intermediate layer
-        } else if name.contains("output.dense.weight") {
-            vec![3072, 768] // Feed-forward output layer
-        } else if name.contains("LayerNorm.weight") || name.contains("LayerNorm.bias") {
-            vec![768] // LayerNorm parameters
-        } else if name.contains("bias") {
-            vec![768] // Common bias size
-        } else {
-            // Default fallback - try to parse from common patterns or use small default
-            vec![768, 768]
-        }
-    }
-
-    #[allow(dead_code)]
-    fn looks_like_tensor_data(&self, chunk: &[u8]) -> bool {
-        Self::looks_like_tensor_data_static(chunk)
-    }
-
-    fn looks_like_tensor_data_static(chunk: &[u8]) -> bool {
-        // Heuristic to identify potential tensor data in byte stream
-        if chunk.len() < 4 {
-            return false;
-        }
-
-        // Check if bytes could represent reasonable float values
-        let float_val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-
-        // Reasonable range for model weights (not NaN, not infinite, reasonable magnitude)
-        float_val.is_finite() && float_val.abs() < 100.0
-    }
-
-    #[allow(dead_code)]
-    fn parse_raw_tensor_data(&self, data: &[u8], name: &str) -> Result<Tensor> {
-        Self::parse_raw_tensor_data_static(data, name)
-    }
-
-    fn parse_raw_tensor_data_static(data: &[u8], name: &str) -> Result<Tensor> {
-        // Fallback: try to parse as raw tensor data
-        let shape = Self::infer_tensor_shape_static(name);
-        let total_elements: usize = shape.iter().product();
-        let expected_size = total_elements * 4; // Assume float32
-
-        if data.len() >= expected_size {
-            // Try different offsets to find the actual tensor data
-            for offset in (0..1024.min(data.len())).step_by(4) {
-                if offset + expected_size <= data.len() {
-                    let tensor_data = &data[offset..offset + expected_size];
-                    let float_data: Vec<f32> = tensor_data
-                        .chunks_exact(4)
-                        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                        .collect();
-
-                    // Validate that the data looks reasonable
-                    if float_data.iter().any(|&x| x.is_finite() && x.abs() < 100.0) {
-                        if let Ok(tensor) = Tensor::from_vec(float_data, &shape) {
-                            return Ok(tensor);
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(TrustformersError::weight_load_error(format!(
-            "Could not parse tensor data for {}",
-            name
-        )))
-    }
-
-    /// Load tensor with lazy loading
+    /// Load a tensor with lazy loading
     #[allow(dead_code)]
     fn load_lazy(&mut self, name: &str) -> Result<LazyTensor> {
         let filename = self.find_tensor_file(name)?;
-        let metadata = self.get_tensor_metadata(name, &filename)?;
+        let metadata = self.get_tensor_metadata(name)?;
 
         Ok(LazyTensor {
             name: name.to_string(),
@@ -532,29 +367,26 @@ impl HuggingFaceLoader {
     }
 
     fn find_tensor_file(&self, name: &str) -> Result<String> {
-        // Check weight map for tensor location
-        if let Some(filename) = self.index.weight_map.get(name) {
-            Ok(filename.clone())
-        } else if let Some(filename) = self.index.weight_map.get("*") {
-            // Single file case
-            Ok(filename.clone())
-        } else {
-            Err(runtime_error(format!("Tensor not found: {}", name)))
-        }
+        self.index
+            .weight_map
+            .get(name)
+            .cloned()
+            .ok_or_else(|| runtime_error(format!("Tensor not found: {}", name)))
     }
 
-    fn get_tensor_metadata(&self, _name: &str, _filename: &str) -> Result<TensorMetadata> {
-        // Parse metadata from file header
-        Ok(TensorMetadata {
-            shape: vec![1024, 768],
-            dtype: WeightDataType::Float32,
-            size_bytes: 1024 * 768 * 4,
-            offset: 0,
-        })
+    /// The tensor's real metadata, as read from the weight file.
+    ///
+    /// A previous revision returned a hardcoded `[1024, 768]` shape and a
+    /// matching invented byte size for every tensor.
+    fn get_tensor_metadata(&self, name: &str) -> Result<TensorMetadata> {
+        self.metadata
+            .get(name)
+            .cloned()
+            .ok_or_else(|| runtime_error(format!("No metadata for tensor: {}", name)))
     }
 
     fn detect_format(&self, filename: &str) -> Result<WeightFormat> {
-        if filename.ends_with(".bin") {
+        if filename.ends_with(".bin") || filename.ends_with(".pt") || filename.ends_with(".pth") {
             Ok(WeightFormat::HuggingFaceBin)
         } else if filename.ends_with(".safetensors") {
             Ok(WeightFormat::SafeTensors)
@@ -566,31 +398,19 @@ impl HuggingFaceLoader {
         }
     }
 
+    /// Read a tensor out of a safetensors file.
+    ///
+    /// A fresh handle is opened per tensor: a cached `BufReader` keeps stale
+    /// buffered bytes across a `seek`, which silently returns the wrong data.
     fn load_from_safetensors(&mut self, name: &str, filename: &str) -> Result<Tensor> {
-        // Use a single method that handles both header parsing and tensor loading
-        self.load_safetensors_tensor_complete(name, filename)
-    }
-
-    fn load_safetensors_tensor_complete(&mut self, name: &str, filename: &str) -> Result<Tensor> {
-        // CRITICAL FIX: Don't use cached file handles for SafeTensors
-        // BufReader's internal buffer causes issues when seeking - it doesn't flush the buffer
-        // after seek(), so we read stale buffered data instead of fresh file data.
-        // Solution: Open a fresh file for each tensor load.
         let file_path = self.model_dir.join(filename);
-        eprintln!(
-            "[SAFETENSORS DEBUG] Loading tensor '{}' from file: {:?}",
-            name, file_path
-        );
         let file = File::open(&file_path)?;
         let mut reader = BufReader::new(file);
 
-        // Read header length (first 8 bytes)
         let mut header_len_bytes = [0u8; 8];
         reader.read_exact(&mut header_len_bytes)?;
         let header_len = u64::from_le_bytes(header_len_bytes);
-        eprintln!("[SAFETENSORS DEBUG] Header length: {} bytes", header_len);
 
-        // Read header JSON
         let mut header_bytes = vec![0u8; header_len as usize];
         reader.read_exact(&mut header_bytes)?;
 
@@ -600,119 +420,78 @@ impl HuggingFaceLoader {
                 e
             ))
         })?;
-
-        // Debug: print first 500 chars of header
-        eprintln!(
-            "[SAFETENSORS DEBUG] Header preview (first 500 chars): {}",
-            &header_str[..header_str.len().min(500)]
-        );
 
         let header: SafeTensorsHeader = serde_json::from_str(header_str).map_err(|e| {
-            eprintln!("[SAFETENSORS DEBUG] Failed to parse header, printing full header:");
-            eprintln!("{}", header_str);
             TrustformersError::serialization_error(format!(
-                "Failed to parse SafeTensors header: {}",
+                "Failed to parse SafeTensors header of {}: {}",
+                file_path.display(),
                 e
             ))
         })?;
 
-        if let Some(tensor_info) = header.tensors.get(name) {
-            // Seek to tensor data (offsets are relative to start of tensor data section)
-            // SafeTensors format: [8 bytes header_len][header_len bytes JSON][tensor data]
-            let tensor_data_start = 8 + header_len;
-            reader.seek(SeekFrom::Start(
-                tensor_data_start + tensor_info.data_offsets[0],
-            ))?;
+        let tensor_info = header
+            .tensors
+            .get(name)
+            .ok_or_else(|| runtime_error(format!("Tensor not found: {}", name)))?;
 
-            // Read tensor data
-            let data_len = (tensor_info.data_offsets[1] - tensor_info.data_offsets[0]) as usize;
-            let mut data = vec![0u8; data_len];
-            reader.read_exact(&mut data)?;
+        // Offsets are relative to the start of the tensor data section, which
+        // begins right after the 8-byte length and the header itself.
+        let tensor_data_start = 8 + header_len;
+        reader.seek(SeekFrom::Start(
+            tensor_data_start + tensor_info.data_offsets[0],
+        ))?;
 
-            // Convert to tensor based on dtype
-            self.bytes_to_tensor(data, &tensor_info.dtype, &tensor_info.shape)
-        } else {
-            Err(runtime_error(format!("Tensor not found: {}", name)))
-        }
-    }
-
-    #[allow(dead_code)]
-    fn parse_safetensors_header(
-        &mut self,
-        reader: &mut BufReader<File>,
-    ) -> Result<SafeTensorsHeader> {
-        // Read header length (first 8 bytes)
-        let mut header_len_bytes = [0u8; 8];
-        reader.read_exact(&mut header_len_bytes)?;
-        let header_len = u64::from_le_bytes(header_len_bytes);
-
-        // Read header JSON
-        let mut header_bytes = vec![0u8; header_len as usize];
-        reader.read_exact(&mut header_bytes)?;
-
-        let header_str = std::str::from_utf8(&header_bytes).map_err(|e| {
-            TrustformersError::weight_load_error(format!(
-                "Invalid UTF-8 in SafeTensors header: {}",
-                e
-            ))
-        })?;
-        serde_json::from_str(header_str).map_err(|e| {
-            TrustformersError::serialization_error(format!(
-                "Failed to parse SafeTensors header: {}",
-                e
-            ))
-        })
-    }
-
-    #[allow(dead_code)]
-    fn load_safetensors_tensor(
-        &mut self,
-        reader: &mut BufReader<File>,
-        info: &TensorInfo,
-    ) -> Result<Tensor> {
-        // Seek to tensor data
-        reader.seek(SeekFrom::Start(info.data_offsets[0]))?;
-
-        // Read tensor data
-        let data_len = (info.data_offsets[1] - info.data_offsets[0]) as usize;
+        let data_len = (tensor_info.data_offsets[1] - tensor_info.data_offsets[0]) as usize;
         let mut data = vec![0u8; data_len];
         reader.read_exact(&mut data)?;
 
-        // Convert to tensor based on dtype
-        self.bytes_to_tensor(data, &info.dtype, &info.shape)
+        self.bytes_to_tensor(data, &tensor_info.dtype, &tensor_info.shape)
     }
 
     fn bytes_to_tensor(&self, data: Vec<u8>, dtype: &str, shape: &[usize]) -> Result<Tensor> {
-        match dtype {
-            "F32" => {
-                let floats: Vec<f32> = data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-                Tensor::from_vec(floats, shape)
+        let expected: usize = shape.iter().product();
+        let floats: Vec<f32> = match dtype {
+            "F32" => data
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect(),
+            "F16" => data
+                .chunks_exact(2)
+                .map(|chunk| {
+                    half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32()
+                })
+                .collect(),
+            "BF16" => data
+                .chunks_exact(2)
+                .map(|chunk| {
+                    half::bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32()
+                })
+                .collect(),
+            "F64" => data
+                .chunks_exact(8)
+                .map(|c| {
+                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
+                .collect(),
+            "I8" => data.iter().map(|&b| b as i8 as f32).collect(),
+            "U8" => data.iter().map(|&b| b as f32).collect(),
+            other => {
+                return Err(invalid_format(
+                    "dtype",
+                    format!("Unsupported dtype: {}", other),
+                ))
             },
-            "F16" => {
-                // Convert f16 to f32
-                let floats: Vec<f32> = data
-                    .chunks_exact(2)
-                    .map(|chunk| {
-                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                        half::f16::from_bits(bits).to_f32()
-                    })
-                    .collect();
-                Tensor::from_vec(floats, shape)
-            },
-            "I8" => {
-                let ints: Vec<i8> = data.into_iter().map(|b| b as i8).collect();
-                // Convert to f32 for now
-                let floats: Vec<f32> = ints.into_iter().map(|i| i as f32).collect();
-                Tensor::from_vec(floats, shape)
-            },
-            _ => Err(invalid_format(
-                "dtype",
-                format!("Unsupported dtype: {}", dtype),
-            )),
+        };
+
+        if floats.len() != expected {
+            return Err(TrustformersError::shape_error(format!(
+                "tensor declares shape {shape:?} ({expected} elements) but its payload decodes to \
+                 {} elements",
+                floats.len()
+            )));
         }
+
+        Tensor::from_vec(floats, shape)
     }
 }
 
@@ -728,8 +507,11 @@ impl WeightLoader for HuggingFaceLoader {
         let tensor = match self.detect_format(&filename)? {
             WeightFormat::HuggingFaceBin => self.load_from_pytorch_bin(name, &filename)?,
             WeightFormat::SafeTensors => self.load_from_safetensors(name, &filename)?,
-            _ => {
-                return Err(invalid_format("weight format", "Unsupported weight format"));
+            other => {
+                return Err(invalid_format(
+                    "weight format",
+                    format!("Unsupported weight format: {other:?}"),
+                ));
             },
         };
 
@@ -742,16 +524,17 @@ impl WeightLoader for HuggingFaceLoader {
     }
 
     fn list_tensors(&self) -> Result<Vec<String>> {
-        Ok(self.index.weight_map.keys().cloned().collect())
+        let mut names: Vec<String> = self.index.weight_map.keys().cloned().collect();
+        names.sort();
+        Ok(names)
     }
 
     fn tensor_info(&self, name: &str) -> Result<Option<TensorMetadata>> {
-        let filename = self.find_tensor_file(name)?;
-        Ok(Some(self.get_tensor_metadata(name, &filename)?))
+        Ok(self.metadata.get(name).cloned())
     }
 
     fn close(&mut self) -> Result<()> {
-        self.file_handles.clear();
+        self.pytorch_readers.clear();
         self.tensor_cache.clear();
         Ok(())
     }
@@ -944,5 +727,150 @@ mod tests {
         let header = result.expect("expected Ok");
         assert_eq!(header.tensors.len(), 2);
         assert!(header.metadata.is_none());
+    }
+    // ── End-to-end tests against real weight files ───────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+    struct TempModelDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempModelDir {
+        fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "trustformers_hf_{label}_{}_{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("temp model dir must be creatable");
+            Self { path }
+        }
+
+        fn write(&self, name: &str, bytes: &[u8]) {
+            std::fs::write(self.path.join(name), bytes).expect("fixture file must be writable");
+        }
+    }
+
+    impl Drop for TempModelDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn safetensors_directory_lists_and_loads_real_tensors() {
+        let dir = TempModelDir::new("st");
+        let tensors = vec![
+            F32Tensor::new("a.weight", &[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            F32Tensor::new("b.bias", &[3], vec![-1.0, 0.0, 1.0]),
+        ];
+        dir.write("model.safetensors", &build_safetensors(&tensors));
+
+        let mut loader = HuggingFaceLoader::new(&dir.path, WeightLoadingConfig::default())
+            .expect("loader must open the directory");
+
+        assert_eq!(
+            loader.list_tensors().expect("names"),
+            vec!["a.weight".to_string(), "b.bias".to_string()]
+        );
+
+        let tensor = loader.load_tensor("a.weight").expect("tensor must load");
+        assert_eq!(tensor.shape(), vec![2, 3]);
+        match tensor {
+            Tensor::F32(arr) => assert_eq!(
+                arr.iter().copied().collect::<Vec<f32>>(),
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+            ),
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tensor_info_reports_the_real_shape_not_a_hardcoded_one() {
+        // Regression: `get_tensor_metadata` used to return `[1024, 768]` and a
+        // matching invented byte size for every tensor in every model.
+        let dir = TempModelDir::new("meta");
+        let tensors = vec![F32Tensor::new(
+            "w",
+            &[4, 5],
+            (0..20).map(|i| i as f32).collect(),
+        )];
+        dir.write("model.safetensors", &build_safetensors(&tensors));
+
+        let loader = HuggingFaceLoader::new(&dir.path, WeightLoadingConfig::default())
+            .expect("loader must open the directory");
+        let info = loader
+            .tensor_info("w")
+            .expect("metadata lookup must succeed")
+            .expect("tensor must exist");
+        assert_eq!(info.shape, vec![4, 5]);
+        assert_eq!(info.size_bytes, 20 * 4);
+        assert!(matches!(info.dtype, WeightDataType::Float32));
+    }
+
+    #[test]
+    fn unknown_tensor_names_are_rejected_rather_than_resolved_by_a_wildcard() {
+        let dir = TempModelDir::new("unknown");
+        let tensors = vec![F32Tensor::new("only", &[1], vec![1.0])];
+        dir.write("model.safetensors", &build_safetensors(&tensors));
+
+        let mut loader = HuggingFaceLoader::new(&dir.path, WeightLoadingConfig::default())
+            .expect("loader must open the directory");
+        let err = loader
+            .load_tensor("something.else")
+            .expect_err("an unknown tensor must not resolve");
+        assert!(
+            err.to_string().contains("something.else"),
+            "unexpected: {err}"
+        );
+        assert!(loader.tensor_info("something.else").expect("lookup must succeed").is_none());
+    }
+
+    #[test]
+    fn pytorch_bin_that_is_not_a_checkpoint_fails_instead_of_fabricating_weights() {
+        // The old loader guessed the shape from the parameter name and scanned
+        // for bytes that "looked like a float", so this returned a tensor.
+        let dir = TempModelDir::new("bin");
+        dir.write("pytorch_model.bin", &vec![0x42u8; 8192]);
+
+        let result = HuggingFaceLoader::new(&dir.path, WeightLoadingConfig::default());
+        let err = match result {
+            Ok(_) => panic!("a file that is not a PyTorch checkpoint must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().to_lowercase().contains("pytorch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn f16_tensors_are_decoded_to_f32() {
+        let dir = TempModelDir::new("f16");
+        let values = [1.0f32, -2.5, 0.5, 8.0];
+        let mut payload = Vec::new();
+        for value in values {
+            payload.extend_from_slice(&half::f16::from_f32(value).to_bits().to_le_bytes());
+        }
+        let header = serde_json::json!({
+            "w": {"dtype": "F16", "shape": [4], "data_offsets": [0, payload.len()]}
+        });
+        let header_bytes = serde_json::to_vec(&header).expect("header serialises");
+        let mut bytes = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&payload);
+        dir.write("model.safetensors", &bytes);
+
+        let mut loader = HuggingFaceLoader::new(&dir.path, WeightLoadingConfig::default())
+            .expect("loader must open the directory");
+        match loader.load_tensor("w").expect("tensor must load") {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), values.to_vec());
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
     }
 }

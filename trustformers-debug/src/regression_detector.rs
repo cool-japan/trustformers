@@ -116,9 +116,19 @@ pub struct RegressionDetection {
     pub metric_type: MetricType,
     pub regression_type: RegressionType,
     pub severity: RegressionSeverity,
-    pub confidence: f64,
     pub degradation_percentage: f64,
-    pub statistical_significance: f64,
+    /// Two-sided p-value of the test that produced this detection, or `None`
+    /// when the detection method ran no statistical test at all.
+    ///
+    /// This replaces the pair `confidence` / `statistical_significance`, which
+    /// looked like two independent pieces of evidence and were not: the
+    /// window-dispersion branch published `1 - p` under *both* names, while
+    /// the trend branch published `p` under `statistical_significance` and
+    /// `1 - p` under `confidence` -- so the same field name carried opposite
+    /// quantities depending on which detector fired, and the change-point
+    /// branch filled both in with the invented constants `0.8` and `0.01`.
+    /// One field, one unambiguous quantity, `None` when nothing measured it.
+    pub p_value: Option<f64>,
     pub affected_period: (SystemTime, SystemTime),
     pub root_cause_analysis: RootCauseAnalysis,
     pub recommendations: Vec<String>,
@@ -191,7 +201,7 @@ pub struct RegressionDetector {
     trend_analyzer: TrendAnalyzer,
     change_point_detector: ChangePointDetector,
     seasonal_decomposer: SeasonalDecomposer,
-    ml_predictor: Option<MLPredictor>,
+    dispersion_scorer: Option<WindowDispersionScorer>,
     detection_history: VecDeque<RegressionDetection>,
 }
 
@@ -344,8 +354,16 @@ impl TrendAnalyzer {
         }
     }
 
+    /// Two-sided p-value for `H0: slope == 0` from the ordinary-least-squares
+    /// t-test on the regression slope, with `n - 2` degrees of freedom.
+    ///
+    /// Uses the exact Student-t distribution
+    /// ([`trustformers_core::statistics::student_t_two_sided_p_value`]), not the
+    /// hand-rolled `0.5 + 0.5 * atan(x) * 2/pi` "CDF" this used to call. That
+    /// approximation was not the t CDF at all -- at `t = 1.96, df = 1000` it
+    /// returned `0.52` where the true value is `0.975`, turning a p-value of
+    /// `0.05` into `0.96`, so no trend was ever significant.
     fn calculate_trend_significance(&self, values: &[f64], slope: f64) -> f64 {
-        // Simplified t-test for trend significance
         if values.len() < 3 {
             return 1.0;
         }
@@ -370,23 +388,19 @@ impl TrendAnalyzer {
 
         if se_slope > 0.0 {
             let t_stat = slope / se_slope;
-            // Simplified p-value approximation
             let df = n - 2.0;
-            if df > 0.0 {
-                2.0 * (1.0 - Self::t_distribution_cdf(t_stat.abs(), df))
+            // `None` only for a non-positive df, which `values.len() >= 3`
+            // already rules out; fall back to "not significant" if it happens.
+            trustformers_core::statistics::student_t_two_sided_p_value(t_stat, df).unwrap_or(1.0)
+        } else {
+            // Zero residual spread: the fit is exact, so a non-zero slope is
+            // maximally significant and a zero slope is not evidence of a trend.
+            if slope.abs() > 0.0 {
+                0.0
             } else {
                 1.0
             }
-        } else {
-            1.0
         }
-    }
-
-    fn t_distribution_cdf(t: f64, df: f64) -> f64 {
-        // Simplified approximation of t-distribution CDF
-        // In practice, would use a proper statistical library
-        let x = t / (df + t.powi(2)).sqrt();
-        0.5 + 0.5 * x.atan() * (2.0 / std::f64::consts::PI)
     }
 }
 
@@ -573,19 +587,20 @@ struct SeasonalComponents {
     residual: Vec<f64>,
 }
 
-/// ML-based predictor for advanced regression detection
+/// Heuristic dispersion scorer over a sliding window of a metric series.
+///
+/// Despite the name it replaces (`MLPredictor`, constructed with
+/// `MLModelType::IsolationForest`), nothing here is machine learning: there is
+/// no model, no training data and no inference. The `model_type` field was
+/// stored and never read -- no isolation forest, LSTM or autoencoder exists
+/// anywhere in this crate. What the type really computes is the coefficient of
+/// variation of a window's summary features, plus a self-consistency measure;
+/// both are now named for that.
 #[derive(Debug)]
-struct MLPredictor {
-    model_type: MLModelType,
+struct WindowDispersionScorer {
     feature_extractor: FeatureExtractor,
-    prediction_threshold: f64,
-}
-
-#[derive(Debug)]
-enum MLModelType {
-    IsolationForest,
-    LSTM,
-    AutoEncoder,
+    /// Dispersion above which the window is flagged.
+    dispersion_threshold: f64,
 }
 
 #[derive(Debug)]
@@ -595,65 +610,80 @@ struct FeatureExtractor {
     frequency_features: bool,
 }
 
-impl MLPredictor {
-    fn new(model_type: MLModelType, prediction_threshold: f64) -> Self {
+impl WindowDispersionScorer {
+    fn new(dispersion_threshold: f64) -> Self {
         Self {
-            model_type,
             feature_extractor: FeatureExtractor {
                 window_size: 50,
                 statistical_features: true,
                 frequency_features: true,
             },
-            prediction_threshold,
+            dispersion_threshold,
         }
     }
 
-    /// Predict if current pattern indicates regression
-    fn predict_regression(&self, values: &[f64]) -> Option<MLPrediction> {
-        if values.len() < self.feature_extractor.window_size {
+    /// Score the most recent window, if there is a full one.
+    ///
+    /// Returns `None` when the window is not full, when the dispersion is below
+    /// the configured threshold, or when there is no prior window to compare
+    /// against (so no real degradation percentage or p-value could be produced).
+    fn score_window(&self, values: &[f64]) -> Option<WindowDispersionScore> {
+        let window = self.feature_extractor.window_size;
+        if values.len() < window {
             return None;
         }
 
         let features = self.feature_extractor.extract_features(values);
-
-        // Simplified ML prediction (in practice would use trained models)
-        let anomaly_score = self.calculate_anomaly_score(&features);
-        let confidence = self.calculate_confidence(&features);
-
-        if anomaly_score > self.prediction_threshold {
-            Some(MLPrediction {
-                anomaly_score,
-                confidence,
-                feature_importance: self.calculate_feature_importance(&features),
-                predicted_severity: self.predict_severity(anomaly_score),
-            })
-        } else {
-            None
+        let dispersion = Self::coefficient_of_variation(&features);
+        if dispersion <= self.dispersion_threshold {
+            return None;
         }
+
+        // Real degradation and significance, from the actual recent vs prior
+        // window of the series -- not from the dispersion score.
+        let recent = &values[values.len() - window..];
+        let prior_end = values.len() - window;
+        if prior_end < 2 {
+            return None;
+        }
+        let prior_start = prior_end.saturating_sub(window);
+        let prior = &values[prior_start..prior_end];
+
+        let recent_mean = trustformers_core::statistics::mean(recent)?;
+        let prior_mean = trustformers_core::statistics::mean(prior)?;
+        if prior_mean.abs() < f64::EPSILON {
+            return None;
+        }
+        let degradation_percentage = (recent_mean - prior_mean) / prior_mean.abs() * 100.0;
+
+        let test = trustformers_core::statistics::welch_t_test(recent, prior)?;
+
+        Some(WindowDispersionScore {
+            dispersion,
+            degradation_percentage,
+            p_value: test.p_value,
+            feature_magnitudes: Self::normalised_magnitudes(&features),
+            severity: Self::severity_for(dispersion),
+        })
     }
 
-    fn calculate_anomaly_score(&self, features: &[f64]) -> f64 {
-        // Simplified anomaly scoring based on feature deviation
+    /// Coefficient of variation `std / |mean|` of the feature vector.
+    fn coefficient_of_variation(features: &[f64]) -> f64 {
+        if features.is_empty() {
+            return 0.0;
+        }
         let mean = features.iter().sum::<f64>() / features.len() as f64;
         let variance =
             features.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / features.len() as f64;
-
         variance.sqrt() / (mean.abs() + 1e-6)
     }
 
-    fn calculate_confidence(&self, features: &[f64]) -> f64 {
-        // Simplified confidence calculation
-        let feature_consistency = 1.0
-            - (features.iter().map(|&x| (x - features[0]).abs()).sum::<f64>()
-                / (features.len() as f64 * features[0].abs() + 1e-6));
-
-        feature_consistency.max(0.0).min(1.0)
-    }
-
-    fn calculate_feature_importance(&self, features: &[f64]) -> Vec<f64> {
-        // Simplified feature importance based on magnitude
+    /// Each feature's magnitude as a fraction of the largest magnitude.
+    ///
+    /// This was called `feature_importance`, which implies a model attribution;
+    /// it is simply `|x| / max|x|`.
+    fn normalised_magnitudes(features: &[f64]) -> Vec<f64> {
         let max_magnitude = features.iter().map(|x| x.abs()).fold(0.0, f64::max);
-
         if max_magnitude > 0.0 {
             features.iter().map(|&x| x.abs() / max_magnitude).collect()
         } else {
@@ -661,12 +691,12 @@ impl MLPredictor {
         }
     }
 
-    fn predict_severity(&self, anomaly_score: f64) -> RegressionSeverity {
-        if anomaly_score > 0.8 {
+    fn severity_for(dispersion: f64) -> RegressionSeverity {
+        if dispersion > 0.8 {
             RegressionSeverity::Critical
-        } else if anomaly_score > 0.6 {
+        } else if dispersion > 0.6 {
             RegressionSeverity::High
-        } else if anomaly_score > 0.4 {
+        } else if dispersion > 0.4 {
             RegressionSeverity::Medium
         } else {
             RegressionSeverity::Low
@@ -733,22 +763,29 @@ impl FeatureExtractor {
     }
 }
 
+/// Result of [`WindowDispersionScorer::score_window`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MLPrediction {
-    anomaly_score: f64,
-    confidence: f64,
-    feature_importance: Vec<f64>,
-    predicted_severity: RegressionSeverity,
+struct WindowDispersionScore {
+    /// Coefficient of variation of the window's summary features.
+    dispersion: f64,
+    /// Real percentage change of the window mean against the previous window.
+    degradation_percentage: f64,
+    /// Real two-sided Welch p-value for recent vs previous window.
+    p_value: f64,
+    /// Per-feature `|x| / max|x|`.
+    #[allow(
+        dead_code,
+        reason = "carried for callers that surface the feature breakdown"
+    )]
+    feature_magnitudes: Vec<f64>,
+    severity: RegressionSeverity,
 }
 
 impl RegressionDetector {
     /// Create a new regression detector
     pub fn new(config: RegressionDetectionConfig) -> Self {
-        let ml_predictor = if config.enable_ml_detection {
-            Some(MLPredictor::new(
-                MLModelType::IsolationForest,
-                config.ml_confidence_threshold,
-            ))
+        let dispersion_scorer = if config.enable_ml_detection {
+            Some(WindowDispersionScorer::new(config.ml_confidence_threshold))
         } else {
             None
         };
@@ -763,7 +800,7 @@ impl RegressionDetector {
             trend_analyzer,
             change_point_detector: ChangePointDetector::new(5, 2.0),
             seasonal_decomposer: SeasonalDecomposer::new(24), // Hourly patterns
-            ml_predictor,
+            dispersion_scorer,
             detection_history: VecDeque::new(),
         }
     }
@@ -849,9 +886,8 @@ impl RegressionDetector {
                     metric_type: metric_type.clone(),
                     regression_type: RegressionType::GradualDegradation,
                     severity,
-                    confidence: 1.0 - trend_result.significance,
                     degradation_percentage: trend_result.slope_change * 100.0,
-                    statistical_significance: trend_result.significance,
+                    p_value: Some(trend_result.significance),
                     affected_period: self.calculate_affected_period(series),
                     root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                     recommendations: self.generate_recommendations(
@@ -880,9 +916,13 @@ impl RegressionDetector {
                         metric_type: metric_type.clone(),
                         regression_type: RegressionType::StepChange,
                         severity: self.calculate_severity(degradation / 100.0),
-                        confidence: 0.8,
                         degradation_percentage: degradation,
-                        statistical_significance: 0.01, // High confidence for step changes
+                        // Change-point detection compares two window means
+                        // against `min_degradation_threshold`; it runs no
+                        // significance test, so there is no p-value to report.
+                        // The old code filled these in with the constants 0.8
+                        // and 0.01 ("High confidence for step changes").
+                        p_value: None,
                         affected_period: self.calculate_affected_period(series),
                         root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                         recommendations: self.generate_recommendations(
@@ -895,22 +935,25 @@ impl RegressionDetector {
             }
         }
 
-        // 3. ML-based detection
-        if let Some(ref ml_predictor) = self.ml_predictor {
-            if let Some(ml_prediction) = ml_predictor.predict_regression(&filtered_values) {
+        // 3. Window-dispersion detection (heuristic screen + a real Welch test
+        //    between the recent and previous windows). Previously labelled
+        //    "ML-based": `degradation_percentage` was the dispersion score
+        //    times 100 and `statistical_significance` was `1 - a consistency
+        //    heuristic`, neither of which measured what its name claims.
+        if let Some(ref scorer) = self.dispersion_scorer {
+            if let Some(score) = scorer.score_window(&filtered_values) {
                 detections.push(RegressionDetection {
                     detection_id: Uuid::new_v4(),
                     metric_type: metric_type.clone(),
                     regression_type: RegressionType::ComplexRegression,
-                    severity: ml_prediction.predicted_severity,
-                    confidence: ml_prediction.confidence,
-                    degradation_percentage: ml_prediction.anomaly_score * 100.0,
-                    statistical_significance: 1.0 - ml_prediction.confidence,
+                    severity: score.severity,
+                    degradation_percentage: score.degradation_percentage,
+                    p_value: Some(score.p_value),
                     affected_period: self.calculate_affected_period(series),
                     root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                     recommendations: self.generate_recommendations(
                         &RegressionType::ComplexRegression,
-                        ml_prediction.anomaly_score,
+                        score.dispersion,
                     ),
                     detected_at: SystemTime::now(),
                 });
@@ -1157,6 +1200,94 @@ impl crate::DebugSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2 honesty regressions ------------------------
+
+    #[test]
+    fn trend_significance_uses_the_real_student_t_distribution() {
+        let detector = TrendAnalyzer::new(3, 0.05);
+        // A perfectly linear ramp with a tiny wobble: the slope is
+        // overwhelmingly significant. The old atan "CDF" returned ~0.96 here.
+        let values: Vec<f64> =
+            (0..30).map(|i| i as f64 + if i % 2 == 0 { 0.01 } else { -0.01 }).collect();
+        let slope = detector.calculate_slope(&values);
+        assert!(
+            (slope - 1.0).abs() < 0.01,
+            "slope should be ~1, got {slope}"
+        );
+        let p = detector.calculate_trend_significance(&values, slope);
+        assert!(
+            p < 1e-6,
+            "a near-perfect ramp must be highly significant, got p={p}"
+        );
+    }
+
+    #[test]
+    fn trend_significance_is_high_for_pure_noise_around_a_flat_line() {
+        let detector = TrendAnalyzer::new(3, 0.05);
+        // Symmetric zig-zag: zero slope, so the null cannot be rejected.
+        let values: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let slope = detector.calculate_slope(&values);
+        let p = detector.calculate_trend_significance(&values, slope);
+        assert!(p > 0.5, "a flat zig-zag must not be significant, got p={p}");
+    }
+
+    #[test]
+    fn trend_significance_matches_a_published_t_critical_value() {
+        // Cross-check the underlying distribution against the standard table:
+        // t(0.025, df=10) = 2.228 => two-sided p = 0.05.
+        let p = trustformers_core::statistics::student_t_two_sided_p_value(2.228, 10.0)
+            .expect("valid df");
+        assert!(
+            (p - 0.05).abs() < 1e-3,
+            "expected p ~= 0.05 for t=2.228, df=10; got {p}"
+        );
+        // What the deleted approximation would have produced at the same point.
+        let bogus = {
+            let x = 2.228_f64 / (10.0 + 2.228_f64.powi(2)).sqrt();
+            2.0 * (1.0 - (0.5 + 0.5 * x.atan() * (2.0 / std::f64::consts::PI)))
+        };
+        // 0.667 vs the true 0.05: the deleted approximation was off by more
+        // than an order of magnitude and would never have rejected the null.
+        assert!(
+            bogus > 10.0 * p,
+            "sanity: the old approximation really was that wrong (bogus={bogus}, true={p})"
+        );
+    }
+
+    #[test]
+    fn dispersion_scorer_reports_a_real_degradation_and_p_value() {
+        let scorer = WindowDispersionScorer::new(0.0);
+        // 50 samples around 1.0 followed by 50 around 2.0: a real +100%
+        // degradation between the previous and the recent window.
+        let mut values: Vec<f64> = Vec::new();
+        for i in 0..50 {
+            values.push(1.0 + (i % 5) as f64 * 0.01);
+        }
+        for i in 0..50 {
+            values.push(2.0 + (i % 5) as f64 * 0.01);
+        }
+        let score = scorer.score_window(&values).expect("dispersion above a zero threshold");
+        assert!(
+            (score.degradation_percentage - 100.0).abs() < 2.0,
+            "expected ~+100% degradation, got {}",
+            score.degradation_percentage
+        );
+        assert!(
+            score.p_value < 1e-6,
+            "two clearly separated windows must be highly significant, got p={}",
+            score.p_value
+        );
+    }
+
+    #[test]
+    fn dispersion_scorer_needs_a_previous_window_to_compare_against() {
+        let scorer = WindowDispersionScorer::new(0.0);
+        // Exactly one window: there is no prior window, so no honest
+        // degradation percentage or p-value exists.
+        let values: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        assert!(scorer.score_window(&values).is_none());
+    }
 
     #[tokio::test]
     async fn test_regression_detector_creation() {

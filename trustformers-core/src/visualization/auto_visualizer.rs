@@ -59,17 +59,11 @@ impl AutoVisualizer {
         }
     }
 
-    /// Extract layer parameters count
-    #[allow(dead_code)] // Reserved for future parameter counting features
-    fn count_parameters<L>(layer: &L) -> usize
-    where
-        L: crate::traits::Layer,
-    {
-        // Simplified placeholder - in practice would use layer's actual parameter count
-        // Cannot downcast generic layer, so return default estimate
-        let _ = layer; // Avoid unused parameter warning
-        768 * 768 // Default estimate
-    }
+    // `count_parameters` was removed. It returned a constant `768 * 768` for
+    // every layer, and the `Layer` trait exposes no parameter count to derive a
+    // real one from, so any node label it produced would have said 589,824
+    // regardless of the model. Add `num_parameters()` to `Layer` (as `Model`
+    // already has) before reintroducing it.
 
     /// Visualize a BERT-like model
     pub fn visualize_bert_model(&mut self, num_layers: usize) -> Result<ModelGraph> {

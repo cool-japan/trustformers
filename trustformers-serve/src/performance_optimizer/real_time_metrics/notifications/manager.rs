@@ -272,10 +272,12 @@ impl NotificationManager {
         self.channels.insert(channel_name.clone(), channel.clone());
         self.channel_configs.write().insert(channel_name.clone(), config.clone());
 
-        // Register with health monitor
+        // Register with health monitor. The monitor holds the channel itself so
+        // it can run the channel's own health check; before 0.2.1 it took only
+        // the name and did nothing with it.
         if self.config.read().enable_health_monitoring && config.health_check.enabled {
             self.health_monitor
-                .register_channel(channel_name.clone(), config.health_check)
+                .register_channel(channel.clone(), config.health_check)
                 .await?;
         }
 

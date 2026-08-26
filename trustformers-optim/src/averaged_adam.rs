@@ -295,9 +295,10 @@ impl AveragedAdam {
 
 impl Optimizer for AveragedAdam {
     fn update(&mut self, param: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        // Get parameter data (bind to variable before taking pointer)
+        // Stable parameter identity (see `crate::param_id`). `data()` returns a
+        // fresh copy, so its address used to change on every single call.
+        let param_name = self.state.param_key_for_tensor(param)?;
         let param_data = param.data()?;
-        let param_name = format!("{:p}", param_data.as_ptr());
         let grad_data = gradient.data()?;
 
         if param_data.len() != grad_data.len() {

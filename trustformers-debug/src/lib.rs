@@ -168,6 +168,38 @@ pub mod visualization;
 #[cfg(feature = "wasm")]
 pub mod wasm_interface;
 
+/// Lock-free single-producer/multi-consumer ring buffer used by
+/// [`dashboard_ws`] to fan out live training events without an unbounded
+/// backlog. Was previously compiled (`mod ring_buffer;` was missing from
+/// this file) but never reachable from outside the crate, so its tests
+/// never ran; declared here rather than deleted since [`dashboard_ws`]
+/// depends on it and both are real, working implementations.
+pub mod ring_buffer;
+
+/// Trace-export formats for profiling data: Chrome/Perfetto JSON, Tracy
+/// CSV, and a unified CSV/JSON exporter. Re-exported under the `export`
+/// namespace (not glob-imported at the crate root) because its
+/// [`export::ExportFormat`] name collides with unrelated `ExportFormat`
+/// types already defined in [`data_export`] and [`netron_export`].
+pub mod export;
+
+/// Real-time training-event streaming over Server-Sent Events (SSE), with
+/// no third-party web-framework dependency. Re-exported under the
+/// `dashboard_ws` namespace (not glob-imported) because its
+/// [`dashboard_ws::DashboardConfig`] name collides with the crate's several
+/// other `DashboardConfig` types (see [`realtime_dashboard`],
+/// [`team_dashboard`]).
+pub mod dashboard_ws;
+
+/// Performance-regression detectors: baseline comparison
+/// ([`regression::RegressionDetector`]) plus streaming z-score/CUSUM
+/// change-point detection. Re-exported under the `regression` namespace
+/// (not glob-imported) because [`regression::RegressionDetector`] and
+/// [`regression::RegressionSeverity`] collide with the unrelated types of
+/// the same name in [`regression_detector`] (the crate's original,
+/// still-primary regression-detection module).
+pub mod regression;
+
 // GPU profiling imports (specific to avoid conflicts)
 pub use advanced_gpu_profiler::{
     AdvancedGpuMemoryProfiler, AdvancedGpuProfilingConfig, CrossDeviceTransfer,
@@ -232,6 +264,7 @@ pub use weight_analyzer::{
 // MLflow Integration
 pub use mlflow_integration::{
     ArtifactType, MLflowClient, MLflowConfig, MLflowDebugSession, MetricPoint, RunInfo, RunStatus,
+    TrackingMode,
 };
 
 // Visualization Plugin System

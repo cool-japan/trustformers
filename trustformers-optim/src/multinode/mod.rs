@@ -225,9 +225,9 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
 
         // Get node-local information
         let (local_rank, local_size) = mpi_utils::get_node_local_info()?;
-        println!("Multi-node environment initialized:");
-        println!("  Local rank: {}", local_rank);
-        println!("  Local size: {}", local_size);
+        tracing::info!("Multi-node environment initialized:");
+        tracing::info!("  Local rank: {}", local_rank);
+        tracing::info!("  Local size: {}", local_size);
 
         Ok(())
     }
@@ -242,12 +242,12 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
             self.gradient_buffers.insert(name.clone(), GradientSyncBuffer::new());
         }
 
-        println!("Multi-node training initialized:");
-        println!("  Node rank: {}", self.config.node_rank);
-        println!("  Global rank: {}", self.config.global_rank);
-        println!("  World size: {}", self.config.world_size());
-        println!("  ZeRO stage: {:?}", self.zero_optimizer.get_stage());
-        println!("  Parameters: {}", parameters.len());
+        tracing::info!("Multi-node training initialized:");
+        tracing::info!("  Node rank: {}", self.config.node_rank);
+        tracing::info!("  Global rank: {}", self.config.global_rank);
+        tracing::info!("  World size: {}", self.config.world_size());
+        tracing::info!("  ZeRO stage: {:?}", self.zero_optimizer.get_stage());
+        tracing::info!("  Parameters: {}", parameters.len());
 
         Ok(())
     }
@@ -489,7 +489,7 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
     pub fn finalize() -> Result<()> {
         MpiCommunicatorImpl::finalize()?;
 
-        println!("Multi-node training finalized");
+        tracing::info!("Multi-node training finalized");
         Ok(())
     }
 }
@@ -507,24 +507,45 @@ pub struct MultiNodeStats {
 }
 
 impl MultiNodeStats {
-    /// Print training statistics
-    pub fn print_stats(&self) {
-        println!("=== Multi-Node Training Statistics ===");
-        println!("Node Rank: {}", self.node_rank);
-        println!("Global Rank: {}", self.global_rank);
-        println!("World Size: {}", self.world_size);
-        println!("ZeRO Stage: {:?}", self.zero_stage);
-        println!("Communication Backend: {:?}", self.communication_backend);
-        println!(
-            "Gradient Compression: {}",
+    /// Render the multi-node training statistics as a human-readable report.
+    fn stats_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("=== Multi-Node Training Statistics ===\n");
+        report.push_str(&format!("Node Rank: {}\n", self.node_rank));
+        report.push_str(&format!("Global Rank: {}\n", self.global_rank));
+        report.push_str(&format!("World Size: {}\n", self.world_size));
+        report.push_str(&format!("ZeRO Stage: {:?}\n", self.zero_stage));
+        report.push_str(&format!(
+            "Communication Backend: {:?}\n",
+            self.communication_backend
+        ));
+        report.push_str(&format!(
+            "Gradient Compression: {}\n",
             self.gradient_compression_enabled
-        );
+        ));
 
-        println!("Memory Savings:");
+        report.push_str("Memory Savings:\n");
         for (component, savings) in &self.memory_savings {
-            println!("  {}: {:.1}%", component, savings * 100.0);
+            report.push_str(&format!("  {}: {:.1}%\n", component, savings * 100.0));
         }
-        println!("=====================================");
+        report.push_str("=====================================");
+        report
+    }
+
+    /// Write `Self::stats_report` to stdout.
+    ///
+    /// This is an explicit, caller-initiated escape hatch for binaries and
+    /// examples; nothing on the training path writes to stdout. Library
+    /// callers should prefer [`Self::log_stats`], which routes the same
+    /// report through the `log` facade so the host application controls the
+    /// sink.
+    pub fn print_stats(&self) {
+        println!("{}", self.stats_report());
+    }
+
+    /// Emit `Self::stats_report` at `info` level through the `log` facade.
+    pub fn log_stats(&self) {
+        log::info!("{}", self.stats_report());
     }
 }
 

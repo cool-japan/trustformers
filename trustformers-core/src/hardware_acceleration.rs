@@ -7,8 +7,6 @@
 //! automatically selecting the best available acceleration method based on system
 //! capabilities and user preferences.
 
-#![allow(unused_variables)] // Multi-backend implementation with feature gates
-
 #[allow(unused_imports)] // Used conditionally based on feature gates
 use crate::errors::{acceleration_error, hardware_error, tensor_op_error, Result};
 use crate::tensor::Tensor;
@@ -319,7 +317,22 @@ impl HardwareAccelerator {
     pub fn matmul(&mut self, a: &Tensor, b: &Tensor, c: &mut Tensor) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let result = match self.active_backend {
+        let result = self.dispatch_matmul(a, b, c);
+
+        // Update statistics
+        self.stats.total_operations += 1;
+        self.stats.total_time_ms += start_time.elapsed().as_millis() as f64;
+
+        result
+    }
+
+    /// Dispatch a matrix multiplication to the active backend without touching
+    /// the statistics counters.
+    ///
+    /// This is the shared-reference entry point used by
+    /// [`api::accelerated_matmul`], which only has a `&'static` handle.
+    pub fn dispatch_matmul(&self, a: &Tensor, b: &Tensor, c: &mut Tensor) -> Result<()> {
+        match self.active_backend {
             AccelerationBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
@@ -385,13 +398,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Cpu => self.cpu_matmul(a, b, c),
-        };
-
-        // Update statistics
-        self.stats.total_operations += 1;
-        self.stats.total_time_ms += start_time.elapsed().as_millis() as f64;
-
-        result
+        }
     }
 
     /// Execute Flash Attention with hardware acceleration
@@ -404,7 +411,28 @@ impl HardwareAccelerator {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let result = match self.active_backend {
+        let result = self.dispatch_flash_attention(query, key, value, output);
+
+        // Update statistics
+        self.stats.total_operations += 1;
+        self.stats.total_time_ms += start_time.elapsed().as_millis() as f64;
+
+        result
+    }
+
+    /// Dispatch Flash Attention to the active backend without touching the
+    /// statistics counters.
+    ///
+    /// This is the shared-reference entry point used by
+    /// [`api::accelerated_flash_attention`], which only has a `&'static` handle.
+    pub fn dispatch_flash_attention(
+        &self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        output: &mut Tensor,
+    ) -> Result<()> {
+        match self.active_backend {
             AccelerationBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 {
@@ -461,13 +489,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Cpu => self.cpu_flash_attention(query, key, value, output),
-        };
-
-        // Update statistics
-        self.stats.total_operations += 1;
-        self.stats.total_time_ms += start_time.elapsed().as_millis() as f64;
-
-        result
+        }
     }
 
     /// CPU fallback for matrix multiplication
@@ -486,11 +508,39 @@ impl HardwareAccelerator {
         value: &Tensor,
         output: &mut Tensor,
     ) -> Result<()> {
-        // Simplified CPU implementation of Flash Attention
-        let q_shape = query.shape();
+        // CPU scaled-dot-product attention over [batch, seq, head_dim] tensors.
+        let q_shape = query.shape().to_vec();
+        if q_shape.len() != 3 {
+            return Err(tensor_op_error(
+                format!(
+                    "expected a 3-D [batch, seq, head_dim] query, got {:?}",
+                    q_shape
+                ),
+                "flash_attention",
+            ));
+        }
         let batch_size = q_shape[0];
         let seq_len = q_shape[1];
         let head_dim = q_shape[2];
+
+        for (name, tensor) in [("key", key), ("value", value)] {
+            let shape = tensor.shape();
+            if shape.len() != 3 || shape[0] != batch_size || shape[2] != head_dim {
+                return Err(tensor_op_error(
+                    format!(
+                        "{} shape {:?} is incompatible with query shape {:?}",
+                        name, shape, q_shape
+                    ),
+                    "flash_attention",
+                ));
+            }
+        }
+        if seq_len == 0 || head_dim == 0 {
+            return Err(tensor_op_error(
+                format!("degenerate query shape {:?}", q_shape),
+                "flash_attention",
+            ));
+        }
 
         // Compute attention scores: Q @ K^T
         let key_transposed = key.transpose(1, 2)?;
@@ -621,50 +671,30 @@ pub mod api {
     }
 
     /// Execute accelerated matrix multiplication
+    /// Execute a matrix multiplication on the globally selected backend.
+    ///
+    /// The global accelerator is shared immutably, so the per-accelerator
+    /// statistics counters are not updated by this entry point; use
+    /// [`HardwareAccelerator::matmul`] on an owned accelerator when you need
+    /// operation accounting.
     pub fn accelerated_matmul(a: &Tensor, b: &Tensor, c: &mut Tensor) -> Result<()> {
-        let accelerator = HardwareAccelerator::global()?;
-
-        // Since we can't get a mutable reference from the static,
-        // we need to handle this differently for now
-        let result = a.matmul(b)?;
-        *c = result;
-        Ok(())
+        HardwareAccelerator::global()?.dispatch_matmul(a, b, c)
     }
 
     /// Execute accelerated Flash Attention
+    /// Execute Flash Attention on the globally selected backend.
+    ///
+    /// As with [`accelerated_matmul`], the shared global accelerator cannot
+    /// update its statistics counters from an immutable handle.
     pub fn accelerated_flash_attention(
         query: &Tensor,
         key: &Tensor,
         value: &Tensor,
         output: &mut Tensor,
     ) -> Result<()> {
-        let accelerator = HardwareAccelerator::global()?;
-
-        // Since we can't get a mutable reference from the static,
-        // we need to handle this differently for now
-        // Simplified CPU implementation of Flash Attention
-        let q_shape = query.shape();
-        let head_dim = q_shape[q_shape.len() - 1];
-
-        // Compute attention scores: Q @ K^T
-        let key_transposed = key.transpose(q_shape.len() - 2, q_shape.len() - 1)?;
-        let scores = query.matmul(&key_transposed)?;
-
-        // Apply scaling
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let scaled_scores = scores.mul_scalar(scale)?;
-
-        // Apply softmax
-        let attention_weights = scaled_scores.softmax((q_shape.len() - 1) as i32)?;
-
-        // Apply attention to values: attention_weights @ V
-        let result = attention_weights.matmul(value)?;
-
-        *output = result;
-        Ok(())
+        HardwareAccelerator::global()?.dispatch_flash_attention(query, key, value, output)
     }
 
-    /// Get active acceleration backend
     pub fn get_active_backend() -> Result<AccelerationBackend> {
         Ok(HardwareAccelerator::global()?.active_backend())
     }
@@ -760,5 +790,54 @@ mod tests {
         let _ = api::init_hardware_acceleration();
         let stats = api::get_memory_stats();
         assert!(stats.is_ok());
+    }
+
+    /// Regression test: a file-level `#![allow(unused_variables)]` hid that
+    /// `cpu_flash_attention` computed `batch_size`/`seq_len` and never used
+    /// them, so mismatched key/value shapes reached `matmul` unchecked.
+    #[test]
+    fn test_cpu_flash_attention_rejects_mismatched_shapes() {
+        let accelerator = HardwareAccelerator::new(AccelerationConfig::default())
+            .expect("accelerator creation failed");
+
+        let query = Tensor::zeros(&[2, 4, 8]).expect("zeros failed");
+        // Wrong head_dim.
+        let key = Tensor::zeros(&[2, 4, 16]).expect("zeros failed");
+        let value = Tensor::zeros(&[2, 4, 16]).expect("zeros failed");
+        let mut output = Tensor::zeros(&[2, 4, 8]).expect("zeros failed");
+
+        assert!(
+            accelerator.cpu_flash_attention(&query, &key, &value, &mut output).is_err(),
+            "key/value with a different head_dim must be rejected"
+        );
+
+        // Wrong rank.
+        let flat_query = Tensor::zeros(&[4, 8]).expect("zeros failed");
+        assert!(accelerator.cpu_flash_attention(&flat_query, &key, &value, &mut output).is_err());
+    }
+
+    /// Regression test: `api::accelerated_matmul` used to fetch the global
+    /// accelerator, drop it, and always run `a.matmul(b)` regardless of the
+    /// selected backend. It must dispatch through the accelerator now.
+    #[test]
+    fn test_accelerated_matmul_dispatches_through_the_accelerator() {
+        let _ = api::init_hardware_acceleration();
+        let accelerator = HardwareAccelerator::global().expect("global accelerator");
+
+        let a = Tensor::ones(&[2, 3]).expect("ones failed");
+        let b = Tensor::ones(&[3, 2]).expect("ones failed");
+
+        let mut via_api = Tensor::zeros(&[2, 2]).expect("zeros failed");
+        api::accelerated_matmul(&a, &b, &mut via_api).expect("accelerated matmul failed");
+
+        let mut via_dispatch = Tensor::zeros(&[2, 2]).expect("zeros failed");
+        accelerator
+            .dispatch_matmul(&a, &b, &mut via_dispatch)
+            .expect("dispatch matmul failed");
+
+        let api_data = via_api.data().expect("data failed");
+        let dispatch_data = via_dispatch.data().expect("data failed");
+        assert_eq!(api_data, dispatch_data);
+        assert!(api_data.iter().all(|value| (value - 3.0).abs() < 1e-6));
     }
 }

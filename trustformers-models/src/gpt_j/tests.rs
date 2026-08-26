@@ -116,7 +116,7 @@ fn test_gptj_config_architecture_name() {
 
 #[test]
 fn test_gptj_rope_creation() {
-    let rope = GptJRotaryEmbedding::new(64, 2048, 10000.0);
+    let rope = GptJRotaryEmbedding::new(64, 64, 2048, 10000.0);
     assert_eq!(rope.dim, 64);
     assert_eq!(rope.max_seq_len, 2048);
     assert!((rope.base - 10000.0).abs() < 1e-5);
@@ -124,21 +124,43 @@ fn test_gptj_rope_creation() {
 
 #[test]
 fn test_gptj_rope_apply_empty_positions() {
-    let rope = GptJRotaryEmbedding::new(8, 64, 10000.0);
-    let q = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
-    let k = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
+    // An empty position list is only valid when paired with a genuinely
+    // empty (seq_len=0) sequence: the real implementation validates that
+    // `position_ids.len()` matches the tensor's sequence length, so a
+    // non-empty tensor (seq_len=1) with zero positions is correctly
+    // rejected as a shape mismatch rather than silently ignored.
+    let rope = GptJRotaryEmbedding::new(8, 8, 64, 10000.0);
+    let q = Tensor::zeros(&[0, 8]).expect("zeros failed");
+    let k = Tensor::zeros(&[0, 8]).expect("zeros failed");
     let positions: Vec<usize> = vec![];
     let result = rope.apply_rotary_emb(&q, &k, &positions);
     assert!(
         result.is_ok(),
-        "Empty positions RoPE failed: {:?}",
+        "Empty-sequence RoPE failed: {:?}",
         result.err()
     );
 }
 
 #[test]
+fn test_gptj_rope_apply_mismatched_positions_is_an_error() {
+    // Regression: the real implementation must reject a position list whose
+    // length doesn't match the tensor's sequence length, rather than
+    // silently proceeding (which the old no-op RoPE did, since it ignored
+    // `position_ids` entirely).
+    let rope = GptJRotaryEmbedding::new(8, 8, 64, 10000.0);
+    let q = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
+    let k = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
+    let positions: Vec<usize> = vec![]; // seq_len=1 but 0 positions supplied
+    let result = rope.apply_rotary_emb(&q, &k, &positions);
+    assert!(
+        result.is_err(),
+        "a position_ids/seq_len length mismatch must be rejected"
+    );
+}
+
+#[test]
 fn test_gptj_rope_apply_single_position() {
-    let rope = GptJRotaryEmbedding::new(8, 64, 10000.0);
+    let rope = GptJRotaryEmbedding::new(8, 8, 64, 10000.0);
     let q = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
     let k = Tensor::zeros(&[1, 1, 8]).expect("zeros failed");
     let positions = vec![0usize];
@@ -152,7 +174,7 @@ fn test_gptj_rope_apply_single_position() {
 
 #[test]
 fn test_gptj_rope_apply_multiple_positions() {
-    let rope = GptJRotaryEmbedding::new(16, 128, 10000.0);
+    let rope = GptJRotaryEmbedding::new(16, 16, 128, 10000.0);
     let q = Tensor::zeros(&[1, 4, 16]).expect("zeros failed");
     let k = Tensor::zeros(&[1, 4, 16]).expect("zeros failed");
     let positions = vec![0usize, 1, 2, 3];

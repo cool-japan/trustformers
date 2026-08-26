@@ -51,8 +51,6 @@ use tokio::{sync::Mutex as TokioMutex, task::JoinHandle};
 /// ```
 #[derive(Debug)]
 pub struct TestPatternRecognitionEngine {
-    /// Engine configuration
-    config: Arc<RwLock<PatternRecognitionConfig>>,
     /// Pattern detector library
     detector_library: Arc<PatternDetectorLibrary>,
     /// Machine learning analyzer
@@ -80,7 +78,7 @@ pub struct TestPatternRecognitionEngine {
 }
 impl TestPatternRecognitionEngine {
     /// Create a new pattern recognition engine
-    pub async fn new(config: PatternRecognitionConfig) -> Result<Self> {
+    pub async fn new(_config: PatternRecognitionConfig) -> Result<Self> {
         let detector_library = Arc::new(PatternDetectorLibrary::new().await?);
         let ml_analyzer = Arc::new(MachineLearningPatternAnalyzer::new().await?);
         let statistical_analyzer = Arc::new(StatisticalPatternAnalyzer::new().await?);
@@ -91,7 +89,6 @@ impl TestPatternRecognitionEngine {
         let anti_pattern_detector = Arc::new(AntiPatternDetector::new().await?);
         let recommendation_engine = Arc::new(PatternRecommendationEngine::new().await?);
         let engine = Self {
-            config: Arc::new(RwLock::new(config)),
             detector_library,
             ml_analyzer,
             statistical_analyzer,
@@ -402,11 +399,7 @@ pub struct TrainingDataPoint {
     pub weight: f64,
 }
 #[derive(Debug, Clone, Default)]
-pub struct ClassificationCache {
-    cache: HashMap<String, CachedClassification>,
-    metadata: CacheMetadata,
-    stats: CacheStats,
-}
+pub struct ClassificationCache {}
 impl ClassificationCache {
     pub fn new() -> Self {
         Self::default()
@@ -501,8 +494,6 @@ pub struct AntiPatternDetector {
     severity_calculators: Vec<Box<dyn SeverityCalculator + Send + Sync>>,
     /// Detection history
     detection_history: Arc<TokioMutex<Vec<AntiPatternDetectionRecord>>>,
-    /// Mitigation strategies
-    mitigation_strategies: HashMap<String, MitigationStrategy>,
 }
 impl AntiPatternDetector {
     /// Create a new anti-pattern detector
@@ -512,7 +503,6 @@ impl AntiPatternDetector {
             detection_algorithms: HashMap::new(),
             severity_calculators: Vec::new(),
             detection_history: Arc::new(TokioMutex::new(Vec::new())),
-            mitigation_strategies: HashMap::new(),
         };
         detector.initialize_anti_pattern_definitions().await?;
         detector.initialize_detection_algorithms().await?;
@@ -697,13 +687,11 @@ pub struct EvolutionPoint {
 #[derive(Debug)]
 pub struct TrainingScheduler {
     scheduled_trainings: VecDeque<TrainingTask>,
-    training_in_progress: bool,
 }
 impl TrainingScheduler {
     pub fn new() -> Self {
         Self {
             scheduled_trainings: VecDeque::new(),
-            training_in_progress: false,
         }
     }
     pub fn schedule_training(&mut self, data: Vec<TrainingDataPoint>) {
@@ -965,8 +953,6 @@ pub struct PatternClassificationEngine {
     rules: Arc<RwLock<ClassificationRuleSet>>,
     /// Confidence calculators
     confidence_calculators: Vec<Box<dyn ConfidenceCalculator + Send + Sync>>,
-    /// Classification cache
-    classification_cache: Arc<TokioMutex<ClassificationCache>>,
     /// Performance metrics
     metrics: Arc<RwLock<ClassificationMetrics>>,
 }
@@ -977,7 +963,6 @@ impl PatternClassificationEngine {
             classifiers: HashMap::new(),
             rules: Arc::new(RwLock::new(ClassificationRuleSet::default())),
             confidence_calculators: Vec::new(),
-            classification_cache: Arc::new(TokioMutex::new(ClassificationCache::new())),
             metrics: Arc::new(RwLock::new(ClassificationMetrics::default())),
         };
         engine.initialize_classifiers().await?;

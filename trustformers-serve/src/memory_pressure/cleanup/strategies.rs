@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! # Cleanup Strategy Selection and Processing
 //!
 //! This module handles the selection and execution of cleanup strategies
@@ -154,7 +151,6 @@ impl CleanupStrategyEngine {
                         queued_at: chrono::Utc::now(),
                     },
                     calculated_priority: priority,
-                    urgency_score: context.get_urgency_score(),
                 };
 
                 queue.push(action);
@@ -513,7 +509,11 @@ impl Default for CleanupEngineConfig {
 struct PrioritizedCleanupAction {
     action: CleanupAction,
     calculated_priority: u32,
-    urgency_score: f32,
+    // 0.2.1: an `urgency_score: f32` field lived here, copied from
+    // `context.get_urgency_score()` and never read. The same urgency already
+    // feeds `calculated_priority` through `urgency_multiplier`, which is what
+    // the queue actually orders by, so the copy could only ever drift from the
+    // value in use.
 }
 
 impl PartialEq for PrioritizedCleanupAction {
@@ -636,7 +636,28 @@ pub struct CleanupQueueStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_pressure::cleanup::handlers::GarbageCollectionHandler;
+    /// Handler that reclaims nothing and says so, used purely to exercise the
+    /// engine's registration and selection logic.
+    #[derive(Debug)]
+    struct NoopHandler;
+
+    impl CleanupHandler for NoopHandler {
+        fn cleanup(&self, _pressure_level: MemoryPressureLevel) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        fn estimate_memory_freed(&self) -> u64 {
+            0
+        }
+
+        fn get_priority(&self) -> u32 {
+            100
+        }
+
+        fn name(&self) -> &'static str {
+            "Noop"
+        }
+    }
 
     #[tokio::test]
     async fn test_strategy_engine_creation() {
@@ -652,7 +673,7 @@ mod tests {
         let config = CleanupEngineConfig::default();
         let engine = CleanupStrategyEngine::new(config);
 
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         let strategies = engine.select_strategies(MemoryPressureLevel::Medium, None).await;
@@ -665,7 +686,7 @@ mod tests {
         let engine = CleanupStrategyEngine::new(config);
 
         // Register a handler
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         // Low pressure should have fewer strategies
@@ -681,7 +702,7 @@ mod tests {
         let engine = CleanupStrategyEngine::new(config);
 
         // Register a handler first
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         let context = CleanupContext::new(MemoryPressureLevel::Medium, 0.7, 1024 * 1024 * 1024);

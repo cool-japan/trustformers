@@ -1,7 +1,6 @@
 //! Compression Pipeline for combining multiple compression techniques
 
-#![allow(unused_variables)] // Compression pipeline
-
+use crate::compression::pruning::{AutomaticPruner, Pruner};
 use crate::compression::{distillation::DistillationConfig, pruning::PruningConfig};
 use anyhow::{anyhow, Result};
 use std::time::Instant;
@@ -69,10 +68,15 @@ where
     pub original_size: usize,
     /// Compressed model size in bytes
     pub compressed_size: usize,
-    /// Compression ratio achieved
+    /// Compression ratio achieved, measured as
+    /// `original_size / compressed_size` where `compressed_size` counts only
+    /// the non-zero parameters the compressed model still carries.
     pub compression_ratio: f32,
-    /// Accuracy retention (0-1)
-    pub accuracy_retention: f32,
+    /// Fraction of the original accuracy retained, when an accuracy evaluator
+    /// was supplied to [`CompressionPipeline::compress_with_evaluator`].
+    ///
+    /// `None` means no evaluation was run; it is never an estimate.
+    pub accuracy_retention: Option<f32>,
     /// Time taken for compression
     pub compression_time_seconds: u64,
     /// Stage-wise results
@@ -81,9 +85,14 @@ where
 
 #[derive(Debug, Clone)]
 pub struct StageResult {
+    /// Human-readable stage name.
     pub stage_name: String,
+    /// Bytes of non-zero parameters after this stage.
     pub model_size: usize,
-    pub accuracy: f32,
+    /// Measured accuracy after this stage, when an evaluator was supplied.
+    /// `None` means the stage was not evaluated.
+    pub accuracy: Option<f32>,
+    /// Wall clock seconds this stage took.
     pub time_seconds: u64,
 }
 
@@ -93,6 +102,54 @@ pub struct CompressionReport {
     pub summary: String,
     pub detailed_metrics: std::collections::HashMap<String, f32>,
     pub recommendations: Vec<String>,
+}
+
+/// Measures a model's accuracy, so the pipeline can report a real retention
+/// figure instead of an estimate.
+type AccuracyEvaluator<'a, M> = dyn Fn(&M) -> Result<f32> + 'a;
+
+/// Bytes occupied by the non-zero parameters of a model.
+///
+/// Pruning zeroes weights rather than removing them, so the honest "compressed
+/// size" is the size a sparse format would need: 4 bytes per surviving f32.
+/// Errors when the model exposes no named tensors, because then no size change
+/// can be measured at all.
+fn nonzero_parameter_bytes<M>(model: &M) -> Result<usize>
+where
+    M: crate::traits::Model,
+{
+    let tensors = model.named_tensors();
+    if tensors.is_empty() {
+        return Err(anyhow!(
+            "compression needs weight access: this model exposes no tensors through \
+             Model::named_tensors, so no size or compression ratio can be measured"
+        ));
+    }
+
+    let mut nonzero = 0usize;
+    for (_, tensor) in tensors {
+        nonzero += tensor.data()?.iter().filter(|value| **value != 0.0).count();
+    }
+    Ok(nonzero * std::mem::size_of::<f32>())
+}
+
+/// Map a stage's strategy name onto a concrete pruning strategy.
+///
+/// Returns `None` for an unrecognised name, in which case the pruner's own
+/// per-layer defaults are used.
+fn pruning_strategy_by_name(
+    strategy: &str,
+    config: &PruningConfig,
+) -> Option<Box<dyn crate::compression::pruning::PruningStrategy>> {
+    use crate::compression::pruning::{MagnitudePruner, StructuredPruner};
+
+    match strategy.to_ascii_lowercase().as_str() {
+        "magnitude" | "unstructured" => {
+            Some(Box::new(MagnitudePruner::new(config.target_sparsity)))
+        },
+        "structured" | "channel" => Some(Box::new(StructuredPruner::new(0))),
+        _ => None,
+    }
 }
 
 /// Main compression pipeline
@@ -110,14 +167,59 @@ impl CompressionPipeline {
         }
     }
 
-    /// Execute the compression pipeline
+    /// Execute the compression pipeline without accuracy evaluation.
+    ///
+    /// `accuracy_retention` on the result stays `None`: nothing was measured.
+    /// If [`CompressionConfig::validate_stages`] is set, this fails, because a
+    /// stage cannot be validated against an accuracy budget that was never
+    /// measured. Use [`Self::compress_with_evaluator`] to supply one.
     pub async fn compress<M>(&self, model: &M) -> Result<CompressionResult<M>>
     where
         M: crate::traits::Model + Clone,
     {
+        self.run(model, None::<&AccuracyEvaluator<'_, M>>).await
+    }
+
+    /// Execute the compression pipeline, measuring accuracy after every stage.
+    ///
+    /// `evaluator` is called on the original model and after each stage; the
+    /// reported `accuracy_retention` is the measured ratio of the final to the
+    /// original accuracy.
+    pub async fn compress_with_evaluator<M, F>(
+        &self,
+        model: &M,
+        evaluator: F,
+    ) -> Result<CompressionResult<M>>
+    where
+        M: crate::traits::Model + Clone,
+        F: Fn(&M) -> Result<f32>,
+    {
+        self.run(model, Some(&evaluator)).await
+    }
+
+    async fn run<M>(
+        &self,
+        model: &M,
+        evaluator: Option<&AccuracyEvaluator<'_, M>>,
+    ) -> Result<CompressionResult<M>>
+    where
+        M: crate::traits::Model + Clone,
+    {
+        if self.config.validate_stages && evaluator.is_none() && !self.config.stages.is_empty() {
+            return Err(anyhow!(
+                "validate_stages is enabled but no accuracy evaluator was supplied: a stage \
+                 cannot be checked against max_accuracy_loss without measuring accuracy. Call \
+                 compress_with_evaluator, or set validate_stages = false."
+            ));
+        }
+
         let start_time = Instant::now();
         let mut current_model = model.clone();
-        let original_size = model.num_parameters() * 4; // Assuming FP32
+        let original_size = nonzero_parameter_bytes(model)?;
+        let baseline_accuracy = match evaluator {
+            Some(evaluate) => Some(evaluate(model)?),
+            None => None,
+        };
         let mut stage_results = Vec::new();
 
         // Execute each stage in the pipeline
@@ -125,21 +227,23 @@ impl CompressionPipeline {
             let stage_start = Instant::now();
             let stage_name = self.get_stage_name(stage);
 
-            println!(
-                "Executing compression stage {}: {}",
-                stage_idx + 1,
-                stage_name
+            tracing::info!(
+                stage = stage_idx + 1,
+                name = %stage_name,
+                "executing compression stage"
             );
 
             // Apply the compression stage
             current_model = self.apply_compression_stage(&current_model, stage).await?;
 
-            // Calculate stage metrics
-            let stage_size = current_model.num_parameters() * 4; // Simplified size calculation
+            // Measure the real size of the compressed model.
+            let stage_size = nonzero_parameter_bytes(&current_model)?;
             let stage_time = stage_start.elapsed().as_secs();
 
-            // Estimate accuracy retention (simplified - in practice would need validation)
-            let accuracy = self.estimate_accuracy_retention(stage, stage_idx);
+            let accuracy = match evaluator {
+                Some(evaluate) => Some(evaluate(&current_model)?),
+                None => None,
+            };
 
             stage_results.push(StageResult {
                 stage_name: stage_name.clone(),
@@ -148,43 +252,59 @@ impl CompressionPipeline {
                 time_seconds: stage_time,
             });
 
-            // Validate if configured
+            // Validate against the measured accuracy, never an estimate.
             if self.config.validate_stages {
-                let accuracy_loss = 1.0 - accuracy;
-                if accuracy_loss > self.config.max_accuracy_loss {
-                    return Err(anyhow!(
-                        "Stage '{}' exceeded maximum accuracy loss: {:.2}% > {:.2}%",
-                        stage_name,
-                        accuracy_loss * 100.0,
-                        self.config.max_accuracy_loss * 100.0
-                    ));
+                if let (Some(baseline), Some(current)) = (baseline_accuracy, accuracy) {
+                    if baseline > 0.0 {
+                        let retention = current / baseline;
+                        let accuracy_loss = 1.0 - retention;
+                        if accuracy_loss > self.config.max_accuracy_loss {
+                            return Err(anyhow!(
+                                "Stage '{}' exceeded maximum accuracy loss: {:.2}% > {:.2}%",
+                                stage_name,
+                                accuracy_loss * 100.0,
+                                self.config.max_accuracy_loss * 100.0
+                            ));
+                        }
+                    }
                 }
             }
 
             // Save intermediate model if output directory is specified
             if let Some(ref output_dir) = self.config.output_dir {
                 let model_path = output_dir.join(format!("model_stage_{}.bin", stage_idx + 1));
-                // In a real implementation, you would serialize the model here
-                println!("Would save intermediate model to: {:?}", model_path);
+                return Err(anyhow!(
+                    "CompressionConfig::output_dir is set ({}), but this pipeline cannot \
+                     serialise an intermediate model: use crate::export or crate::checkpoint to \
+                     write the returned model instead",
+                    model_path.display()
+                ));
             }
         }
 
-        // Calculate final metrics
-        let compressed_size = current_model.num_parameters() * 4;
-        let compression_ratio = original_size as f32 / compressed_size as f32;
+        // Calculate final metrics from the real weights.
+        let compressed_size = nonzero_parameter_bytes(&current_model)?;
+        let compression_ratio = if compressed_size > 0 {
+            original_size as f32 / compressed_size as f32
+        } else {
+            0.0
+        };
         let total_time = start_time.elapsed().as_secs();
 
-        // Calculate overall accuracy retention
-        let final_accuracy = stage_results
-            .iter()
-            .map(|r| r.accuracy)
-            .fold(1.0, |acc, stage_acc| acc * stage_acc);
+        let accuracy_retention = match (baseline_accuracy, stage_results.last()) {
+            (Some(baseline), Some(last)) if baseline > 0.0 => {
+                last.accuracy.map(|accuracy| accuracy / baseline)
+            },
+            // No stages ran, but a baseline exists: nothing changed.
+            (Some(_), None) => Some(1.0),
+            _ => None,
+        };
 
-        // Check if target compression ratio was achieved
         if compression_ratio < self.config.target_ratio {
-            println!(
-                "Warning: Target compression ratio {:.2}x not achieved (got {:.2}x)",
-                self.config.target_ratio, compression_ratio
+            tracing::warn!(
+                target = self.config.target_ratio,
+                achieved = compression_ratio,
+                "target compression ratio not achieved"
             );
         }
 
@@ -193,7 +313,7 @@ impl CompressionPipeline {
             original_size,
             compressed_size,
             compression_ratio,
-            accuracy_retention: final_accuracy,
+            accuracy_retention,
             compression_time_seconds: total_time,
             stage_results,
         })
@@ -205,47 +325,46 @@ impl CompressionPipeline {
     {
         match stage {
             CompressionStage::Pruning { strategy, config } => {
-                // Apply pruning (simplified implementation)
-                println!("Applying pruning with strategy: {}", strategy);
-                // In practice, you would implement actual pruning logic here
-                Ok(model.clone())
-            },
-            CompressionStage::Quantization { bits, symmetric } => {
-                println!(
-                    "Applying quantization: {} bits, symmetric: {}",
-                    bits, symmetric
+                // Real pruning: rewrite the model's weights and let the pruner
+                // report the sparsity it actually achieved.
+                let mut pruner = AutomaticPruner::new();
+                if let Some(named) = pruning_strategy_by_name(strategy, config) {
+                    pruner = pruner.with_default_strategy(named);
+                }
+                let result = pruner.prune(model.clone(), config)?;
+                tracing::info!(
+                    strategy = %strategy,
+                    sparsity = result.sparsity,
+                    pruned_params = result.pruned_params,
+                    "pruning stage applied"
                 );
-                // In practice, you would implement quantization logic here
-                Ok(model.clone())
+                Ok(result.model)
             },
-            CompressionStage::Distillation {
-                teacher_model,
-                config,
-            } => {
-                println!("Applying distillation with teacher: {}", teacher_model);
-                // In practice, you would implement distillation logic here
-                Ok(model.clone())
-            },
+            CompressionStage::Quantization { bits, symmetric } => Err(anyhow!(
+                "quantization stage ({} bits, symmetric = {}) is not wired into the compression \
+                 pipeline: the quantizers in crate::quantization operate on tensors, not on a \
+                 generic Model, so no weight can be quantised here",
+                bits,
+                symmetric
+            )),
+            CompressionStage::Distillation { teacher_model, .. } => Err(anyhow!(
+                "distillation stage (teacher '{}') is not implemented: training the student \
+                 requires gradients, which are not available over the generic Model trait",
+                teacher_model
+            )),
             CompressionStage::FineTuning {
                 epochs,
                 learning_rate,
-            } => {
-                println!(
-                    "Applying fine-tuning: {} epochs, lr: {}",
-                    epochs, learning_rate
-                );
-                // In practice, you would implement fine-tuning logic here
-                Ok(model.clone())
-            },
-            CompressionStage::Custom { name, params } => {
-                println!(
-                    "Applying custom stage: {} with {} params",
-                    name,
-                    params.len()
-                );
-                // In practice, you would implement custom compression logic here
-                Ok(model.clone())
-            },
+            } => Err(anyhow!(
+                "fine-tuning stage ({} epochs, lr {}) is not implemented: it requires an \
+                 optimizer and gradients, which are not available over the generic Model trait",
+                epochs,
+                learning_rate
+            )),
+            CompressionStage::Custom { name, .. } => Err(anyhow!(
+                "custom compression stage '{}' has no registered executor",
+                name
+            )),
         }
     }
 
@@ -259,23 +378,6 @@ impl CompressionPipeline {
         }
     }
 
-    fn estimate_accuracy_retention(&self, stage: &CompressionStage, _stage_idx: usize) -> f32 {
-        // Simplified accuracy estimation - in practice would need actual evaluation
-        match stage {
-            CompressionStage::Pruning { .. } => 0.98, // 2% accuracy loss typical for pruning
-            CompressionStage::Quantization { bits, .. } => {
-                match bits {
-                    8 => 0.99, // INT8 usually has minimal accuracy loss
-                    4 => 0.95, // INT4 has more significant loss
-                    _ => 0.97, // Other bit widths
-                }
-            },
-            CompressionStage::Distillation { .. } => 0.96, // Distillation can be lossy but effective
-            CompressionStage::FineTuning { .. } => 1.02, // Fine-tuning can actually improve accuracy
-            CompressionStage::Custom { .. } => 0.98,     // Conservative estimate for custom stages
-        }
-    }
-
     /// Generate compression report
     pub fn generate_report<M>(&self, result: &CompressionResult<M>) -> CompressionReport
     where
@@ -286,18 +388,23 @@ impl CompressionPipeline {
              - Original size: {} MB\n\
              - Compressed size: {} MB\n\
              - Compression ratio: {:.2}x\n\
-             - Accuracy retention: {:.2}%\n\
+             - Accuracy retention: {}\n\
              - Total time: {} seconds",
             result.original_size / 1_000_000,
             result.compressed_size / 1_000_000,
             result.compression_ratio,
-            result.accuracy_retention * 100.0,
+            result
+                .accuracy_retention
+                .map(|value| format!("{:.2}%", value * 100.0))
+                .unwrap_or_else(|| "not measured".to_string()),
             result.compression_time_seconds
         );
 
         let mut detailed_metrics = std::collections::HashMap::new();
         detailed_metrics.insert("compression_ratio".to_string(), result.compression_ratio);
-        detailed_metrics.insert("accuracy_retention".to_string(), result.accuracy_retention);
+        if let Some(retention) = result.accuracy_retention {
+            detailed_metrics.insert("accuracy_retention".to_string(), retention);
+        }
         detailed_metrics.insert(
             "size_reduction".to_string(),
             1.0 - (result.compressed_size as f32 / result.original_size as f32),
@@ -367,13 +474,23 @@ impl CompressionPipeline {
     }
     */
 
+    /// Check a stage's *measured* accuracy against the configured budget.
+    ///
+    /// A stage with no measurement cannot be validated; that is reported as an
+    /// error rather than silently passing.
     #[allow(dead_code)]
     fn validate_stage_result(&self, result: &StageResult) -> Result<()> {
-        if result.accuracy < (1.0 - self.config.max_accuracy_loss) {
+        let Some(accuracy) = result.accuracy else {
+            return Err(anyhow!(
+                "Stage {} was not evaluated, so it cannot be validated against max_accuracy_loss",
+                result.stage_name
+            ));
+        };
+        if accuracy < (1.0 - self.config.max_accuracy_loss) {
             return Err(anyhow!(
                 "Stage {} resulted in too much accuracy loss: {:.2}%",
                 result.stage_name,
-                (1.0 - result.accuracy) * 100.0
+                (1.0 - accuracy) * 100.0
             ));
         }
         Ok(())
@@ -392,10 +509,14 @@ impl CompressionPipeline {
             ));
         }
 
-        if result.accuracy_retention < 0.95 {
-            recommendations.push(
+        match result.accuracy_retention {
+            Some(retention) if retention < 0.95 => recommendations.push(
                 "Significant accuracy loss detected. Consider using knowledge distillation or fine-tuning.".to_string()
-            );
+            ),
+            None => recommendations.push(
+                "Accuracy was not measured. Run compress_with_evaluator to find out what the compression cost.".to_string()
+            ),
+            _ => {},
         }
 
         // Stage-specific recommendations
@@ -543,5 +664,254 @@ struct MockConfig;
 impl crate::traits::Config for MockConfig {
     fn architecture(&self) -> &'static str {
         "mock"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tensor::Tensor;
+    use crate::traits::{Config, Model};
+    use std::io::Read;
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct TinyConfig;
+
+    impl Config for TinyConfig {
+        fn architecture(&self) -> &'static str {
+            "tiny"
+        }
+    }
+
+    /// A model with real, addressable weights.
+    #[derive(Debug, Clone)]
+    struct TinyModel {
+        config: TinyConfig,
+        weight: Tensor,
+    }
+
+    impl TinyModel {
+        fn new() -> Self {
+            Self {
+                config: TinyConfig,
+                weight: Tensor::from_vec(
+                    vec![0.9, -0.8, 0.05, -0.02, 0.7, -0.6, 0.01, -0.03],
+                    &[2, 4],
+                )
+                .expect("from_vec failed"),
+            }
+        }
+    }
+
+    impl Model for TinyModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> crate::errors::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            8
+        }
+
+        fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+            vec![("linear.weight".to_string(), &self.weight)]
+        }
+
+        fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+            vec![("linear.weight".to_string(), &mut self.weight)]
+        }
+    }
+
+    /// A model that exposes no weights at all.
+    #[derive(Debug, Clone)]
+    struct OpaqueModel;
+
+    impl Model for OpaqueModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> crate::errors::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &TinyConfig
+        }
+
+        fn num_parameters(&self) -> usize {
+            1_000_000
+        }
+    }
+
+    /// Regression test: every stage used to be `Ok(model.clone())`, so the
+    /// pipeline reported a 1.0x ratio with 98% "accuracy retention" for a model
+    /// it had never touched. Pruning must now really zero weights and the size
+    /// must really drop.
+    #[tokio::test]
+    async fn test_pruning_stage_really_compresses_the_model() {
+        let pipeline = CompressionPipeline::new(CompressionConfig {
+            stages: vec![CompressionStage::Pruning {
+                strategy: "magnitude".to_string(),
+                config: PruningConfig {
+                    target_sparsity: 0.5,
+                    ..Default::default()
+                },
+            }],
+            target_ratio: 1.5,
+            max_accuracy_loss: 1.0,
+            validate_stages: false,
+            output_dir: None,
+        });
+
+        let model = TinyModel::new();
+        let result = pipeline.compress(&model).await.expect("compression failed");
+
+        assert_eq!(result.original_size, 8 * 4, "8 non-zero f32 weights");
+        assert!(
+            result.compressed_size < result.original_size,
+            "pruning must reduce the non-zero footprint: {} -> {}",
+            result.original_size,
+            result.compressed_size
+        );
+        assert!(
+            result.compression_ratio > 1.0,
+            "compression ratio must reflect a real change, got {}",
+            result.compression_ratio
+        );
+
+        // The returned model's weights must actually contain zeros now.
+        let weights = result.model.named_tensors()[0].1.data().expect("data failed");
+        assert!(
+            weights.contains(&0.0),
+            "the compressed model must really carry pruned weights: {:?}",
+            weights
+        );
+
+        // No evaluator was supplied, so no accuracy may be claimed.
+        assert!(result.accuracy_retention.is_none());
+        assert!(result.stage_results.iter().all(|stage| stage.accuracy.is_none()));
+    }
+
+    /// Accuracy retention must come from the supplied evaluator.
+    #[tokio::test]
+    async fn test_accuracy_retention_is_measured_not_estimated() {
+        let pipeline = CompressionPipeline::new(CompressionConfig {
+            stages: vec![CompressionStage::Pruning {
+                strategy: "magnitude".to_string(),
+                config: PruningConfig {
+                    target_sparsity: 0.5,
+                    ..Default::default()
+                },
+            }],
+            target_ratio: 1.0,
+            max_accuracy_loss: 1.0,
+            validate_stages: true,
+            output_dir: None,
+        });
+
+        let model = TinyModel::new();
+        // "Accuracy" here is the fraction of surviving weights, so it really
+        // changes when the model is pruned.
+        let evaluator = |model: &TinyModel| -> Result<f32> {
+            let data = model.weight.data()?;
+            Ok(data.iter().filter(|value| **value != 0.0).count() as f32 / data.len() as f32)
+        };
+
+        let result = pipeline
+            .compress_with_evaluator(&model, evaluator)
+            .await
+            .expect("compression failed");
+
+        let retention = result.accuracy_retention.expect("an evaluator was supplied");
+        assert!(
+            retention < 1.0,
+            "the evaluator saw a real change: {retention}"
+        );
+        // 0.98 was the hardcoded pruning estimate.
+        assert!((retention - 0.98).abs() > 1e-6);
+    }
+
+    /// Stages that are not implemented must fail loudly.
+    #[tokio::test]
+    async fn test_unimplemented_stages_fail_instead_of_cloning() {
+        for stage in [
+            CompressionStage::Quantization {
+                bits: 8,
+                symmetric: true,
+            },
+            CompressionStage::Distillation {
+                teacher_model: "teacher".to_string(),
+                config: DistillationConfig::default(),
+            },
+            CompressionStage::FineTuning {
+                epochs: 1,
+                learning_rate: 1e-4,
+            },
+            CompressionStage::Custom {
+                name: "mystery".to_string(),
+                params: std::collections::HashMap::new(),
+            },
+        ] {
+            let pipeline = CompressionPipeline::new(CompressionConfig {
+                stages: vec![stage],
+                validate_stages: false,
+                ..Default::default()
+            });
+            let model = TinyModel::new();
+            assert!(
+                pipeline.compress(&model).await.is_err(),
+                "an unimplemented stage must not silently return the input model"
+            );
+        }
+    }
+
+    /// A model with no weight access cannot be measured, so no ratio may be
+    /// reported for it.
+    #[tokio::test]
+    async fn test_model_without_weight_access_is_refused() {
+        let pipeline = CompressionPipeline::new(CompressionConfig {
+            validate_stages: false,
+            ..Default::default()
+        });
+        let error = pipeline
+            .compress(&OpaqueModel)
+            .await
+            .expect_err("no size can be measured without named tensors");
+        assert!(error.to_string().contains("named_tensors"));
+    }
+
+    /// Validation against an accuracy budget requires a measurement.
+    #[tokio::test]
+    async fn test_validate_stages_requires_an_evaluator() {
+        let pipeline = CompressionPipeline::new(CompressionConfig {
+            stages: vec![CompressionStage::Pruning {
+                strategy: "magnitude".to_string(),
+                config: PruningConfig::default(),
+            }],
+            validate_stages: true,
+            ..Default::default()
+        });
+        let model = TinyModel::new();
+        let error = pipeline
+            .compress(&model)
+            .await
+            .expect_err("cannot validate an unmeasured accuracy");
+        assert!(error.to_string().contains("no accuracy evaluator"));
     }
 }

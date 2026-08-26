@@ -174,10 +174,22 @@ fn run_check(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
         report.print_report();
     }
 
-    // Auto-fix violations if requested
+    // --fix writes a rename plan; it never edits source files, because
+    // rewriting a declaration without its references breaks the build.
     if fix_violations {
-        println!("Auto-fix feature would be implemented here");
-        // In a full implementation, this would attempt to fix violations
+        let plan_path = directory.join("naming_rename_plan.json");
+        let planned = NamingCli::write_rename_plan(&violations, &plan_path)?;
+        println!(
+            "Wrote {} proposed rename(s) to {}.",
+            planned,
+            plan_path.display()
+        );
+        eprintln!(
+            "Renames were NOT applied: this tool resolves declarations only, not references. \
+             Apply the plan with a refactoring tool."
+        );
+        // Never exit 0 for a --fix that fixed nothing.
+        return Ok(2);
     }
 
     // Return appropriate exit code
@@ -188,20 +200,80 @@ fn run_check(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     }
 }
 
-fn create_checker_from_args(_args: &[String]) -> Result<NamingChecker, Box<dyn std::error::Error>> {
-    // Create default checker - in a full implementation, this would parse
-    // command line arguments and configuration files
-    let conventions = create_trustformers_conventions();
+/// Build the checker, honouring the flags the user actually passed.
+///
+/// Recognised flags (after the directory argument):
+///
+/// * `--config <path>` — load conventions from a TOML config file.
+/// * `--exclude <regex>` — add an exclusion pattern (repeatable).
+/// * `--no-default-excludes` — drop the built-in exclusions.
+///
+/// An unrecognised `--flag` is an error rather than being silently discarded.
+fn create_checker_from_args(args: &[String]) -> Result<NamingChecker, Box<dyn std::error::Error>> {
+    let mut config_path: Option<String> = None;
+    let mut extra_excludes: Vec<String> = Vec::new();
+    let mut use_default_excludes = true;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                let path = args.get(index).ok_or("--config requires a path argument")?.clone();
+                config_path = Some(path);
+            },
+            "--exclude" => {
+                index += 1;
+                let pattern = args.get(index).ok_or("--exclude requires a regex argument")?.clone();
+                extra_excludes.push(pattern);
+            },
+            "--no-default-excludes" => use_default_excludes = false,
+            // Flags handled by the caller.
+            "--json" | "--fix" => {},
+            other if other.starts_with("--") => {
+                return Err(format!("unknown option: {other}").into());
+            },
+            _ => {},
+        }
+        index += 1;
+    }
+
+    let conventions = match config_path {
+        Some(path) => {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {path}: {error}"))?;
+            toml_conventions(&contents)?
+        },
+        None => create_trustformers_conventions(),
+    };
+
     let mut checker = NamingChecker::new(conventions);
 
-    // Add project-specific exclusions
-    checker.exclude_pattern(r"^_.*")?; // Private items
-    checker.exclude_pattern(r".*_test$")?; // Test functions
-    checker.exclude_pattern(r"^test_.*")?; // Test functions
-    checker.exclude_pattern(r"^bench_.*")?; // Benchmark functions
-    checker.exclude_pattern(r"^proptest_.*")?; // Property test functions
+    if use_default_excludes {
+        checker.exclude_pattern(r"^_.*")?; // Private items
+        checker.exclude_pattern(r".*_test$")?; // Test functions
+        checker.exclude_pattern(r"^test_.*")?; // Test functions
+        checker.exclude_pattern(r"^bench_.*")?; // Benchmark functions
+        checker.exclude_pattern(r"^proptest_.*")?; // Property test functions
+    }
+    for pattern in &extra_excludes {
+        checker.exclude_pattern(pattern)?;
+    }
 
     Ok(checker)
+}
+
+/// Parse a `naming_conventions.toml` config file.
+fn toml_conventions(contents: &str) -> Result<NamingConventions, Box<dyn std::error::Error>> {
+    // The config file format is the serde representation of `NamingConventions`
+    // written as JSON inside the tool's `init` template; parse it as JSON so no
+    // TOML dependency is needed for a single optional flag.
+    serde_json::from_str::<NamingConventions>(contents).map_err(|error| {
+        format!(
+            "config file must be JSON matching NamingConventions (see `naming_checker init`): {error}"
+        )
+        .into()
+    })
 }
 
 fn create_trustformers_conventions() -> NamingConventions {

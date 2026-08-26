@@ -362,58 +362,18 @@ impl Default for ProcessInfo {
     }
 }
 
-/// Zipkin span format for export
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ZipkinSpan {
-    pub id: String,
-    pub trace_id: String,
-    pub parent_id: Option<String>,
-    pub name: String,
-    pub timestamp: u64,
-    pub duration: Option<u64>,
-    pub tags: HashMap<String, String>,
-    pub annotations: Vec<serde_json::Value>,
-}
+/// Trace export wire formats (Jaeger, Zipkin v2, OTLP/JSON).
+///
+/// Re-exported here so `tracing::legacy::ZipkinSpan` and friends keep their
+/// existing paths; `tracing/mod.rs` re-exports them from this module.
+pub mod export;
 
-impl ZipkinSpan {
-    pub fn from_span(span: &Span) -> Self {
-        Self {
-            id: span.span_id.clone(),
-            trace_id: span.trace_id.clone(),
-            parent_id: span.parent_span_id.clone(),
-            name: span.operation_name.clone(),
-            timestamp: span.start_time.timestamp_micros() as u64,
-            duration: span.duration_us,
-            tags: span.tags.clone(),
-            annotations: Vec::new(),
-        }
-    }
-}
-
-/// OpenTelemetry export format
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenTelemetryExport {
-    pub spans: Vec<serde_json::Value>,
-    pub metadata: HashMap<String, String>,
-}
-
-impl OpenTelemetryExport {
-    pub fn from_spans(spans: &[Arc<Span>]) -> Self {
-        let span_data: Vec<serde_json::Value> = spans
-            .iter()
-            .map(|span| serde_json::to_value(&**span).unwrap_or_default())
-            .collect();
-
-        let mut metadata = HashMap::new();
-        metadata.insert("format".to_string(), "opentelemetry".to_string());
-        metadata.insert("version".to_string(), "1.0".to_string());
-
-        Self {
-            spans: span_data,
-            metadata,
-        }
-    }
-}
+pub use export::{
+    JaegerExport, JaegerLog, JaegerProcess, JaegerReference, JaegerSpan, JaegerTag, JaegerTrace,
+    OpenTelemetryExport, OtlpAnyValue, OtlpEvent, OtlpKeyValue, OtlpLink, OtlpResource,
+    OtlpResourceSpans, OtlpScope, OtlpScopeSpans, OtlpSpan, OtlpStatus, ZipkinAnnotation,
+    ZipkinEndpoint, ZipkinSpan,
+};
 
 /// Trace metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,11 +732,15 @@ impl DistributedTracer {
 
         match format {
             TraceExportFormat::Jaeger => {
-                let json = serde_json::to_string_pretty(&*completed_spans)?;
+                // Jaeger's own trace document: spans grouped by trace, with the
+                // per-trace process registry their `processID`s refer to.
+                let document = JaegerExport::from_spans(completed_spans.as_slice());
+
+                let json = serde_json::to_string_pretty(&document)?;
                 Ok(json.into_bytes())
             },
             TraceExportFormat::Zipkin => {
-                // Convert spans to Zipkin format
+                // Zipkin v2 JSON: a bare array of spans.
                 let zipkin_spans: Vec<ZipkinSpan> =
                     completed_spans.iter().map(ZipkinSpan::from_span).collect();
 
@@ -784,7 +748,7 @@ impl DistributedTracer {
                 Ok(json.into_bytes())
             },
             TraceExportFormat::OpenTelemetry => {
-                // Convert spans to OpenTelemetry format
+                // OTLP/JSON `ExportTraceServiceRequest`, grouped by service.
                 let arc_spans: Vec<Arc<Span>> =
                     completed_spans.iter().map(|span| Arc::new(span.clone())).collect();
                 let otel_export = OpenTelemetryExport::from_spans(&arc_spans);

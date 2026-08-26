@@ -22,26 +22,4 @@ pub trait StorageBackend<T>: Send + Sync {
     /// Perform cleanup operations
     async fn cleanup(&self) -> Result<()>;
 }
-mod uuid {
-    use std::fmt;
-    pub struct Uuid(u128);
-    impl Uuid {
-        pub fn new_v4() -> Self {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let mut hasher = DefaultHasher::new();
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                .as_nanos()
-                .hash(&mut hasher);
-            Uuid(hasher.finish() as u128)
-        }
-    }
-    impl fmt::Display for Uuid {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{:032x}", self.0)
-        }
-    }
-}
+mod uuid {}

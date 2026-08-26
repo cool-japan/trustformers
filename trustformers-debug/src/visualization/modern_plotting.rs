@@ -415,12 +415,51 @@ pub struct PlotInstance {
     pub update_count: u64,
 }
 
-/// Dashboard server for web interface
+/// In-memory store of rendered dashboard plots.
+///
+/// Despite the name it is **not** a network server: nothing binds a socket and
+/// nothing listens on `port`. It holds rendered plot documents keyed by id so a
+/// caller can serve them from its own HTTP stack; `port` records the port the
+/// caller intends to use, and `is_running` whether plots may be added.
 #[derive(Debug)]
 pub struct DashboardServer {
+    /// Port the CALLER intends to serve these plots on. Nothing here binds it.
     port: u16,
     plots: HashMap<String, String>, // plot_id -> HTML content
     is_running: bool,
+}
+
+impl DashboardServer {
+    /// The rendered plot documents, keyed by plot id.
+    pub fn plots(&self) -> &HashMap<String, String> {
+        &self.plots
+    }
+
+    /// Port the caller intends to serve on. No socket is bound to it here.
+    pub fn intended_port(&self) -> u16 {
+        self.port
+    }
+
+    /// Whether plots may currently be added.
+    pub fn is_active(&self) -> bool {
+        self.is_running
+    }
+}
+
+/// Escape a string for safe inclusion inside a double-quoted HTML attribute.
+fn html_attribute_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Cached plot for performance optimization
@@ -1076,26 +1115,23 @@ impl ModernPlottingEngine {
 
         Plotly.newPlot('plotDiv', [trace], layout, config);
 
-        // Simulate real-time updates
-        var cnt = 0;
-        var interval = setInterval(function() {{
-            var time = new Date().getTime();
-            var y = Math.sin(cnt * 0.1) + Math.random() * 0.1;
-
-            Plotly.extendTraces('plotDiv', {{
-                x: [[time]],
-                y: [[y]]
-            }}, [0]);
-
-            // Keep only last {} points
-            if (trace.x.length > {}) {{
+        // Live-update hook. The page does NOT generate its own data: call
+        // `trustformersPushPoint(x, y)` from whatever feed supplies real
+        // samples. A previous version of this template ran a setInterval that
+        // appended `Math.sin(cnt * 0.1) + Math.random() * 0.1` to the chart, so
+        // an unattended page filled up with invented measurements.
+        var trustformersBufferSize = {};
+        window.trustformersPushPoint = function(x, y) {{
+            Plotly.extendTraces('plotDiv', {{ x: [[x]], y: [[y]] }}, [0]);
+            if (trace.x.length > trustformersBufferSize) {{
                 Plotly.relayout('plotDiv', {{
-                    'xaxis.range': [trace.x[trace.x.length - {}], trace.x[trace.x.length - 1]]
+                    'xaxis.range': [
+                        trace.x[trace.x.length - trustformersBufferSize],
+                        trace.x[trace.x.length - 1]
+                    ]
                 }});
             }}
-
-            cnt++;
-        }}, {});
+        }};
     </script>
 </body>
 </html>"#,
@@ -1105,9 +1141,6 @@ impl ModernPlottingEngine {
             realtime_config.time_window_seconds,
             data.plot_data.y_label,
             realtime_config.buffer_size,
-            realtime_config.buffer_size,
-            realtime_config.buffer_size,
-            realtime_config.update_frequency_ms
         );
 
         Ok(html)
@@ -1280,33 +1313,34 @@ impl ModernPlottingEngine {
         Ok(html)
     }
 
+    /// Embed a rendered plot page into the dashboard's plot container.
+    ///
+    /// `plot_html` is a complete standalone document (own `<head>`, own Plotly
+    /// bootstrap), so it is embedded through an `<iframe srcdoc>` rather than
+    /// spliced into the parent DOM: that keeps each plot's script and ids
+    /// isolated and needs no HTML parser.
+    ///
+    /// The previous version inserted an EMPTY `<div class="plot-container">`
+    /// and dropped `plot_html` on the floor, then appended a `<script>` block
+    /// whose whole body was the comment "Plot <id> initialization would go
+    /// here" -- so the dashboard showed an empty box that looked like a plot.
     fn embed_plot_in_dashboard(
         &self,
         dashboard_html: &str,
         plot_id: &str,
         plot_html: &str,
     ) -> Result<String> {
-        // Extract the plot div and script from the plot HTML
         let plot_div = format!(
-            r#"<div class="plot-container" id="container-{}"></div>"#,
-            plot_id
+            r#"<div class="plot-container" id="container-{}"><iframe title="{}"                style="width:100%;height:640px;border:0" srcdoc="{}"></iframe></div>"#,
+            html_attribute_escape(plot_id),
+            html_attribute_escape(plot_id),
+            html_attribute_escape(plot_html),
         );
 
-        let mut updated_html = dashboard_html.replace(
+        let updated_html = dashboard_html.replace(
             r#"<div id="plots-container">"#,
             &format!(r#"<div id="plots-container">{}"#, plot_div),
         );
-
-        // Add the plot script (simplified - would need proper HTML parsing in production)
-        updated_html.push_str(&format!(
-            r#"
-    <script>
-        // Plot {} initialization would go here
-        // Extracted from: {}
-    </script>"#,
-            plot_id,
-            plot_html.len()
-        ));
 
         Ok(updated_html)
     }
@@ -1363,12 +1397,23 @@ impl ModernPlottingEngine {
         Ok(())
     }
 
+    /// Mark the in-memory dashboard as active.
+    ///
+    /// This binds NO socket and starts no HTTP listener: `DashboardServer` is a
+    /// plain in-memory map of rendered plot documents that a caller can read
+    /// via [`DashboardServer::plots`] and serve however it likes. The flag only
+    /// records that plots may now be added.
+    ///
+    /// It used to log `"Dashboard server started on port {port}"`, which read
+    /// as a live listener on that port.
     async fn start_dashboard_server(&mut self) -> Result<()> {
         if let Some(ref mut server) = self.dashboard_server {
             if !server.is_running {
-                // In a real implementation, this would start an actual web server
                 server.is_running = true;
-                tracing::info!("Dashboard server started on port {}", server.port);
+                tracing::debug!(
+                    port = server.port,
+                    "in-memory plot dashboard activated (no socket is bound)"
+                );
             }
         }
         Ok(())
@@ -1379,7 +1424,7 @@ impl ModernPlottingEngine {
         plot_id: &str,
         data: &InteractivePlotData,
     ) -> Result<()> {
-        // Update the plot in the dashboard (simplified implementation)
+        // Re-render the plot from the new data and replace the stored document.
         let updated_content = self.generate_plotly_line_plot(data)?;
 
         if let Some(ref mut server) = self.dashboard_server {

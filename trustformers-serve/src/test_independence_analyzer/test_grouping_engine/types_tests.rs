@@ -4,14 +4,20 @@ use super::types::*;
 use std::collections::HashMap;
 use std::time::Duration;
 
-struct Lcg { state: u64 }
+struct Lcg {
+    state: u64,
+}
 impl Lcg {
-    fn new(seed: u64) -> Self { Self { state: seed } }
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
     }
-    fn next_f32(&mut self) -> f32 { (self.next_u64() % 10000) as f32 / 10000.0 }
+    fn next_f32(&mut self) -> f32 {
+        (self.next_u64() % 10000) as f32 / 10000.0
+    }
 }
 
 #[test]
@@ -67,7 +73,9 @@ fn test_duration_pattern_sustained() {
 
 #[test]
 fn test_duration_pattern_periodic() {
-    let p = DurationPattern::Periodic { interval: Duration::from_secs(10) };
+    let p = DurationPattern::Periodic {
+        interval: Duration::from_secs(10),
+    };
     let _ = format!("{:?}", p);
 }
 

@@ -666,6 +666,7 @@ mod tests {
                 self_time: Duration::from_millis(40),
                 children: vec![],
                 percent_of_parent: 100.0,
+                ..ProfileResult::new("test".to_string())
             }),
             latency_metrics: None,
             memory_metrics: None,
@@ -693,6 +694,7 @@ mod tests {
                 self_time: Duration::from_millis(400),
                 children: vec![],
                 percent_of_parent: 100.0,
+                ..ProfileResult::new("test".to_string())
             }),
             latency_metrics: None,
             memory_metrics: None,
@@ -906,6 +908,7 @@ mod tests {
                 self_time: Duration::from_millis(40),
                 children: vec![],
                 percent_of_parent: 100.0,
+                ..ProfileResult::new("test".to_string())
             }),
             latency_metrics: None,
             memory_metrics: Some(MemoryMetrics {

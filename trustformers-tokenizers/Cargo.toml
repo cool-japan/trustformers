@@ -2,6 +2,7 @@
 name = "trustformers-tokenizers"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,12 +25,18 @@ serde.workspace = true
 serde_json.workspace = true
 unicode-normalization.workspace = true
 regex.workspace = true
+fancy-regex.workspace = true
+minijinja.workspace = true
+# Pure-Rust cross-platform process memory query for the performance
+# profiler (replaces the Linux-only /proc/self/status VmRSS parse).
+sysinfo.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 base64.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+tracing.workspace = true
 tokio-stream.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
@@ -39,18 +46,23 @@ memmap2.workspace = true
 # `include-flate` -> `zstd-sys` (C) into the default tree. Chinese segmentation
 # (`chinese.rs`) uses an in-crate pure-Rust dictionary/char-frequency segmenter,
 # not jieba. Re-add as an optional, feature-gated dep if jieba is ever wired in.
-mecab = { version = "0.1.6", optional = true }
+mecab = { workspace = true, optional = true }
 # Binary format dependencies
 oxiarc-deflate.workspace = true
-crc32fast = "1.5.0"
+crc32fast.workspace = true
 oxicode.workspace = true
 # Performance profiler dependencies
 chrono.workspace = true
 # MessagePack serialization
 rmp-serde.workspace = true
 # Additional dependencies for coverage and serialization
-unicode_categories = "0.1.1"
-serde_yaml.workspace = true
+unicode_categories.workspace = true
+# `serde_yaml_ng`, not `serde_yaml`: the original crate was archived by its
+# author in 2024 and receives no further fixes. (It carries no RustSec advisory
+# - RUSTSEC-2024-0320 is filed against the unrelated `yaml-rust` crate - so this
+# is a maintenance choice, not a vulnerability fix.) `serde_yaml_ng` is the
+# maintained hard fork with the same API surface.
+serde_yaml_ng.workspace = true
 # Python bindings
 pyo3 = { workspace = true, features = ["extension-module"], optional = true }
 
@@ -75,6 +87,8 @@ rstest.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
+# `tests/workspace_hygiene.rs` parses the workspace root manifest and deny.toml.
+toml.workspace = true
 
 [[bench]]
 name = "tokenizer_performance"

@@ -353,7 +353,18 @@ impl ErrorRecoveryManager {
                         })
                     },
                     AnalysisPhase::RealTimeProfiler => {
-                        PhaseResult::RealTimeProfiler(Box::new(characteristics))
+                        // Recovery synthesises a degraded `TestCharacteristics`;
+                        // it has no way to produce the *measured* sampling
+                        // counters this phase reports. Reporting zeroed counters
+                        // as if the profiler had run would be worse than
+                        // failing, so the recovery fails for this phase.
+                        self.error_stats.failed_recoveries.fetch_add(1, Ordering::Relaxed);
+                        return Err(anyhow!(
+                            "recovery for the real-time profiling phase is not possible: the \
+                             phase reports profiling counters measured by a live sampling loop, \
+                             and recovery has no measurement to report (original error: {})",
+                            error
+                        ));
                     },
                 };
 

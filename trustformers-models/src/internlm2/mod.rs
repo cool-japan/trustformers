@@ -149,7 +149,7 @@ mod tests {
         let seq_len = 5;
         let attn = InternLm2Attention::new(cfg, 0);
         let input = vec![0.5f32; seq_len * h];
-        let out = attn.forward(&input, seq_len);
+        let out = attn.forward(&input, seq_len).expect("attention forward");
         assert_eq!(
             out.len(),
             seq_len * h,
@@ -178,7 +178,7 @@ mod tests {
         let h = cfg.hidden_size;
         let mlp = InternLm2MLP::new(&cfg);
         let input = vec![1.0f32; h];
-        let out = mlp.forward(&input);
+        let out = mlp.forward(&input).expect("mlp forward");
         assert_eq!(out.len(), h, "MLP output length must equal hidden_size");
     }
 
@@ -191,7 +191,7 @@ mod tests {
         let seq_len = 3;
         let layer = InternLm2DecoderLayer::new(cfg, 0);
         let input = vec![0.2f32; seq_len * h];
-        let out = layer.forward(&input, seq_len);
+        let out = layer.forward(&input, seq_len).expect("layer forward");
         assert_eq!(out.len(), seq_len * h);
     }
 

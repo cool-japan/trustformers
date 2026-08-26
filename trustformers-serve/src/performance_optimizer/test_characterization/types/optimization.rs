@@ -12,7 +12,7 @@ use uuid;
 use super::core::{
     ApplicationResult, ComplexityLevel, DetectedImprovement, LearningConfiguration, ObjectiveType,
     PreventionAction, PriorityLevel, ResolutionAction, ResolutionType, SelectionContext,
-    TestCharacterizationResult, UrgencyLevel,
+    TestCharacterizationError, TestCharacterizationResult, UrgencyLevel,
 };
 
 // Import cross-module types
@@ -256,11 +256,18 @@ pub struct FeasibilityAnalyzer {
 }
 
 #[derive(Debug, Clone)]
+/// Flow-control lifecycle with an observable running state.
+///
+/// `control_enabled` is configuration; `active` is a real, shared flag that
+/// `start_control` and `stop_control` flip. Before 0.2.1 both were `Ok(())`
+/// no-ops and `check_flow_control` reported the configuration flag as though it
+/// were the running state.
 pub struct FlowControlManager {
     pub control_enabled: bool,
     pub flow_rate_limit: f64,
     pub backpressure_enabled: bool,
     pub control_policies: Vec<String>,
+    active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,11 +468,13 @@ pub struct OptimizationEvent {
     pub performance_improvement: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct OptimizationInsightEngine {
-    pub insights_generated: u64,
-    pub recommendations: Vec<String>,
-}
+/// Reports the headroom between each metric's mean and its observed peak.
+///
+/// Before 0.2.1 this carried `insights_generated` and `recommendations` fields
+/// that nothing ever wrote to, and reported an "Optimization potential" of
+/// high/moderate/low derived from the length of that permanently empty vector.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptimizationInsightEngine;
 
 #[derive(Debug, Clone)]
 pub struct OptimizationObjective {
@@ -504,11 +513,16 @@ pub struct OptimizationOpportunity {
 }
 
 #[derive(Debug, Clone)]
+/// Records the performance samples an optimizer is handed.
+///
+/// Before 0.2.1 the history was a plain `Vec` behind an `Arc`, so nothing could
+/// ever be recorded, `start_tracking`/`stop_tracking` were `Ok(())` no-ops, and
+/// `get_current_performance` returned the all-default `baseline_metrics` under
+/// the name "current performance".
 pub struct OptimizationPerformanceTracker {
     pub tracking_enabled: bool,
-    pub performance_history: Vec<(chrono::DateTime<chrono::Utc>, PerformanceMetrics)>,
-    pub baseline_metrics: PerformanceMetrics,
-    pub improvement_trends: HashMap<String, Vec<f64>>,
+    tracking: Arc<std::sync::atomic::AtomicBool>,
+    history: Arc<parking_lot::Mutex<Vec<(chrono::DateTime<chrono::Utc>, PerformanceMetrics)>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,10 +685,16 @@ pub struct OptimizationPerformanceData {
 }
 
 #[derive(Debug, Clone)]
+/// Accumulates per-strategy effectiveness scores as they are observed.
+///
+/// Before 0.2.1 the score map was a plain `HashMap` behind an `Arc`, so nothing
+/// could record into it and `analyze_current_effectiveness` always returned an
+/// empty map, which the optimizer averaged into an effectiveness of 0.0.
 pub struct StrategyEffectivenessAnalyzer {
     pub analysis_enabled: bool,
-    pub effectiveness_metrics: HashMap<String, f64>,
     pub analysis_window: std::time::Duration,
+    analyzing: Arc<std::sync::atomic::AtomicBool>,
+    effectiveness: Arc<parking_lot::Mutex<HashMap<String, Vec<f64>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -686,10 +706,15 @@ pub struct StrategyOptimizationResult {
 }
 
 #[derive(Debug, Clone)]
+/// Accumulates per-strategy performance samples as they are observed.
+///
+/// Before 0.2.1 the sample map was a plain `HashMap` behind an `Arc`, so nothing
+/// could record into it; `start_tracking`/`stop_tracking` were `Ok(())` no-ops
+/// and `get_current_performance` always summarised an empty map.
 pub struct StrategyPerformanceTracker {
-    pub performance_data: HashMap<String, Vec<f64>>,
     pub tracking_start: chrono::DateTime<chrono::Utc>,
-    pub current_best_strategy: String,
+    tracking: Arc<std::sync::atomic::AtomicBool>,
+    performance_data: Arc<parking_lot::Mutex<HashMap<String, Vec<f64>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -848,12 +873,7 @@ impl AdaptiveOptimizer {
                 state_metrics: HashMap::new(),
             },
             history: VecDeque::new(),
-            performance_tracker: Arc::new(OptimizationPerformanceTracker {
-                tracking_enabled: true,
-                performance_history: Vec::new(),
-                baseline_metrics: PerformanceMetrics::default(),
-                improvement_trends: HashMap::new(),
-            }),
+            performance_tracker: Arc::new(OptimizationPerformanceTracker::new()),
             learning_config,
             adaptation_threshold: 0.1,
             strategy_effectiveness: HashMap::new(),
@@ -1238,25 +1258,36 @@ impl FlowControlManager {
             flow_rate_limit: 100.0,
             backpressure_enabled: true,
             control_policies: Vec::new(),
+            active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Check flow control status
+    /// True only while flow control is both configured and running.
     pub async fn check_flow_control(&self) -> TestCharacterizationResult<bool> {
-        // Placeholder implementation - return whether flow control is active
-        Ok(self.control_enabled)
+        Ok(self.control_enabled && self.is_active())
     }
 
-    /// Start flow control
-    pub async fn start_control(&self) -> TestCharacterizationResult<()> {
-        // Start flow control operations
+    /// Start flow control.
+    pub fn start_control(&self) -> TestCharacterizationResult<()> {
+        if !self.control_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "flow control is disabled by configuration".to_string(),
+                component: "FlowControlManager".to_string(),
+            });
+        }
+        self.active.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop flow control
-    pub async fn stop_control(&self) -> TestCharacterizationResult<()> {
-        // Stop flow control operations
+    /// Stop flow control.
+    pub fn stop_control(&self) -> TestCharacterizationResult<()> {
+        self.active.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether flow control is running right now.
+    pub fn is_active(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1271,28 +1302,63 @@ impl OptimizationPerformanceTracker {
     pub fn new() -> Self {
         Self {
             tracking_enabled: true,
-            performance_history: Vec::new(),
-            baseline_metrics: PerformanceMetrics::default(),
-            improvement_trends: HashMap::new(),
+            tracking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
-    /// Start performance tracking
-    pub async fn start_tracking(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+    /// Start performance tracking.
+    pub fn start_tracking(&self) -> TestCharacterizationResult<()> {
+        if !self.tracking_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "performance tracking is disabled by configuration".to_string(),
+                component: "OptimizationPerformanceTracker".to_string(),
+            });
+        }
+        self.tracking.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop performance tracking
-    pub async fn stop_tracking(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+    /// Stop performance tracking.
+    pub fn stop_tracking(&self) -> TestCharacterizationResult<()> {
+        self.tracking.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Get current performance metrics
-    pub async fn get_current_performance(&self) -> TestCharacterizationResult<PerformanceMetrics> {
-        // Return baseline metrics as placeholder
-        Ok(self.baseline_metrics.clone())
+    /// Whether tracking is running right now.
+    pub fn is_tracking(&self) -> bool {
+        self.tracking.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one observed performance sample.
+    ///
+    /// Ignored while tracking is stopped, so the history only ever holds
+    /// samples taken inside a start/stop window.
+    pub fn record(&self, metrics: PerformanceMetrics) {
+        if !self.is_tracking() {
+            return;
+        }
+        self.history.lock().push((chrono::Utc::now(), metrics));
+    }
+
+    /// Number of samples recorded so far.
+    pub fn recorded_sample_count(&self) -> usize {
+        self.history.lock().len()
+    }
+
+    /// The most recently recorded performance sample.
+    ///
+    /// Errors when nothing has been recorded: a default-valued
+    /// `PerformanceMetrics` is indistinguishable from a genuinely idle system.
+    pub fn get_current_performance(&self) -> TestCharacterizationResult<PerformanceMetrics> {
+        let history = self.history.lock();
+        history.last().map(|(_, metrics)| metrics.clone()).ok_or_else(|| {
+            TestCharacterizationError::InvalidInput {
+                message: "no performance sample has been recorded".to_string(),
+                field: "history".to_string(),
+                value: "0".to_string(),
+            }
+        })
     }
 }
 
@@ -1307,29 +1373,63 @@ impl StrategyEffectivenessAnalyzer {
     pub fn new() -> Self {
         Self {
             analysis_enabled: true,
-            effectiveness_metrics: HashMap::new(),
             analysis_window: Duration::from_secs(60),
+            analyzing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            effectiveness: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
-    /// Start effectiveness analysis
-    pub async fn start_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+    /// Start effectiveness analysis.
+    pub fn start_analysis(&self) -> TestCharacterizationResult<()> {
+        if !self.analysis_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "effectiveness analysis is disabled by configuration".to_string(),
+                component: "StrategyEffectivenessAnalyzer".to_string(),
+            });
+        }
+        self.analyzing.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop effectiveness analysis
-    pub async fn stop_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+    /// Stop effectiveness analysis.
+    pub fn stop_analysis(&self) -> TestCharacterizationResult<()> {
+        self.analyzing.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Analyze current strategy effectiveness
-    pub async fn analyze_current_effectiveness(
+    /// Whether analysis is running right now.
+    pub fn is_analyzing(&self) -> bool {
+        self.analyzing.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one observed effectiveness score for `strategy`.
+    ///
+    /// Ignored while analysis is stopped.
+    pub fn record_effectiveness(&self, strategy: &str, score: f64) {
+        if !self.is_analyzing() || !score.is_finite() {
+            return;
+        }
+        self.effectiveness.lock().entry(strategy.to_string()).or_default().push(score);
+    }
+
+    /// Mean recorded effectiveness per strategy.
+    ///
+    /// A strategy that has produced no score is absent from the map rather than
+    /// present with a substituted value.
+    pub fn analyze_current_effectiveness(
         &self,
     ) -> TestCharacterizationResult<HashMap<String, f64>> {
-        // Return current effectiveness metrics
-        Ok(self.effectiveness_metrics.clone())
+        let recorded = self.effectiveness.lock();
+        Ok(recorded
+            .iter()
+            .filter(|(_, scores)| !scores.is_empty())
+            .map(|(strategy, scores)| {
+                (
+                    strategy.clone(),
+                    scores.iter().sum::<f64>() / scores.len() as f64,
+                )
+            })
+            .collect())
     }
 }
 
@@ -1431,69 +1531,56 @@ impl Default for AdaptiveThresholdManager {
 }
 
 impl OptimizationInsightEngine {
-    /// Create a new OptimizationInsightEngine with default settings
+    /// Create a new OptimizationInsightEngine.
     pub fn new() -> Self {
-        Self {
-            insights_generated: 0,
-            recommendations: Vec::new(),
-        }
+        Self
     }
-}
 
-impl Default for OptimizationInsightEngine {
-    fn default() -> Self {
-        Self::new()
+    /// Headroom findings: how far each metric's mean sits below its own peak.
+    fn headroom(&self, observations: super::analysis::InsightObservations<'_>) -> Vec<String> {
+        observations
+            .keys()
+            .into_iter()
+            .filter_map(|key| observations.summary(&key))
+            .filter(|summary| summary.max > 0.0 && summary.max > summary.min)
+            .map(|summary| {
+                let headroom = 1.0 - summary.mean / summary.max;
+                format!(
+                    "`{}` averaged {:.4} against an observed peak of {:.4} over {} samples                      ({:.1}% headroom to its own peak)",
+                    summary.key,
+                    summary.mean,
+                    summary.max,
+                    summary.count,
+                    headroom * 100.0
+                )
+            })
+            .collect()
     }
 }
 
 impl InsightEngine for OptimizationInsightEngine {
-    fn generate(&self) -> String {
-        format!(
-            "Optimization Insight Engine (insights_generated={}, recommendations={})",
-            self.insights_generated,
-            self.recommendations.len()
-        )
+    fn describe(&self) -> String {
+        "Optimization insight engine: reports mean-to-peak headroom per metric over the supplied          window; holds no accumulated state"
+            .to_string()
     }
 
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would analyze test-specific optimization opportunities
-        Ok(vec![
-            format!(
-                "Test '{}' optimization analysis: {} insights generated with {} recommendations",
-                test_id,
-                self.insights_generated,
-                self.recommendations.len()
-            ),
-            format!(
-                "Optimization potential: {}",
-                if self.recommendations.len() > 5 {
-                    "high"
-                } else if self.recommendations.len() > 2 {
-                    "moderate"
-                } else {
-                    "low"
-                }
-            ),
-        ])
-    }
-
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would generate comprehensive optimization insights
-        let mut insights = vec![
-            format!(
-                "Total optimization insights generated: {}",
-                self.insights_generated
-            ),
-            format!("Active recommendations: {}", self.recommendations.len()),
-            "Optimization analysis engine active".to_string(),
-        ];
-
-        // Add top recommendations if available
-        if !self.recommendations.is_empty() {
-            insights.push(format!("Top recommendation: {}", self.recommendations[0]));
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        let mut insights = self.headroom(observations);
+        for insight in insights.iter_mut() {
+            *insight = format!("test `{}`: {}", test_id, insight);
         }
-
         Ok(insights)
+    }
+
+    fn generate_insights(
+        &self,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self.headroom(observations))
     }
 }
 
@@ -1501,44 +1588,74 @@ impl StrategyPerformanceTracker {
     /// Create a new StrategyPerformanceTracker with default settings
     pub fn new() -> Self {
         Self {
-            performance_data: HashMap::new(),
             tracking_start: Utc::now(),
-            current_best_strategy: String::from("default"),
+            tracking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            performance_data: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
-    /// Start performance tracking
-    pub async fn start_tracking(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would start tracking strategy performance
+    /// Start performance tracking.
+    pub fn start_tracking(&self) -> TestCharacterizationResult<()> {
+        self.tracking.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop performance tracking
-    pub async fn stop_tracking(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would stop tracking strategy performance
+    /// Stop performance tracking.
+    pub fn stop_tracking(&self) -> TestCharacterizationResult<()> {
+        self.tracking.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Get current performance metrics
-    pub async fn get_current_performance(
-        &self,
-    ) -> TestCharacterizationResult<HashMap<String, f64>> {
-        // Placeholder implementation
-        // In a real implementation, this would return current performance metrics
-        // Return empty map or summary statistics based on tracked data
-        let mut summary = HashMap::new();
-        if !self.performance_data.is_empty() {
-            // Calculate average performance for each strategy
-            for (strategy, values) in &self.performance_data {
-                if !values.is_empty() {
-                    let avg: f64 = values.iter().sum::<f64>() / values.len() as f64;
-                    summary.insert(strategy.clone(), avg);
-                }
-            }
+    /// Whether tracking is running right now.
+    pub fn is_tracking(&self) -> bool {
+        self.tracking.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one observed performance sample for `strategy`.
+    ///
+    /// Ignored while tracking is stopped.
+    pub fn record(&self, strategy: &str, value: f64) {
+        if !self.is_tracking() || !value.is_finite() {
+            return;
         }
-        Ok(summary)
+        self.performance_data
+            .lock()
+            .entry(strategy.to_string())
+            .or_default()
+            .push(value);
+    }
+
+    /// Mean recorded performance per strategy.
+    ///
+    /// A strategy with no sample is absent from the map.
+    pub fn get_current_performance(&self) -> TestCharacterizationResult<HashMap<String, f64>> {
+        let recorded = self.performance_data.lock();
+        Ok(recorded
+            .iter()
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(strategy, values)| {
+                (
+                    strategy.clone(),
+                    values.iter().sum::<f64>() / values.len() as f64,
+                )
+            })
+            .collect())
+    }
+
+    /// The strategy with the highest mean recorded performance, if any.
+    pub fn current_best_strategy(&self) -> Option<String> {
+        let recorded = self.performance_data.lock();
+        recorded
+            .iter()
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(strategy, values)| {
+                (
+                    strategy.clone(),
+                    values.iter().sum::<f64>() / values.len() as f64,
+                )
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(strategy, _)| strategy)
     }
 }
 
@@ -1567,297 +1684,5 @@ impl super::quality::RiskMitigationStrategy for AdaptiveMitigation {
 
     fn is_applicable(&self) -> bool {
         self.enabled
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct Lcg(u64);
-    impl Lcg {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            self.0
-        }
-        fn next_f64(&mut self) -> f64 {
-            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-        }
-        fn next_usize(&mut self, bound: usize) -> usize {
-            (self.next_u64() as usize) % bound.max(1)
-        }
-    }
-
-    // ---- ConstraintType tests ----
-    #[test]
-    fn test_constraint_type_all_variants() {
-        let variants = [
-            ConstraintType::Order,
-            ConstraintType::MutualExclusion,
-            ConstraintType::Dependency,
-            ConstraintType::Resource,
-            ConstraintType::Timing,
-        ];
-        assert_eq!(variants.len(), 5);
-    }
-
-    #[test]
-    fn test_constraint_type_equality() {
-        assert_eq!(ConstraintType::Order, ConstraintType::Order);
-        assert_ne!(ConstraintType::Order, ConstraintType::Timing);
-    }
-
-    #[test]
-    fn test_constraint_type_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(ConstraintType::Order);
-        set.insert(ConstraintType::Order);
-        set.insert(ConstraintType::Resource);
-        assert_eq!(set.len(), 2);
-    }
-
-    // ---- OptimizationEffort tests ----
-    #[test]
-    fn test_optimization_effort_all_variants() {
-        let efforts = [
-            OptimizationEffort::Minimal,
-            OptimizationEffort::Low,
-            OptimizationEffort::Medium,
-            OptimizationEffort::High,
-            OptimizationEffort::Maximum,
-        ];
-        assert_eq!(efforts.len(), 5);
-    }
-
-    #[test]
-    fn test_optimization_effort_equality() {
-        assert_eq!(OptimizationEffort::Medium, OptimizationEffort::Medium);
-    }
-
-    // ---- OptimizationType tests ----
-    #[test]
-    fn test_optimization_type_all_variants() {
-        let types = [
-            OptimizationType::Parallelism,
-            OptimizationType::Batching,
-            OptimizationType::Caching,
-            OptimizationType::ResourcePooling,
-            OptimizationType::LoadBalancing,
-            OptimizationType::ReduceOverhead,
-            OptimizationType::SimplifyImplementation,
-        ];
-        assert_eq!(types.len(), 7);
-    }
-
-    // ---- AdaptiveOptimizerConfig default ----
-    #[test]
-    fn test_adaptive_optimizer_config_default() {
-        let c = AdaptiveOptimizerConfig::default();
-        assert!((c.adaptation_rate - 0.1).abs() < f64::EPSILON);
-        assert_eq!(c.optimization_effort, OptimizationEffort::Medium);
-        assert_eq!(c.max_iterations, 100);
-        assert!((c.convergence_threshold - 0.001).abs() < f64::EPSILON);
-        assert_eq!(c.optimization_interval, std::time::Duration::from_secs(10));
-    }
-
-    #[test]
-    fn test_adaptive_optimizer_config_default_empty_strings() {
-        let c = AdaptiveOptimizerConfig::default();
-        assert!(c.tracking_config.is_empty());
-        assert!(c.analysis_config.is_empty());
-    }
-
-    // ---- AdaptiveMitigation ----
-    #[test]
-    fn test_adaptive_mitigation_new() {
-        let m = AdaptiveMitigation::new();
-        assert!(m.enabled);
-        assert!((m.learning_rate - 0.1).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_adaptive_mitigation_default() {
-        let m = AdaptiveMitigation::default();
-        assert!(m.enabled);
-    }
-
-    // ---- FlowControlManager ----
-    #[test]
-    fn test_flow_control_manager_new() {
-        let f = FlowControlManager::new();
-        assert!(f.control_enabled);
-        assert!((f.flow_rate_limit - 100.0).abs() < f64::EPSILON);
-        assert!(f.backpressure_enabled);
-    }
-
-    #[test]
-    fn test_flow_control_manager_default() {
-        let f = FlowControlManager::default();
-        assert!(f.control_enabled);
-    }
-
-    // ---- OptimizationPerformanceTracker ----
-    #[test]
-    fn test_optimization_performance_tracker_new() {
-        let t = OptimizationPerformanceTracker::new();
-        assert!(t.tracking_enabled);
-        assert!(t.performance_history.is_empty());
-    }
-
-    #[test]
-    fn test_optimization_performance_tracker_default() {
-        let t = OptimizationPerformanceTracker::default();
-        assert!(t.tracking_enabled);
-    }
-
-    // ---- StrategyEffectivenessAnalyzer ----
-    #[test]
-    fn test_strategy_effectiveness_analyzer_new() {
-        let a = StrategyEffectivenessAnalyzer::new();
-        assert!(a.analysis_enabled);
-        assert!(a.effectiveness_metrics.is_empty());
-    }
-
-    #[test]
-    fn test_strategy_effectiveness_analyzer_default() {
-        let a = StrategyEffectivenessAnalyzer::default();
-        assert!(a.analysis_enabled);
-    }
-
-    // ---- AdaptiveSamplingStrategy ----
-    #[test]
-    fn test_adaptive_sampling_strategy_new() {
-        let s = AdaptiveSamplingStrategy::new();
-        assert!((s.min_rate_hz - 1.0).abs() < f64::EPSILON);
-        assert!((s.max_rate_hz - 1000.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_adaptive_sampling_strategy_default() {
-        let s = AdaptiveSamplingStrategy::default();
-        assert!((s.adaptation_factor - 1.5).abs() < f64::EPSILON);
-    }
-
-    // ---- AdaptiveThresholdManager ----
-    #[test]
-    fn test_adaptive_threshold_manager_new() {
-        let m = AdaptiveThresholdManager::new();
-        assert!(m.adaptation_enabled);
-        assert!(m.thresholds.is_empty());
-    }
-
-    #[test]
-    fn test_adaptive_threshold_manager_default() {
-        let m = AdaptiveThresholdManager::default();
-        assert!(m.adaptation_enabled);
-    }
-
-    // ---- StrategyPerformanceTracker ----
-    #[test]
-    fn test_strategy_performance_tracker_new() {
-        let t = StrategyPerformanceTracker::new();
-        assert!(t.performance_data.is_empty());
-        assert_eq!(t.current_best_strategy, "default");
-    }
-
-    #[test]
-    fn test_strategy_performance_tracker_default() {
-        let t = StrategyPerformanceTracker::default();
-        assert!(t.performance_data.is_empty());
-    }
-
-    // ---- CostBenefitAnalysis ----
-    #[test]
-    fn test_cost_benefit_analysis_construction() {
-        let cba = CostBenefitAnalysis {
-            total_cost: 100.0,
-            total_benefit: 300.0,
-            net_benefit: 200.0,
-            benefit_cost_ratio: 3.0,
-            payback_period: std::time::Duration::from_secs(60),
-        };
-        assert!((cba.benefit_cost_ratio - 3.0).abs() < f64::EPSILON);
-        assert!((cba.net_benefit - 200.0).abs() < f64::EPSILON);
-    }
-
-    // ---- CostTargets ----
-    #[test]
-    fn test_cost_targets_construction() {
-        let targets = CostTargets {
-            target_cost: 50.0,
-            max_acceptable_cost: 100.0,
-            cost_reduction_goal: 30.0,
-            target_timeframe: std::time::Duration::from_secs(3600),
-        };
-        assert!((targets.target_cost - 50.0).abs() < f64::EPSILON);
-    }
-
-    // ---- BackoffStrategy ----
-    #[test]
-    fn test_backoff_strategy_construction() {
-        let bs = BackoffStrategy {
-            initial_delay: std::time::Duration::from_millis(100),
-            max_delay: std::time::Duration::from_secs(60),
-            backoff_factor: 2.0,
-            strategy_type: "exponential".to_string(),
-        };
-        assert!((bs.backoff_factor - 2.0).abs() < f64::EPSILON);
-        assert_eq!(bs.strategy_type, "exponential");
-    }
-
-    // ---- BackpressureController ----
-    #[test]
-    fn test_backpressure_controller_construction() {
-        let bp = BackpressureController {
-            enabled: true,
-            pressure_threshold: 0.8,
-            control_actions: vec!["throttle".to_string()],
-            current_pressure: 0.5,
-        };
-        assert!(bp.enabled);
-        assert_eq!(bp.control_actions.len(), 1);
-    }
-
-    // ---- FlowController ----
-    #[test]
-    fn test_flow_controller_construction() {
-        let fc = FlowController {
-            max_flow_rate: 1000.0,
-            current_flow_rate: 500.0,
-            throttle_enabled: true,
-            burst_capacity: 50,
-        };
-        assert!(fc.throttle_enabled);
-        assert_eq!(fc.burst_capacity, 50);
-    }
-
-    // ---- LCG-driven tests ----
-    #[test]
-    fn test_lcg_selects_optimization_types() {
-        let mut rng = Lcg::new(42);
-        let types = [
-            OptimizationType::Parallelism,
-            OptimizationType::Batching,
-            OptimizationType::Caching,
-            OptimizationType::ResourcePooling,
-        ];
-        for _ in 0..20 {
-            let idx = rng.next_usize(types.len());
-            let formatted = format!("{:?}", types[idx]);
-            assert!(!formatted.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_lcg_generates_cost_values() {
-        let mut rng = Lcg::new(7777);
-        for _ in 0..50 {
-            let cost = rng.next_f64() * 1000.0;
-            assert!((0.0..1000.0).contains(&cost));
-        }
     }
 }

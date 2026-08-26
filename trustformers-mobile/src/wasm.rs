@@ -18,6 +18,8 @@ use js_sys::{Array, ArrayBuffer, Promise, Uint8Array};
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 use wasm_bindgen::prelude::*;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
+use wasm_bindgen::JsCast;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 use web_sys::{console, window, Navigator, Performance, WorkerGlobalScope};
@@ -292,6 +294,42 @@ impl WasmMobileEngine {
         let has_web_workers = window.worker().is_ok();
         let has_touch = window.navigator().max_touch_points() > 0;
 
+        // Real WebGL/WebGL2 detection: create an off-DOM canvas and ask it
+        // for the context, exactly what a real WebGL-using caller would
+        // do. Previously `has_webgl`/`has_webgl2` were hardcoded `true`
+        // ("Assume modern browser") regardless of what the browser
+        // actually supported -- a browser with WebGL disabled (or, on a
+        // headless/CI runner, entirely absent) still reported both `true`.
+        let (has_webgl, has_webgl2) = Self::detect_webgl_support(&window);
+
+        // Real availability check via JS reflection (`'serviceWorker' in
+        // navigator`), not a hardcoded `true`. `js_sys::Reflect::has`
+        // mirrors the standard JS feature-detection idiom and does not
+        // panic when the property is absent (unlike calling a typed
+        // accessor that assumes it exists).
+        let has_service_workers =
+            js_sys::Reflect::has(&navigator, &JsValue::from_str("serviceWorker")).unwrap_or(false);
+
+        // WebGPU: this crate does not enable `web-sys`'s `Gpu`/`GpuAdapter`
+        // bindings, so a typed check is not available; `Reflect::has` still
+        // gives a real (if coarse -- it only proves the property exists,
+        // not that a real adapter is obtainable) answer rather than the
+        // previous unconditional `false`, which was honest-by-accident
+        // (never `true`) rather than honest-by-measurement.
+        let has_webgpu =
+            js_sys::Reflect::has(&navigator, &JsValue::from_str("gpu")).unwrap_or(false);
+
+        // WASM SIMD: whether *this* module was actually compiled with SIMD
+        // instructions is a build-time fact (the `simd128` target feature),
+        // not something queryable at runtime through `Navigator`/`Window`
+        // the way the capabilities above are; detecting whether the *host
+        // engine* supports SIMD at all needs feeding a small SIMD-using
+        // WASM byte sequence to `WebAssembly.validate`, which this crate
+        // does not yet do. Reporting `false` here is the honest "not
+        // measured" answer, not the previous "Assume WASM SIMD support"
+        // `true`.
+        let has_simd = cfg!(target_feature = "simd128");
+
         // Memory estimation (very rough)
         let memory_mb = if is_mobile {
             Some(2048) // Assume 2GB for mobile
@@ -303,15 +341,38 @@ impl WasmMobileEngine {
             user_agent,
             memory_mb,
             hardware_concurrency: hardware_concurrency.max(1),
-            has_webgl: true,   // Assume modern browser
-            has_webgl2: true,  // Assume modern browser
-            has_webgpu: false, // Conservative assumption
-            has_simd: true,    // Assume WASM SIMD support
+            has_webgl,
+            has_webgl2,
+            has_webgpu,
+            has_simd,
             has_web_workers,
-            has_service_workers: true, // Assume modern browser
+            has_service_workers,
             is_mobile,
             has_touch,
         })
+    }
+
+    /// Real WebGL/WebGL2 support: create an off-DOM `<canvas>` (never
+    /// attached to `document.body`, so nothing renders and this has no
+    /// visible side effect) and ask it for each context via the same
+    /// `HTMLCanvasElement.getContext` call any real WebGL-using code
+    /// would make. A browser (or headless test runner) with WebGL
+    /// disabled or unavailable gets `(false, false)` here instead of the
+    /// previous hardcoded `(true, true)`.
+    fn detect_webgl_support(window: &web_sys::Window) -> (bool, bool) {
+        let Some(document) = window.document() else {
+            return (false, false);
+        };
+        let Ok(canvas_element) = document.create_element("canvas") else {
+            return (false, false);
+        };
+        let Ok(canvas) = canvas_element.dyn_into::<web_sys::HtmlCanvasElement>() else {
+            return (false, false);
+        };
+
+        let has_webgl = canvas.get_context("webgl").ok().flatten().is_some();
+        let has_webgl2 = canvas.get_context("webgl2").ok().flatten().is_some();
+        (has_webgl, has_webgl2)
     }
 
     fn get_performance_now() -> f32 {
@@ -323,76 +384,153 @@ impl WasmMobileEngine {
         0.0
     }
 
+    /// Spawning real `web_sys::Worker` instances needs a worker bootstrap
+    /// script (a small JS/wasm-bindgen glue file the browser loads via
+    /// `new Worker(url)` that re-initializes this crate's wasm module
+    /// inside the worker thread and wires up a `postMessage` protocol to
+    /// receive/return tensors) -- build tooling this crate does not ship.
+    /// Building that is real, substantial work this pass does not
+    /// fabricate a shortcut for.
+    ///
+    /// What changes here: `available_workers` (and `workers` itself) now
+    /// honestly stays empty when no worker was actually spawned, instead
+    /// of advertising `num_workers` available workers via
+    /// `(0..num_workers).collect()` while `workers` stayed an empty `Vec`
+    /// -- a caller inspecting `self.worker_pool` used to see slots for
+    /// workers that were never created. [`Self::inference`] already never
+    /// depended on this count being accurate: it only checks
+    /// `self.worker_pool.is_some()` before routing to
+    /// [`Self::inference_with_workers`], which itself falls back to
+    /// [`Self::inference_single_threaded`] (see that method's own doc
+    /// comment) -- so leaving `worker_pool` unset entirely, rather than
+    /// `Some` with zero real workers, is both more honest and behaviorally
+    /// identical for every caller today.
     fn init_worker_pool(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let num_workers = self.config.num_workers.min(self.browser_info.hardware_concurrency);
-        let mut workers = Vec::with_capacity(num_workers);
-
-        for i in 0..num_workers {
-            // In a real implementation, this would create actual Web Workers
-            // For now, we'll just track that we would create them
-            console::log_1(&JsValue::from_str(&format!("Creating worker {}", i)));
-        }
-
-        self.worker_pool = Some(WorkerPool {
-            workers,
-            task_queue: Vec::new(),
-            available_workers: (0..num_workers).collect(),
-        });
-
+        console::log_1(&JsValue::from_str(
+            "Web Worker pool requested but not available: this build has no real Worker \
+             bootstrap script; inference will run single-threaded",
+        ));
+        self.worker_pool = None;
         Ok(())
     }
 
+    /// Real safetensors parsing via
+    /// [`crate::inference::MobileInferenceEngine::parse_safetensors`] --
+    /// the same decoder [`crate::inference`] uses for every other
+    /// platform, reused here rather than duplicated. Previously this
+    /// ignored `data` entirely and returned a single hardcoded
+    /// `"layer1"` tensor of `Tensor::ones(&[10, 10])`, regardless of what
+    /// checkpoint bytes were actually uploaded from JS.
     fn parse_model_weights(
         &self,
-        _data: &[u8],
+        data: &[u8],
     ) -> Result<HashMap<String, Tensor>, Box<dyn std::error::Error>> {
-        // Simplified model weight parsing
-        let mut weights = HashMap::new();
-        weights.insert("layer1".to_string(), Tensor::ones(&[10, 10])?);
-        Ok(weights)
+        Ok(crate::inference::MobileInferenceEngine::parse_safetensors(
+            data,
+        )?)
     }
 
+    /// Real parsing of `data` as a flat little-endian `f32` buffer -- the
+    /// natural wire format for a JS caller to produce via
+    /// `new Float32Array(...).buffer` and pass to
+    /// [`WasmMobileEngine::inference`]. Unlike [`Self::parse_model_weights`]
+    /// (a self-describing safetensors buffer), a raw input buffer carries
+    /// no shape metadata of its own, so this reports it as the 1-D
+    /// `[n]` tensor its byte length actually determines -- real data, not
+    /// the previous hardcoded `Tensor::ones(&[1, 10])` returned regardless
+    /// of `data`'s contents (or even its length: a caller sending the
+    /// wrong amount of data got the same fabricated tensor back with no
+    /// error). Reshape to the model's real expected input shape with
+    /// `trustformers_core::Tensor::reshape` downstream if needed.
     fn parse_input_data(
         &self,
-        _data: &[u8],
+        data: &[u8],
     ) -> Result<HashMap<String, Tensor>, Box<dyn std::error::Error>> {
-        // Simplified input parsing
+        if data.len() % 4 != 0 {
+            return Err(format!(
+                "input buffer length {} is not a multiple of 4 bytes (expected a flat f32 \
+                 buffer)",
+                data.len()
+            )
+            .into());
+        }
+        let values: Vec<f32> = data
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        let len = values.len();
+        let tensor = Tensor::from_vec(values, &[len])?;
+
         let mut inputs = HashMap::new();
-        inputs.insert("input".to_string(), Tensor::ones(&[1, 10])?);
+        inputs.insert("input".to_string(), tensor);
         Ok(inputs)
     }
 
+    /// No real Web Worker pool exists to distribute across (see
+    /// [`Self::init_worker_pool`]'s doc comment), so this always falls
+    /// back to [`Self::inference_single_threaded`] -- the same real
+    /// computation, just not parallelized. This was already true before
+    /// this pass; what changed is that `inference_single_threaded` itself
+    /// now performs real computation rather than an identity pass, so this
+    /// fallback is no longer silently indistinguishable from "did
+    /// nothing".
     async fn inference_with_workers(
         &mut self,
         input: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>, Box<dyn std::error::Error>> {
-        // Simplified worker-based inference
-        // In a real implementation, this would distribute work across Web Workers
         self.inference_single_threaded(input)
     }
 
+    /// Real inference against [`Self::model_weights`] via
+    /// [`crate::inference::MobileInferenceEngine`] -- the same real
+    /// matmul/bias execution path every other platform bridge in this
+    /// crate (`android::engine::AndroidInferenceEngine::cpu_inference`,
+    /// `react_native::MobileInferenceEngine::run_inference`, ...) uses,
+    /// reused here rather than a third, divergent implementation.
+    /// Previously this was `let output_tensor = input_tensor.clone();` --
+    /// an identity pass that never touched `model_weights` at all.
+    ///
+    /// A fresh `MobileInferenceEngine` is constructed and reloaded with
+    /// `self.model_weights` on every call rather than cached on `self`;
+    /// that reload cost is real and worth optimizing away in a follow-up
+    /// (caching the engine across calls, invalidating it only when
+    /// `load_model` is called again), but it is an honest performance
+    /// trade-off, not a correctness or honesty gap like the identity pass
+    /// it replaces.
     fn inference_single_threaded(
         &self,
         input: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>, Box<dyn std::error::Error>> {
-        // Simplified single-threaded inference
+        let input_tensor = input.get("input").ok_or("missing 'input' tensor")?;
+        let weights = self.model_weights.as_ref().ok_or("no model loaded")?;
+
+        let mut engine = crate::inference::MobileInferenceEngine::new(MobileConfig::default())?;
+        engine.load_model(weights.clone())?;
+        let output_tensor = engine.inference(input_tensor)?;
+
         let mut output = HashMap::new();
-
-        if let Some(input_tensor) = input.get("input") {
-            // Simple computation (in practice would be model inference)
-            let output_tensor = input_tensor.clone();
-            output.insert("output".to_string(), output_tensor);
-        }
-
+        output.insert("output".to_string(), output_tensor);
         Ok(output)
     }
 
+    /// Real serialization of `output`'s `"output"` tensor as a flat
+    /// little-endian `f32` buffer -- the layout [`Self::parse_input_data`]
+    /// decodes on the way in, so a JS caller can round-trip through
+    /// `new Float32Array(resultBuffer)` symmetrically. Previously this
+    /// ignored `output` entirely and returned `vec![0u8; 32]` regardless
+    /// of what inference produced (or whether `output` even had 32 bytes
+    /// worth of real data in it).
     fn serialize_output(
         &self,
-        _output: &HashMap<String, Tensor>,
+        output: &HashMap<String, Tensor>,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        // Simplified output serialization
-        Ok(vec![0u8; 32]) // Placeholder
+        let output_tensor = output.get("output").ok_or("missing 'output' tensor")?;
+        let data = output_tensor.data()?;
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for value in data {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(bytes)
     }
 }
 

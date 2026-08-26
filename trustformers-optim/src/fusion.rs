@@ -116,13 +116,31 @@ impl Default for FusionStats {
     }
 }
 
-/// Fused optimizer that combines multiple optimization operations
+/// Fused optimizer that combines multiple optimization operations.
+///
+/// # Result retrieval contract
+///
+/// [`queue_operation`](FusedOptimizer::queue_operation) takes **owned** parameter and
+/// gradient tensors, so the caller's own bindings are never mutated. The updated
+/// parameters (and, for [`FusedOperation::FusedGradientClipping`], the clipped
+/// gradients) are stored internally keyed by the `param_name` supplied at queue time and
+/// must be collected with [`take_updated_parameters`](FusedOptimizer::take_updated_parameters)
+/// / [`take_clipped_gradients`](FusedOptimizer::take_clipped_gradients) after
+/// [`flush`](FusedOptimizer::flush).
+///
+/// Callers that want in-place semantics should use
+/// [`apply_in_place`](FusedOptimizer::apply_in_place), which updates a `&mut Tensor`
+/// directly and bypasses the batching queue.
 #[derive(Debug)]
 pub struct FusedOptimizer {
     config: FusionConfig,
     state: Arc<Mutex<FusedOptimizerState>>,
     pending_operations: Arc<Mutex<Vec<(String, FusedOperation, Tensor, Tensor)>>>,
     operation_queue: Arc<Mutex<HashMap<String, Vec<FusedOperation>>>>,
+    /// Parameters updated by the most recent batch executions, keyed by `param_name`.
+    updated_parameters: Arc<Mutex<HashMap<String, Tensor>>>,
+    /// Gradients clipped by the most recent batch executions, keyed by `param_name`.
+    clipped_gradients: Arc<Mutex<HashMap<String, Tensor>>>,
 }
 
 impl FusedOptimizer {
@@ -139,7 +157,146 @@ impl FusedOptimizer {
             state: Arc::new(Mutex::new(state)),
             pending_operations: Arc::new(Mutex::new(Vec::new())),
             operation_queue: Arc::new(Mutex::new(HashMap::new())),
+            updated_parameters: Arc::new(Mutex::new(HashMap::new())),
+            clipped_gradients: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Record an updated parameter tensor so the caller can retrieve it after `flush()`.
+    fn record_updated_parameter(&self, param_name: String, param: Tensor) -> Result<()> {
+        let mut updated = self.updated_parameters.lock().map_err(|_| {
+            TrustformersError::lock_error("fusion updated-parameter mutex poisoned".to_string())
+        })?;
+        updated.insert(param_name, param);
+        Ok(())
+    }
+
+    /// Takes (and clears) the parameters updated by previously executed batches.
+    pub fn take_updated_parameters(&mut self) -> Result<HashMap<String, Tensor>> {
+        let mut updated = self.updated_parameters.lock().map_err(|_| {
+            TrustformersError::lock_error("fusion updated-parameter mutex poisoned".to_string())
+        })?;
+        Ok(std::mem::take(&mut *updated))
+    }
+
+    /// Returns a clone of the most recent updated value for `param_name`, if any.
+    pub fn updated_parameter(&self, param_name: &str) -> Result<Option<Tensor>> {
+        let updated = self.updated_parameters.lock().map_err(|_| {
+            TrustformersError::lock_error("fusion updated-parameter mutex poisoned".to_string())
+        })?;
+        Ok(updated.get(param_name).cloned())
+    }
+
+    /// Takes (and clears) the gradients clipped by previously executed batches.
+    pub fn take_clipped_gradients(&mut self) -> Result<HashMap<String, Tensor>> {
+        let mut clipped = self.clipped_gradients.lock().map_err(|_| {
+            TrustformersError::lock_error("fusion clipped-gradient mutex poisoned".to_string())
+        })?;
+        Ok(std::mem::take(&mut *clipped))
+    }
+
+    /// Applies a single fused operation directly to a caller-owned parameter tensor.
+    ///
+    /// Unlike [`queue_operation`](FusedOptimizer::queue_operation) this bypasses the
+    /// batching queue and mutates `parameter` (or, for gradient clipping, `gradient`)
+    /// in place, so no result retrieval step is needed.
+    pub fn apply_in_place(
+        &mut self,
+        param_name: &str,
+        operation: FusedOperation,
+        parameter: &mut Tensor,
+        gradient: &mut Tensor,
+    ) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
+        let opt_state = state.parameter_states.entry(param_name.to_string()).or_insert_with(|| {
+            OptimizerState {
+                step: 0,
+                momentum: HashMap::new(),
+                variance: HashMap::new(),
+                ..Default::default()
+            }
+        });
+
+        match operation {
+            FusedOperation::FusedAdam {
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => Self::fused_adam_update(
+                param_name,
+                parameter,
+                gradient,
+                opt_state,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            ),
+            FusedOperation::FusedAdamW {
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            } => Self::fused_adamw_update(
+                param_name,
+                parameter,
+                gradient,
+                opt_state,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+            ),
+            FusedOperation::FusedSGDMomentum {
+                lr,
+                momentum,
+                dampening,
+                weight_decay,
+                nesterov,
+            } => Self::fused_sgd_update(
+                param_name,
+                parameter,
+                gradient,
+                opt_state,
+                lr,
+                momentum,
+                dampening,
+                weight_decay,
+                nesterov,
+            ),
+            FusedOperation::FusedGradientClipping {
+                max_norm,
+                scale_factor,
+            } => {
+                let norm = gradient.norm()? as f64;
+                let scale = if norm > max_norm && norm > 0.0 {
+                    (max_norm / norm) * scale_factor
+                } else {
+                    scale_factor
+                };
+                Self::scale_tensor_in_place(gradient, scale as f32)
+            },
+            FusedOperation::FusedBatchNorm { .. } => Err(TrustformersError::not_implemented(
+                "FusedOperation::FusedBatchNorm has no fused implementation".to_string(),
+            )),
+        }
+    }
+
+    /// Multiplies every element of `tensor` by `scale`, in place.
+    fn scale_tensor_in_place(tensor: &mut Tensor, scale: f32) -> Result<()> {
+        let mut data = tensor.data()?;
+        for value in data.iter_mut() {
+            *value *= scale;
+        }
+        tensor.set_data_f32(&data)
     }
 
     /// Add operation to fusion queue
@@ -231,7 +388,7 @@ impl FusedOptimizer {
             .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
-        for (param_name, op, param, grad) in operations {
+        for (param_name, op, mut param, grad) in operations {
             if let FusedOperation::FusedAdam {
                 lr,
                 beta1,
@@ -252,8 +409,9 @@ impl FusedOptimizer {
                     });
 
                 // Fused Adam update with optimized memory access
-                self.fused_adam_update(
-                    &param,
+                Self::fused_adam_update(
+                    &param_name,
+                    &mut param,
                     &grad,
                     opt_state,
                     lr,
@@ -262,6 +420,7 @@ impl FusedOptimizer {
                     eps,
                     weight_decay,
                 )?;
+                self.record_updated_parameter(param_name, param)?;
             }
         }
 
@@ -290,7 +449,7 @@ impl FusedOptimizer {
             .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
-        for (param_name, op, param, grad) in operations {
+        for (param_name, op, mut param, grad) in operations {
             if let FusedOperation::FusedAdamW {
                 lr,
                 beta1,
@@ -310,8 +469,9 @@ impl FusedOptimizer {
                     });
 
                 // Fused AdamW update with decoupled weight decay
-                self.fused_adamw_update(
-                    &param,
+                Self::fused_adamw_update(
+                    &param_name,
+                    &mut param,
                     &grad,
                     opt_state,
                     lr,
@@ -320,6 +480,7 @@ impl FusedOptimizer {
                     eps,
                     weight_decay,
                 )?;
+                self.record_updated_parameter(param_name, param)?;
             }
         }
 
@@ -342,7 +503,7 @@ impl FusedOptimizer {
             .map_err(|_| TrustformersError::lock_error("fusion mutex poisoned".to_string()))?;
         let batch_size = operations.len();
 
-        for (param_name, op, param, grad) in operations {
+        for (param_name, op, mut param, grad) in operations {
             if let FusedOperation::FusedSGDMomentum {
                 lr,
                 momentum,
@@ -361,8 +522,9 @@ impl FusedOptimizer {
                     });
 
                 // Fused SGD with momentum update
-                self.fused_sgd_update(
-                    &param,
+                Self::fused_sgd_update(
+                    &param_name,
+                    &mut param,
                     &grad,
                     opt_state,
                     lr,
@@ -371,6 +533,7 @@ impl FusedOptimizer {
                     weight_decay,
                     nesterov,
                 )?;
+                self.record_updated_parameter(param_name, param)?;
             }
         }
 
@@ -402,21 +565,27 @@ impl FusedOptimizer {
         // Compute global gradient norm for batch
         let global_norm = self.compute_global_norm(&gradients)?;
 
-        for (_, op, _, grad) in operations {
+        // Scale factor shared by the whole batch: clip only when the *global* norm
+        // exceeds `max_norm`, matching `torch.nn.utils.clip_grad_norm_` semantics.
+        for (param_name, op, _, mut grad) in operations {
             if let FusedOperation::FusedGradientClipping {
                 max_norm,
                 scale_factor,
             } = op
             {
-                // Apply clipping with pre-computed global norm
-                if global_norm > max_norm {
-                    let clip_coef = max_norm / global_norm;
-                    let grad_mut = grad;
-                    grad_mut.mul_scalar((clip_coef * scale_factor) as f32)?;
+                let scale = if global_norm > max_norm && global_norm > 0.0 {
+                    (max_norm / global_norm) * scale_factor
                 } else {
-                    let grad_mut = grad;
-                    grad_mut.mul_scalar(scale_factor as f32)?;
-                }
+                    scale_factor
+                };
+                Self::scale_tensor_in_place(&mut grad, scale as f32)?;
+
+                let mut clipped = self.clipped_gradients.lock().map_err(|_| {
+                    TrustformersError::lock_error(
+                        "fusion clipped-gradient mutex poisoned".to_string(),
+                    )
+                })?;
+                clipped.insert(param_name, grad);
             }
         }
 
@@ -440,10 +609,13 @@ impl FusedOptimizer {
         Ok(())
     }
 
-    /// Optimized Adam update with fused operations
+    /// Optimized Adam update with fused operations.
+    ///
+    /// Writes the updated values back into `param` — the per-parameter momentum and
+    /// variance buffers live in `state`, keyed by the caller-supplied `param_name`.
     fn fused_adam_update(
-        &self,
-        param: &Tensor,
+        param_name: &str,
+        param: &mut Tensor,
         grad: &Tensor,
         state: &mut OptimizerState,
         lr: f64,
@@ -452,10 +624,8 @@ impl FusedOptimizer {
         eps: f64,
         weight_decay: f64,
     ) -> Result<()> {
-        use crate::common::ParameterIds;
-
         state.step += 1;
-        let param_id = ParameterIds::from_tensor(param)?;
+        let param_id = param_name.to_string();
         let param_len = param.data()?.len();
 
         // Get or initialize momentum and variance buffers
@@ -493,13 +663,15 @@ impl FusedOptimizer {
             param_data[i] -= lr as f32 * m_hat / (v_hat.sqrt() + eps as f32);
         }
 
-        Ok(())
+        param.set_data_f32(&param_data)
     }
 
-    /// Optimized AdamW update with fused operations and decoupled weight decay
+    /// Optimized AdamW update with fused operations and decoupled weight decay.
+    ///
+    /// Writes the updated values back into `param`.
     fn fused_adamw_update(
-        &self,
-        param: &Tensor,
+        param_name: &str,
+        param: &mut Tensor,
         grad: &Tensor,
         state: &mut OptimizerState,
         lr: f64,
@@ -508,10 +680,8 @@ impl FusedOptimizer {
         eps: f64,
         weight_decay: f64,
     ) -> Result<()> {
-        use crate::common::ParameterIds;
-
         state.step += 1;
-        let param_id = ParameterIds::from_tensor(param)?;
+        let param_id = param_name.to_string();
         let param_len = param.data()?.len();
 
         // Get or initialize momentum and variance buffers
@@ -548,13 +718,15 @@ impl FusedOptimizer {
             param_data[i] -= adaptive_step + weight_decay_step;
         }
 
-        Ok(())
+        param.set_data_f32(&param_data)
     }
 
-    /// Optimized SGD update with fused momentum
+    /// Optimized SGD update with fused momentum.
+    ///
+    /// Writes the updated values back into `param`.
     fn fused_sgd_update(
-        &self,
-        param: &Tensor,
+        param_name: &str,
+        param: &mut Tensor,
         grad: &Tensor,
         state: &mut OptimizerState,
         lr: f64,
@@ -563,10 +735,8 @@ impl FusedOptimizer {
         weight_decay: f64,
         nesterov: bool,
     ) -> Result<()> {
-        use crate::common::ParameterIds;
-
         state.step += 1;
-        let param_id = ParameterIds::from_tensor(param)?;
+        let param_id = param_name.to_string();
         let param_len = param.data()?.len();
 
         // Get or initialize momentum buffer
@@ -610,7 +780,7 @@ impl FusedOptimizer {
             }
         }
 
-        Ok(())
+        param.set_data_f32(&param_data)
     }
 
     /// Compute global gradient norm for clipping
@@ -888,5 +1058,208 @@ mod tests {
 
         // Expected: sqrt(9 + 4) = sqrt(13) ≈ 3.606
         assert!((global_norm - 3.606).abs() < 0.01);
+    }
+
+    /// Regression: the clipping arm used to compute `clip_coef` and drop the result,
+    /// so a gradient with norm above `max_norm` came back unchanged.
+    #[test]
+    fn test_fused_clipping_actually_clips() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        // 4 elements of 5.0 => norm = sqrt(4 * 25) = 10.0
+        let grad = Tensor::from_vec(vec![5.0_f32; 4], &[4]).expect("grad tensor");
+        let param = Tensor::from_vec(vec![0.0_f32; 4], &[4]).expect("param tensor");
+        let before = grad.norm().expect("norm before");
+        assert!((before - 10.0).abs() < 1e-4, "precondition norm: {before}");
+
+        optimizer
+            .queue_operation(
+                "w".to_string(),
+                FusedOperation::FusedGradientClipping {
+                    max_norm: 1.0,
+                    scale_factor: 1.0,
+                },
+                param,
+                grad,
+            )
+            .expect("queue clipping");
+        optimizer.flush().expect("flush");
+
+        let clipped = optimizer.take_clipped_gradients().expect("take clipped");
+        let out = clipped.get("w").expect("clipped gradient recorded");
+        let after = out.norm().expect("norm after");
+        assert!(
+            (after - 1.0).abs() < 1e-4,
+            "gradient norm must be clipped to max_norm, got {after}"
+        );
+    }
+
+    /// Regression: `scale_factor` was also dropped on the non-clipping path.
+    #[test]
+    fn test_fused_clipping_applies_scale_factor_below_threshold() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        let grad = Tensor::from_vec(vec![1.0_f32; 4], &[4]).expect("grad tensor");
+        let param = Tensor::from_vec(vec![0.0_f32; 4], &[4]).expect("param tensor");
+
+        optimizer
+            .queue_operation(
+                "w".to_string(),
+                FusedOperation::FusedGradientClipping {
+                    max_norm: 100.0,
+                    scale_factor: 0.5,
+                },
+                param,
+                grad,
+            )
+            .expect("queue clipping");
+        optimizer.flush().expect("flush");
+
+        let clipped = optimizer.take_clipped_gradients().expect("take clipped");
+        let data = clipped.get("w").expect("clipped gradient").data().expect("data");
+        for v in data {
+            assert!((v - 0.5).abs() < 1e-6, "scale_factor must be applied: {v}");
+        }
+    }
+
+    /// Regression: `fused_adam_update` wrote into `param.data()?`, a throwaway copy,
+    /// so the parameter never moved.
+    #[test]
+    fn test_fused_adam_moves_parameter() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        let param = Tensor::from_vec(vec![1.0_f32; 4], &[4]).expect("param tensor");
+        let grad = Tensor::from_vec(vec![1.0_f32; 4], &[4]).expect("grad tensor");
+
+        optimizer
+            .queue_operation(
+                "w".to_string(),
+                FusedOperation::FusedAdam {
+                    lr: 0.1,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    eps: 1e-8,
+                    weight_decay: 0.0,
+                },
+                param,
+                grad,
+            )
+            .expect("queue adam");
+        optimizer.flush().expect("flush");
+
+        let updated = optimizer.take_updated_parameters().expect("take updated");
+        let data = updated.get("w").expect("updated parameter").data().expect("data");
+        // Step 1 Adam with g=1: m_hat = g, v_hat = g^2 => step ≈ lr.
+        for v in data {
+            assert!(v < 1.0, "parameter must decrease, got {v}");
+            assert!(
+                (v - 0.9).abs() < 1e-3,
+                "first Adam step should be ≈ lr = 0.1, got {v}"
+            );
+        }
+    }
+
+    /// Adam state must persist across steps: identical gradients give shrinking steps
+    /// once the bias correction saturates.
+    #[test]
+    fn test_fused_adam_in_place_carries_state() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        let mut param = Tensor::from_vec(vec![0.0_f32; 2], &[2]).expect("param");
+        let mut grad = Tensor::from_vec(vec![1.0_f32; 2], &[2]).expect("grad");
+        let op = FusedOperation::FusedAdam {
+            lr: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        };
+
+        optimizer
+            .apply_in_place("w", op.clone(), &mut param, &mut grad)
+            .expect("step 1");
+        let after_first = param.data().expect("data")[0];
+        assert!(after_first < 0.0, "first step must move the parameter");
+
+        // Second step with a *zero* gradient: only carried momentum can move the
+        // parameter now. A stateless implementation would leave it exactly in place.
+        let mut zero_grad = Tensor::from_vec(vec![0.0_f32; 2], &[2]).expect("zero grad");
+        optimizer.apply_in_place("w", op, &mut param, &mut zero_grad).expect("step 2");
+        let after_second = param.data().expect("data")[0];
+
+        assert!(
+            (after_second - after_first).abs() > 1e-6,
+            "carried momentum must still move the parameter on a zero gradient: \
+             {after_first} -> {after_second}"
+        );
+    }
+
+    /// Regression: SGD wrote into a throwaway copy too.
+    #[test]
+    fn test_fused_sgd_in_place_moves_parameter() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        let mut param = Tensor::from_vec(vec![1.0_f32, 2.0], &[2]).expect("param");
+        let mut grad = Tensor::from_vec(vec![1.0_f32, 1.0], &[2]).expect("grad");
+
+        optimizer
+            .apply_in_place(
+                "w",
+                FusedOperation::FusedSGDMomentum {
+                    lr: 0.5,
+                    momentum: 0.0,
+                    dampening: 0.0,
+                    weight_decay: 0.0,
+                    nesterov: false,
+                },
+                &mut param,
+                &mut grad,
+            )
+            .expect("sgd step");
+
+        let data = param.data().expect("data");
+        // Plain SGD: p -= lr * g  =>  1.0 - 0.5 = 0.5, 2.0 - 0.5 = 1.5
+        assert!((data[0] - 0.5).abs() < 1e-6, "got {}", data[0]);
+        assert!((data[1] - 1.5).abs() < 1e-6, "got {}", data[1]);
+    }
+
+    /// Convergence smoke test on a quadratic bowl f(x) = sum(x^2), grad = 2x.
+    #[test]
+    fn test_fused_adam_converges_on_quadratic() {
+        let config = FusionConfig::default();
+        let mut optimizer = FusedOptimizer::new(config).expect("create fused optimizer");
+
+        let mut param = Tensor::from_vec(vec![1.0_f32; 4], &[4]).expect("param");
+        let initial_loss: f32 = param.data().expect("data").iter().map(|v| v * v).sum();
+
+        for _ in 0..400 {
+            let grad_data: Vec<f32> = param.data().expect("data").iter().map(|v| 2.0 * v).collect();
+            let mut grad = Tensor::from_vec(grad_data, &[4]).expect("grad");
+            optimizer
+                .apply_in_place(
+                    "w",
+                    FusedOperation::FusedAdam {
+                        lr: 0.05,
+                        beta1: 0.9,
+                        beta2: 0.999,
+                        eps: 1e-8,
+                        weight_decay: 0.0,
+                    },
+                    &mut param,
+                    &mut grad,
+                )
+                .expect("adam step");
+        }
+
+        let final_loss: f32 = param.data().expect("data").iter().map(|v| v * v).sum();
+        assert!(
+            final_loss < initial_loss * 1e-2,
+            "loss must decrease: {initial_loss} -> {final_loss}"
+        );
     }
 }

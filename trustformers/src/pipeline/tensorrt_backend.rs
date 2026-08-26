@@ -8,11 +8,42 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trustformers_core::errors::{Result as CoreResult, TrustformersError as CoreTrustformersError};
-use trustformers_core::traits::{Model, Tokenizer};
-// Note: Using mock types since actual TensorRT runtime types need implementation
 use trustformers_core::export::tensorrt::TensorRTConfig;
+use trustformers_core::traits::{Model, Tokenizer};
 
-// Mock TensorRT types - replace with actual implementation
+// # Why every real code path here fails
+//
+// A TensorRT `.plan` engine is the output of NVIDIA's closed-source builder
+// (`nvinfer`), auto-tuned for the exact GPU/driver/TensorRT version of the
+// building machine; it cannot be produced or read in pure Rust (compare
+// `trustformers_core::export::tensorrt`, which documents exactly this and
+// refuses to write a look-alike file). This file used to build an "engine"
+// for any path, execute it by returning `Tensor::zeros(&[1, 10])`, report a
+// fixed benchmark, and describe the device as an
+// `"NVIDIA GeForce RTX 4090"` regardless of what (if any) GPU is actually
+// present. None of that survives: every method that would need the real
+// runtime now returns a structured [`TrustformersError::FeatureUnavailable`].
+const TENSORRT_UNAVAILABLE_REASON: &str =
+    "TensorRT inference requires NVIDIA's TensorRT runtime (C++), which this pure-Rust build \
+     does not link. A `.plan` engine cannot be built or read without it, and no pure-Rust \
+     TensorRT interpreter exists in trustformers-core.";
+
+fn tensorrt_unavailable(feature: &str) -> TrustformersError {
+    TrustformersError::FeatureUnavailable {
+        message: TENSORRT_UNAVAILABLE_REASON.to_string(),
+        feature: feature.to_string(),
+        suggestion: Some(
+            "Export the model to ONNX and use trustformers::pipeline::onnx_backend instead; \
+             it runs on a real pure-Rust CPU interpreter."
+                .to_string(),
+        ),
+        alternatives: vec!["onnx_backend".to_string()],
+    }
+}
+
+/// TensorRT client handle. Holding one claims nothing about an engine or
+/// device — only [`TensorRTBackend::load_engine`]/[`TensorRTBackend::build_engine`]
+/// would make (and honestly refuse) that claim.
 #[derive(Debug, Clone)]
 pub struct TensorRTBackend;
 
@@ -103,73 +134,77 @@ pub enum LogLevel {
     Verbose,
 }
 
-// Mock implementations
 impl TensorRTBackend {
     pub fn new(_config: TensorRTConfig) -> Result<Self> {
         Ok(Self)
     }
 
+    /// Always fails: no build of this crate can read a `.plan` engine file.
     pub fn load_engine(&self, _path: &PathBuf) -> Result<TensorRTEngine> {
-        Ok(TensorRTEngine)
+        Err(tensorrt_unavailable("tensorrt_engine_load"))
     }
 
+    /// Always fails: no build of this crate can invoke NVIDIA's engine
+    /// builder.
     pub fn build_engine(&self, _builder: TensorRTBuilder) -> Result<TensorRTEngine> {
-        Ok(TensorRTEngine)
+        Err(tensorrt_unavailable("tensorrt_engine_build"))
     }
 
+    /// Always fails: there is no TensorRT runtime here to enumerate GPUs/DLAs
+    /// with. The old `vec!["GPU:0", "DLA:0"]` claimed hardware nothing here
+    /// can actually drive.
     pub fn get_available_devices(&self) -> Result<Vec<String>> {
-        Ok(vec!["GPU:0".to_string(), "DLA:0".to_string()])
+        Err(tensorrt_unavailable("device_enumeration"))
     }
 
     pub fn get_device_properties(&self, _device: &str) -> Result<HashMap<String, String>> {
-        let mut props = HashMap::new();
-        props.insert("type".to_string(), "mock".to_string());
-        Ok(props)
+        Err(tensorrt_unavailable("device_properties"))
     }
 
+    /// Always fails: there is no real engine to serialize.
     pub fn save_engine(&self, _engine: &TensorRTEngine, _path: &Path) -> Result<()> {
-        // Mock implementation - would serialize engine to file
-        Ok(())
+        Err(tensorrt_unavailable("tensorrt_engine_save"))
     }
 }
 
 impl TensorRTBuilder {
+    /// An inert builder token; it makes no claim about `_path` until
+    /// [`TensorRTBackend::build_engine`] (which always fails) is called.
     pub fn from_path<P: AsRef<Path>>(_path: P) -> Result<Self> {
         Ok(TensorRTBuilder)
     }
 }
 
 impl TensorRTEngine {
+    /// `TensorRTEngine` is a public unit struct, directly constructible by any
+    /// caller — not only via `TensorRTBackend::load_engine`/`build_engine`
+    /// (which always fail). These accessors must therefore be honest on their
+    /// own: an engine value that was never really built has no real input
+    /// names, so this reports none rather than the invented
+    /// `"input_ids"`/`"attention_mask"` of the old mock.
     pub fn input_names(&self) -> Vec<String> {
-        vec!["input_ids".to_string(), "attention_mask".to_string()]
+        Vec::new()
     }
 
     pub fn output_names(&self) -> Vec<String> {
-        vec!["logits".to_string()]
+        Vec::new()
     }
 
     pub fn input_shapes(&self) -> HashMap<String, Vec<usize>> {
-        let mut shapes = HashMap::new();
-        shapes.insert("input_ids".to_string(), vec![1, 512]);
-        shapes.insert("attention_mask".to_string(), vec![1, 512]);
-        shapes
+        HashMap::new()
     }
 
     pub fn output_shapes(&self) -> HashMap<String, Vec<usize>> {
-        let mut shapes = HashMap::new();
-        shapes.insert("logits".to_string(), vec![1, 1000]); // Common classification size
-        shapes
+        HashMap::new()
     }
 
+    /// Always fails: the old body returned `Tensor::zeros(&[1, 10])` as
+    /// "execution" regardless of `_inputs`.
     pub fn execute(
         &self,
         _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        // Mock implementation - return empty result
-        let mut outputs = HashMap::new();
-        let mock_tensor = trustformers_core::tensor::Tensor::zeros(&[1, 10])?;
-        outputs.insert("logits".to_string(), mock_tensor);
-        Ok(outputs)
+        Err(tensorrt_unavailable("tensorrt_execution"))
     }
 
     pub fn execute_with_device(
@@ -187,25 +222,18 @@ impl TensorRTEngine {
         self.execute(inputs)
     }
 
+    /// Always fails: there is no real execution to time.
     pub fn benchmark(
         &self,
         _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
         _num_runs: usize,
         _warmup_runs: usize,
     ) -> Result<BenchmarkResults> {
-        Ok(BenchmarkResults {
-            avg_latency_ms: 20.0,
-            throughput: 50.0,
-            memory_usage: 2 * 1024 * 1024 * 1024, // 2GB
-        })
+        Err(tensorrt_unavailable("tensorrt_benchmark"))
     }
 
     pub fn get_memory_info(&self) -> Result<MemoryInfo> {
-        Ok(MemoryInfo {
-            total_memory: 12 * 1024 * 1024 * 1024, // 12GB
-            used_memory: 4 * 1024 * 1024 * 1024,   // 4GB
-            free_memory: 8 * 1024 * 1024 * 1024,   // 8GB
-        })
+        Err(tensorrt_unavailable("memory_info"))
     }
 
     pub fn execute_with_context(
@@ -213,46 +241,34 @@ impl TensorRTEngine {
         inputs: HashMap<String, trustformers_core::tensor::Tensor>,
         _context_id: usize,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        // Mock implementation - context_id is ignored
         self.execute(inputs)
     }
 
+    /// Always fails. The old body invented a specific GPU
+    /// (`"NVIDIA GeForce RTX 4090"`, a driver version, a CUDA version) with no
+    /// basis whatsoever — not even a real `nvidia-smi`/CUDA query.
     pub fn get_device_info(&self) -> Result<HashMap<String, String>> {
-        let mut info = HashMap::new();
-        info.insert(
-            "device_name".to_string(),
-            "NVIDIA GeForce RTX 4090".to_string(),
-        );
-        info.insert("driver_version".to_string(), "535.104.05".to_string());
-        info.insert("cuda_version".to_string(), "12.2".to_string());
-        info.insert("compute_capability".to_string(), "8.9".to_string());
-        Ok(info)
+        Err(tensorrt_unavailable("device_info"))
     }
 
     pub fn optimize_for_shapes(&self, _shapes: HashMap<String, Vec<i32>>) -> Result<()> {
-        // Mock implementation - shapes optimization
-        Ok(())
+        Err(tensorrt_unavailable("shape_optimization"))
     }
 
     pub fn create_execution_context(&self) -> Result<usize> {
-        // Mock implementation - return a context ID
-        Ok(42)
+        Err(tensorrt_unavailable("execution_context"))
     }
 
+    /// Always fails. The old body invented throughput/bandwidth/utilization/
+    /// power numbers with no execution behind them.
     pub fn get_performance_metrics(&self) -> Result<HashMap<String, f32>> {
-        let mut metrics = HashMap::new();
-        metrics.insert("throughput_ops_per_sec".to_string(), 1250.0);
-        metrics.insert("memory_bandwidth_gb_per_sec".to_string(), 1008.0);
-        metrics.insert("gpu_utilization_percent".to_string(), 85.0);
-        metrics.insert("power_usage_watts".to_string(), 350.0);
-        Ok(metrics)
+        Err(tensorrt_unavailable("performance_metrics"))
     }
 
     pub fn run(
         &self,
         inputs: HashMap<String, trustformers_core::tensor::Tensor>,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        // Delegate to execute method
         self.execute(inputs)
     }
 }
@@ -784,9 +800,9 @@ impl Model for TensorRTModel {
     type Input = HashMap<String, Tensor>;
     type Output = HashMap<String, Tensor>;
 
-    /// Forward pass implementation for Model trait
+    /// Forward pass implementation for Model trait. Always fails: see the
+    /// module docs for why no TensorRT execution path exists in this build.
     fn forward(&self, inputs: Self::Input) -> CoreResult<Self::Output> {
-        // Run inference using the TensorRT engine
         self.engine.run(inputs).map_err(Into::into)
     }
 
@@ -801,11 +817,13 @@ impl Model for TensorRTModel {
         &self.config
     }
 
-    /// Get the number of parameters in the model
+    /// Get the number of parameters in the model.
+    ///
+    /// Honestly `0`: no build of this crate can build or load a real TensorRT
+    /// engine (see [`TensorRTModel::from_config`]), so there are never any
+    /// real parameters behind a `TensorRTModel` value to count.
     fn num_parameters(&self) -> usize {
-        // For TensorRT models, we can't easily determine this without parsing the model
-        // Return a placeholder value or implement actual parameter counting if needed
-        0 // Placeholder - would need TensorRT model introspection
+        0
     }
 }
 
@@ -1702,5 +1720,123 @@ mod tests {
             .with_engine_cache(cache_path.clone());
 
         assert_eq!(config.engine_cache_path, Some(cache_path));
+    }
+
+    // ── Honesty regression tests ──────────────────────────────────────────────
+
+    /// Regression test for `execute` returning `Tensor::zeros(&[1, 10])`
+    /// regardless of `_inputs`.
+    #[test]
+    fn execute_never_fabricates_a_zero_tensor() {
+        let engine = TensorRTEngine;
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "input_ids".to_string(),
+            trustformers_core::tensor::Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3])
+                .expect("tensor"),
+        );
+
+        let err = engine
+            .execute(inputs.clone())
+            .expect_err("no TensorRT runtime is linked into this build");
+        assert!(!err.to_string().is_empty());
+
+        assert!(engine.benchmark(inputs.clone(), 5, 2).is_err());
+        assert!(engine.get_memory_info().is_err());
+        assert!(engine.run(inputs).is_err());
+    }
+
+    /// Regression test for `get_device_info` inventing an
+    /// `"NVIDIA GeForce RTX 4090"` and driver/CUDA versions with no basis.
+    #[test]
+    fn get_device_info_never_invents_a_gpu() {
+        let engine = TensorRTEngine;
+        assert!(engine.get_device_info().is_err());
+        assert!(engine.get_performance_metrics().is_err());
+    }
+
+    /// Regression test for `input_names`/`output_names`/`input_shapes`/
+    /// `output_shapes` inventing `"input_ids"`/`"attention_mask"`/`[1, 512]`/
+    /// `logits: [1, 1000]` for an engine that was never really built.
+    #[test]
+    fn engine_introspection_reports_nothing_real_instead_of_invented_names() {
+        let engine = TensorRTEngine;
+        assert!(engine.input_names().is_empty());
+        assert!(engine.output_names().is_empty());
+        assert!(engine.input_shapes().is_empty());
+        assert!(engine.output_shapes().is_empty());
+    }
+
+    /// Regression test for `TensorRTBackend::load_engine`/`build_engine`/
+    /// `save_engine`/device enumeration unconditionally succeeding.
+    #[test]
+    fn backend_engine_lifecycle_always_fails() {
+        let backend = TensorRTBackend;
+        assert!(backend.load_engine(&PathBuf::from("model.plan")).is_err());
+        assert!(backend
+            .build_engine(TensorRTBuilder::from_path("model.onnx").expect("inert token"))
+            .is_err());
+        assert!(backend.get_available_devices().is_err());
+        assert!(backend.get_device_properties("GPU:0").is_err());
+        assert!(backend.save_engine(&TensorRTEngine, Path::new("out.plan")).is_err());
+    }
+
+    /// Regression test: `from_config` must refuse every real model path, even
+    /// one that exists on disk, since no build of this crate can build or
+    /// load a TensorRT engine.
+    #[test]
+    fn from_config_always_fails_even_for_an_existing_file() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        std::fs::write(&model_path, b"not a real onnx or plan file").expect("write dummy file");
+
+        let config = TensorRTBackendConfig::latency_optimized(model_path);
+        let message = match TensorRTModel::from_config(config) {
+            Ok(_) => panic!("no TensorRT runtime is linked into this build"),
+            Err(e) => e.to_string(),
+        };
+        assert!(!message.is_empty());
+    }
+
+    /// Regression test: the public pipeline factory must fail loudly rather
+    /// than build a classifier on top of a `Tensor::zeros` mock.
+    #[test]
+    fn tensorrt_text_classification_pipeline_fails_loudly() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.onnx");
+        std::fs::write(&model_path, b"not a real onnx or plan file").expect("write dummy file");
+
+        struct StubTokenizer;
+        impl Clone for StubTokenizer {
+            fn clone(&self) -> Self {
+                StubTokenizer
+            }
+        }
+        impl Tokenizer for StubTokenizer {
+            fn encode(&self, _text: &str) -> CoreResult<TokenizedInput> {
+                Ok(TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]))
+            }
+            fn encode_pair(&self, text: &str, _text2: &str) -> CoreResult<TokenizedInput> {
+                self.encode(text)
+            }
+            fn decode(&self, ids: &[u32]) -> CoreResult<String> {
+                Ok(format!("{ids:?}"))
+            }
+            fn vocab_size(&self) -> usize {
+                10
+            }
+            fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+                std::collections::HashMap::new()
+            }
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+        }
+
+        let result = tensorrt_text_classification_pipeline(&model_path, StubTokenizer, None);
+        assert!(result.is_err());
     }
 }

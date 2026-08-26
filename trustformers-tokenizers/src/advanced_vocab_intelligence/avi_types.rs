@@ -629,4 +629,9 @@ pub struct VocabIntelligenceAnalyzer {
     #[allow(dead_code)]
     pub(super) similarity_cache: HashMap<(String, String), f32>,
     pub(super) evolution_history: Vec<EvolutionSnapshot>,
+    /// The token set of the vocabulary as of the most recent
+    /// `analyze_vocabulary_evolution` call, kept so the *next* call can
+    /// compute a real added/removed token diff instead of a fabricated
+    /// example change. `None` until the first snapshot has been taken.
+    pub(super) last_vocab_tokens: Option<std::collections::HashSet<String>>,
 }

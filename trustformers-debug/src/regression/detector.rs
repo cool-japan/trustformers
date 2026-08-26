@@ -206,11 +206,8 @@ impl RegressionDetector {
 
         for (name, measurements) in &current_by_name {
             // Baseline aggregate for this component.
-            let baseline_measurements: Vec<&PerfMeasurement> = baseline
-                .measurements
-                .iter()
-                .filter(|m| m.name == *name)
-                .collect();
+            let baseline_measurements: Vec<&PerfMeasurement> =
+                baseline.measurements.iter().filter(|m| m.name == *name).collect();
 
             if baseline_measurements.is_empty() {
                 continue;
@@ -223,15 +220,15 @@ impl RegressionDetector {
             let current_mean_throughput =
                 measurements.iter().map(|m| m.throughput).sum::<f64>() / measurements.len() as f64;
 
-            let baseline_mean_latency = baseline_measurements.iter().map(|m| m.latency_ms).sum::<f64>()
-                / baseline_measurements.len() as f64;
-            let baseline_mean_memory = baseline_measurements.iter().map(|m| m.memory_mb).sum::<f64>()
-                / baseline_measurements.len() as f64;
-            let baseline_mean_throughput = baseline_measurements
-                .iter()
-                .map(|m| m.throughput)
-                .sum::<f64>()
-                / baseline_measurements.len() as f64;
+            let baseline_mean_latency =
+                baseline_measurements.iter().map(|m| m.latency_ms).sum::<f64>()
+                    / baseline_measurements.len() as f64;
+            let baseline_mean_memory =
+                baseline_measurements.iter().map(|m| m.memory_mb).sum::<f64>()
+                    / baseline_measurements.len() as f64;
+            let baseline_mean_throughput =
+                baseline_measurements.iter().map(|m| m.throughput).sum::<f64>()
+                    / baseline_measurements.len() as f64;
 
             let stats = baseline.stats_for(name);
 
@@ -304,7 +301,9 @@ impl RegressionDetector {
         }
 
         // Sort by severity (worst first) so consumers see critical issues first.
-        alerts.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+        alerts.sort_by(|a, b| {
+            b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal)
+        });
         alerts
     }
 
@@ -335,11 +334,12 @@ impl RegressionDetector {
 
     /// Persist a `PerfBaseline` as JSON to `path`.
     pub fn save_baseline(&self, baseline: &PerfBaseline, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(baseline)
-            .context("failed to serialize baseline")?;
+        let json =
+            serde_json::to_string_pretty(baseline).context("failed to serialize baseline")?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create baseline directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create baseline directory: {}", parent.display())
+            })?;
         }
         std::fs::write(path, json)
             .with_context(|| format!("failed to write baseline: {}", path.display()))?;
@@ -363,7 +363,11 @@ impl RegressionDetector {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        PerfBaseline { measurements, created_at, description: description.to_string() }
+        PerfBaseline {
+            measurements,
+            created_at,
+            description: description.to_string(),
+        }
     }
 
     /// Generate actionable recommendations for a list of alerts.
@@ -378,24 +382,41 @@ impl RegressionDetector {
 
         if has_latency {
             recs.push("Profile forward/backward passes to identify new hot-spots (use flame_graph_profiler).".to_string());
-            recs.push("Check for inadvertent Python or C FFI call sites introduced in recent commits.".to_string());
+            recs.push(
+                "Check for inadvertent Python or C FFI call sites introduced in recent commits."
+                    .to_string(),
+            );
             recs.push("Consider operator fusion or kernel-level optimisations for attention / FFN layers.".to_string());
         }
         if has_memory {
-            recs.push("Audit tensor lifetime to ensure activations are freed promptly after use.".to_string());
-            recs.push("Enable gradient checkpointing or reduce batch size to stay within memory budget.".to_string());
+            recs.push(
+                "Audit tensor lifetime to ensure activations are freed promptly after use."
+                    .to_string(),
+            );
+            recs.push(
+                "Enable gradient checkpointing or reduce batch size to stay within memory budget."
+                    .to_string(),
+            );
             recs.push("Use memory_profiler to locate the largest allocations.".to_string());
         }
         if has_throughput {
-            recs.push("Check data-loading pipeline: a slow DataLoader can mask compute regressions.".to_string());
-            recs.push("Investigate whether new ops are preventing Tensor-Core utilisation.".to_string());
+            recs.push(
+                "Check data-loading pipeline: a slow DataLoader can mask compute regressions."
+                    .to_string(),
+            );
+            recs.push(
+                "Investigate whether new ops are preventing Tensor-Core utilisation.".to_string(),
+            );
         }
         if has_critical || has_severe {
             recs.push("URGENT: consider reverting the most recent change and bisecting to isolate the regression.".to_string());
         }
 
         if recs.is_empty() {
-            recs.push("No actionable recommendations — regressions are within acceptable bounds.".to_string());
+            recs.push(
+                "No actionable recommendations — regressions are within acceptable bounds."
+                    .to_string(),
+            );
         }
 
         recs
@@ -410,7 +431,7 @@ impl RegressionDetector {
             Some(std) if std > 0.0 => {
                 let z = (current - baseline_mean).abs() / std;
                 z > self.config.z_score_threshold
-            }
+            },
             _ => true,
         }
     }
@@ -437,7 +458,12 @@ mod tests {
     use super::*;
     use std::env::temp_dir;
 
-    fn make_measurement(name: &str, latency_ms: f64, memory_mb: f64, throughput: f64) -> PerfMeasurement {
+    fn make_measurement(
+        name: &str,
+        latency_ms: f64,
+        memory_mb: f64,
+        throughput: f64,
+    ) -> PerfMeasurement {
         PerfMeasurement {
             name: name.to_string(),
             latency_ms,
@@ -466,7 +492,11 @@ mod tests {
 
     #[test]
     fn test_latency_regression_detected() {
-        let config = RegressionConfig { monitor_memory: false, monitor_throughput: false, ..Default::default() };
+        let config = RegressionConfig {
+            monitor_memory: false,
+            monitor_throughput: false,
+            ..Default::default()
+        };
         let detector = RegressionDetector::new(config);
         let baseline = make_baseline(vec![
             make_measurement("attn", 10.0, 0.0, 0.0),
@@ -481,7 +511,11 @@ mod tests {
 
     #[test]
     fn test_memory_regression_detected() {
-        let config = RegressionConfig { monitor_latency: false, monitor_throughput: false, ..Default::default() };
+        let config = RegressionConfig {
+            monitor_latency: false,
+            monitor_throughput: false,
+            ..Default::default()
+        };
         let detector = RegressionDetector::new(config);
         let baseline = make_baseline(vec![make_measurement("ffn", 0.0, 100.0, 0.0)]);
         let current = vec![make_measurement("ffn", 0.0, 150.0, 0.0)]; // 50%
@@ -492,7 +526,11 @@ mod tests {
 
     #[test]
     fn test_throughput_regression_detected() {
-        let config = RegressionConfig { monitor_latency: false, monitor_memory: false, ..Default::default() };
+        let config = RegressionConfig {
+            monitor_latency: false,
+            monitor_memory: false,
+            ..Default::default()
+        };
         let detector = RegressionDetector::new(config);
         let baseline = make_baseline(vec![make_measurement("decode", 0.0, 0.0, 1000.0)]);
         let current = vec![make_measurement("decode", 0.0, 0.0, 600.0)]; // 40%
@@ -504,9 +542,18 @@ mod tests {
     #[test]
     fn test_severity_from_pct() {
         assert_eq!(RegressionSeverity::from_pct(7.0), RegressionSeverity::Minor);
-        assert_eq!(RegressionSeverity::from_pct(15.0), RegressionSeverity::Moderate);
-        assert_eq!(RegressionSeverity::from_pct(35.0), RegressionSeverity::Severe);
-        assert_eq!(RegressionSeverity::from_pct(75.0), RegressionSeverity::Critical);
+        assert_eq!(
+            RegressionSeverity::from_pct(15.0),
+            RegressionSeverity::Moderate
+        );
+        assert_eq!(
+            RegressionSeverity::from_pct(35.0),
+            RegressionSeverity::Severe
+        );
+        assert_eq!(
+            RegressionSeverity::from_pct(75.0),
+            RegressionSeverity::Critical
+        );
     }
 
     #[test]
@@ -533,7 +580,11 @@ mod tests {
 
     #[test]
     fn test_recommendations_populated_for_latency() {
-        let config = RegressionConfig { monitor_memory: false, monitor_throughput: false, ..Default::default() };
+        let config = RegressionConfig {
+            monitor_memory: false,
+            monitor_throughput: false,
+            ..Default::default()
+        };
         let detector = RegressionDetector::new(config);
         let baseline = make_baseline(vec![
             make_measurement("a", 10.0, 0.0, 0.0),
@@ -599,7 +650,6 @@ mod tests {
 
     #[test]
     fn test_detect_alerts_sorted_by_severity() {
-        let detector = RegressionDetector::new(RegressionConfig::default());
         let baseline = make_baseline(vec![
             make_measurement("a", 10.0, 0.0, 0.0),
             make_measurement("a", 10.0, 0.0, 0.0),
@@ -610,7 +660,11 @@ mod tests {
             make_measurement("a", 16.0, 0.0, 0.0), // ~60% → Critical
             make_measurement("b", 11.5, 0.0, 0.0), // ~15% → Moderate
         ];
-        let cfg = RegressionConfig { monitor_memory: false, monitor_throughput: false, ..Default::default() };
+        let cfg = RegressionConfig {
+            monitor_memory: false,
+            monitor_throughput: false,
+            ..Default::default()
+        };
         let det2 = RegressionDetector::new(cfg);
         let alerts = det2.detect(&current, &baseline);
         if alerts.len() >= 2 {
@@ -620,7 +674,11 @@ mod tests {
 
     #[test]
     fn test_regression_metric_variants() {
-        let metrics = [RegressionMetric::Latency, RegressionMetric::Memory, RegressionMetric::Throughput];
+        let metrics = [
+            RegressionMetric::Latency,
+            RegressionMetric::Memory,
+            RegressionMetric::Throughput,
+        ];
         for m in &metrics {
             assert!(!format!("{:?}", m).is_empty());
         }
@@ -657,17 +715,15 @@ mod tests {
     #[test]
     fn test_report_with_alerts_includes_count() {
         let detector = RegressionDetector::new(RegressionConfig::default());
-        let alerts = vec![
-            RegressionAlert {
-                name: "a".to_string(),
-                metric: RegressionMetric::Latency,
-                severity: RegressionSeverity::Minor,
-                baseline_value: 10.0,
-                current_value: 10.5,
-                regression_pct: 5.0,
-                message: "Minor regression".to_string(),
-            },
-        ];
+        let alerts = vec![RegressionAlert {
+            name: "a".to_string(),
+            metric: RegressionMetric::Latency,
+            severity: RegressionSeverity::Minor,
+            baseline_value: 10.0,
+            current_value: 10.5,
+            regression_pct: 5.0,
+            message: "Minor regression".to_string(),
+        }];
         let report = detector.report(&alerts);
         assert!(report.contains("Total alerts: 1"));
     }
@@ -694,9 +750,8 @@ mod tests {
 
     #[test]
     fn test_baseline_stats_p95_p99() {
-        let measurements: Vec<PerfMeasurement> = (1..=10)
-            .map(|i| make_measurement("l", i as f64 * 10.0, 0.0, 0.0))
-            .collect();
+        let measurements: Vec<PerfMeasurement> =
+            (1..=10).map(|i| make_measurement("l", i as f64 * 10.0, 0.0, 0.0)).collect();
         let baseline = make_baseline(measurements);
         let stats = baseline.stats_for("l").expect("should have stats");
         assert!(stats.p95_latency_ms >= stats.mean_latency_ms);

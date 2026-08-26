@@ -1,5 +1,6 @@
 //! Tests for parallel execution engine types
 
+use super::scheduling::PriorityQueue;
 use super::types::*;
 use chrono::Utc;
 use std::time::Duration;

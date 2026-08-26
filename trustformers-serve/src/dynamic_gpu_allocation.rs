@@ -461,16 +461,28 @@ impl DynamicGpuAllocator {
         }
     }
 
-    /// Initialize GPU resources
+    /// Initialize GPU resources from the devices actually present on this host.
+    ///
+    /// On a machine with no discoverable GPU this leaves the resource table
+    /// empty; allocations then fail with [`AllocationError::NoAvailableGpu`]
+    /// rather than being granted on hardware that does not exist.
     pub async fn initialize_resources(&self) -> Result<(), AllocationError> {
+        let device_ids = self.detect_gpu_devices().await?;
+
+        let mut discovered = Vec::with_capacity(device_ids.len());
+        for device_id in device_ids {
+            discovered.push((device_id, self.query_gpu_resource(device_id).await?));
+        }
+
         let mut resources = self.gpu_resources.write().unwrap_or_else(|p| p.into_inner());
-
-        // Detect available GPUs
-        let gpu_count = self.detect_gpu_count().await?;
-
-        for device_id in 0..gpu_count {
-            let resource = self.query_gpu_resource(device_id).await?;
+        for (device_id, resource) in discovered {
             resources.insert(device_id, resource);
+        }
+
+        if resources.is_empty() {
+            tracing::info!(
+                "No GPU devices discovered; the dynamic allocator will refuse GPU allocations"
+            );
         }
 
         Ok(())
@@ -846,30 +858,82 @@ impl DynamicGpuAllocator {
         COUNTER.fetch_add(1, Ordering::SeqCst)
     }
 
-    async fn detect_gpu_count(&self) -> Result<u32, AllocationError> {
-        // Placeholder - in real implementation would use CUDA/ROCm APIs
-        Ok(2)
+    /// Ids of the GPU devices genuinely present on this host.
+    ///
+    /// Shares the driver-backed discovery path used by
+    /// [`crate::resource_management::gpu_manager`], so the two subsystems can
+    /// never disagree about what hardware exists.
+    pub async fn detect_gpu_devices(&self) -> Result<Vec<u32>, AllocationError> {
+        let devices = crate::resource_management::gpu_manager::discover_gpu_devices()
+            .await
+            .map_err(|e| AllocationError::DeviceError(e.to_string()))?;
+        Ok(devices.into_iter().map(|d| d.device_id as u32).collect())
     }
 
-    async fn query_gpu_resource(&self, device_id: u32) -> Result<GpuResource, AllocationError> {
-        // Placeholder - in real implementation would query actual GPU
+    /// Query one real GPU device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocationError::DeviceError`] when the device is not present.
+    /// Capability and performance figures the driver does not expose are left at
+    /// zero rather than being filled in with representative values.
+    pub async fn query_gpu_resource(&self, device_id: u32) -> Result<GpuResource, AllocationError> {
+        let devices = crate::resource_management::gpu_manager::discover_gpu_devices()
+            .await
+            .map_err(|e| AllocationError::DeviceError(e.to_string()))?;
+
+        let device =
+            devices.into_iter().find(|d| d.device_id as u32 == device_id).ok_or_else(|| {
+                AllocationError::DeviceError(format!(
+                    "GPU device {} is not present on this host",
+                    device_id
+                ))
+            })?;
+
+        let total_memory = device.total_memory_mb * 1024 * 1024;
+        let available_memory = device.available_memory_mb * 1024 * 1024;
+
+        let telemetry =
+            crate::resource_management::gpu_manager::GpuResourceManager::device_telemetry(
+                device_id as usize,
+            )
+            .await
+            .map_err(|e| AllocationError::DeviceError(e.to_string()))?;
+
+        // NaN for every reading the driver would not give, so a consumer can
+        // tell "unknown" from "cool and idle". 0.2.1: an unreadable utilization
+        // sensor arrived as `0.0` and was indistinguishable from a genuinely
+        // idle GPU; only temperature and power were NaN-guarded.
+        let (utilization, temperature, power_consumption) = match telemetry {
+            Some(sample) => (
+                sample.utilization_percent.map(|u| u / 100.0).unwrap_or(f32::NAN),
+                sample.temperature_celsius.unwrap_or(f32::NAN),
+                sample.power_watts.unwrap_or(f32::NAN),
+            ),
+            None => (f32::NAN, f32::NAN, f32::NAN),
+        };
+
         Ok(GpuResource {
             device_id,
-            total_memory: 8 * 1024 * 1024 * 1024,     // 8GB
-            available_memory: 6 * 1024 * 1024 * 1024, // 6GB
-            compute_capability: (7, 5),
-            utilization: 0.3,
-            temperature: 65.0,
-            power_consumption: 150.0,
+            total_memory,
+            available_memory,
+            // The discovery path does not expose compute capability; leaving it
+            // at (0, 0) marks it unknown rather than claiming a generation.
+            compute_capability: (0, 0),
+            utilization,
+            temperature,
+            power_consumption,
             status: GpuStatus::Available,
             active_allocations: Vec::new(),
             reserved_memory: 0,
+            // Throughput figures require a benchmark run; zero means "not
+            // measured", never "typical for this class of device".
             performance_profile: PerformanceProfile {
-                fp32_performance: 13.0,
-                fp16_performance: 26.0,
-                int8_performance: 104.0,
-                memory_bandwidth: 448.0,
-                tensor_cores: true,
+                fp32_performance: 0.0,
+                fp16_performance: 0.0,
+                int8_performance: 0.0,
+                memory_bandwidth: 0.0,
+                tensor_cores: false,
             },
         })
     }
@@ -999,22 +1063,38 @@ mod tests {
         assert_eq!(metrics.failed_allocations, 0);
     }
 
+    /// Regression: the allocator must reflect the hardware that is actually
+    /// present. It used to hallucinate two 8 GB GPUs on every machine.
     #[tokio::test]
     async fn test_gpu_resource_monitoring() {
         let scheduler = Arc::new(GpuScheduler::new(Default::default()));
         let config = DynamicAllocationConfig::default();
         let allocator = DynamicGpuAllocator::new(scheduler, config);
 
-        let _ = allocator.initialize_resources().await;
+        let device_ids =
+            allocator.detect_gpu_devices().await.expect("device discovery must not fail");
+        allocator.initialize_resources().await.expect("initialization must not fail");
 
-        // Test resource querying
-        let resource = allocator
-            .query_gpu_resource(0)
-            .await
-            .expect("Query GPU resource should succeed");
-        assert_eq!(resource.device_id, 0);
-        assert!(resource.total_memory > 0);
-        assert!(resource.available_memory <= resource.total_memory);
+        match device_ids.first() {
+            Some(&device_id) => {
+                let resource = allocator
+                    .query_gpu_resource(device_id)
+                    .await
+                    .expect("a discovered device must be queryable");
+                assert_eq!(resource.device_id, device_id);
+                assert!(resource.total_memory > 0);
+                assert!(resource.available_memory <= resource.total_memory);
+            },
+            None => {
+                // No GPU on this host: querying one must fail rather than
+                // returning an invented device.
+                let error = allocator
+                    .query_gpu_resource(0)
+                    .await
+                    .expect_err("a host with no GPU must not report device 0");
+                assert!(matches!(error, AllocationError::DeviceError(_)));
+            },
+        }
     }
 
     #[tokio::test]

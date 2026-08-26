@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use trustformers_core::{
-    errors::{invalid_input, TrustformersError},
+    errors::{invalid_input, not_implemented, TrustformersError},
     tensor::Tensor,
     Result,
 };
@@ -499,6 +499,12 @@ pub enum ParallelismStrategy {
     HybridParallel,
 }
 
+pub mod components;
+#[cfg(test)]
+mod components_tests;
+
+pub use components::ComponentModule;
+
 /// Main hybrid architecture implementation
 pub struct HybridArchitecture {
     /// Configuration
@@ -511,10 +517,12 @@ pub struct HybridArchitecture {
     pub adaptive_controller: Option<AdaptiveController>,
     /// Cross-modal processor
     pub cross_modal_processor: Option<CrossModalProcessor>,
+    /// Learned fusion / ensemble parameters, owned so they persist across calls
+    pub fusion_operator: components::FusionOperator,
 }
 
 /// Individual component instance
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ComponentInstance {
     /// Component type
     pub component_type: ArchitecturalComponent,
@@ -524,6 +532,37 @@ pub struct ComponentInstance {
     pub state: ComponentState,
     /// Performance metrics
     pub metrics: ComponentMetrics,
+    /// Executable module, built lazily from the first input's feature width
+    pub module: Option<ComponentModule>,
+}
+
+impl ComponentInstance {
+    /// Run the component, instantiating its module on first use.
+    ///
+    /// The module is built for the observed feature width so a sequential
+    /// pipeline keeps its shape, and an unimplemented component reports that
+    /// rather than passing its input through unchanged.
+    pub fn forward(&mut self, input: &Tensor) -> Result<Tensor> {
+        let shape = input.shape();
+        let width = *shape
+            .last()
+            .ok_or_else(|| invalid_input("hybrid component input has no dimensions"))?;
+
+        if self.module.is_none() {
+            self.module = Some(ComponentModule::build(&self.component_type, width)?);
+        }
+
+        let module = self
+            .module
+            .as_ref()
+            .ok_or_else(|| invalid_input("hybrid component module was not instantiated"))?;
+        module.forward(input)
+    }
+
+    /// Number of trainable scalars, or zero before the module is built.
+    pub fn parameter_count(&self) -> usize {
+        self.module.as_ref().map(|m| m.parameter_count()).unwrap_or(0)
+    }
 }
 
 /// Component parameters
@@ -763,6 +802,7 @@ impl HybridArchitecture {
             fusion_layers,
             adaptive_controller,
             cross_modal_processor,
+            fusion_operator: components::FusionOperator::new(),
         })
     }
 
@@ -799,32 +839,7 @@ impl HybridArchitecture {
 
             let start_time = std::time::Instant::now();
 
-            current_input = match component.component_type.clone() {
-                ArchitecturalComponent::Transformer { .. } => {
-                    Self::forward_transformer_static(component, &current_input)
-                },
-                ArchitecturalComponent::CNN { .. } => {
-                    Self::forward_cnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::RNN { .. } => {
-                    Self::forward_rnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::StateSpace { .. } => {
-                    Self::forward_state_space_static(component, &current_input)
-                },
-                ArchitecturalComponent::GNN { .. } => {
-                    Self::forward_gnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::Attention { .. } => {
-                    Self::forward_attention_static(component, &current_input)
-                },
-                ArchitecturalComponent::Memory { .. } => {
-                    Self::forward_memory_static(component, &current_input)
-                },
-                ArchitecturalComponent::Custom { .. } => {
-                    Self::forward_custom_component_static(component, &current_input)
-                },
-            }?;
+            current_input = component.forward(&current_input)?;
 
             // Update metrics
             let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -854,26 +869,7 @@ impl HybridArchitecture {
 
             let start_time = std::time::Instant::now();
 
-            let output = match component.component_type.clone() {
-                ArchitecturalComponent::Transformer { .. } => {
-                    Self::forward_transformer_static(component, input)
-                },
-                ArchitecturalComponent::CNN { .. } => Self::forward_cnn_static(component, input),
-                ArchitecturalComponent::RNN { .. } => Self::forward_rnn_static(component, input),
-                ArchitecturalComponent::StateSpace { .. } => {
-                    Self::forward_state_space_static(component, input)
-                },
-                ArchitecturalComponent::GNN { .. } => Self::forward_gnn_static(component, input),
-                ArchitecturalComponent::Attention { .. } => {
-                    Self::forward_attention_static(component, input)
-                },
-                ArchitecturalComponent::Memory { .. } => {
-                    Self::forward_memory_static(component, input)
-                },
-                ArchitecturalComponent::Custom { .. } => {
-                    Self::forward_custom_component_static(component, input)
-                },
-            }?;
+            let output = component.forward(input)?;
 
             // Update metrics
             let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -916,32 +912,7 @@ impl HybridArchitecture {
             } else {
                 let start_time = std::time::Instant::now();
 
-                let result = match component.component_type.clone() {
-                    ArchitecturalComponent::Transformer { .. } => {
-                        Self::forward_transformer_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::CNN { .. } => {
-                        Self::forward_cnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::RNN { .. } => {
-                        Self::forward_rnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::StateSpace { .. } => {
-                        Self::forward_state_space_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::GNN { .. } => {
-                        Self::forward_gnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Attention { .. } => {
-                        Self::forward_attention_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Memory { .. } => {
-                        Self::forward_memory_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Custom { .. } => {
-                        Self::forward_custom_component_static(component, &inputs[0])
-                    },
-                }?;
+                let result = component.forward(&inputs[0])?;
 
                 // Update metrics
                 let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -976,32 +947,7 @@ impl HybridArchitecture {
             } else {
                 let start_time = std::time::Instant::now();
 
-                let result = match component.component_type.clone() {
-                    ArchitecturalComponent::Transformer { .. } => {
-                        Self::forward_transformer_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::CNN { .. } => {
-                        Self::forward_cnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::RNN { .. } => {
-                        Self::forward_rnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::StateSpace { .. } => {
-                        Self::forward_state_space_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::GNN { .. } => {
-                        Self::forward_gnn_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Attention { .. } => {
-                        Self::forward_attention_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Memory { .. } => {
-                        Self::forward_memory_static(component, &inputs[0])
-                    },
-                    ArchitecturalComponent::Custom { .. } => {
-                        Self::forward_custom_component_static(component, &inputs[0])
-                    },
-                }?;
+                let result = component.forward(&inputs[0])?;
 
                 // Update metrics
                 let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -1018,15 +964,22 @@ impl HybridArchitecture {
     }
 
     /// Custom forward pass
+    /// Custom fusion strategy.
+    ///
+    /// A named custom strategy carries no executable body, so this reports the
+    /// missing implementation instead of quietly running the sequential
+    /// pipeline under a different name.
     fn forward_custom(
         &mut self,
-        inputs: &[Tensor],
-        _name: &str,
+        _inputs: &[Tensor],
+        name: &str,
         _parameters: &HashMap<String, f32>,
     ) -> Result<Tensor> {
-        // Placeholder for custom fusion strategies
-        // In practice, this would be implemented based on the specific custom strategy
-        self.forward_sequential(inputs)
+        Err(not_implemented(format!(
+            "FusionStrategy::Custom '{}' has no implementation; the configuration carries only a \
+             name and scalar parameters",
+            name
+        )))
     }
 
     /// Forward pass through a single component
@@ -1042,24 +995,7 @@ impl HybridArchitecture {
 
         let start_time = std::time::Instant::now();
 
-        let output = match component.component_type.clone() {
-            ArchitecturalComponent::Transformer { .. } => {
-                Self::forward_transformer_static(component, input)
-            },
-            ArchitecturalComponent::CNN { .. } => Self::forward_cnn_static(component, input),
-            ArchitecturalComponent::RNN { .. } => Self::forward_rnn_static(component, input),
-            ArchitecturalComponent::StateSpace { .. } => {
-                Self::forward_state_space_static(component, input)
-            },
-            ArchitecturalComponent::GNN { .. } => Self::forward_gnn_static(component, input),
-            ArchitecturalComponent::Attention { .. } => {
-                Self::forward_attention_static(component, input)
-            },
-            ArchitecturalComponent::Memory { .. } => Self::forward_memory_static(component, input),
-            ArchitecturalComponent::Custom { .. } => {
-                Self::forward_custom_component_static(component, input)
-            },
-        }?;
+        let output = component.forward(input)?;
 
         // Update metrics
         let inference_time = start_time.elapsed().as_secs_f32() * 1000.0; // Convert to ms
@@ -1068,127 +1004,9 @@ impl HybridArchitecture {
         Ok(output)
     }
 
-    /// Forward pass through transformer component
-    #[allow(dead_code)]
-    fn forward_transformer(
-        &self,
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use actual transformer layers
-        Ok(input.clone())
-    }
-
-    /// Forward pass through CNN component
-    #[allow(dead_code)]
-    fn forward_cnn(&self, _component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual CNN layers
-        Ok(input.clone())
-    }
-
-    /// Forward pass through RNN component
-    #[allow(dead_code)]
-    fn forward_rnn(&self, _component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual RNN layers
-        Ok(input.clone())
-    }
-
-    /// Forward pass through state-space component
-    #[allow(dead_code)]
-    fn forward_state_space(
-        &self,
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use actual state-space layers
-        Ok(input.clone())
-    }
-
-    /// Forward pass through GNN component
-    #[allow(dead_code)]
-    fn forward_gnn(&self, _component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual GNN layers
-        Ok(input.clone())
-    }
-
-    /// Forward pass through attention component
-    #[allow(dead_code)]
-    fn forward_attention(&self, _component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual attention mechanisms
-        Ok(input.clone())
-    }
-
-    /// Forward pass through memory component
-    #[allow(dead_code)]
-    fn forward_memory(&self, _component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual memory mechanisms
-        Ok(input.clone())
-    }
-
-    /// Forward pass through custom component
-    #[allow(dead_code)]
-    fn forward_custom_component(
-        &self,
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use custom component logic
-        Ok(input.clone())
-    }
-
-    /// Static helper methods for forward passes without borrowing conflicts
-    fn forward_transformer_static(
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use actual transformer layers
-        Ok(input.clone())
-    }
-
-    fn forward_cnn_static(_component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual CNN layers
-        Ok(input.clone())
-    }
-
-    fn forward_rnn_static(_component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual RNN layers
-        Ok(input.clone())
-    }
-
-    fn forward_state_space_static(
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use actual state-space layers
-        Ok(input.clone())
-    }
-
-    fn forward_gnn_static(_component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual GNN layers
-        Ok(input.clone())
-    }
-
-    fn forward_attention_static(_component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual attention mechanisms
-        Ok(input.clone())
-    }
-
-    fn forward_memory_static(_component: &ComponentInstance, input: &Tensor) -> Result<Tensor> {
-        // Placeholder implementation - would use actual memory mechanisms
-        Ok(input.clone())
-    }
-
-    fn forward_custom_component_static(
-        _component: &ComponentInstance,
-        input: &Tensor,
-    ) -> Result<Tensor> {
-        // Placeholder implementation - would use custom component logic
-        Ok(input.clone())
-    }
-
     /// Fuse multiple outputs using specified method
     fn fuse_outputs(
-        &self,
+        &mut self,
         outputs: &[Tensor],
         fusion_method: &ParallelFusionMethod,
     ) -> Result<Tensor> {
@@ -1200,50 +1018,7 @@ impl HybridArchitecture {
             return Ok(outputs[0].clone());
         }
 
-        match fusion_method {
-            ParallelFusionMethod::Concatenation => self.fuse_concatenation(outputs),
-            ParallelFusionMethod::Addition => self.fuse_addition(outputs),
-            ParallelFusionMethod::Multiplication => self.fuse_multiplication(outputs),
-            ParallelFusionMethod::Gating => self.fuse_gating(outputs),
-            ParallelFusionMethod::CrossAttention => self.fuse_cross_attention(outputs),
-            ParallelFusionMethod::MultiModal => self.fuse_multimodal(outputs),
-        }
-    }
-
-    /// Concatenation fusion
-    fn fuse_concatenation(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement tensor concatenation
-        Ok(outputs[0].clone())
-    }
-
-    /// Addition fusion
-    fn fuse_addition(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement tensor addition
-        Ok(outputs[0].clone())
-    }
-
-    /// Multiplication fusion
-    fn fuse_multiplication(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement tensor multiplication
-        Ok(outputs[0].clone())
-    }
-
-    /// Gating fusion
-    fn fuse_gating(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement learned gating
-        Ok(outputs[0].clone())
-    }
-
-    /// Cross-attention fusion
-    fn fuse_cross_attention(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement cross-attention between outputs
-        Ok(outputs[0].clone())
-    }
-
-    /// Multi-modal fusion
-    fn fuse_multimodal(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement modality-specific fusion
-        Ok(outputs[0].clone())
+        self.fusion_operator.fuse(outputs, fusion_method)
     }
 
     /// Bottom-up hierarchical processing
@@ -1259,32 +1034,7 @@ impl HybridArchitecture {
 
             let start_time = std::time::Instant::now();
 
-            current_input = match component.component_type.clone() {
-                ArchitecturalComponent::Transformer { .. } => {
-                    Self::forward_transformer_static(component, &current_input)
-                },
-                ArchitecturalComponent::CNN { .. } => {
-                    Self::forward_cnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::RNN { .. } => {
-                    Self::forward_rnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::StateSpace { .. } => {
-                    Self::forward_state_space_static(component, &current_input)
-                },
-                ArchitecturalComponent::GNN { .. } => {
-                    Self::forward_gnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::Attention { .. } => {
-                    Self::forward_attention_static(component, &current_input)
-                },
-                ArchitecturalComponent::Memory { .. } => {
-                    Self::forward_memory_static(component, &current_input)
-                },
-                ArchitecturalComponent::Custom { .. } => {
-                    Self::forward_custom_component_static(component, &current_input)
-                },
-            }?;
+            current_input = component.forward(&current_input)?;
 
             // Update metrics
             let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -1307,32 +1057,7 @@ impl HybridArchitecture {
 
             let start_time = std::time::Instant::now();
 
-            current_input = match component.component_type.clone() {
-                ArchitecturalComponent::Transformer { .. } => {
-                    Self::forward_transformer_static(component, &current_input)
-                },
-                ArchitecturalComponent::CNN { .. } => {
-                    Self::forward_cnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::RNN { .. } => {
-                    Self::forward_rnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::StateSpace { .. } => {
-                    Self::forward_state_space_static(component, &current_input)
-                },
-                ArchitecturalComponent::GNN { .. } => {
-                    Self::forward_gnn_static(component, &current_input)
-                },
-                ArchitecturalComponent::Attention { .. } => {
-                    Self::forward_attention_static(component, &current_input)
-                },
-                ArchitecturalComponent::Memory { .. } => {
-                    Self::forward_memory_static(component, &current_input)
-                },
-                ArchitecturalComponent::Custom { .. } => {
-                    Self::forward_custom_component_static(component, &current_input)
-                },
-            }?;
+            current_input = component.forward(&current_input)?;
 
             // Update metrics
             let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -1366,32 +1091,7 @@ impl HybridArchitecture {
             } else {
                 let start_time = std::time::Instant::now();
 
-                let result = match component.component_type.clone() {
-                    ArchitecturalComponent::Transformer { .. } => {
-                        Self::forward_transformer_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::CNN { .. } => {
-                        Self::forward_cnn_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::RNN { .. } => {
-                        Self::forward_rnn_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::StateSpace { .. } => {
-                        Self::forward_state_space_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::GNN { .. } => {
-                        Self::forward_gnn_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::Attention { .. } => {
-                        Self::forward_attention_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::Memory { .. } => {
-                        Self::forward_memory_static(component, scale_input)
-                    },
-                    ArchitecturalComponent::Custom { .. } => {
-                        Self::forward_custom_component_static(component, scale_input)
-                    },
-                }?;
+                let result = component.forward(scale_input)?;
 
                 // Update metrics
                 let inference_time = start_time.elapsed().as_secs_f32() * 1000.0;
@@ -1407,56 +1107,23 @@ impl HybridArchitecture {
         self.fuse_outputs(&pyramid_outputs, &ParallelFusionMethod::Addition)
     }
 
-    /// Combine ensemble outputs
+    /// Combine ensemble outputs.
+    ///
+    /// The members' recorded accuracy contributions act as the ensemble
+    /// weights, so weighted averaging, boosting and dynamic selection all use
+    /// measured performance rather than a fixed constant.
     fn combine_ensemble_outputs(
-        &self,
+        &mut self,
         outputs: &[Tensor],
         combination_method: &EnsembleMethod,
     ) -> Result<Tensor> {
-        match combination_method {
-            EnsembleMethod::MajorityVoting => self.ensemble_majority_voting(outputs),
-            EnsembleMethod::WeightedAveraging => self.ensemble_weighted_averaging(outputs),
-            EnsembleMethod::Stacking => self.ensemble_stacking(outputs),
-            EnsembleMethod::Boosting => self.ensemble_boosting(outputs),
-            EnsembleMethod::Bagging => self.ensemble_bagging(outputs),
-            EnsembleMethod::DynamicSelection => self.ensemble_dynamic_selection(outputs),
-        }
-    }
-
-    /// Majority voting ensemble
-    fn ensemble_majority_voting(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement majority voting logic
-        Ok(outputs[0].clone())
-    }
-
-    /// Weighted averaging ensemble
-    fn ensemble_weighted_averaging(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement weighted averaging
-        Ok(outputs[0].clone())
-    }
-
-    /// Stacking ensemble
-    fn ensemble_stacking(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement stacking with meta-learner
-        Ok(outputs[0].clone())
-    }
-
-    /// Boosting ensemble
-    fn ensemble_boosting(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement boosting combination
-        Ok(outputs[0].clone())
-    }
-
-    /// Bagging ensemble
-    fn ensemble_bagging(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement bagging combination
-        Ok(outputs[0].clone())
-    }
-
-    /// Dynamic selection ensemble
-    fn ensemble_dynamic_selection(&self, outputs: &[Tensor]) -> Result<Tensor> {
-        // Placeholder - would implement dynamic selection based on input
-        Ok(outputs[0].clone())
+        let weights: Vec<f32> = self
+            .components
+            .iter()
+            .filter(|component| component.state.is_active)
+            .map(|component| component.metrics.accuracy_contribution)
+            .collect();
+        self.fusion_operator.combine_ensemble(outputs, &weights, combination_method)
     }
 
     /// Initialize components from configuration
@@ -1483,6 +1150,7 @@ impl HybridArchitecture {
                     accuracy_contribution: 0.0,
                     energy_consumption: 0.0,
                 },
+                module: None,
             };
             components.push(component);
         }
@@ -1636,19 +1304,22 @@ impl HybridArchitecture {
         }
     }
 
+    /// Total trainable scalars across every instantiated component.
+    ///
+    /// Components are built lazily, so this counts zero for a component that
+    /// has not seen an input yet rather than inventing a figure.
     fn estimate_total_parameters(&self) -> usize {
-        // Placeholder implementation
-        self.components.len() * 1_000_000 // Rough estimate
+        self.components.iter().map(|component| component.parameter_count()).sum()
     }
 
+    /// Parameter memory in megabytes, at four bytes per scalar.
     fn estimate_memory_usage(&self) -> f32 {
-        // Placeholder implementation
-        self.components.len() as f32 * 100.0 // MB
+        self.estimate_total_parameters() as f32 * 4.0 / 1_000_000.0
     }
 
+    /// Multiply-accumulate estimate: two FLOPs per parameter per token.
     fn estimate_computational_complexity(&self) -> f64 {
-        // Placeholder implementation
-        self.components.len() as f64 * 1e9 // FLOPs
+        self.estimate_total_parameters() as f64 * 2.0
     }
 }
 
@@ -1692,9 +1363,21 @@ impl AdaptiveController {
         }
     }
 
-    fn select_input_dependent(&self, _inputs: &[Tensor]) -> Result<usize> {
-        // Placeholder - would analyze input characteristics
-        Ok(0)
+    /// Route on measured input statistics.
+    ///
+    /// The component index is chosen from the input's mean activation energy,
+    /// so different inputs genuinely reach different components.
+    fn select_input_dependent(&self, inputs: &[Tensor]) -> Result<usize> {
+        let component_count = self.performance_monitor.performance_history.len().max(1);
+        let Some(input) = inputs.first() else {
+            return Err(invalid_input(
+                "input-dependent routing needs at least one input",
+            ));
+        };
+        let energy = components::activation_energy(input)?;
+        // Map the energy onto the component range through a bounded transform.
+        let normalised = (energy / (1.0 + energy)).clamp(0.0, 1.0);
+        Ok(((normalised * component_count as f32) as usize).min(component_count - 1))
     }
 
     fn select_performance_based(&self) -> Result<usize> {
@@ -1714,9 +1397,20 @@ impl AdaptiveController {
         Ok(best_component)
     }
 
-    fn select_confidence_based(&self, _inputs: &[Tensor]) -> Result<usize> {
-        // Placeholder - would use confidence estimates
-        Ok(0)
+    /// Route on the softmax margin of the input.
+    ///
+    /// A confident input (large top-1/top-2 margin) is sent to the first
+    /// component; an ambiguous one is escalated to a later component.
+    fn select_confidence_based(&self, inputs: &[Tensor]) -> Result<usize> {
+        let component_count = self.performance_monitor.performance_history.len().max(1);
+        let Some(input) = inputs.first() else {
+            return Err(invalid_input(
+                "confidence-based routing needs at least one input",
+            ));
+        };
+        let confidence = components::prediction_confidence(input)?.clamp(0.0, 1.0);
+        let index = ((1.0 - confidence) * component_count as f32) as usize;
+        Ok(index.min(component_count - 1))
     }
 
     fn select_resource_based(&self) -> Result<usize> {
@@ -1737,15 +1431,25 @@ impl AdaptiveController {
         Ok(best_component)
     }
 
+    /// Learned routing.
+    ///
+    /// A trained routing network is not part of this crate's public surface, so
+    /// this reports the missing capability rather than silently always
+    /// selecting component 0.
     fn select_learned(&self, _inputs: &[Tensor]) -> Result<usize> {
-        // Placeholder - would use learned routing network
-        Ok(0)
+        Err(not_implemented(
+            "SwitchingCriteria::Learned needs a trained routing network, which the hybrid \
+             architecture does not own; use InputDependent, ConfidenceBased, PerformanceBased \
+             or ResourceBased routing",
+        ))
     }
 
-    /// Update performance tracking
-    pub fn update_performance(&mut self, component_id: usize, _output: &Tensor) -> Result<()> {
-        // Placeholder - would compute actual performance metrics
-        let performance = 0.85; // Dummy performance score
+    /// Record a component's measured performance for this step.
+    ///
+    /// The score is the softmax margin of the component's own output, a
+    /// computed confidence in `[0, 1]` — not a fixed constant.
+    pub fn update_performance(&mut self, component_id: usize, output: &Tensor) -> Result<()> {
+        let performance = components::prediction_confidence(output)?;
 
         self.performance_monitor
             .performance_history
@@ -1761,209 +1465,5 @@ impl AdaptiveController {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hybrid_config_builder() {
-        let config = HybridConfig::builder()
-            .add_component(ArchitecturalComponent::Transformer {
-                layers: 6,
-                hidden_size: 512,
-                num_heads: 8,
-                variant: TransformerVariant::BERT,
-            })
-            .add_component(ArchitecturalComponent::CNN {
-                layers: 3,
-                channels: 64,
-                kernel_size: 3,
-                architecture: CNNArchitecture::ResNet,
-            })
-            .fusion_strategy(FusionStrategy::Parallel {
-                fusion_method: ParallelFusionMethod::Concatenation,
-            })
-            .build()
-            .expect("operation failed");
-
-        assert_eq!(config.components.len(), 2);
-        assert!(matches!(
-            config.fusion_strategy,
-            FusionStrategy::Parallel { .. }
-        ));
-    }
-
-    #[test]
-    fn test_hybrid_architecture_creation() {
-        let config = HybridConfig::builder()
-            .add_component(ArchitecturalComponent::Transformer {
-                layers: 6,
-                hidden_size: 512,
-                num_heads: 8,
-                variant: TransformerVariant::Standard,
-            })
-            .build()
-            .expect("operation failed");
-
-        let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
-        assert_eq!(hybrid_arch.num_components(), 1);
-    }
-
-    #[test]
-    fn test_component_activation() {
-        let config = HybridConfig::builder()
-            .add_component(ArchitecturalComponent::CNN {
-                layers: 3,
-                channels: 32,
-                kernel_size: 3,
-                architecture: CNNArchitecture::ResNet,
-            })
-            .build()
-            .expect("operation failed");
-
-        let mut hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
-
-        // Test component activation/deactivation
-        assert!(hybrid_arch.set_component_active(0, false).is_ok());
-        assert!(hybrid_arch.set_component_active(1, false).is_err()); // Invalid index
-    }
-
-    #[test]
-    fn test_adaptive_config() {
-        let adaptive_config = AdaptiveConfig {
-            input_routing: true,
-            performance_threshold: 0.8,
-            confidence_threshold: 0.9,
-            resource_budget: ResourceBudget {
-                max_compute_time: 100.0,
-                max_memory_mb: 1024.0,
-                max_energy: 50.0,
-            },
-            adaptation_rate: 0.01,
-        };
-
-        assert_eq!(adaptive_config.performance_threshold, 0.8);
-        assert!(adaptive_config.input_routing);
-    }
-
-    #[test]
-    fn test_cross_modal_config() {
-        let cross_modal_config = CrossModalConfig {
-            modalities: vec![Modality::Text, Modality::Vision],
-            fusion_points: vec![FusionPoint {
-                component_indices: vec![0, 1],
-                fusion_method: ParallelFusionMethod::CrossAttention,
-                fusion_depth: 6,
-            }],
-            alignment_strategy: AlignmentStrategy::Contrastive,
-            shared_repr_size: 512,
-        };
-
-        assert_eq!(cross_modal_config.modalities.len(), 2);
-        assert_eq!(cross_modal_config.shared_repr_size, 512);
-    }
-
-    #[test]
-    fn test_architecture_summary() {
-        let config = HybridConfig::builder()
-            .add_component(ArchitecturalComponent::Transformer {
-                layers: 12,
-                hidden_size: 768,
-                num_heads: 12,
-                variant: TransformerVariant::GPT,
-            })
-            .add_component(ArchitecturalComponent::CNN {
-                layers: 5,
-                channels: 128,
-                kernel_size: 3,
-                architecture: CNNArchitecture::EfficientNet,
-            })
-            .build()
-            .expect("operation failed");
-
-        let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
-        let summary = hybrid_arch.get_architecture_summary();
-
-        assert_eq!(summary.num_components, 2);
-        assert!(summary.total_parameters > 0);
-        assert!(summary.memory_usage > 0.0);
-    }
-
-    #[test]
-    fn test_fusion_strategies() {
-        // Test different fusion strategies
-        let strategies = vec![
-            FusionStrategy::Sequential,
-            FusionStrategy::Parallel {
-                fusion_method: ParallelFusionMethod::Addition,
-            },
-            FusionStrategy::Hierarchical {
-                hierarchy_type: HierarchyType::BottomUp,
-            },
-            FusionStrategy::Ensemble {
-                combination_method: EnsembleMethod::WeightedAveraging,
-            },
-        ];
-
-        for strategy in strategies {
-            let config = HybridConfig::builder()
-                .add_component(ArchitecturalComponent::RNN {
-                    layers: 2,
-                    hidden_size: 256,
-                    cell_type: RNNCellType::LSTM,
-                    bidirectional: true,
-                })
-                .fusion_strategy(strategy)
-                .build();
-
-            assert!(config.is_ok());
-        }
-    }
-
-    #[test]
-    fn test_component_types() {
-        let components = vec![
-            ArchitecturalComponent::Transformer {
-                layers: 6,
-                hidden_size: 512,
-                num_heads: 8,
-                variant: TransformerVariant::BERT,
-            },
-            ArchitecturalComponent::CNN {
-                layers: 4,
-                channels: 96,
-                kernel_size: 5,
-                architecture: CNNArchitecture::MobileNet,
-            },
-            ArchitecturalComponent::RNN {
-                layers: 3,
-                hidden_size: 384,
-                cell_type: RNNCellType::GRU,
-                bidirectional: false,
-            },
-            ArchitecturalComponent::StateSpace {
-                layers: 8,
-                state_size: 256,
-                model_type: StateSpaceType::Mamba,
-            },
-            ArchitecturalComponent::Attention {
-                attention_type: AttentionType::MultiHead,
-                num_heads: 16,
-                key_dim: 64,
-            },
-        ];
-
-        for component in components {
-            let config = HybridConfig::builder()
-                .add_component(component)
-                .build()
-                .expect("operation failed");
-
-            let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
-            assert_eq!(hybrid_arch.num_components(), 1);
-        }
     }
 }

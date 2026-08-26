@@ -1,10 +1,28 @@
 //! # Zero-Shot Audio Classification Pipeline
 //!
-//! CLAP-compatible zero-shot audio classification: classify audio against a set
-//! of natural-language candidate labels without any task-specific fine-tuning.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **CLAP** — Contrastive Language-Audio Pre-training
+//! * [`ZeroShotAudioClassificationPipeline::audio_features`] — a genuine
+//!   4-dimensional descriptor of a waveform: RMS energy, peak amplitude,
+//!   duration and zero-crossing rate, all measured from the samples.
+//! * [`ZeroShotAudioProcessor::format_hypotheses`] — real hypothesis-template
+//!   expansion.
+//! * [`cosine_similarity`], [`softmax`] and
+//!   [`ZeroShotAudioClassificationPipeline::rank_similarities`] — exact
+//!   arithmetic that works on any pair of embeddings you supply.
+//!
+//! ## Model support
+//!
+//! Zero-shot classification needs a **joint audio-text embedding space**, and
+//! no CLAP-style encoder is implemented in `trustformers-models`.
+//! [`ZeroShotAudioClassificationPipeline::classify`] therefore returns
+//! [`ZeroShotAudioError::UnsupportedModel`].
+//!
+//! It used to compare the audio descriptor above against a "text embedding"
+//! built from the *djb2 hash of the label string* — four bytes of a hash
+//! treated as a semantic vector. Those similarities were arithmetic noise, and
+//! the softmax over them produced confident-looking probabilities with no
+//! relationship to the audio's content. None of that survives.
 //!
 //! ## Example
 //!
@@ -17,12 +35,19 @@
 //! let config = ZeroShotAudioConfig::default();
 //! let pipeline = ZeroShotAudioClassificationPipeline::new(config)?;
 //! let waveform = AudioWaveform::new(vec![0.0; 16_000], 16_000)?;
-//! let result = pipeline.classify(&waveform, &["speech", "music", "noise"])?;
+//! // Real feature extraction and ranking around your own CLAP encoder:
+//! let features = pipeline.audio_features(&waveform);
+//! let result = pipeline.rank_similarities(&["speech", "music"], &my_similarities)?;
 //! println!("Top label: {} ({:.4})", result.label, result.score);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use super::audio_generation::AudioWaveform;
+
+/// Joint audio-text architectures with a real encoder in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -37,6 +62,21 @@ pub enum ZeroShotAudioError {
     /// No candidate labels were provided.
     #[error("No candidate labels")]
     NoLabels,
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real joint audio-text embedding model is implemented for `{requested}`; supported: \
+         {supported}. This pipeline never scores labels against a hash of their text — use \
+         `rank_similarities` with your own encoder's similarities."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
+    /// The number of similarities does not match the number of labels.
+    #[error("expected {expected} similarity scores (one per label) but got {got}")]
+    ScoreCountMismatch { expected: usize, got: usize },
     /// A generic model-level error with a descriptive message.
     #[error("Model error: {0}")]
     ModelError(String),
@@ -248,18 +288,12 @@ pub struct ZeroShotAudioItem {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// djb2 hash — used for deterministic mock text embeddings.
-fn djb2_hash(s: &str) -> u64 {
-    let mut h: u64 = 5381;
-    for b in s.bytes() {
-        h = h.wrapping_mul(33).wrapping_add(b as u64);
-    }
-    h
-}
-
-/// Produce a 4-dimensional mock embedding for an audio waveform.
+/// Compute a real 4-dimensional acoustic descriptor of a waveform.
 ///
-/// Features: `[rms_energy, peak_amplitude, duration_seconds, zero_crossing_rate]`.
+/// Components: `[rms_energy, peak_amplitude, duration_seconds,
+/// zero_crossing_rate]` — all measured directly from the samples. This is a
+/// genuine (if low-dimensional) feature vector; it is **not** a CLAP embedding
+/// and cannot be compared against text.
 fn audio_embedding(audio: &AudioWaveform, normalize: bool) -> [f32; 4] {
     let rms = audio.rms_energy();
     let peak = audio.peak_amplitude();
@@ -283,28 +317,8 @@ fn audio_embedding(audio: &AudioWaveform, normalize: bool) -> [f32; 4] {
     emb
 }
 
-/// Produce a 4-dimensional mock embedding for a text label using its djb2 hash.
-fn text_embedding(label: &str, normalize: bool) -> [f32; 4] {
-    let h = djb2_hash(label);
-    let mut emb = [
-        ((h & 0xFF) as f32) / 255.0,
-        (((h >> 8) & 0xFF) as f32) / 255.0,
-        (((h >> 16) & 0xFF) as f32) / 255.0,
-        (((h >> 24) & 0xFF) as f32) / 255.0,
-    ];
-    if normalize {
-        let norm = (emb.iter().map(|x| x * x).sum::<f32>()).sqrt();
-        if norm > f32::EPSILON {
-            for v in emb.iter_mut() {
-                *v /= norm;
-            }
-        }
-    }
-    emb
-}
-
 /// Cosine similarity between two fixed-size embedding arrays.
-fn cosine_similarity(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+pub fn cosine_similarity(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na = (a.iter().map(|x| x * x).sum::<f32>()).sqrt();
     let nb = (b.iter().map(|x| x * x).sum::<f32>()).sqrt();
@@ -320,7 +334,7 @@ fn cosine_similarity(a: &[f32; 4], b: &[f32; 4]) -> f32 {
 /// Exponentials are accumulated in `f64` and each probability is floored at
 /// `f32::MIN_POSITIVE`, so outputs stay strictly positive even when widely
 /// spread logits would underflow in `f32` (softmax is mathematically > 0).
-fn softmax(logits: &[f32]) -> Vec<f32> {
+pub fn softmax(logits: &[f32]) -> Vec<f32> {
     if logits.is_empty() {
         return Vec::new();
     }
@@ -374,23 +388,59 @@ impl ZeroShotAudioClassificationPipeline {
         if candidate_labels.is_empty() {
             return Err(ZeroShotAudioError::NoLabels);
         }
+        Err(self.unsupported())
+    }
 
-        let audio_emb = audio_embedding(audio, self.config.normalize_embeddings);
-        let logits: Vec<f32> = candidate_labels
-            .iter()
-            .map(|lbl| {
-                let text_emb = text_embedding(lbl, self.config.normalize_embeddings);
-                cosine_similarity(&audio_emb, &text_emb)
-            })
-            .collect();
+    /// The error this pipeline returns when asked to score labels.
+    fn unsupported(&self) -> ZeroShotAudioError {
+        ZeroShotAudioError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no joint audio-text encoder is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        }
+    }
 
-        let probs = softmax(&logits);
+    /// Measure the real acoustic descriptor of a waveform.
+    ///
+    /// `[rms_energy, peak_amplitude, duration_seconds, zero_crossing_rate]`,
+    /// L2-normalised when the configuration asks for it.
+    pub fn audio_features(&self, audio: &AudioWaveform) -> [f32; 4] {
+        audio_embedding(audio, self.config.normalize_embeddings)
+    }
 
-        // Build sorted (label, score) pairs.
+    /// Turn a real encoder's audio-text similarities into a ranked result.
+    ///
+    /// `similarities[i]` is the cosine similarity between the audio embedding
+    /// and the embedding of `candidate_labels[i]`, as produced by *your*
+    /// encoder. The pipeline softmaxes them and sorts descending.
+    ///
+    /// # Errors
+    ///
+    /// [`ZeroShotAudioError::NoLabels`] for an empty label set and
+    /// [`ZeroShotAudioError::ScoreCountMismatch`] on a length mismatch.
+    pub fn rank_similarities(
+        &self,
+        candidate_labels: &[&str],
+        similarities: &[f32],
+    ) -> Result<ZeroShotAudioResult, ZeroShotAudioError> {
+        if candidate_labels.is_empty() {
+            return Err(ZeroShotAudioError::NoLabels);
+        }
+        if similarities.len() != candidate_labels.len() {
+            return Err(ZeroShotAudioError::ScoreCountMismatch {
+                expected: candidate_labels.len(),
+                got: similarities.len(),
+            });
+        }
+
+        let probs = softmax(similarities);
         let mut all_scores: Vec<(String, f32)> = candidate_labels
             .iter()
             .zip(probs.iter())
-            .map(|(lbl, &p)| (lbl.to_string(), p))
+            .map(|(lbl, &p)| ((*lbl).to_string(), p))
             .collect();
         all_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -436,32 +486,13 @@ impl ZeroShotAudioClassificationPipeline {
             return Err(ZeroShotAudioError::NoLabels);
         }
 
-        let hypotheses = ZeroShotAudioProcessor::format_hypotheses(
+        // The hypothesis expansion is real and still runs, so template errors
+        // surface here rather than being masked by the missing encoder.
+        let _hypotheses = ZeroShotAudioProcessor::format_hypotheses(
             candidate_labels,
             &self.config.hypothesis_template,
         );
-
-        let audio_emb = audio_embedding(&audio.waveform, self.config.normalize_embeddings);
-        let logits: Vec<f32> = hypotheses
-            .iter()
-            .map(|hyp| {
-                let text_emb = text_embedding(hyp, self.config.normalize_embeddings);
-                cosine_similarity(&audio_emb, &text_emb)
-            })
-            .collect();
-
-        let probs = softmax(&logits);
-
-        let mut items: Vec<ZeroShotAudioItem> = candidate_labels
-            .iter()
-            .zip(probs.iter())
-            .map(|(lbl, &score)| ZeroShotAudioItem {
-                candidate_label: lbl.clone(),
-                score,
-            })
-            .collect();
-        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(items)
+        Err(self.unsupported())
     }
 
     /// Classify a batch of [`AudioInput`] values against the same candidate labels.
@@ -503,53 +534,35 @@ mod tests {
             .expect("default config valid")
     }
 
-    #[test]
-    fn test_classify_returns_correct_label_count() {
-        let p = default_pipeline();
-        let audio = make_waveform(vec![0.5_f32; 16_000]);
-        let labels = ["speech", "music", "noise", "silence"];
-        let result = p.classify(&audio, &labels).expect("classify ok");
-        assert_eq!(result.all_scores.len(), labels.len());
-    }
-
-    #[test]
-    fn test_classify_scores_sorted_descending() {
-        let p = default_pipeline();
-        let audio = make_waveform(vec![0.3_f32; 16_000]);
-        let labels = ["cat", "dog", "bird"];
-        let result = p.classify(&audio, &labels).expect("ok");
-        for w in result.all_scores.windows(2) {
-            assert!(
-                w[0].1 >= w[1].1,
-                "scores not sorted: {} > {}",
-                w[0].1,
-                w[1].1
-            );
+    fn assert_unsupported(err: &ZeroShotAudioError) {
+        match err {
+            ZeroShotAudioError::UnsupportedModel { supported, .. } => {
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_classify_all_scores_sum_approx_one() {
+    fn test_classify_reports_unsupported_model() {
+        // Regression: `classify` used to compare a real acoustic descriptor
+        // against a "text embedding" made of four bytes of the label's djb2
+        // hash, and report the softmax of that noise as probabilities.
         let p = default_pipeline();
-        let audio = make_waveform(vec![0.1_f32; 8_000]);
-        let labels = ["rain", "thunder", "wind", "hail"];
-        let result = p.classify(&audio, &labels).expect("ok");
-        let total: f32 = result.all_scores.iter().map(|(_, s)| s).sum();
-        assert!(
-            (total - 1.0).abs() < 1e-5,
-            "scores sum to {total}, expected ~1.0"
-        );
+        let audio = make_waveform(vec![0.5_f32; 16_000]);
+        let labels = ["speech", "music", "noise", "silence"];
+        assert_unsupported(&p.classify(&audio, &labels).expect_err("no encoder"));
     }
 
     #[test]
-    fn test_classify_batch_count() {
+    fn test_classify_batch_reports_unsupported_model() {
         let p = default_pipeline();
         let a1 = make_waveform(vec![0.1_f32; 16_000]);
         let a2 = make_waveform(vec![0.9_f32; 16_000]);
         let audios = [&a1, &a2];
-        let labels = ["music", "noise"];
-        let results = p.classify_batch(&audios, &labels).expect("batch ok");
-        assert_eq!(results.len(), 2);
+        assert_unsupported(
+            &p.classify_batch(&audios, &["music", "noise"]).expect_err("no encoder"),
+        );
     }
 
     #[test]
@@ -568,11 +581,58 @@ mod tests {
         assert!(matches!(err, ZeroShotAudioError::NoLabels));
     }
 
+    // ── Real feature extraction and ranking ─────────────────────────────────
+
     #[test]
-    fn test_single_label_score_is_one() {
+    fn test_audio_features_measure_the_waveform() {
+        let p = ZeroShotAudioClassificationPipeline::new(ZeroShotAudioConfig {
+            normalize_embeddings: false,
+            ..ZeroShotAudioConfig::default()
+        })
+        .expect("valid");
+        // Alternating +-0.5 at 16 kHz: RMS 0.5, peak 0.5, ZCR ~1.0.
+        let samples: Vec<f32> = (0..16_000).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let f = p.audio_features(&make_waveform(samples));
+        assert!((f[0] - 0.5).abs() < 1e-4, "rms: {}", f[0]);
+        assert!((f[1] - 0.5).abs() < 1e-4, "peak: {}", f[1]);
+        assert!((f[2] - 1.0).abs() < 1e-4, "duration: {}", f[2]);
+        assert!((f[3] - 1.0).abs() < 1e-3, "zcr: {}", f[3]);
+    }
+
+    #[test]
+    fn test_audio_features_distinguish_signals() {
         let p = default_pipeline();
-        let audio = make_waveform(vec![0.2_f32; 16_000]);
-        let result = p.classify(&audio, &["music"]).expect("ok");
+        let quiet = p.audio_features(&make_waveform(vec![0.01_f32; 4_000]));
+        let loud = p.audio_features(&make_waveform(vec![0.9_f32; 4_000]));
+        assert_ne!(
+            quiet, loud,
+            "different waveforms must give different features"
+        );
+    }
+
+    #[test]
+    fn test_rank_similarities_sorts_and_normalises() {
+        let p = default_pipeline();
+        let labels = ["cat", "dog", "bird"];
+        let result = p.rank_similarities(&labels, &[0.1, 0.9, 0.2]).expect("rank");
+        assert_eq!(result.all_scores.len(), labels.len());
+        assert_eq!(result.label, "dog");
+        for w in result.all_scores.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "scores not sorted: {} < {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+        let total: f32 = result.all_scores.iter().map(|(_, s)| s).sum();
+        assert!((total - 1.0).abs() < 1e-5, "scores sum to {total}");
+    }
+
+    #[test]
+    fn test_rank_similarities_single_label_scores_one() {
+        let p = default_pipeline();
+        let result = p.rank_similarities(&["music"], &[0.42]).expect("rank");
         assert!(
             (result.score - 1.0).abs() < 1e-5,
             "score was {}",
@@ -581,24 +641,16 @@ mod tests {
     }
 
     #[test]
-    fn test_different_audios_may_get_different_top_labels() {
+    fn test_rank_similarities_rejects_bad_input() {
         let p = default_pipeline();
-        // Two very different signals.
-        let a1 = make_waveform((0..16_000).map(|i| (i as f32 * 0.001).sin()).collect());
-        let a2 = make_waveform(vec![0.999_f32; 16_000]);
-        let labels = ["speech", "music", "noise", "silence", "environmental"];
-        let r1 = p.classify(&a1, &labels).expect("ok");
-        let r2 = p.classify(&a2, &labels).expect("ok");
-        // At minimum the scores should differ (they embed differently).
-        let scores_differ = r1
-            .all_scores
-            .iter()
-            .zip(r2.all_scores.iter())
-            .any(|(a, b)| (a.1 - b.1).abs() > 1e-6);
-        assert!(
-            scores_differ,
-            "expected different score distributions for different audio"
-        );
+        assert!(matches!(
+            p.rank_similarities(&["a", "b"], &[0.1]),
+            Err(ZeroShotAudioError::ScoreCountMismatch { .. })
+        ));
+        assert!(matches!(
+            p.rank_similarities(&[], &[]),
+            Err(ZeroShotAudioError::NoLabels)
+        ));
     }
 
     #[test]
@@ -794,36 +846,11 @@ mod tests {
     // ── classify_input (new API) ──────────────────────────────────────────────
 
     #[test]
-    fn test_classify_input_basic() {
-        let p = default_pipeline();
-        let audio = AudioInput::from_samples(vec![0.5_f32; 16_000], 16_000).expect("ok");
-        let labels = ["speech", "music", "noise"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let result = p.classify_input(&audio, &labels).expect("classify_input ok");
-        assert_eq!(result.len(), labels.len());
-    }
-
-    #[test]
-    fn test_classify_input_scores_sorted() {
-        let p = default_pipeline();
-        let audio = AudioInput::from_samples(vec![0.3_f32; 8_000], 16_000).expect("ok");
-        let labels =
-            ["cat", "dog", "bird", "rain"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let result = p.classify_input(&audio, &labels).expect("ok");
-        for w in result.windows(2) {
-            assert!(w[0].score >= w[1].score, "scores not sorted descending");
-        }
-    }
-
-    #[test]
-    fn test_classify_input_single_label_score_one() {
+    fn test_classify_input_reports_unsupported_model() {
         let p = default_pipeline();
         let audio = AudioInput::from_samples(vec![0.1_f32; 4_000], 16_000).expect("ok");
-        let labels = vec!["music".to_string()];
-        let result = p.classify_input(&audio, &labels).expect("ok");
-        assert!(
-            (result[0].score - 1.0).abs() < 1e-5,
-            "single label score should be 1.0"
-        );
+        let labels = vec!["music".to_string(), "speech".to_string()];
+        assert_unsupported(&p.classify_input(&audio, &labels).expect_err("no encoder"));
     }
 
     #[test]
@@ -847,17 +874,13 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_inputs_batch_shape() {
+    fn test_classify_inputs_batch_reports_unsupported_model() {
         let p = default_pipeline();
         let audios: Vec<AudioInput> = (0..3)
             .map(|i| AudioInput::from_samples(vec![(i as f32) * 0.1; 4_000], 16_000).expect("ok"))
             .collect();
         let labels = ["speech", "music", "noise"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let results = p.classify_inputs_batch(audios, &labels).expect("batch ok");
-        assert_eq!(results.len(), 3, "batch should return one result per audio");
-        for r in &results {
-            assert_eq!(r.len(), labels.len());
-        }
+        assert_unsupported(&p.classify_inputs_batch(audios, &labels).expect_err("no encoder"));
     }
 
     // ── hypothesis_template in config ────────────────────────────────────────
@@ -897,9 +920,8 @@ mod tests {
     #[test]
     fn test_top_k_score_sum_approaches_one() {
         let p = default_pipeline();
-        let audio = make_waveform(vec![0.4_f32; 8_000]);
         let labels = ["a", "b", "c", "d", "e"];
-        let result = p.classify(&audio, &labels).expect("ok");
+        let result = p.rank_similarities(&labels, &[0.4, 0.1, -0.2, 0.9, 0.0]).expect("rank");
         // All scores sum to 1.0
         let sum: f32 = result.all_scores.iter().map(|(_, s)| s).sum();
         assert!((sum - 1.0).abs() < 1e-5, "all scores sum to {sum}");

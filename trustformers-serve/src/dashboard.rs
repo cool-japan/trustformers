@@ -5,7 +5,8 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{ws::WebSocket, Path, WebSocketUpgrade},
+    extract::{ws::WebSocket, Path, State, WebSocketUpgrade},
+    http::StatusCode,
     response::{Html, IntoResponse},
     routing::get,
     Json, Router,
@@ -974,24 +975,66 @@ impl DashboardService {
         ))
     }
 
-    async fn get_layouts() -> impl IntoResponse {
-        let config = DashboardConfig::default();
-        Json(config.layouts)
+    /// Return the layouts this service was configured with.
+    ///
+    /// Reads the running service's own config. It used to build a fresh
+    /// [`DashboardConfig::default`] and serve *those* layouts, so a dashboard
+    /// configured with custom layouts served the built-in ones instead.
+    async fn get_layouts(State(service): State<DashboardService>) -> impl IntoResponse {
+        Json(service.config.layouts.clone())
     }
 
-    async fn get_widget_data(Path(widget_id): Path<String>) -> impl IntoResponse {
-        // Return widget data (placeholder)
-        Json(serde_json::json!({
-            "widget_id": widget_id,
-            "data": []
-        }))
+    /// Return the collected series for one widget.
+    ///
+    /// Reads the live `widget_data` store that
+    /// [`DashboardService::update_widget_data`] fills. It used to answer
+    /// `{"data": []}` for every widget id — including ids that had data and
+    /// ids that do not exist — so the dashboard's own API contradicted the
+    /// WebSocket stream feeding the same page.
+    ///
+    /// An unknown widget id gets `404`, which is what distinguishes it from a
+    /// known widget with no points yet.
+    async fn get_widget_data(
+        State(service): State<DashboardService>,
+        Path(widget_id): Path<String>,
+    ) -> impl IntoResponse {
+        let widget_data = service.widget_data.read().await;
+        match widget_data.get(&widget_id) {
+            Some(series) => {
+                let points: Vec<DataPoint> = series.iter().cloned().collect();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "widget_id": widget_id,
+                        "data": points,
+                    })),
+                )
+            },
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "widget_id": widget_id,
+                    "error": "no data has been collected for this widget id",
+                })),
+            ),
+        }
     }
 
+    /// Alerts endpoint.
+    ///
+    /// Answers `501 Not Implemented`: [`DashboardService`] keeps no alert
+    /// store — it counts alerts in [`DashboardStats::alerts_generated`] and
+    /// nothing more — so it has no alerts to serve. It used to answer `200`
+    /// with `{"alerts": []}`, which a client cannot tell apart from "the
+    /// system is quiet". Alert state lives in [`crate::alerting`].
     async fn get_alerts() -> impl IntoResponse {
-        // Return current alerts (placeholder)
-        Json(serde_json::json!({
-            "alerts": []
-        }))
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "the dashboard service does not store alerts",
+                "detail": "alert state is held by the alerting service, not the dashboard",
+            })),
+        )
     }
 
     async fn websocket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {

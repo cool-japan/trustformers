@@ -181,12 +181,14 @@ mod tests {
 
     #[test]
     fn test_gpu_device_capabilities() {
+        // `GPUDevice` does not open a real backend context, so it must not
+        // fabricate VRAM size / compute unit counts it never measured.
         let device = GPUDevice::new("gpu_caps".to_string(), GPUBackendType::CUDA);
         let caps = device.capabilities();
         assert!(!caps.data_types.is_empty());
         assert!(caps.max_dimensions >= 1);
-        assert!(caps.memory_size.is_some());
-        assert!(caps.compute_units.is_some());
+        assert!(caps.memory_size.is_none());
+        assert!(caps.compute_units.is_none());
     }
 
     #[test]
@@ -199,12 +201,15 @@ mod tests {
 
     #[test]
     fn test_gpu_device_status() {
+        // No thermal sensor is wired up for GPUDevice (no backend context
+        // is opened), so temperature must honestly be reported unknown
+        // rather than a fabricated reading.
         let device = GPUDevice::new("gpu_status".to_string(), GPUBackendType::Metal);
         let status = device.status();
         assert!(status.online);
         assert!(!status.busy);
         assert!(status.error.is_none());
-        assert!(status.temperature.is_some());
+        assert!(status.temperature.is_none());
     }
 
     #[test]
@@ -259,22 +264,19 @@ mod tests {
 
     #[test]
     fn test_gpu_device_power_consumption() {
+        // Regression guard: `detect_gpu_capabilities` used to return a
+        // hardcoded per-backend wattage (e.g. 250.0 for CUDA) with no real
+        // device ever queried. It must now honestly report unknown.
         let device = GPUDevice::new("gpu_power".to_string(), GPUBackendType::CUDA);
         let caps = device.capabilities();
-        assert!(caps.power_consumption.is_some());
-        if let Some(power) = caps.power_consumption {
-            assert!(power > 0.0);
-        }
+        assert!(caps.power_consumption.is_none());
     }
 
     #[test]
     fn test_gpu_device_thermal_design_power() {
         let device = GPUDevice::new("gpu_tdp".to_string(), GPUBackendType::CUDA);
         let caps = device.capabilities();
-        assert!(caps.thermal_design_power.is_some());
-        if let Some(tdp) = caps.thermal_design_power {
-            assert!(tdp > 0.0);
-        }
+        assert!(caps.thermal_design_power.is_none());
     }
 
     #[test]

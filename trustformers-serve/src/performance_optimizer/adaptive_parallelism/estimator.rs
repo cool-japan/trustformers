@@ -46,14 +46,19 @@ impl OptimalParallelismEstimator {
                     ],
                 },
                 parameters: HashMap::new(),
-                accuracy: 0.8,
+                // A model that has seen no training data has no measured
+                // accuracy. This used to be initialised to 0.8 with a matching
+                // set of invented validation results (r² 0.8, five plausible
+                // fold scores), so a freshly constructed estimator reported
+                // itself as well validated before it had done anything.
+                accuracy: 0.0,
                 last_updated: Utc::now(),
                 training_data_size: 0,
                 validation_results: ModelValidationResults {
-                    r_squared: 0.8,
-                    mean_absolute_error: 0.1,
-                    root_mean_squared_error: 0.15,
-                    cross_validation_scores: vec![0.8, 0.82, 0.78, 0.85, 0.79],
+                    r_squared: 0.0,
+                    mean_absolute_error: f32::INFINITY,
+                    root_mean_squared_error: f32::INFINITY,
+                    cross_validation_scores: Vec::new(),
                     validated_at: Utc::now(),
                 },
             })),

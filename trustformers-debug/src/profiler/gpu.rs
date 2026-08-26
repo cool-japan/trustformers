@@ -27,6 +27,9 @@ pub struct GpuKernelProfile {
 /// GPU profiler for kernel analysis
 #[derive(Debug)]
 pub struct GpuProfiler {
+    /// Number of GPU devices this profiler has enumerated.
+    ///
+    /// Always `0`: no GPU driver is linked, so nothing can be enumerated.
     device_count: i32,
     pub(crate) active_streams: HashMap<i32, Vec<GpuKernelProfile>>,
     memory_pools: HashMap<i32, GpuMemoryPool>,
@@ -41,10 +44,16 @@ pub struct GpuMemoryPool {
 }
 
 impl GpuProfiler {
+    /// Create a GPU profiler with no enumerated devices.
+    ///
+    /// `device_count` is `0` because this crate links no GPU driver and
+    /// therefore cannot enumerate anything -- it accepts kernel profiles that
+    /// a caller records and aggregates them, but it never discovers hardware
+    /// itself. It used to report `1`, i.e. "one GPU present", on every machine
+    /// including ones with no GPU at all.
     pub fn new() -> Result<Self> {
-        // In practice, this would initialize CUDA/ROCm profiling
         Ok(Self {
-            device_count: 1, // Simplified
+            device_count: 0,
             active_streams: HashMap::new(),
             memory_pools: HashMap::new(),
         })

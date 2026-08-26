@@ -60,9 +60,6 @@ pub struct TempDirectoryManager {
     /// Base directory for all temporary directories
     base_directory: PathBuf,
 
-    /// Pool of available directories
-    available_directories: Arc<Mutex<Vec<PathBuf>>>,
-
     /// Currently allocated directories
     allocated_directories: Arc<Mutex<HashMap<PathBuf, TempDirectoryAllocation>>>,
 
@@ -140,14 +137,12 @@ impl TempDirectoryManager {
         let conflict_resolver = Arc::new(DirectoryConflictResolver::new());
 
         // Initialize directory pool
-        let available_directories = Arc::new(Mutex::new(Vec::new()));
         let allocated_directories = Arc::new(Mutex::new(HashMap::new()));
 
         let manager = Self {
             instance_info: Arc::new(RwLock::new(instance_info)),
             config: Arc::new(RwLock::new(config.clone())),
             base_directory: base_directory.clone(),
-            available_directories,
             allocated_directories,
             cleanup_scheduler: cleanup_scheduler.clone(),
             quota_manager: quota_manager.clone(),

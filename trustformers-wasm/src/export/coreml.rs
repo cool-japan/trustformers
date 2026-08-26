@@ -1,15 +1,22 @@
 //! Core ML Export for Apple Devices
 //!
-//! This module provides export capabilities to Apple's Core ML format,
-//! enabling optimized inference on iOS, iPadOS, macOS devices with
-//! Neural Engine acceleration.
+//! This module builds an in-memory graph representation (layers →
+//! operations → a [`CoreMLModel`]) modeled on Apple's Core ML concepts, for
+//! iOS/iPadOS/macOS/Neural-Engine deployment planning.
+//!
+//! **Output format status:** [`CoreMLModel::export_coreml_json`] serializes
+//! that graph to a JSON *intermediate representation* for inspection and
+//! debugging. It is **not** a real `.mlmodel`/`.mlpackage` — Core ML's
+//! actual on-disk format is a versioned protobuf, and this crate does not
+//! implement that protobuf encoder yet. See `trustformers-wasm/TODO.md`
+//! for the tracked real-protobuf-export item.
 //!
 //! Key features:
-//! - Transformer model conversion to Core ML format
+//! - Transformer model conversion to an in-memory Core ML-style graph
 //! - Neural Engine optimization
 //! - Multi-head attention mapping
 //! - Quantization support (FP16, INT8)
-//! - Metadata and model packaging
+//! - Metadata and model packaging (JSON intermediate representation)
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -527,10 +534,18 @@ pub struct CoreMLModel {
 }
 
 impl CoreMLModel {
-    /// Serialize model to ML Model format (simplified)
-    pub fn to_mlmodel_json(&self) -> String {
-        // In a real implementation, this would generate the actual .mlmodel protobuf format
-        // For now, we generate a JSON representation
+    /// Serialize this model's structure to a JSON *intermediate*
+    /// representation.
+    ///
+    /// This is **not** a `.mlmodel` file: Core ML's real on-disk format is
+    /// a versioned protobuf (see `CoreML.proto` in Apple's `coremltools`),
+    /// and this crate does not implement that protobuf encoder. The JSON
+    /// produced here summarizes the exported graph (version, compute
+    /// unit, input/output counts, operation count) for inspection and
+    /// debugging; feeding it to a real Core ML runtime expecting a
+    /// `.mlmodel`/`.mlpackage` will fail to parse. Real protobuf export is
+    /// tracked in `trustformers-wasm/TODO.md`.
+    pub fn export_coreml_json(&self) -> String {
         format!(
             r#"{{
     "version": "{:?}",
@@ -644,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mlmodel_json_generation() {
+    fn test_export_coreml_json_generation() {
         let model = CoreMLModel {
             version: CoreMLVersion::V6,
             metadata: CoreMLModelMetadata::default(),
@@ -654,7 +669,9 @@ mod tests {
             compute_unit: CoreMLComputeUnit::CPUAndNeuralEngine,
         };
 
-        let json = model.to_mlmodel_json();
+        // This is the JSON intermediate representation, not a real
+        // `.mlmodel` — see `export_coreml_json`'s doc comment.
+        let json = model.export_coreml_json();
         assert!(json.contains("V6"));
         assert!(json.contains("CPUAndNeuralEngine"));
     }

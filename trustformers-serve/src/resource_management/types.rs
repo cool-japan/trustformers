@@ -72,7 +72,9 @@ pub struct TempDirPoolConfig {
 impl Default for TempDirPoolConfig {
     fn default() -> Self {
         Self {
-            base_path: PathBuf::from("/tmp/trustformers"),
+            // Derived from the platform temp directory, never a hardcoded
+            // absolute path: `/tmp` does not exist on every supported target.
+            base_path: std::env::temp_dir().join("trustformers"),
             max_directories: 50,
             max_directory_size_bytes: 1024 * 1024 * 1024, // 1GB
             default_cleanup_policy: TempDirectoryCleanupPolicy::SessionEnd,

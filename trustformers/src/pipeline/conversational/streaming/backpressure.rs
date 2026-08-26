@@ -39,6 +39,54 @@ pub struct BackpressureController {
     resource_monitor: Arc<RwLock<ResourceMonitor>>,
     /// Flow control strategies for different scenarios
     strategies: Arc<RwLock<FlowControlStrategies>>,
+    /// Source of the system resource readings that drive throttling.
+    probe: Arc<dyn ResourceProbe>,
+    /// When the current pressured interval began, if any.
+    pressure_since: Arc<RwLock<Option<Instant>>>,
+}
+
+/// Source of the system-resource readings a [`BackpressureController`]
+/// throttles on.
+///
+/// Injecting a probe keeps the controller testable without ever substituting
+/// constants for measurements: a probe that cannot read a metric returns
+/// `None` for it.
+#[async_trait::async_trait]
+pub trait ResourceProbe: Send + Sync + std::fmt::Debug {
+    /// Read the current resource usage.
+    async fn sample(&self) -> ResourceSnapshot;
+}
+
+/// Default probe: reads this host through `sysinfo`.
+///
+/// CPU and memory are real system readings. Network and disk I/O are not
+/// sampled by this probe and are reported as `None` rather than guessed.
+#[derive(Debug, Default)]
+pub struct SystemResourceProbe;
+
+#[async_trait::async_trait]
+impl ResourceProbe for SystemResourceProbe {
+    async fn sample(&self) -> ResourceSnapshot {
+        // CPU comes from the shared sampler so repeated polling does not add a
+        // fixed sleep to every measurement.
+        let cpu = crate::enhanced_profiler::read_cpu_usage().await;
+
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let total_memory = system.total_memory();
+        let memory = if total_memory > 0 {
+            Some(system.used_memory() as f32 / total_memory as f32 * 100.0)
+        } else {
+            None
+        };
+
+        ResourceSnapshot {
+            cpu: Some(cpu),
+            memory,
+            network: None,
+            io: None,
+        }
+    }
 }
 
 /// Hierarchical pressure levels for graduated backpressure response
@@ -170,15 +218,19 @@ pub struct ResourceMonitor {
 
 /// Resource usage snapshot
 #[derive(Debug, Clone)]
+///
+/// Every field is `Option`: a probe that cannot read a metric reports `None`,
+/// which keeps that metric out of the pressure calculation instead of feeding
+/// it a made-up figure.
 pub struct ResourceSnapshot {
-    /// CPU usage at snapshot time
-    pub cpu: f32,
-    /// Memory usage at snapshot time
-    pub memory: f32,
-    /// Network usage at snapshot time
-    pub network: f32,
-    /// I/O usage at snapshot time
-    pub io: f32,
+    /// CPU usage at snapshot time, in percent.
+    pub cpu: Option<f32>,
+    /// Memory usage at snapshot time, in percent of total.
+    pub memory: Option<f32>,
+    /// Network usage at snapshot time.
+    pub network: Option<f32>,
+    /// I/O operations per second at snapshot time.
+    pub io: Option<f32>,
 }
 
 /// Resource utilization statistics
@@ -321,6 +373,14 @@ impl BackpressureController {
     /// Initializes all monitoring systems, metrics collection, and flow control algorithms
     /// with sensible defaults that can be customized through the configuration
     pub fn new(config: AdvancedStreamingConfig) -> Self {
+        Self::with_probe(config, Arc::new(SystemResourceProbe))
+    }
+
+    /// Create a controller that samples resources through `probe`.
+    ///
+    /// Use this to drive the controller from an application-specific telemetry
+    /// source, or from a deterministic probe in tests.
+    pub fn with_probe(config: AdvancedStreamingConfig, probe: Arc<dyn ResourceProbe>) -> Self {
         Self {
             config,
             pressure_level: Arc::new(RwLock::new(PressureLevel::None)),
@@ -328,6 +388,8 @@ impl BackpressureController {
             metrics: Arc::new(RwLock::new(BackpressureMetrics::default())),
             resource_monitor: Arc::new(RwLock::new(ResourceMonitor::default())),
             strategies: Arc::new(RwLock::new(FlowControlStrategies::default())),
+            probe,
+            pressure_since: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -359,13 +421,28 @@ impl BackpressureController {
             let mut metrics = self.metrics.write().await;
             metrics.pressure_events += 1;
 
-            // Track time under pressure
-            if pressure > PressureLevel::None {
-                let now = Instant::now();
-                if let Some(last_event) = metrics.resource_stats.avg_cpu.partial_cmp(&0.0) {
-                    // Simplified time tracking - in real implementation would be more sophisticated
-                    metrics.time_under_pressure_ms += 100; // Placeholder increment
-                }
+            // Track time under pressure using the real clock: the interval that
+            // just ended is added when the system leaves a pressured state.
+            let now = Instant::now();
+            let mut pressure_since = self.pressure_since.write().await;
+            match (
+                previous_pressure > PressureLevel::None,
+                pressure > PressureLevel::None,
+            ) {
+                (false, true) => *pressure_since = Some(now),
+                (true, false) => {
+                    if let Some(started) = pressure_since.take() {
+                        metrics.time_under_pressure_ms +=
+                            now.duration_since(started).as_millis() as u64;
+                    }
+                },
+                (true, true) => {
+                    if let Some(started) = pressure_since.replace(now) {
+                        metrics.time_under_pressure_ms +=
+                            now.duration_since(started).as_millis() as u64;
+                    }
+                },
+                (false, false) => {},
             }
 
             // Update maximum pressure level
@@ -476,14 +553,32 @@ impl BackpressureController {
                 actions.push(FlowAction::BufferDrain);
                 actions.push(FlowAction::QualityAdjustment(0.3)); // Significant quality reduction
 
-                // Activate load balancing for critical situations
-                actions.push(FlowAction::LoadBalance(LoadBalanceAction::DropLowPriority));
+                // Honor the emergency strategy's own load-shedding preference:
+                // a `Dropping` strategy configured to preserve priority sheds
+                // low-priority load first; otherwise fall back to fair
+                // sharing. Other strategy choices keep the previous
+                // unconditional `DropLowPriority`, since it's still a
+                // reasonable default under emergency conditions.
+                let load_balance_action = match strategy {
+                    BackpressureStrategy::Dropping {
+                        priority_preservation: false,
+                        ..
+                    } => LoadBalanceAction::FairShare,
+                    _ => LoadBalanceAction::DropLowPriority,
+                };
+                actions.push(FlowAction::LoadBalance(load_balance_action));
             },
             PressureLevel::High => {
                 // Aggressive but controlled response
                 let reduction_factor =
                     self.calculate_adaptive_reduction_factor(&flow_state, buffer_state).await;
-                let reduction = flow_state.flow_rate * reduction_factor;
+                let mut reduction = flow_state.flow_rate * reduction_factor;
+                // A `RateLimiting` strategy's `max_rate` is a hard cap: make
+                // sure the reduction brings the flow rate down to at least
+                // that, even if the adaptive factor alone would not.
+                if let BackpressureStrategy::RateLimiting { max_rate, .. } = strategy {
+                    reduction = reduction.max(flow_state.flow_rate - max_rate).max(0.0);
+                }
                 actions.push(FlowAction::DecreaseRate(reduction));
                 actions.push(FlowAction::QualityAdjustment(0.6));
                 actions.push(FlowAction::AdaptiveThrottle(0.7));
@@ -685,18 +780,21 @@ impl BackpressureController {
         let mut monitor = self.resource_monitor.write().await;
         let now = Instant::now();
 
-        // Simulate resource monitoring - in real implementation would use system APIs
-        let snapshot = ResourceSnapshot {
-            cpu: self.get_cpu_usage().await,
-            memory: self.get_memory_usage().await,
-            network: self.get_network_usage().await,
-            io: self.get_io_usage().await,
-        };
+        // Real readings from the injected probe.
+        let snapshot = self.sample_resources().await;
 
-        monitor.cpu_usage = snapshot.cpu;
-        monitor.memory_usage = snapshot.memory;
-        monitor.network_usage = snapshot.network;
-        monitor.io_ops_per_sec = snapshot.io;
+        if let Some(cpu) = snapshot.cpu {
+            monitor.cpu_usage = cpu;
+        }
+        if let Some(memory) = snapshot.memory {
+            monitor.memory_usage = memory;
+        }
+        if let Some(network) = snapshot.network {
+            monitor.network_usage = network;
+        }
+        if let Some(io) = snapshot.io {
+            monitor.io_ops_per_sec = io;
+        }
 
         // Update usage history
         monitor.usage_history.push_back((now, snapshot));
@@ -716,14 +814,28 @@ impl BackpressureController {
             return 1.0; // Default high availability
         }
 
-        // Simple linear trend analysis
+        // Simple linear trend analysis over the metrics that were measured.
+        // Snapshots where neither CPU nor memory could be read contribute
+        // nothing rather than a substituted value.
         let recent_usage: Vec<f32> = monitor
             .usage_history
             .iter()
             .rev()
             .take(10)
-            .map(|(_, snapshot)| (snapshot.cpu + snapshot.memory) / 2.0)
+            .filter_map(|(_, snapshot)| {
+                let readings: Vec<f32> =
+                    [snapshot.cpu, snapshot.memory].into_iter().flatten().collect();
+                if readings.is_empty() {
+                    None
+                } else {
+                    Some(readings.iter().sum::<f32>() / readings.len() as f32)
+                }
+            })
             .collect();
+
+        if recent_usage.len() < 2 {
+            return 1.0;
+        }
 
         let trend = recent_usage.windows(2).map(|w| w[1] - w[0]).sum::<f32>()
             / (recent_usage.len() - 1) as f32;
@@ -796,28 +908,14 @@ impl BackpressureController {
         Ok(())
     }
 
-    /// Get current CPU usage (placeholder - would use system APIs in real implementation)
-    async fn get_cpu_usage(&self) -> f32 {
-        // Placeholder implementation - return deterministic values for now
-        50.0
-    }
-
-    /// Get current memory usage (placeholder)
-    async fn get_memory_usage(&self) -> f32 {
-        // Placeholder implementation - return deterministic values for now
-        60.0
-    }
-
-    /// Get current network usage (placeholder)
-    async fn get_network_usage(&self) -> f32 {
-        // Placeholder implementation - return deterministic values for now
-        30.0
-    }
-
-    /// Get current I/O usage (placeholder)
-    async fn get_io_usage(&self) -> f32 {
-        // Placeholder implementation - return deterministic values for now
-        40.0
+    /// Sample the system resources the controller throttles on.
+    ///
+    /// Readings come from the injected [`ResourceProbe`]; the default probe
+    /// reads the operating system through `sysinfo`. Nothing is assumed — a
+    /// metric the probe cannot answer stays `None` and does not contribute to
+    /// the pressure decision.
+    async fn sample_resources(&self) -> ResourceSnapshot {
+        self.probe.sample().await
     }
 
     /// Get current pressure level with thread-safe access
@@ -1026,7 +1124,59 @@ impl Default for FlowControlStrategies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+
+    // -----------------------------------------------------------------------
+    // Regression: `get_cpu_usage`/`get_memory_usage`/`get_network_usage`/
+    // `get_io_usage` used to return the constants 50/60/30/40, so the
+    // controller never adapted. The probe below proves the readings now come
+    // from an injected source, and that a metric the probe cannot answer is
+    // left alone rather than overwritten with a substitute.
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct FixedProbe;
+
+    #[async_trait::async_trait]
+    impl ResourceProbe for FixedProbe {
+        async fn sample(&self) -> ResourceSnapshot {
+            ResourceSnapshot {
+                cpu: Some(91.0),
+                memory: Some(88.0),
+                network: None,
+                io: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_readings_come_from_the_probe() {
+        let controller = BackpressureController::with_probe(
+            AdvancedStreamingConfig::default(),
+            Arc::new(FixedProbe),
+        );
+
+        let network_before = controller.resource_monitor.read().await.network_usage;
+        controller
+            .update_resource_monitoring()
+            .await
+            .expect("monitoring update should succeed");
+        let monitor = controller.resource_monitor.read().await;
+
+        assert!(
+            (monitor.cpu_usage - 91.0).abs() < 1e-5,
+            "CPU must come from the probe, got {} (50.0 was the old constant)",
+            monitor.cpu_usage
+        );
+        assert!(
+            (monitor.memory_usage - 88.0).abs() < 1e-5,
+            "memory must come from the probe, got {} (60.0 was the old constant)",
+            monitor.memory_usage
+        );
+        assert!(
+            (monitor.network_usage - network_before).abs() < 1e-5,
+            "an unmeasured metric must be left untouched, not replaced by 30.0"
+        );
+    }
 
     fn make_config() -> AdvancedStreamingConfig {
         AdvancedStreamingConfig::default()

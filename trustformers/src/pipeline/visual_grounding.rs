@@ -1,10 +1,18 @@
 //! # Visual Grounding Pipeline
 //!
-//! GroundingDINO-compatible visual grounding pipeline: locate objects in images
-//! described by free-form text queries and return normalised bounding boxes.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **GroundingDINO** — open-set object detection with language conditioning
+//! Query parsing (`parse_phrases`, which splits a GroundingDINO-style prompt
+//! on `.` and `,`) and the post-processing chain in
+//! [`VisualGroundingPipeline::postprocess`]: score thresholding, descending
+//! sort and truncation to `max_detections`.
+//!
+//! ## Model support
+//!
+//! No open-set grounding backbone (GroundingDINO, …) is implemented in
+//! `trustformers-models`, so [`VisualGroundingPipeline::ground`] returns
+//! [`GroundingError::UnsupportedModel`] instead of the boxes it used to derive
+//! from a djb2 hash of the phrase while ignoring the image entirely.
 //!
 //! ## Example
 //!
@@ -13,8 +21,8 @@
 //!
 //! let config = VisualGroundingConfig::default();
 //! let pipeline = VisualGroundingPipeline::new(config)?;
-//! let pixels = vec![0.5_f32; 800 * 1333 * 3];
-//! let result = pipeline.ground(&pixels, 800, 1333, "a cat . a dog")?;
+//! // Real post-processing over boxes produced by your own model:
+//! let result = pipeline.postprocess(my_boxes, "a cat . a dog", 800, 1333);
 //! for b in &result.boxes {
 //!     println!("{}: {:.3}", b.phrase, b.score);
 //! }
@@ -37,7 +45,24 @@ pub enum GroundingError {
     /// A generic model-level error with a descriptive message.
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real visual grounding model is implemented for `{requested}`; supported: \
+         {supported}. This pipeline never returns synthesised boxes — use `postprocess` with \
+         your own model's output."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
 }
+
+/// Grounding architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -175,6 +200,18 @@ impl GroundingResult {
         }
         out
     }
+
+    /// Split `query` (the original GroundingDINO-style prompt, e.g.
+    /// `"a cat . a dog"`) into the individual phrases that were requested.
+    ///
+    /// This is [`unique_phrases`](Self::unique_phrases)'s counterpart on the
+    /// *input* side: `unique_phrases` reports what the (external) model
+    /// actually returned boxes for, `requested_phrases` reports what was
+    /// asked for. Comparing the two can surface a model that grounded a
+    /// phrase nobody requested, or requested phrases it never answered.
+    pub fn requested_phrases(&self) -> Vec<String> {
+        parse_phrases(&self.query)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,46 +237,6 @@ fn parse_phrases(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Generate a mock bounding box for `phrase` given image `height` and `width`.
-///
-/// Position is deterministic based on the phrase hash; size shrinks with phrase
-/// length (longer phrase → more specific → smaller box).
-fn mock_box_for_phrase(phrase: &str, _height: usize, _width: usize) -> (f32, f32, f32, f32) {
-    let h = djb2_hash(phrase);
-
-    // Decode position from hash bytes (normalised to [0, 1]).
-    let cx = ((h & 0xFF) as f32) / 255.0;
-    let cy = (((h >> 8) & 0xFF) as f32) / 255.0;
-
-    // Shorter phrases → larger boxes (max ~0.6, min ~0.1).
-    let max_side = 0.60_f32;
-    let min_side = 0.10_f32;
-    let len_factor = (phrase.len() as f32 / 30.0_f32).clamp(0.0, 1.0);
-    let side = max_side - len_factor * (max_side - min_side);
-
-    let half = side / 2.0;
-    let x1 = (cx - half).clamp(0.0, 1.0 - side);
-    let y1 = (cy - half).clamp(0.0, 1.0 - side);
-    let x2 = (x1 + side).min(1.0);
-    let y2 = (y1 + side).min(1.0);
-
-    (x1, y1, x2, y2)
-}
-
-/// Compute a mock confidence score for a phrase-image pair in `[0, 1]`.
-fn mock_score(phrase: &str, image: &[f32]) -> f32 {
-    let h = djb2_hash(phrase);
-    let base = (((h >> 16) & 0xFF) as f32) / 255.0;
-    // Blend with mean pixel intensity to vary by image content.
-    let img_mean = if image.is_empty() {
-        0.5
-    } else {
-        let sum: f32 = image.iter().take(256).sum();
-        (sum / image.len().min(256) as f32).clamp(0.0, 1.0)
-    };
-    (base * 0.7 + img_mean * 0.3).clamp(0.0, 1.0)
-}
-
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -261,18 +258,17 @@ impl VisualGroundingPipeline {
 
     /// Ground a text query in a single image.
     ///
-    /// `image` is a flat pixel buffer (any channel layout is accepted; only
-    /// its length is used for mock scoring).
-    ///
     /// # Errors
     ///
     /// - [`GroundingError::EmptyImage`] — `image` is empty.
     /// - [`GroundingError::EmptyQuery`] — `text_query` is blank.
+    /// - [`GroundingError::UnsupportedModel`] — otherwise: no grounding
+    ///   backbone is implemented and this pipeline will not invent boxes.
     pub fn ground(
         &self,
         image: &[f32],
-        height: usize,
-        width: usize,
+        _height: usize,
+        _width: usize,
         text_query: &str,
     ) -> Result<GroundingResult, GroundingError> {
         if image.is_empty() {
@@ -282,37 +278,36 @@ impl VisualGroundingPipeline {
         if trimmed.is_empty() {
             return Err(GroundingError::EmptyQuery);
         }
+        Err(GroundingError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no grounding backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
+    }
 
-        let phrases = parse_phrases(trimmed);
-        let mut boxes: Vec<GroundedBox> = Vec::new();
-
-        for phrase in &phrases {
-            let score = mock_score(phrase, image);
-            if score < self.config.box_threshold {
-                continue;
-            }
-            let phrase_h = djb2_hash(phrase);
-            let phrase_score =
-                (((phrase_h >> 32) & 0xFF) as f32 / 255.0).clamp(self.config.text_threshold, 1.0);
-            let bbox = mock_box_for_phrase(phrase, height, width);
-            boxes.push(GroundedBox {
-                phrase: phrase.clone(),
-                bbox,
-                score,
-                phrase_score,
-            });
-        }
-
-        // Sort by score descending and cap at max_detections.
+    /// Apply the pipeline's real post-processing to boxes from your own model.
+    ///
+    /// Drops boxes scoring below `box_threshold`, sorts the rest by descending
+    /// score, and truncates to `max_detections`.
+    pub fn postprocess(
+        &self,
+        mut boxes: Vec<GroundedBox>,
+        query: &str,
+        image_height: usize,
+        image_width: usize,
+    ) -> GroundingResult {
+        boxes.retain(|b| b.score >= self.config.box_threshold);
         boxes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         boxes.truncate(self.config.max_detections);
-
-        Ok(GroundingResult {
+        GroundingResult {
             boxes,
-            query: trimmed.to_string(),
-            image_height: height,
-            image_width: width,
-        })
+            query: query.trim().to_string(),
+            image_height,
+            image_width,
+        }
     }
 
     /// Ground the same text query across a batch of images.
@@ -406,11 +401,7 @@ impl GroundingProcessor {
             .split_whitespace()
             .map(|word| {
                 let lower = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                let mut h: u64 = 5381;
-                for b in lower.bytes() {
-                    h = h.wrapping_mul(33).wrapping_add(b as u64);
-                }
-                (h % 30_000) as u32 + 1
+                (djb2_hash(&lower) % 30_000) as u32 + 1
             })
             .collect()
     }
@@ -665,36 +656,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_requested_phrases_parses_the_query_not_the_boxes() {
+        // The model answered for "cat" only, but the query asked for both
+        // "cat" and "dog" - requested_phrases must report what was asked,
+        // independent of unique_phrases (what was answered).
+        let boxes = vec![GroundedBox {
+            phrase: "cat".to_string(),
+            bbox: (0.0, 0.0, 0.1, 0.1),
+            score: 0.9,
+            phrase_score: 0.8,
+        }];
+        let result = GroundingResult {
+            boxes,
+            query: "a cat . a dog".to_string(),
+            image_height: 100,
+            image_width: 100,
+        };
+        assert_eq!(
+            result.requested_phrases(),
+            vec!["a cat".to_string(), "a dog".to_string()]
+        );
+        assert_eq!(result.unique_phrases(), vec!["cat".to_string()]);
+    }
+
     // --- Pipeline::ground ---
 
     #[test]
-    fn test_ground_multi_phrase_query_produces_boxes() {
-        // Use a low box_threshold so mock boxes are kept.
+    fn test_ground_reports_unsupported_model() {
+        // Regression: `ground` used to derive boxes from a djb2 hash of the
+        // phrase, ignoring the image, and report them as detections.
         let config = VisualGroundingConfig {
             box_threshold: 0.0,
+            model_name: "IDEA-Research/grounding-dino-tiny".to_string(),
             ..Default::default()
         };
         let p = VisualGroundingPipeline::new(config).expect("valid");
         let img = dummy_image(800 * 600 * 3);
-        let result = p.ground(&img, 800, 600, "a cat . a dog . a bird").expect("ground ok");
-        // Three phrases → at most three boxes (before filtering).
-        assert!(!result.boxes.is_empty(), "expected at least one box");
+        match p.ground(&img, 800, 600, "a cat . a dog . a bird") {
+            Err(GroundingError::UnsupportedModel {
+                requested,
+                supported,
+            }) => {
+                assert_eq!(requested, "IDEA-Research/grounding-dino-tiny");
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
+        }
     }
 
-    // --- Pipeline::ground_batch ---
-
     #[test]
-    fn test_ground_batch_count() {
-        let config = VisualGroundingConfig {
-            box_threshold: 0.0,
-            ..Default::default()
-        };
-        let p = VisualGroundingPipeline::new(config).expect("valid");
+    fn test_ground_batch_reports_unsupported_model() {
+        let p = default_pipeline();
         let img1 = dummy_image(100 * 100 * 3);
         let img2 = dummy_image(200 * 200 * 3);
         let images: Vec<(&[f32], usize, usize)> = vec![(&img1, 100, 100), (&img2, 200, 200)];
-        let results = p.ground_batch(&images, "cat").expect("batch ok");
-        assert_eq!(results.len(), 2);
+        assert!(matches!(
+            p.ground_batch(&images, "cat"),
+            Err(GroundingError::UnsupportedModel { .. })
+        ));
+    }
+
+    #[test]
+    fn test_postprocess_filters_sorts_and_truncates() {
+        let config = VisualGroundingConfig {
+            box_threshold: 0.4,
+            max_detections: 2,
+            ..Default::default()
+        };
+        let p = VisualGroundingPipeline::new(config).expect("valid");
+        let make = |phrase: &str, score: f32| GroundedBox {
+            phrase: phrase.to_string(),
+            bbox: (0.1, 0.1, 0.5, 0.5),
+            score,
+            phrase_score: 0.5,
+        };
+        let result = p.postprocess(
+            vec![
+                make("cat", 0.9),
+                make("dog", 0.2),
+                make("bird", 0.7),
+                make("tree", 0.6),
+            ],
+            " a cat . a dog ",
+            800,
+            600,
+        );
+        assert_eq!(result.boxes.len(), 2, "{:?}", result.boxes);
+        assert_eq!(result.boxes[0].phrase, "cat");
+        assert_eq!(result.boxes[1].phrase, "bird");
+        assert_eq!(result.query, "a cat . a dog");
+        assert_eq!(result.image_height, 800);
+        assert_eq!(result.image_width, 600);
     }
 
     // --- Error cases ---
@@ -715,49 +768,6 @@ mod tests {
     }
 
     // --- Bbox / score invariants ---
-
-    #[test]
-    fn test_boxes_within_unit_square() {
-        let config = VisualGroundingConfig {
-            box_threshold: 0.0,
-            ..Default::default()
-        };
-        let p = VisualGroundingPipeline::new(config).expect("valid");
-        let img = dummy_image(800 * 600 * 3);
-        let result = p.ground(&img, 800, 600, "tree, car, person, building").expect("ok");
-        for b in &result.boxes {
-            let (x1, y1, x2, y2) = b.bbox;
-            assert!(
-                x1 >= 0.0 && y1 >= 0.0 && x2 <= 1.0 && y2 <= 1.0,
-                "box out of unit square: {:?}",
-                b.bbox
-            );
-            assert!(
-                x2 >= x1 && y2 >= y1,
-                "box coordinates inverted: {:?}",
-                b.bbox
-            );
-        }
-    }
-
-    #[test]
-    fn test_box_score_le_one() {
-        let config = VisualGroundingConfig {
-            box_threshold: 0.0,
-            ..Default::default()
-        };
-        let p = VisualGroundingPipeline::new(config).expect("valid");
-        let img = dummy_image(400 * 300 * 3);
-        let result = p.ground(&img, 400, 300, "window, door, roof").expect("ok");
-        for b in &result.boxes {
-            assert!(
-                b.score <= 1.0,
-                "score {} > 1.0 for phrase '{}'",
-                b.score,
-                b.phrase
-            );
-        }
-    }
 
     // -----------------------------------------------------------------------
     // BoundingBox extended type tests

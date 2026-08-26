@@ -1,17 +1,16 @@
 # Migrating from SentencePiece to TrustformeRS
 
+> **Accuracy note (2026-08-24):** the `migration/tiktoken-migration.md` guide in this same directory was found to describe roughly 30 methods/types that don't exist on the real `TiktokenTokenizer` and was rewritten from the real source to fix it. A same-pattern grep of this file (not a full method-by-method audit) turns up about 9 hits of the same kind — API calls, config structs, or helper types below that were not individually checked against `trustformers-tokenizers/src/`. Verify any specific method name you plan to depend on against the source before relying on it; do not assume the presence of a name here means it exists in the crate.
+
 This comprehensive guide will help you migrate from Google's SentencePiece library to TrustformeRS Tokenizers while maintaining full compatibility with SentencePiece models and gaining significant performance improvements.
 
 ## Why Migrate from SentencePiece?
 
 ### Performance Benefits
-| Metric | SentencePiece | TrustformeRS Tokenizers | Improvement |
-|--------|---------------|-------------------------|-------------|
-| **Tokenization Speed** | 400K tokens/sec | 950K tokens/sec | **137% faster** |
-| **Memory Usage** | 120MB baseline | 65MB baseline | **46% less memory** |
-| **Binary Size** | 35MB | 18MB | **49% smaller** |
-| **Cold Start Time** | 300ms | 95ms | **68% faster startup** |
-| **Model Loading** | 180ms | 60ms | **67% faster loading** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and loading-time figures presented as a measured comparison against SentencePiece. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (950K tokens/sec here, 1.1M in the tiktoken guide, 1.2M in the HuggingFace guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real SentencePiece installation on your own hardware.
+
+Real, verified behavior worth knowing before you migrate: `SentencePieceTokenizer::from_pretrained` (`ln::from_pretrained` in `trustformers-tokenizers/src/sentencepiece/mod.rs`) probes `{path}/spiece.model`, `{path}/sentencepiece.bpe.model`, `{path}/tokenizer.model`, `{path}.model`, and the bare path for a real SentencePiece model file, and returns a hard `Err` listing every path it probed (and why any that existed still failed to parse) if none resolve. It does not fabricate a vocabulary as a fallback.
 
 ### Feature Advantages
 - **Full SentencePiece compatibility** with all model formats

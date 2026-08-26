@@ -14,6 +14,7 @@
 
 use crate::common::{BiasCorrection, ParameterUpdate};
 use std::alloc::{alloc, dealloc, Layout};
+use std::collections::HashMap;
 use std::ptr::{self, NonNull};
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
@@ -157,16 +158,27 @@ unsafe impl Sync for AlignedAllocator {}
 
 /// Structure of Arrays (SoA) layout for optimizer state.
 ///
-/// This layout stores momentum and variance in separate aligned arrays
-/// to improve vectorization and cache utilization.
+/// Momentum and variance for *every* registered parameter live in two contiguous
+/// arrays rather than in per-parameter allocations, so a sweep over one moment
+/// touches consecutive cache lines. Each parameter owns the half-open range
+/// `[momentum_offset, momentum_offset + size)` of `SoAOptimizerState::momentum`
+/// (and likewise for the variance array); ranges are padded up to a cache-line
+/// boundary so no two parameters share a cache line.
+///
+/// The moments are **persistent**: `update_parameter_soa` reads the previous values
+/// out of these arrays and writes the new ones back. An earlier revision recomputed
+/// both from the current gradient on every call, which silently removed all of
+/// Adam's adaptivity.
 #[derive(Debug)]
 pub struct SoAOptimizerState {
-    /// Momentum arrays for all parameters
-    momentum_storage: AlignedAllocator,
-    /// Variance arrays for all parameters
-    variance_storage: AlignedAllocator,
+    /// Contiguous first-moment (momentum) storage shared by all parameters.
+    momentum: Vec<f32>,
+    /// Contiguous second-moment (variance) storage shared by all parameters.
+    variance: Vec<f32>,
     /// Parameter metadata
     parameters: Vec<ParameterInfo>,
+    /// Fast lookup from parameter id to its index in `parameters`.
+    parameter_index: HashMap<String, usize>,
     /// Global step counter
     step: usize,
     /// Alignment configuration
@@ -192,35 +204,59 @@ impl SoAOptimizerState {
     /// Creates a new SoA optimizer state.
     pub fn new(alignment: AlignmentConfig) -> Self {
         Self {
-            momentum_storage: AlignedAllocator::new(alignment),
-            variance_storage: AlignedAllocator::new(alignment),
+            momentum: Vec::new(),
+            variance: Vec::new(),
             parameters: Vec::new(),
+            parameter_index: HashMap::new(),
             step: 0,
             alignment,
         }
     }
 
-    /// Adds a parameter to the SoA layout.
+    /// Number of `f32` elements per cache line, used to pad parameter blocks.
+    fn cache_line_elements(&self) -> usize {
+        (self.alignment.cache_line_size / std::mem::size_of::<f32>()).max(1)
+    }
+
+    /// Adds a parameter to the SoA layout, reserving zeroed moment storage for it.
+    ///
+    /// Registering the same id twice is a no-op, so callers may register lazily.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `size` is zero, which would produce an empty block.
     pub fn add_parameter(&mut self, id: String, size: usize) -> Result<()> {
+        if self.parameter_index.contains_key(&id) {
+            return Ok(());
+        }
+        if size == 0 {
+            return Err(TrustformersError::tensor_op_error(
+                "cannot register a zero-sized parameter in the SoA layout",
+                "add_parameter",
+            ));
+        }
+
         // Calculate optimal chunk size for vectorization
         let chunk_size = self.calculate_optimal_chunk_size(size);
 
-        // Allocate aligned momentum array
-        let _momentum_ptr = self.momentum_storage.allocate_initialized(size, 0.0f32)?;
-        let momentum_offset = self.parameters.len() * size; // Simplified offset calculation
+        // Each parameter's block starts on a cache-line boundary within the shared
+        // array so that neighbouring parameters never share a line.
+        let line = self.cache_line_elements();
+        let momentum_offset = self.momentum.len().div_ceil(line) * line;
+        let variance_offset = self.variance.len().div_ceil(line) * line;
 
-        // Allocate aligned variance array
-        let _variance_ptr = self.variance_storage.allocate_initialized(size, 0.0f32)?;
-        let variance_offset = self.parameters.len() * size; // Simplified offset calculation
+        self.momentum.resize(momentum_offset + size, 0.0);
+        self.variance.resize(variance_offset + size, 0.0);
 
         let param_info = ParameterInfo {
-            id,
+            id: id.clone(),
             momentum_offset,
             variance_offset,
             size,
             chunk_size,
         };
 
+        self.parameter_index.insert(id, self.parameters.len());
         self.parameters.push(param_info);
         Ok(())
     }
@@ -246,7 +282,24 @@ impl SoAOptimizerState {
 
     /// Gets parameter information by ID.
     pub fn get_parameter_info(&self, id: &str) -> Option<&ParameterInfo> {
-        self.parameters.iter().find(|p| p.id == id)
+        self.parameter_index.get(id).and_then(|&i| self.parameters.get(i))
+    }
+
+    /// Reads the persisted first moment of a parameter (primarily for tests).
+    pub fn momentum_of(&self, id: &str) -> Option<&[f32]> {
+        let info = self.get_parameter_info(id)?;
+        self.momentum.get(info.momentum_offset..info.momentum_offset + info.size)
+    }
+
+    /// Reads the persisted second moment of a parameter (primarily for tests).
+    pub fn variance_of(&self, id: &str) -> Option<&[f32]> {
+        let info = self.get_parameter_info(id)?;
+        self.variance.get(info.variance_offset..info.variance_offset + info.size)
+    }
+
+    /// Current global step counter.
+    pub fn step_count(&self) -> usize {
+        self.step
     }
 
     /// Updates momentum and variance for a parameter using optimized memory access.
@@ -303,7 +356,10 @@ impl SoAOptimizerState {
         Ok(())
     }
 
-    /// Processes a chunk using Structure of Arrays layout.
+    /// Processes a chunk using the Structure of Arrays layout.
+    ///
+    /// Reads the previous moments out of the shared arrays, applies the Adam EMA
+    /// update, writes the new moments back, and steps the parameter.
     fn process_chunk_soa(
         &mut self,
         param_chunk: &mut [f32],
@@ -317,46 +373,44 @@ impl SoAOptimizerState {
         eps: f32,
         weight_decay: f32,
     ) -> Result<()> {
-        // This is a simplified version - in a real implementation,
-        // we would directly access the aligned momentum and variance arrays
+        let momentum_start = param_info.momentum_offset + offset;
+        let variance_start = param_info.variance_offset + offset;
+        let len = param_chunk.len();
 
-        for i in 0..param_chunk.len() {
+        // `momentum` and `variance` are distinct fields, so both slices can be held
+        // mutably at once.
+        let momentum_slice =
+            self.momentum.get_mut(momentum_start..momentum_start + len).ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    "momentum block out of range for SoA layout",
+                    "process_chunk_soa",
+                )
+            })?;
+        let variance_slice =
+            self.variance.get_mut(variance_start..variance_start + len).ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    "variance block out of range for SoA layout",
+                    "process_chunk_soa",
+                )
+            })?;
+
+        for i in 0..len {
             let grad_val = grad_chunk[i] + weight_decay * param_chunk[i];
 
-            // SoA access simulation - in production would use actual aligned arrays
-            let momentum_idx = param_info.momentum_offset + offset + i;
-            let variance_idx = param_info.variance_offset + offset + i;
-
-            // For now, simulate SoA access with computed values
-            // In production, this would access pre-allocated aligned arrays
-            let mut momentum = if momentum_idx < param_info.size {
-                // Simulate momentum retrieval from aligned storage
-                grad_val * 0.9 // Simplified momentum simulation
-            } else {
-                0.0f32
-            };
-
-            let mut variance = if variance_idx < param_info.size {
-                // Simulate variance retrieval from aligned storage
-                grad_val * grad_val * 0.999 // Simplified variance simulation
-            } else {
-                0.0f32
-            };
+            // Real SoA access: load the persisted moments for this element.
+            let momentum = &mut momentum_slice[i];
+            let variance = &mut variance_slice[i];
 
             // Update momentum and variance with exponential moving averages
-            ParameterUpdate::update_ema(&mut momentum, grad_val, betas.0);
-            ParameterUpdate::update_ema(&mut variance, grad_val * grad_val, betas.1);
+            ParameterUpdate::update_ema(momentum, grad_val, betas.0);
+            ParameterUpdate::update_ema(variance, grad_val * grad_val, betas.1);
 
             // Compute bias-corrected estimates
-            let m_hat = momentum / bias_correction1;
-            let v_hat = variance / bias_correction2;
+            let m_hat = *momentum / bias_correction1;
+            let v_hat = *variance / bias_correction2;
 
             // Apply Adam update to parameter
             ParameterUpdate::adam_update(&mut param_chunk[i], lr, m_hat, v_hat, eps);
-
-            // In production, momentum and variance would be written back to aligned arrays
-            // momentum_array[momentum_idx] = momentum;
-            // variance_array[variance_idx] = variance;
         }
 
         Ok(())
@@ -364,8 +418,8 @@ impl SoAOptimizerState {
 
     /// Gets memory layout statistics.
     pub fn layout_stats(&self) -> LayoutStats {
-        let momentum_memory = self.momentum_storage.memory_usage();
-        let variance_memory = self.variance_storage.memory_usage();
+        let momentum_memory = self.momentum.len() * std::mem::size_of::<f32>();
+        let variance_memory = self.variance.len() * std::mem::size_of::<f32>();
         let total_elements: usize = self.parameters.iter().map(|p| p.size).sum();
 
         LayoutStats {
@@ -477,6 +531,11 @@ pub struct LayoutOptimizedAdam {
     weight_decay: f32,
     /// SoA optimizer state
     state: SoAOptimizerState,
+    /// Stable parameter identity registry (see [`crate::param_id`]).
+    ///
+    /// Replaces heap-address keys, which change in every process and so made
+    /// checkpoint resume silently restore nothing.
+    params: crate::param_id::ParamRegistry,
 }
 
 impl LayoutOptimizedAdam {
@@ -499,6 +558,7 @@ impl LayoutOptimizedAdam {
             eps,
             weight_decay,
             state: SoAOptimizerState::new(alignment),
+            params: crate::param_id::ParamRegistry::new(),
         }
     }
 
@@ -522,7 +582,7 @@ impl Optimizer for LayoutOptimizedAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.params.key_for_addr(param.as_ptr() as usize, param.len())?;
 
                 // Ensure parameter is registered
                 if self.state.get_parameter_info(&param_id).is_none() {
@@ -680,5 +740,94 @@ mod tests {
         let optimizer = LayoutOptimizedAdam::avx512_optimized(1e-3, (0.9, 0.999), 1e-8, 0.01);
         let stats = optimizer.layout_stats();
         assert_eq!(stats.alignment_config.vector_size, 64);
+    }
+
+    /// Regression: `process_chunk_soa` used to derive momentum/variance from the
+    /// current gradient on every call and never write them back, so the "Adam"
+    /// update was a pure function of the latest gradient.
+    #[test]
+    fn test_soa_state_persists_across_steps() {
+        let mut state = SoAOptimizerState::new(AlignmentConfig::default());
+        state.add_parameter("w".to_string(), 4).expect("register");
+
+        let mut param = vec![0.0_f32; 4];
+        let grad = vec![1.0_f32; 4];
+
+        state
+            .update_parameter_soa("w", &mut param, &grad, 0.1, (0.9, 0.999), 1e-8, 0.0)
+            .expect("step 1");
+        let momentum_after_first = state.momentum_of("w").expect("momentum block").to_vec();
+        assert!(
+            momentum_after_first.iter().all(|m| (m - 0.1).abs() < 1e-6),
+            "first EMA must be (1-beta1)*g = 0.1, got {momentum_after_first:?}"
+        );
+
+        // A second step with a ZERO gradient can only move the parameter if the
+        // momentum from step 1 was actually stored.
+        let before_second = param.clone();
+        let zero_grad = vec![0.0_f32; 4];
+        state
+            .update_parameter_soa("w", &mut param, &zero_grad, 0.1, (0.9, 0.999), 1e-8, 0.0)
+            .expect("step 2");
+
+        let momentum_after_second = state.momentum_of("w").expect("momentum block").to_vec();
+        assert!(
+            momentum_after_second.iter().all(|m| (m - 0.09).abs() < 1e-6),
+            "second EMA must decay to beta1*0.1 = 0.09, got {momentum_after_second:?}"
+        );
+        for (before, after) in before_second.iter().zip(param.iter()) {
+            assert!(
+                (before - after).abs() > 1e-6,
+                "carried momentum must still move the parameter on a zero gradient"
+            );
+        }
+    }
+
+    /// Two parameters must own disjoint, non-overlapping blocks of the shared arrays.
+    #[test]
+    fn test_soa_parameters_get_disjoint_blocks() {
+        let mut state = SoAOptimizerState::new(AlignmentConfig::default());
+        state.add_parameter("a".to_string(), 4).expect("a");
+        state.add_parameter("b".to_string(), 4).expect("b");
+
+        let mut param_a = vec![0.0_f32; 4];
+        let mut param_b = vec![0.0_f32; 4];
+        let grad_a = vec![1.0_f32; 4];
+        let grad_b = vec![0.0_f32; 4];
+
+        state
+            .update_parameter_soa("a", &mut param_a, &grad_a, 0.1, (0.9, 0.999), 1e-8, 0.0)
+            .expect("update a");
+        state
+            .update_parameter_soa("b", &mut param_b, &grad_b, 0.1, (0.9, 0.999), 1e-8, 0.0)
+            .expect("update b");
+
+        let momentum_b = state.momentum_of("b").expect("b momentum");
+        assert!(
+            momentum_b.iter().all(|m| m.abs() < 1e-9),
+            "parameter b saw a zero gradient; its momentum must stay zero: {momentum_b:?}"
+        );
+        let momentum_a = state.momentum_of("a").expect("a momentum");
+        assert!(momentum_a.iter().all(|m| *m > 0.0), "a must have momentum");
+    }
+
+    /// Convergence smoke test on a quadratic bowl f(x) = sum(x^2), grad = 2x.
+    #[test]
+    fn test_layout_optimized_adam_converges_on_quadratic() {
+        let mut optimizer = LayoutOptimizedAdam::new(0.05, (0.9, 0.999), 1e-8, 0.0);
+        let mut param = Tensor::from_vec(vec![1.0_f32; 4], &[4]).expect("param");
+        let initial_loss: f32 = param.data().expect("data").iter().map(|v| v * v).sum();
+
+        for _ in 0..400 {
+            let grad_data: Vec<f32> = param.data().expect("data").iter().map(|v| 2.0 * v).collect();
+            let grad = Tensor::from_vec(grad_data, &[4]).expect("grad");
+            optimizer.update(&mut param, &grad).expect("update");
+        }
+
+        let final_loss: f32 = param.data().expect("data").iter().map(|v| v * v).sum();
+        assert!(
+            final_loss < initial_loss * 1e-2,
+            "loss must decrease: {initial_loss} -> {final_loss}"
+        );
     }
 }

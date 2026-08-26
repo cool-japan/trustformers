@@ -66,6 +66,15 @@ pub struct AdaptiveParallelismController {
     pub learning_model: Arc<AdaptiveLearningModel>,
     /// Controller configuration
     pub config: Arc<RwLock<AdaptiveParallelismConfig>>,
+    /// The test characteristics most recently handed to
+    /// [`AdaptiveParallelismController::adjust_parallelism`].
+    ///
+    /// The controller does not observe the test suite itself, so this is the
+    /// only description of the workload it can honestly claim to have. The
+    /// periodic adjustment task reuses it; until a caller has driven at least
+    /// one adjustment it stays `None` and the task reports that rather than
+    /// inventing a workload profile.
+    pub last_characteristics: Arc<Mutex<Option<TestCharacteristics>>>,
 }
 
 /// Configuration for adaptive parallelism control
@@ -390,28 +399,36 @@ pub struct ComparativePerformance {
 
 /// Machine learning model performance metrics
 ///
-/// Comprehensive metrics for evaluating machine learning model performance
-/// including accuracy, loss, and convergence status.
+/// Metrics the adaptive learning model can actually establish about itself:
+/// the running training accuracy, whether it has converged, how many examples
+/// it has been trained on, and when that last happened.
+///
+/// ## Removed in 0.2.1: `validation_accuracy`, `test_accuracy`, `loss`,
+/// `precision`, `recall` and `f1_score`
+///
+/// The only producer of this struct is
+/// [`AdaptiveLearningModel::get_performance_metrics`](crate::performance_optimizer::types_ml::AdaptiveLearningModel::get_performance_metrics),
+/// and it had no validation split, no held-out test set and no labelled
+/// classification outcomes to derive any of those six numbers from. It filled
+/// them in anyway — `validation_accuracy` was `training_accuracy * 0.95`,
+/// `test_accuracy` was `training_accuracy * 0.9`, and `loss`, `precision`,
+/// `recall` and `f1_score` were the literals `0.1`, `0.8`, `0.75` and `0.77`
+/// on every call, for every model, forever. A caller reading
+/// `f1_score == 0.77` would have been reading a constant, not a measurement.
+///
+/// Nothing in the crate read any of the six, so they were removed rather than
+/// turned into `Option`: an always-`None` field is only worth its weight when
+/// some consumer can act on the `None`. Should a real validation split be
+/// added later, the fields come back together with the code that computes
+/// them.
 #[derive(Debug, Clone)]
 pub struct ModelPerformanceMetrics {
     /// Training accuracy
     pub training_accuracy: f32,
-    /// Validation accuracy
-    pub validation_accuracy: f32,
-    /// Test accuracy
-    pub test_accuracy: f32,
-    /// Loss function value
-    pub loss: f64,
     /// Convergence status
     pub convergence_status: ConvergenceStatus,
     /// Overall accuracy
     pub accuracy: f32,
-    /// Precision metric
-    pub precision: f32,
-    /// Recall metric
-    pub recall: f32,
-    /// F1 score
-    pub f1_score: f32,
     /// Training examples count
     pub training_examples: usize,
     /// Last updated timestamp
@@ -444,21 +461,35 @@ pub enum ConvergenceStatus {
 ///
 /// Comprehensive snapshot of system state including resource availability,
 /// utilization, and environmental conditions at measurement time.
+///
+/// ## Removed in 0.2.1: `io_wait_percent` and `network_utilization`
+///
+/// Both were `f32` fields that no code on this build could measure. The one
+/// producer,
+/// `adaptive_parallelism::AdaptiveParallelismController::get_current_system_state`,
+/// filled them with the literals `2.0` and `0.1`, and the one consumer,
+/// `performance_modeling::LinearRegressionModel::extract_prediction_features`,
+/// fed both straight into a prediction feature vector — so the model was
+/// being trained on two constants dressed up as telemetry.
+///
+/// I/O-wait accounting exists only on Linux (`/proc/stat`), and network
+/// *utilisation* additionally needs a link speed that no portable API
+/// reports, so neither could be produced honestly for every supported
+/// platform. The fields and their two feature-vector slots were removed
+/// rather than left as constants; the remaining fields are all read live
+/// from `sysinfo` at call time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemState {
     /// Available CPU cores
     pub available_cores: usize,
     /// Available memory (MB)
     pub available_memory_mb: u64,
-    /// System load average
+    /// System load average (1-minute); `0.0` on platforms with no load
+    /// accounting, which `sysinfo` reports as zero.
     pub load_average: f32,
     /// Active processes
     pub active_processes: usize,
-    /// I/O wait percentage
-    pub io_wait_percent: f32,
-    /// Network utilization
-    pub network_utilization: f32,
-    /// Temperature metrics
+    /// Temperature metrics, when the platform exposes thermal sensors.
     pub temperature_metrics: Option<TemperatureMetrics>,
 }
 

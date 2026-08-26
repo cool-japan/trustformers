@@ -40,6 +40,12 @@ pub struct AutomatedReport {
     content: String,
 }
 
+/// Most automated reports retained in memory before the oldest is dropped.
+///
+/// There is no database behind this log -- reports live for the lifetime of the
+/// reporter -- so the cap keeps a long-running monitor bounded.
+const MAX_AUTOMATED_REPORTS: usize = 100;
+
 impl EnvironmentalReportingEngine {
     /// Create a new environmental reporting engine
     pub fn new() -> Self {
@@ -59,8 +65,14 @@ impl EnvironmentalReportingEngine {
     }
 
     /// Generate comprehensive environmental impact report
+    /// Generate a report and retain it in [`Self::get_automated_reports`].
+    ///
+    /// Takes `&mut self` because the report is really stored; the previous
+    /// `&self` signature made storage impossible, so `store_automated_report`
+    /// built an [`AutomatedReport`], logged "Stored automated report: {id}" and
+    /// then dropped it -- `get_automated_reports` stayed empty forever.
     pub async fn generate_environmental_report(
-        &self,
+        &mut self,
         report_type: ReportType,
     ) -> Result<EnvironmentalReport> {
         info!("Generating environmental impact report: {:?}", report_type);
@@ -73,8 +85,7 @@ impl EnvironmentalReportingEngine {
             ReportType::Compliance => self.generate_compliance_report().await?,
         };
 
-        // Store the generated report
-        self.store_automated_report(&report).await?;
+        self.store_automated_report(&report)?;
 
         Ok(report)
     }
@@ -460,8 +471,9 @@ impl EnvironmentalReportingEngine {
         Ok(report)
     }
 
-    /// Store automated report
-    async fn store_automated_report(&self, report: &EnvironmentalReport) -> Result<()> {
+    /// Retain `report` in the in-memory automated-report log, dropping the
+    /// oldest once [`MAX_AUTOMATED_REPORTS`] is reached.
+    fn store_automated_report(&mut self, report: &EnvironmentalReport) -> Result<()> {
         let automated_report = AutomatedReport {
             report_id: report.report_id.clone(),
             generated_at: report.generated_at,
@@ -469,8 +481,12 @@ impl EnvironmentalReportingEngine {
             content: format!("{}\n\n{}", report.summary, report.detailed_analysis),
         };
 
-        // In a real implementation, this would store to a database
-        info!("Stored automated report: {}", automated_report.report_id);
+        let report_id = automated_report.report_id.clone();
+        self.automated_reports.push(automated_report);
+        if self.automated_reports.len() > MAX_AUTOMATED_REPORTS {
+            self.automated_reports.remove(0);
+        }
+        info!("Stored automated report: {}", report_id);
         Ok(())
     }
 
@@ -599,6 +615,45 @@ impl EnvironmentalReportingEngine {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn generated_reports_are_really_retained() {
+        let mut engine = EnvironmentalReportingEngine::new();
+        assert!(engine.get_automated_reports().is_empty());
+
+        let report = engine
+            .generate_environmental_report(ReportType::Summary)
+            .await
+            .expect("report generation");
+
+        // `store_automated_report` used to take `&self`, build an
+        // `AutomatedReport`, log "Stored automated report: {id}" and drop it,
+        // so this log stayed empty no matter how many reports were generated.
+        let stored = engine.get_automated_reports();
+        assert_eq!(
+            stored.len(),
+            1,
+            "the generated report must really be retained"
+        );
+        assert_eq!(stored[0].report_id, report.report_id);
+        assert!(stored[0].content.contains(&report.summary));
+    }
+
+    #[tokio::test]
+    async fn the_automated_report_log_is_bounded() {
+        let mut engine = EnvironmentalReportingEngine::new();
+        for _ in 0..(MAX_AUTOMATED_REPORTS + 5) {
+            engine
+                .generate_environmental_report(ReportType::Summary)
+                .await
+                .expect("report generation");
+        }
+        assert_eq!(
+            engine.get_automated_reports().len(),
+            MAX_AUTOMATED_REPORTS,
+            "the oldest reports must be dropped, not accumulated without bound"
+        );
+    }
+
     #[test]
     fn test_reporting_engine_creation() {
         let engine = EnvironmentalReportingEngine::new();
@@ -618,7 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_report_types() {
-        let engine = EnvironmentalReportingEngine::new();
+        let mut engine = EnvironmentalReportingEngine::new();
 
         let summary_report = engine
             .generate_environmental_report(ReportType::Summary)

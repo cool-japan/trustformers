@@ -1,7 +1,9 @@
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Configuration validation framework
 pub trait Validatable {
@@ -116,34 +118,55 @@ impl ValidationReport {
         !self.infos.is_empty()
     }
 
-    pub fn print_summary(&self) {
-        println!("🔍 Validation Report");
-        println!(
-            "   Status: {}",
+    /// Render this report as the human-readable text [`Self::print_summary`]
+    /// and [`Self::log_summary`] both emit.
+    fn summary_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("🔍 Validation Report\n");
+        report.push_str(&format!(
+            "   Status: {}\n",
             if self.is_valid { "✅ Valid" } else { "❌ Invalid" }
-        );
-        println!("   Rules Applied: {}", self.rules_applied);
+        ));
+        report.push_str(&format!("   Rules Applied: {}", self.rules_applied));
 
         if !self.errors.is_empty() {
-            println!("   ❌ Errors: {}", self.errors.len());
+            report.push_str(&format!("\n   ❌ Errors: {}", self.errors.len()));
             for error in &self.errors {
-                println!("      {}", error);
+                report.push_str(&format!("\n      {}", error));
             }
         }
 
         if !self.warnings.is_empty() {
-            println!("   ⚠️  Warnings: {}", self.warnings.len());
+            report.push_str(&format!("\n   ⚠️  Warnings: {}", self.warnings.len()));
             for warning in &self.warnings {
-                println!("      {}", warning);
+                report.push_str(&format!("\n      {}", warning));
             }
         }
 
         if !self.infos.is_empty() {
-            println!("   ℹ️  Infos: {}", self.infos.len());
+            report.push_str(&format!("\n   ℹ️  Infos: {}", self.infos.len()));
             for info in &self.infos {
-                println!("      {}", info);
+                report.push_str(&format!("\n      {}", info));
             }
         }
+
+        report
+    }
+
+    /// Write `Self::summary_report` to stdout.
+    ///
+    /// This is an explicit, caller-initiated escape hatch for binaries and
+    /// examples; nothing on the validation path writes to stdout on its own.
+    /// Library callers should prefer [`Self::log_summary`], which routes the
+    /// same report through `tracing` so the host application controls the
+    /// sink.
+    pub fn print_summary(&self) {
+        println!("{}", self.summary_report());
+    }
+
+    /// Emit `Self::summary_report` at `info` level through `tracing`.
+    pub fn log_summary(&self) {
+        tracing::info!("{}", self.summary_report());
     }
 }
 
@@ -433,12 +456,79 @@ where
     }
 }
 
+/// A named predicate backing [`Constraint::Custom`].
+///
+/// Returns `Ok(())` when the value is acceptable, or `Err(message)` with a human-readable
+/// explanation that is surfaced as the [`ValidationError`] message.
+pub type CustomConstraintEvaluator =
+    Arc<dyn Fn(&serde_json::Value) -> std::result::Result<(), String> + Send + Sync>;
+
 /// Configuration schema for runtime validation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct ConfigSchema {
     pub fields: HashMap<String, FieldSchema>,
     pub required_fields: Vec<String>,
     pub dependencies: HashMap<String, Vec<String>>,
+    /// Predicates for [`Constraint::Custom`], keyed by the constraint's `name`.
+    ///
+    /// Not serialised: a closure has no wire representation, so a schema round-tripped
+    /// through JSON keeps the *names* of its custom constraints and reports them as
+    /// unregistered until the predicates are attached again.
+    custom_evaluators: HashMap<String, CustomConstraintEvaluator>,
+}
+
+impl fmt::Debug for ConfigSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigSchema")
+            .field("fields", &self.fields)
+            .field("required_fields", &self.required_fields)
+            .field("dependencies", &self.dependencies)
+            .field(
+                "custom_evaluators",
+                &self.custom_evaluators.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl Serialize for ConfigSchema {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            fields: &'a HashMap<String, FieldSchema>,
+            required_fields: &'a Vec<String>,
+            dependencies: &'a HashMap<String, Vec<String>>,
+        }
+        Wire {
+            fields: &self.fields,
+            required_fields: &self.required_fields,
+            dependencies: &self.dependencies,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            fields: HashMap<String, FieldSchema>,
+            required_fields: Vec<String>,
+            dependencies: HashMap<String, Vec<String>>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            fields: wire.fields,
+            required_fields: wire.required_fields,
+            dependencies: wire.dependencies,
+            custom_evaluators: HashMap::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,7 +584,21 @@ impl ConfigSchema {
             fields: HashMap::new(),
             required_fields: Vec::new(),
             dependencies: HashMap::new(),
+            custom_evaluators: HashMap::new(),
         }
+    }
+
+    /// Attach the predicate that backs a [`Constraint::Custom`] with the given `name`.
+    ///
+    /// Without a registered predicate the constraint reports a
+    /// `CUSTOM_CONSTRAINT_UNREGISTERED` error, so a custom rule can never silently pass.
+    pub fn register_custom_constraint(
+        mut self,
+        name: impl Into<String>,
+        evaluator: CustomConstraintEvaluator,
+    ) -> Self {
+        self.custom_evaluators.insert(name.into(), evaluator);
+        self
     }
 
     pub fn add_field(mut self, name: String, schema: FieldSchema) -> Self {
@@ -695,23 +799,61 @@ impl ConfigSchema {
             },
             Constraint::Pattern { regex } => {
                 if let serde_json::Value::String(s) = value {
-                    // In a real implementation, would use regex crate
-                    if s.is_empty() {
-                        return Some(ValidationError {
-                            field: field_name.to_string(),
-                            message: format!("String does not match pattern: {}", regex),
-                            severity: Severity::Error,
-                            error_code: "PATTERN_MISMATCH".to_string(),
-                        });
+                    // Real regex matching. An unparseable pattern is a configuration error in
+                    // its own right and is reported instead of being silently accepted.
+                    match Regex::new(regex) {
+                        Ok(compiled) => {
+                            if !compiled.is_match(s) {
+                                return Some(ValidationError {
+                                    field: field_name.to_string(),
+                                    message: format!(
+                                        "String \"{}\" does not match pattern: {}",
+                                        s, regex
+                                    ),
+                                    severity: Severity::Error,
+                                    error_code: "PATTERN_MISMATCH".to_string(),
+                                });
+                            }
+                        },
+                        Err(err) => {
+                            return Some(ValidationError {
+                                field: field_name.to_string(),
+                                message: format!("Invalid pattern `{}`: {}", regex, err),
+                                severity: Severity::Error,
+                                error_code: "PATTERN_INVALID".to_string(),
+                            });
+                        },
                     }
                 }
             },
-            Constraint::Custom {
-                name: _,
-                description: _,
-            } => {
-                // Custom constraints would be implemented here
-                // For now, just a placeholder
+            Constraint::Custom { name, description } => {
+                // `Constraint` is serialisable, so a custom rule can only be *named* here; the
+                // predicate itself lives in the schema's evaluator registry. An unregistered
+                // name is reported rather than silently passing.
+                match self.custom_evaluators.get(name) {
+                    Some(evaluator) => {
+                        if let Err(message) = evaluator(value) {
+                            return Some(ValidationError {
+                                field: field_name.to_string(),
+                                message,
+                                severity: Severity::Error,
+                                error_code: "CUSTOM_CONSTRAINT_FAILED".to_string(),
+                            });
+                        }
+                    },
+                    None => {
+                        return Some(ValidationError {
+                            field: field_name.to_string(),
+                            message: format!(
+                                "No evaluator registered for custom constraint `{}` ({}); \
+                                 register one with ConfigSchema::register_custom_constraint",
+                                name, description
+                            ),
+                            severity: Severity::Error,
+                            error_code: "CUSTOM_CONSTRAINT_UNREGISTERED".to_string(),
+                        });
+                    },
+                }
             },
         }
 
@@ -722,6 +864,134 @@ impl ConfigSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn schema_with_pattern(pattern: &str) -> ConfigSchema {
+        ConfigSchema::new()
+            .add_field(
+                "model_id".to_string(),
+                FieldSchema {
+                    field_type: FieldType::String,
+                    constraints: vec![Constraint::Pattern {
+                        regex: pattern.to_string(),
+                    }],
+                    description: "model identifier".to_string(),
+                    default_value: None,
+                },
+            )
+            .require_field("model_id".to_string())
+    }
+
+    fn config_with(field: &str, value: serde_json::Value) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(field.to_string(), value);
+        serde_json::Value::Object(map)
+    }
+
+    #[test]
+    fn test_pattern_constraint_rejects_non_matching_strings() {
+        // Regression: any non-empty string used to pass any pattern.
+        let schema = schema_with_pattern(r"^[a-z0-9_\-]+/[a-z0-9_\-]+$");
+        let errors = schema.validate_json(&config_with(
+            "model_id",
+            serde_json::Value::String("Not A Valid Id".to_string()),
+        ));
+        assert!(
+            errors.iter().any(|e| e.error_code == "PATTERN_MISMATCH"),
+            "expected PATTERN_MISMATCH, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_pattern_constraint_accepts_matching_strings() {
+        let schema = schema_with_pattern(r"^[a-z0-9_\-]+/[a-z0-9_\-]+$");
+        let errors = schema.validate_json(&config_with(
+            "model_id",
+            serde_json::Value::String("cool-japan/trustformers".to_string()),
+        ));
+        assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    }
+
+    #[test]
+    fn test_invalid_pattern_is_reported() {
+        let schema = schema_with_pattern("[unclosed");
+        let errors = schema.validate_json(&config_with(
+            "model_id",
+            serde_json::Value::String("anything".to_string()),
+        ));
+        assert!(
+            errors.iter().any(|e| e.error_code == "PATTERN_INVALID"),
+            "an unparseable pattern must be reported, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_custom_constraint_without_evaluator_is_an_error() {
+        // Regression: `Constraint::Custom` used to fall through to `None`, i.e. always valid.
+        let schema = ConfigSchema::new()
+            .add_field(
+                "output_dir".to_string(),
+                FieldSchema {
+                    field_type: FieldType::String,
+                    constraints: vec![Constraint::Custom {
+                        name: "writable_path".to_string(),
+                        description: "the directory must be writable".to_string(),
+                    }],
+                    description: "output directory".to_string(),
+                    default_value: None,
+                },
+            )
+            .require_field("output_dir".to_string());
+
+        let errors = schema.validate_json(&config_with(
+            "output_dir",
+            serde_json::Value::String("/nonexistent".to_string()),
+        ));
+        assert!(
+            errors.iter().any(|e| e.error_code == "CUSTOM_CONSTRAINT_UNREGISTERED"),
+            "an unregistered custom constraint must not pass, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_registered_custom_constraint_is_evaluated() {
+        let schema = ConfigSchema::new()
+            .add_field(
+                "output_dir".to_string(),
+                FieldSchema {
+                    field_type: FieldType::String,
+                    constraints: vec![Constraint::Custom {
+                        name: "absolute_path".to_string(),
+                        description: "the directory must be an absolute path".to_string(),
+                    }],
+                    description: "output directory".to_string(),
+                    default_value: None,
+                },
+            )
+            .require_field("output_dir".to_string())
+            .register_custom_constraint(
+                "absolute_path",
+                Arc::new(|value: &serde_json::Value| match value.as_str() {
+                    Some(s) if s.starts_with('/') => Ok(()),
+                    Some(s) => Err(format!("`{s}` is not an absolute path")),
+                    None => Err("expected a string".to_string()),
+                }),
+            );
+
+        let ok = schema.validate_json(&config_with(
+            "output_dir",
+            serde_json::Value::String("/tmp/output".to_string()),
+        ));
+        assert!(ok.is_empty(), "absolute path should pass, got {ok:?}");
+
+        let bad = schema.validate_json(&config_with(
+            "output_dir",
+            serde_json::Value::String("relative/output".to_string()),
+        ));
+        assert!(
+            bad.iter().any(|e| e.error_code == "CUSTOM_CONSTRAINT_FAILED"),
+            "relative path should fail, got {bad:?}"
+        );
+    }
 
     #[derive(Clone)]
     struct TestConfig {

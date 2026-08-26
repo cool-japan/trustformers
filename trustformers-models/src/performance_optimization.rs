@@ -1373,11 +1373,33 @@ impl GpuTensorCache {
     }
 
     /// Estimate tensor size in bytes (simplified)
+    /// Byte size of a tensor's payload.
+    ///
+    /// Every dense variant reports `element_count × element_size`. A previous
+    /// revision returned a flat `1024` for anything that was not `F32`/`F64`, so
+    /// an `I64` index tensor of a million elements (8 MB) and a two-element
+    /// `BF16` vector (4 bytes) both counted as 1 KiB — the cache's memory
+    /// accounting, its eviction decisions and every statistic derived from them
+    /// were wrong for exactly the dtypes a quantized model uses most.
     fn estimate_tensor_size(&self, tensor: &Tensor) -> usize {
         match tensor {
-            Tensor::F32(arr) => arr.len() * 4, // 4 bytes per f32
-            Tensor::F64(arr) => arr.len() * 8, // 8 bytes per f64
-            _ => 1024,                         // Default estimate for other types
+            Tensor::F32(arr) => arr.len() * std::mem::size_of::<f32>(),
+            Tensor::F64(arr) => arr.len() * std::mem::size_of::<f64>(),
+            Tensor::F16(arr) => arr.len() * std::mem::size_of::<half::f16>(),
+            Tensor::BF16(arr) => arr.len() * std::mem::size_of::<half::bf16>(),
+            Tensor::I64(arr) => arr.len() * std::mem::size_of::<i64>(),
+            // Complex variants: two real components per element.
+            Tensor::C32(arr) => arr.len() * 2 * std::mem::size_of::<f32>(),
+            Tensor::C64(arr) => arr.len() * 2 * std::mem::size_of::<f64>(),
+            Tensor::CF16(arr) => arr.len() * 2 * std::mem::size_of::<half::f16>(),
+            Tensor::CBF16(arr) => arr.len() * 2 * std::mem::size_of::<half::bf16>(),
+            // A sparse tensor knows its own footprint: stored values plus
+            // indices, not the size of the dense tensor it represents.
+            Tensor::Sparse(sparse) => sparse.memory_usage(),
+            // GPU-resident and backend tensors hold no host payload to account
+            // for here; their device memory is tracked by the backend.
+            #[allow(unreachable_patterns)]
+            _ => 0,
         }
     }
 

@@ -16,12 +16,136 @@ pub struct PPOTrainer {
     statistics: PPOStatistics,
 }
 
-/// Policy model wrapper for language generation
+/// Key of the token-embedding matrix, shape `[vocab_size, hidden_size]`.
+pub const PARAM_EMBEDDING: &str = "embedding";
+/// Key of the optional hidden transform, shape `[hidden_size, hidden_size]`.
+pub const PARAM_HIDDEN_WEIGHT: &str = "hidden.weight";
+/// Key of the output projection, shape `[hidden_size, vocab_size]`.
+pub const PARAM_OUTPUT_WEIGHT: &str = "output.weight";
+/// Key of the optional output bias, shape `[1, vocab_size]`.
+pub const PARAM_OUTPUT_BIAS: &str = "output.bias";
+/// Key of the value head, shape `[hidden_size, 1]`.
+pub const PARAM_VALUE_HEAD: &str = "value_head";
+/// Key of the optional value-head bias, shape `[1, 1]`.
+pub const PARAM_VALUE_BIAS: &str = "value_head.bias";
+
+/// Recency decay used when pooling a token sequence into a single context vector.
+pub(crate) const CONTEXT_DECAY: f32 = 0.9;
+
+/// Deterministic 64-bit mixer (splitmix64) used to seed parameter initialisation.
+///
+/// A PRNG with an explicit seed keeps model initialisation reproducible across runs, which
+/// is what makes "two different weight sets produce different logits" a testable property.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Draw a uniform sample in `(-limit, limit)` from the given PRNG state.
+fn uniform_symmetric(state: &mut u64, limit: f32) -> f32 {
+    let bits = splitmix64(state);
+    // 53-bit mantissa -> [0, 1)
+    let unit = ((bits >> 11) as f64) / ((1u64 << 53) as f64);
+    ((unit as f32) * 2.0 - 1.0) * limit
+}
+
+/// Build a Xavier-uniform matrix of the requested shape from a deterministic seed.
+fn xavier_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
+    let limit = (6.0f32 / (rows as f32 + cols as f32)).sqrt();
+    let mut state = seed;
+    Array2::from_shape_fn((rows, cols), |_| uniform_symmetric(&mut state, limit))
+}
+
+/// Exponentially-decayed causal pooling of a token sequence into one context vector.
+///
+/// `ctx = Σ_i decay^(n-1-i) · E[t_i] / Σ_i decay^(n-1-i)`
+///
+/// The most recent token therefore carries the largest weight, which is the causal-LM prior
+/// this lightweight policy encodes. Every component of the result depends on the *actual*
+/// embedding rows, so changing the weights changes the context.
+pub(crate) fn pool_context(
+    embedding: &Array2<f32>,
+    sequence: &[u32],
+    hidden_size: usize,
+) -> Result<Vec<f32>> {
+    if sequence.is_empty() {
+        return Err(anyhow!("cannot encode an empty token sequence"));
+    }
+    let vocab_size = embedding.nrows();
+    let mut ctx = vec![0.0f32; hidden_size];
+    let mut weight_sum = 0.0f32;
+    let n = sequence.len();
+    for (i, &token) in sequence.iter().enumerate() {
+        let token_idx = token as usize;
+        if token_idx >= vocab_size {
+            return Err(anyhow!(
+                "token id {token_idx} is outside the model vocabulary [0, {vocab_size})"
+            ));
+        }
+        let w = CONTEXT_DECAY.powi((n - 1 - i) as i32);
+        weight_sum += w;
+        for j in 0..hidden_size {
+            ctx[j] += w * embedding[[token_idx, j]];
+        }
+    }
+    if weight_sum > 0.0 {
+        for value in ctx.iter_mut() {
+            *value /= weight_sum;
+        }
+    }
+    Ok(ctx)
+}
+
+/// Fetch a parameter matrix, validating its shape.
+fn require_param<'a>(
+    parameters: &'a HashMap<String, Array2<f32>>,
+    key: &str,
+    expected: (usize, usize),
+    model_id: &str,
+) -> Result<&'a Array2<f32>> {
+    let matrix = parameters.get(key).ok_or_else(|| {
+        anyhow!(
+            "model '{model_id}' is missing the required parameter '{key}' \
+             (expected shape {:?}); initialise it with the model's constructor or load \
+             pretrained weights before running a forward pass",
+            expected
+        )
+    })?;
+    if matrix.dim() != expected {
+        return Err(anyhow!(
+            "model '{model_id}' parameter '{key}' has shape {:?}, expected {:?}",
+            matrix.dim(),
+            expected
+        ));
+    }
+    Ok(matrix)
+}
+
+/// Policy model for language generation.
+///
+/// # Architecture
+///
+/// A single-layer causal bag-of-context language model, fully specified by `parameters`:
+///
+/// | key | shape | role |
+/// |-----|-------|------|
+/// | [`PARAM_EMBEDDING`] | `[vocab_size, hidden_size]` | token embeddings |
+/// | [`PARAM_HIDDEN_WEIGHT`] (optional) | `[hidden_size, hidden_size]` | `tanh` hidden transform |
+/// | [`PARAM_OUTPUT_WEIGHT`] | `[hidden_size, vocab_size]` | output projection |
+/// | [`PARAM_OUTPUT_BIAS`] (optional) | `[1, vocab_size]` | output bias |
+///
+/// `logits(seq) = tanh(pool(seq) · W_hidden) · W_out + b`, where `pool` is the recency-decayed
+/// average of the embedded tokens. Every logit is a function of the stored weights — there is
+/// no closed-form fallback — so a model with no parameters returns an error rather than a
+/// fabricated distribution.
 #[derive(Debug, Clone)]
 pub struct PolicyModel {
     /// Model identifier
     pub model_id: String,
-    /// Current parameters (simplified representation)
+    /// Parameter matrices keyed by the `PARAM_*` constants.
     pub parameters: HashMap<String, Array2<f32>>,
     /// Vocabulary size
     pub vocab_size: usize,
@@ -29,15 +153,208 @@ pub struct PolicyModel {
     pub hidden_size: usize,
 }
 
-/// Value model for estimating state values
+impl PolicyModel {
+    /// Create a policy with Xavier-uniform parameters drawn from `seed`.
+    ///
+    /// Two different seeds produce two genuinely different models.
+    pub fn new_initialized(
+        model_id: impl Into<String>,
+        vocab_size: usize,
+        hidden_size: usize,
+        seed: u64,
+    ) -> Result<Self> {
+        if vocab_size == 0 || hidden_size == 0 {
+            return Err(anyhow!(
+                "vocab_size and hidden_size must both be non-zero (got {vocab_size}, {hidden_size})"
+            ));
+        }
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            PARAM_EMBEDDING.to_string(),
+            xavier_matrix(vocab_size, hidden_size, seed),
+        );
+        parameters.insert(
+            PARAM_HIDDEN_WEIGHT.to_string(),
+            xavier_matrix(hidden_size, hidden_size, seed ^ 0x5DEE_CE66),
+        );
+        parameters.insert(
+            PARAM_OUTPUT_WEIGHT.to_string(),
+            xavier_matrix(hidden_size, vocab_size, seed ^ 0x1234_5678_9ABC),
+        );
+        parameters.insert(
+            PARAM_OUTPUT_BIAS.to_string(),
+            Array2::zeros((1, vocab_size)),
+        );
+        Ok(Self {
+            model_id: model_id.into(),
+            parameters,
+            vocab_size,
+            hidden_size,
+        })
+    }
+
+    /// Encode a token sequence into the model's hidden representation.
+    pub fn encode(&self, sequence: &[u32]) -> Result<Vec<f32>> {
+        let embedding = require_param(
+            &self.parameters,
+            PARAM_EMBEDDING,
+            (self.vocab_size, self.hidden_size),
+            &self.model_id,
+        )?;
+        let ctx = pool_context(embedding, sequence, self.hidden_size)?;
+
+        match self.parameters.get(PARAM_HIDDEN_WEIGHT) {
+            Some(hidden) => {
+                if hidden.dim() != (self.hidden_size, self.hidden_size) {
+                    return Err(anyhow!(
+                        "model '{}' parameter '{PARAM_HIDDEN_WEIGHT}' has shape {:?}, expected {:?}",
+                        self.model_id,
+                        hidden.dim(),
+                        (self.hidden_size, self.hidden_size)
+                    ));
+                }
+                let mut out = vec![0.0f32; self.hidden_size];
+                for j in 0..self.hidden_size {
+                    let mut acc = 0.0f32;
+                    for k in 0..self.hidden_size {
+                        acc += ctx[k] * hidden[[k, j]];
+                    }
+                    out[j] = acc.tanh();
+                }
+                Ok(out)
+            },
+            None => Ok(ctx),
+        }
+    }
+
+    /// Compute the next-token logits for `sequence` over the **full** vocabulary.
+    pub fn logits(&self, sequence: &[u32]) -> Result<Vec<f32>> {
+        let hidden = self.encode(sequence)?;
+        let output = require_param(
+            &self.parameters,
+            PARAM_OUTPUT_WEIGHT,
+            (self.hidden_size, self.vocab_size),
+            &self.model_id,
+        )?;
+
+        let mut logits = vec![0.0f32; self.vocab_size];
+        for (v, logit) in logits.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for k in 0..self.hidden_size {
+                acc += hidden[k] * output[[k, v]];
+            }
+            *logit = acc;
+        }
+
+        if let Some(bias) = self.parameters.get(PARAM_OUTPUT_BIAS) {
+            if bias.dim() != (1, self.vocab_size) {
+                return Err(anyhow!(
+                    "model '{}' parameter '{PARAM_OUTPUT_BIAS}' has shape {:?}, expected {:?}",
+                    self.model_id,
+                    bias.dim(),
+                    (1, self.vocab_size)
+                ));
+            }
+            for (v, logit) in logits.iter_mut().enumerate() {
+                *logit += bias[[0, v]];
+            }
+        }
+
+        Ok(logits)
+    }
+}
+
+/// Value model for estimating state values.
+///
+/// # Architecture
+///
+/// | key | shape | role |
+/// |-----|-------|------|
+/// | [`PARAM_EMBEDDING`] | `[vocab_size, hidden_size]` | token embeddings |
+/// | [`PARAM_VALUE_HEAD`] | `[hidden_size, 1]` | scalar projection |
+/// | [`PARAM_VALUE_BIAS`] (optional) | `[1, 1]` | bias |
+///
+/// `value(seq) = tanh(pool(seq) · w_v + b_v)`, bounded to `(-1, 1)`.
 #[derive(Debug, Clone)]
 pub struct ValueModel {
     /// Model identifier
     pub model_id: String,
-    /// Model parameters
+    /// Parameter matrices keyed by the `PARAM_*` constants.
     pub parameters: HashMap<String, Array2<f32>>,
     /// Hidden size
     pub hidden_size: usize,
+}
+
+impl ValueModel {
+    /// Create a value model with Xavier-uniform parameters drawn from `seed`.
+    pub fn new_initialized(
+        model_id: impl Into<String>,
+        vocab_size: usize,
+        hidden_size: usize,
+        seed: u64,
+    ) -> Result<Self> {
+        if vocab_size == 0 || hidden_size == 0 {
+            return Err(anyhow!(
+                "vocab_size and hidden_size must both be non-zero (got {vocab_size}, {hidden_size})"
+            ));
+        }
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            PARAM_EMBEDDING.to_string(),
+            xavier_matrix(vocab_size, hidden_size, seed ^ 0xA5A5_A5A5),
+        );
+        parameters.insert(
+            PARAM_VALUE_HEAD.to_string(),
+            xavier_matrix(hidden_size, 1, seed ^ 0x5A5A_5A5A),
+        );
+        parameters.insert(PARAM_VALUE_BIAS.to_string(), Array2::zeros((1, 1)));
+        Ok(Self {
+            model_id: model_id.into(),
+            parameters,
+            hidden_size,
+        })
+    }
+
+    /// Estimate the value of a token sequence, in `(-1, 1)`.
+    pub fn value(&self, sequence: &[u32]) -> Result<f32> {
+        let embedding = self.parameters.get(PARAM_EMBEDDING).ok_or_else(|| {
+            anyhow!(
+                "value model '{}' is missing the required parameter '{PARAM_EMBEDDING}'",
+                self.model_id
+            )
+        })?;
+        if embedding.ncols() != self.hidden_size {
+            return Err(anyhow!(
+                "value model '{}' parameter '{PARAM_EMBEDDING}' has {} columns, expected {}",
+                self.model_id,
+                embedding.ncols(),
+                self.hidden_size
+            ));
+        }
+        let ctx = pool_context(embedding, sequence, self.hidden_size)?;
+
+        let head = require_param(
+            &self.parameters,
+            PARAM_VALUE_HEAD,
+            (self.hidden_size, 1),
+            &self.model_id,
+        )?;
+        let mut value = 0.0f32;
+        for k in 0..self.hidden_size {
+            value += ctx[k] * head[[k, 0]];
+        }
+        if let Some(bias) = self.parameters.get(PARAM_VALUE_BIAS) {
+            if bias.dim() != (1, 1) {
+                return Err(anyhow!(
+                    "value model '{}' parameter '{PARAM_VALUE_BIAS}' has shape {:?}, expected (1, 1)",
+                    self.model_id,
+                    bias.dim()
+                ));
+            }
+            value += bias[[0, 0]];
+        }
+        Ok(value.tanh())
+    }
 }
 
 /// PPO-specific optimizer
@@ -415,6 +732,17 @@ impl PPOTrainer {
         current_id += 1;
         token_map.insert("<unk>".to_string(), current_id);
 
+        // Hashing tokenizer: ids must stay inside the policy model's vocabulary, otherwise
+        // the embedding lookup in `PolicyModel::encode` would be out of bounds.
+        const NUM_SPECIAL_TOKENS: u32 = 4;
+        let vocab_size = self
+            .policy_model
+            .as_ref()
+            .map(|m| m.vocab_size as u32)
+            .unwrap_or(50_000)
+            .max(NUM_SPECIAL_TOKENS + 1);
+        let hash_space = vocab_size - NUM_SPECIAL_TOKENS;
+
         // Simple word-based tokenization
         let words: Vec<&str> = text.split_whitespace().collect();
         let mut tokens = Vec::new();
@@ -425,9 +753,11 @@ impl PPOTrainer {
                 tokens.push(id);
             } else {
                 // Simple hash-based ID generation for unknown words
-                let id = (word.len() as u32 * 31 + word.chars().map(|c| c as u32).sum::<u32>())
-                    % 50000
-                    + 4;
+                let id = (word.len() as u32)
+                    .wrapping_mul(31)
+                    .wrapping_add(word.chars().map(|c| c as u32).fold(0u32, u32::wrapping_add))
+                    % hash_space
+                    + NUM_SPECIAL_TOKENS;
                 tokens.push(id);
             }
         }
@@ -507,36 +837,13 @@ impl PPOTrainer {
         Ok(generated_tokens)
     }
 
-    /// Get model logits for a given sequence
+    /// Get next-token logits for `sequence` from the policy model's real parameters.
+    ///
+    /// This is a straight delegation to [`PolicyModel::logits`]: the full vocabulary is
+    /// scored from the stored embedding / hidden / output matrices, so different weights
+    /// give different logits and a model without parameters errors out.
     fn get_model_logits(&self, model: &PolicyModel, sequence: &[u32]) -> Result<Vec<f32>> {
-        // Simplified model forward pass
-        let _seq_len = sequence.len();
-        let hidden_size = model.hidden_size;
-        let vocab_size = model.vocab_size;
-
-        // Create input embedding (simplified)
-        let mut hidden_state = vec![0.0f32; hidden_size];
-
-        // Simple attention mechanism (simplified)
-        for (i, &token) in sequence.iter().enumerate() {
-            let position_weight = 1.0 / (i + 1) as f32;
-            for j in 0..hidden_size {
-                hidden_state[j] += position_weight * (token as f32 * 0.01);
-            }
-        }
-
-        // Project to vocabulary size
-        let mut logits = vec![0.0f32; vocab_size];
-        for i in 0..vocab_size.min(1000) {
-            // Limit for computational efficiency
-            let mut sum = 0.0;
-            for j in 0..hidden_size.min(hidden_state.len()) {
-                sum += hidden_state[j] * ((i + j) as f32 * 0.001);
-            }
-            logits[i] = sum;
-        }
-
-        Ok(logits)
+        model.logits(sequence)
     }
 
     /// Sample from a probability distribution
@@ -592,28 +899,7 @@ impl PPOTrainer {
         value_model: &ValueModel,
         sequence: &[u32],
     ) -> Result<f32> {
-        let _seq_len = sequence.len();
-        let hidden_size = value_model.hidden_size;
-
-        // Create sequence representation (simplified)
-        let mut hidden_state = vec![0.0f32; hidden_size];
-
-        // Simple sequence encoding
-        for (i, &token) in sequence.iter().enumerate() {
-            let position_weight = 1.0 / (i + 1) as f32;
-            for j in 0..hidden_size {
-                hidden_state[j] += position_weight * (token as f32 * 0.01);
-            }
-        }
-
-        // Project to scalar value
-        let mut value = 0.0f32;
-        for &h in &hidden_state {
-            value += h * 0.1; // Simple linear projection
-        }
-
-        // Apply tanh activation to bound the value
-        Ok(value.tanh())
+        value_model.value(sequence)
     }
 }
 
@@ -657,6 +943,175 @@ mod tests {
         let (advantages, returns) = result.expect("operation failed in test");
         assert_eq!(advantages.len(), 3);
         assert_eq!(returns.len(), 3);
+    }
+
+    // ── Real policy / value forward pass ─────────────────────────────────────
+
+    #[test]
+    fn test_policy_logits_depend_on_the_model_weights() {
+        // Regression: `get_model_logits` used to be a fixed function of the token ids only,
+        // so two entirely different weight sets produced byte-identical logits.
+        let a = PolicyModel::new_initialized("a", 32, 8, 1).expect("model a");
+        let b = PolicyModel::new_initialized("b", 32, 8, 999).expect("model b");
+        let sequence = [1u32, 5, 9, 2];
+
+        let logits_a = a.logits(&sequence).expect("logits a");
+        let logits_b = b.logits(&sequence).expect("logits b");
+        assert_eq!(logits_a.len(), 32);
+        assert_eq!(logits_b.len(), 32);
+
+        let max_diff = logits_a
+            .iter()
+            .zip(logits_b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-6,
+            "different weights must give different logits (max diff {max_diff})"
+        );
+    }
+
+    #[test]
+    fn test_policy_logits_depend_on_the_input_sequence() {
+        let model = PolicyModel::new_initialized("p", 32, 8, 7).expect("model");
+        let one = model.logits(&[3u32, 4, 5]).expect("logits one");
+        let two = model.logits(&[9u32, 10, 11]).expect("logits two");
+        let max_diff =
+            one.iter().zip(two.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-6,
+            "different inputs must give different logits"
+        );
+    }
+
+    #[test]
+    fn test_policy_logits_cover_the_whole_vocabulary() {
+        // Regression: the old projection stopped at `vocab_size.min(1000)`, leaving every
+        // token above index 999 pinned at exactly 0.0.
+        let model = PolicyModel::new_initialized("wide", 1200, 4, 11).expect("model");
+        let logits = model.logits(&[1u32, 2, 3]).expect("logits");
+        assert_eq!(logits.len(), 1200);
+        let tail_nonzero = logits[1000..].iter().any(|v| v.abs() > 1e-9);
+        assert!(
+            tail_nonzero,
+            "logits beyond index 999 must be produced by the projection, not left at zero"
+        );
+    }
+
+    #[test]
+    fn test_policy_logits_error_when_parameters_are_missing() {
+        let model = PolicyModel {
+            model_id: "empty".to_string(),
+            parameters: HashMap::new(),
+            vocab_size: 16,
+            hidden_size: 4,
+        };
+        let err = model.logits(&[1u32, 2]).expect_err("must not fabricate logits");
+        assert!(
+            err.to_string().contains(PARAM_EMBEDDING),
+            "error should name the missing parameter, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_policy_logits_reject_out_of_vocabulary_tokens() {
+        let model = PolicyModel::new_initialized("p", 16, 4, 3).expect("model");
+        assert!(model.logits(&[99u32]).is_err());
+    }
+
+    #[test]
+    fn test_policy_logits_are_hand_checkable_without_a_hidden_layer() {
+        // With no hidden transform and a single token, the context is exactly that token's
+        // embedding row, so the logit is a plain dot product with the output column.
+        let mut parameters = HashMap::new();
+        let mut embedding = Array2::zeros((2, 2));
+        embedding[[1, 0]] = 2.0;
+        embedding[[1, 1]] = 3.0;
+        let mut output = Array2::zeros((2, 2));
+        output[[0, 1]] = 1.0;
+        output[[1, 1]] = 10.0;
+        parameters.insert(PARAM_EMBEDDING.to_string(), embedding);
+        parameters.insert(PARAM_OUTPUT_WEIGHT.to_string(), output);
+
+        let model = PolicyModel {
+            model_id: "hand".to_string(),
+            parameters,
+            vocab_size: 2,
+            hidden_size: 2,
+        };
+        let logits = model.logits(&[1u32]).expect("logits");
+        assert!((logits[0] - 0.0).abs() < 1e-6, "logit0 = {}", logits[0]);
+        // 2*1 + 3*10 = 32
+        assert!((logits[1] - 32.0).abs() < 1e-5, "logit1 = {}", logits[1]);
+    }
+
+    #[test]
+    fn test_value_model_depends_on_weights_and_input() {
+        let a = ValueModel::new_initialized("va", 32, 8, 2).expect("value a");
+        let b = ValueModel::new_initialized("vb", 32, 8, 4242).expect("value b");
+        let seq = [1u32, 6, 7];
+        let va = a.value(&seq).expect("value a");
+        let vb = b.value(&seq).expect("value b");
+        assert!(
+            (va - vb).abs() > 1e-6,
+            "different value weights must give different values ({va} vs {vb})"
+        );
+        assert!(
+            va.abs() <= 1.0 && vb.abs() <= 1.0,
+            "tanh output must be bounded"
+        );
+
+        let other = a.value(&[2u32, 3, 4]).expect("value other");
+        assert!(
+            (va - other).abs() > 1e-9,
+            "different inputs must give different values"
+        );
+    }
+
+    #[test]
+    fn test_value_model_errors_without_parameters() {
+        let vm = ValueModel {
+            model_id: "empty".to_string(),
+            parameters: HashMap::new(),
+            hidden_size: 4,
+        };
+        assert!(vm.value(&[1u32]).is_err());
+    }
+
+    #[test]
+    fn test_generate_responses_uses_the_real_models() {
+        let cfg = PPOConfig::default();
+        let mut trainer = PPOTrainer::new(cfg).expect("trainer creation failed");
+        let policy = PolicyModel::new_initialized("p", 64, 8, 21).expect("policy");
+        let value = ValueModel::new_initialized("v", 64, 8, 22).expect("value");
+        trainer.initialize_models(policy, value, None).expect("initialize failed");
+
+        let results = trainer
+            .generate_responses(&["hello world".to_string()], 5)
+            .expect("generation failed");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].value.is_finite());
+        assert_eq!(results[0].log_probs.len(), results[0].tokens.len());
+        for lp in results[0].log_probs.iter() {
+            assert!(lp.is_finite() && *lp <= 0.0, "log prob out of range: {lp}");
+        }
+    }
+
+    #[test]
+    fn test_tokenize_stays_inside_the_model_vocabulary() {
+        let cfg = PPOConfig::default();
+        let mut trainer = PPOTrainer::new(cfg).expect("trainer creation failed");
+        let policy = PolicyModel::new_initialized("p", 64, 8, 5).expect("policy");
+        let value = ValueModel::new_initialized("v", 64, 8, 6).expect("value");
+        trainer.initialize_models(policy, value, None).expect("initialize failed");
+
+        let tokens = trainer
+            .tokenize("a much longer sentence with many distinct words here")
+            .expect("tokenize failed");
+        assert!(
+            tokens.iter().all(|&t| (t as usize) < 64),
+            "every token id must fit the model vocabulary: {tokens:?}"
+        );
     }
 
     #[test]

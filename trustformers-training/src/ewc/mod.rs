@@ -125,7 +125,11 @@ pub enum EwcError {
     /// Parameter name at position `i` did not match between slices.
     ParamNameMismatch { expected: String, got: String },
     /// A parameter tensor's element count did not match the Fisher vector.
-    SizeMismatch { param: String, expected: usize, got: usize },
+    SizeMismatch {
+        param: String,
+        expected: usize,
+        got: usize,
+    },
     /// Online EWC attempted to update Fisher but no anchors are registered.
     NoAnchors,
 }
@@ -135,19 +139,19 @@ impl fmt::Display for EwcError {
         match self {
             EwcError::EmptyParameters => {
                 write!(f, "EwcError: parameter slices are empty")
-            }
+            },
             EwcError::ParamCountMismatch { expected, got } => {
                 write!(
                     f,
                     "EwcError: parameter count mismatch — expected {expected}, got {got}"
                 )
-            }
+            },
             EwcError::ParamNameMismatch { expected, got } => {
                 write!(
                     f,
                     "EwcError: parameter name mismatch — expected '{expected}', got '{got}'"
                 )
-            }
+            },
             EwcError::SizeMismatch {
                 param,
                 expected,
@@ -157,10 +161,10 @@ impl fmt::Display for EwcError {
                     f,
                     "EwcError: size mismatch for '{param}' — expected {expected} elements, got {got}"
                 )
-            }
+            },
             EwcError::NoAnchors => {
                 write!(f, "EwcError: no task anchors registered")
-            }
+            },
         }
     }
 }
@@ -220,11 +224,7 @@ pub fn compute_ewc_penalty(
     let mut total_penalty = 0.0_f32;
     let mut total_deviation = 0.0_f32;
 
-    for ((cur, anc), fi) in current_params
-        .iter()
-        .zip(anchor_params.iter())
-        .zip(fisher.iter())
-    {
+    for ((cur, anc), fi) in current_params.iter().zip(anchor_params.iter()).zip(fisher.iter()) {
         // ── name matching ────────────────────────────────────────────────────
         if cur.name != anc.name {
             return Err(EwcError::ParamNameMismatch {
@@ -361,8 +361,7 @@ impl EwcTrainer {
                 }
             }
         } else {
-            self.anchors
-                .push(EwcTaskAnchor::new(task_name, anchor_params, fisher));
+            self.anchors.push(EwcTaskAnchor::new(task_name, anchor_params, fisher));
         }
         Ok(())
     }
@@ -422,9 +421,7 @@ mod tests {
     }
 
     fn make_params(n: usize, val: f32) -> Vec<NamedParameter> {
-        (0..n)
-            .map(|i| param(&format!("p{i}"), vec![val; 4]))
-            .collect()
+        (0..n).map(|i| param(&format!("p{i}"), vec![val; 4])).collect()
     }
 
     // ── NamedParameter ───────────────────────────────────────────────────────
@@ -490,10 +487,7 @@ mod tests {
 
     #[test]
     fn test_compute_fisher_basic() {
-        let grads = vec![
-            param("a", vec![1.0, 4.0]),
-            param("b", vec![9.0, 0.25]),
-        ];
+        let grads = vec![param("a", vec![1.0, 4.0]), param("b", vec![9.0, 0.25])];
         let fisher = compute_fisher(&grads);
         assert_eq!(fisher.len(), 2);
         assert_eq!(fisher[0].name, "a");
@@ -544,13 +538,22 @@ mod tests {
         let anc = vec![param("w", vec![1.0])];
         let fi = compute_fisher(&[param("w", vec![1.0])]);
 
-        let cfg_a = EwcConfig { lambda: 1.0, ..Default::default() };
-        let cfg_b = EwcConfig { lambda: 10.0, ..Default::default() };
+        let cfg_a = EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        };
+        let cfg_b = EwcConfig {
+            lambda: 10.0,
+            ..Default::default()
+        };
         let res_a = compute_ewc_penalty(&cur, &anc, &fi, &cfg_a).expect("a");
         let res_b = compute_ewc_penalty(&cur, &anc, &fi, &cfg_b).expect("b");
 
         let ratio = res_b.total_penalty / res_a.total_penalty;
-        assert!((ratio - 10.0).abs() < 1e-4, "ratio should be 10, got {ratio}");
+        assert!(
+            (ratio - 10.0).abs() < 1e-4,
+            "ratio should be 10, got {ratio}"
+        );
     }
 
     #[test]
@@ -561,7 +564,10 @@ mod tests {
         let fi_low = compute_fisher(&[param("w", vec![1.0])]);
         let fi_high = compute_fisher(&[param("w", vec![10.0])]);
 
-        let cfg = EwcConfig { lambda: 1.0, ..Default::default() };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        };
         let res_low = compute_ewc_penalty(&cur, &anc, &fi_low, &cfg).expect("low");
         let res_high = compute_ewc_penalty(&cur, &anc, &fi_high, &cfg).expect("high");
 
@@ -570,16 +576,13 @@ mod tests {
 
     #[test]
     fn test_ewc_penalty_per_param() {
-        let cur = vec![
-            param("w1", vec![2.0]),
-            param("w2", vec![3.0]),
-        ];
-        let anc = vec![
-            param("w1", vec![1.0]),
-            param("w2", vec![1.0]),
-        ];
+        let cur = vec![param("w1", vec![2.0]), param("w2", vec![3.0])];
+        let anc = vec![param("w1", vec![1.0]), param("w2", vec![1.0])];
         let fi = compute_fisher(&[param("w1", vec![1.0]), param("w2", vec![1.0])]);
-        let cfg = EwcConfig { lambda: 2.0, ..Default::default() };
+        let cfg = EwcConfig {
+            lambda: 2.0,
+            ..Default::default()
+        };
         let res = compute_ewc_penalty(&cur, &anc, &fi, &cfg).expect("penalty");
 
         assert_eq!(res.per_param_penalty.len(), 2);
@@ -616,7 +619,10 @@ mod tests {
 
     #[test]
     fn test_ewc_trainer_total_penalty() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 2.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 2.0,
+            ..Default::default()
+        });
         let anchor = make_params(1, 1.0);
         let grads = vec![param("p0", vec![1.0; 4])];
         trainer.register_task("t1", anchor, &grads).expect("register");
@@ -630,7 +636,10 @@ mod tests {
 
     #[test]
     fn test_ewc_trainer_multi_task() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 1.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        });
         let grads = vec![param("p0", vec![1.0; 2])];
 
         trainer
@@ -660,13 +669,9 @@ mod tests {
         let grads1 = vec![param("p0", vec![1.0])];
         let grads2 = vec![param("p0", vec![1.0])];
 
-        trainer
-            .register_task("t1", vec![param("p0", vec![0.0])], &grads1)
-            .expect("t1");
+        trainer.register_task("t1", vec![param("p0", vec![0.0])], &grads1).expect("t1");
         // Online mode: second task blends into the first anchor instead of adding a new one
-        trainer
-            .register_task("t2", vec![param("p0", vec![0.0])], &grads2)
-            .expect("t2");
+        trainer.register_task("t2", vec![param("p0", vec![0.0])], &grads2).expect("t2");
 
         assert_eq!(trainer.num_tasks(), 1);
         // Fisher should have been doubled (1 + 1)
@@ -675,7 +680,10 @@ mod tests {
 
     #[test]
     fn test_ewc_trainer_penalty_history() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 1.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        });
         let anchor = vec![param("p0", vec![0.0])];
         let grads = vec![param("p0", vec![1.0])];
         trainer.register_task("t1", anchor, &grads).expect("register");
@@ -697,7 +705,10 @@ mod tests {
         let e = EwcError::EmptyParameters;
         assert!(e.to_string().contains("empty"));
 
-        let e = EwcError::ParamCountMismatch { expected: 3, got: 2 };
+        let e = EwcError::ParamCountMismatch {
+            expected: 3,
+            got: 2,
+        };
         let s = e.to_string();
         assert!(s.contains("3") && s.contains("2"), "got: {s}");
 
@@ -714,7 +725,10 @@ mod tests {
             got: 3,
         };
         let s = e.to_string();
-        assert!(s.contains("w") && s.contains("4") && s.contains("3"), "got: {s}");
+        assert!(
+            s.contains("w") && s.contains("4") && s.contains("3"),
+            "got: {s}"
+        );
 
         let e = EwcError::NoAnchors;
         assert!(e.to_string().contains("anchor"));
@@ -730,8 +744,14 @@ mod tests {
             param("w1", vec![1.0, 0.0, 0.01]),
         ];
         let fisher = compute_fisher(&grads);
-        assert_eq!(fisher[0].fisher, grads[0].values, "Fisher must equal squared grad values for w0");
-        assert_eq!(fisher[1].fisher, grads[1].values, "Fisher must equal squared grad values for w1");
+        assert_eq!(
+            fisher[0].fisher, grads[0].values,
+            "Fisher must equal squared grad values for w0"
+        );
+        assert_eq!(
+            fisher[1].fisher, grads[1].values,
+            "Fisher must equal squared grad values for w1"
+        );
     }
 
     // 22. EWC penalty formula: Σ F_i * (θ_i - θ*_i)^2 / 2 with known values
@@ -743,15 +763,26 @@ mod tests {
         let cur = vec![param("w", vec![3.0, 5.0])];
         let anc = vec![param("w", vec![1.0, 2.0])];
         let fi = compute_fisher(&[param("w", vec![2.0, 4.0])]);
-        let cfg = EwcConfig { lambda: 1.0, ..Default::default() };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        };
         let res = compute_ewc_penalty(&cur, &anc, &fi, &cfg).expect("penalty");
-        assert!((res.total_penalty - 22.0).abs() < 1e-4, "expected 22.0, got {}", res.total_penalty);
+        assert!(
+            (res.total_penalty - 22.0).abs() < 1e-4,
+            "expected 22.0, got {}",
+            res.total_penalty
+        );
     }
 
     // 23. Online EWC with gamma=0.5: blended Fisher = 0.5 * old + new
     #[test]
     fn test_online_ewc_gamma_decay() {
-        let cfg = EwcConfig { lambda: 1.0, online: true, gamma: 0.5 };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            online: true,
+            gamma: 0.5,
+        };
         let mut trainer = EwcTrainer::new(cfg);
 
         // Register first task with Fisher = [4.0]
@@ -763,7 +794,11 @@ mod tests {
         let grads2 = vec![param("p0", vec![2.0])];
         trainer.register_task("t2", vec![param("p0", vec![0.0])], &grads2).expect("t2");
 
-        assert_eq!(trainer.num_tasks(), 1, "online mode should keep only 1 anchor");
+        assert_eq!(
+            trainer.num_tasks(),
+            1,
+            "online mode should keep only 1 anchor"
+        );
         let blended = trainer.anchors()[0].fisher[0].fisher[0];
         assert!(
             (blended - 4.0).abs() < 1e-5,
@@ -774,14 +809,21 @@ mod tests {
     // 24. Multi-task EWC: separate Fisher per task, total penalty sums contributions
     #[test]
     fn test_multi_task_ewc_separate_anchors() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 2.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 2.0,
+            ..Default::default()
+        });
         let grads = vec![param("p0", vec![1.0])]; // Fisher = [1.0]
 
         trainer.register_task("t1", vec![param("p0", vec![0.0])], &grads).expect("t1");
         trainer.register_task("t2", vec![param("p0", vec![1.0])], &grads).expect("t2");
         trainer.register_task("t3", vec![param("p0", vec![2.0])], &grads).expect("t3");
 
-        assert_eq!(trainer.num_tasks(), 3, "3 tasks should be registered separately");
+        assert_eq!(
+            trainer.num_tasks(),
+            3,
+            "3 tasks should be registered separately"
+        );
 
         // current = [3.0]
         // penalty for t1 anchor(0): (2/2)*1*(3-0)^2 = 9
@@ -796,7 +838,10 @@ mod tests {
     // 25. Penalty grows with larger parameter divergence
     #[test]
     fn test_penalty_grows_with_divergence() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 1.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        });
         let grads = vec![param("p0", vec![1.0])];
         trainer.register_task("t1", vec![param("p0", vec![0.0])], &grads).expect("t1");
 
@@ -806,7 +851,12 @@ mod tests {
         let p_small = trainer.total_penalty(&small_dev).expect("small");
         let p_large = trainer.total_penalty(&large_dev).expect("large");
 
-        assert!(p_small < p_large, "larger deviation should produce larger penalty: {} vs {}", p_small, p_large);
+        assert!(
+            p_small < p_large,
+            "larger deviation should produce larger penalty: {} vs {}",
+            p_small,
+            p_large
+        );
     }
 
     // 26. Zero penalty when current == anchor (per-param check)
@@ -816,28 +866,51 @@ mod tests {
         let cur = vec![param("w", anchor_vals.clone())];
         let anc = vec![param("w", anchor_vals)];
         let fi = compute_fisher(&[param("w", vec![100.0, 100.0, 100.0, 100.0])]);
-        let cfg = EwcConfig { lambda: 9999.0, ..Default::default() };
+        let cfg = EwcConfig {
+            lambda: 9999.0,
+            ..Default::default()
+        };
         let res = compute_ewc_penalty(&cur, &anc, &fi, &cfg).expect("penalty");
-        assert!(res.total_penalty.abs() < 1e-6, "penalty must be 0 at anchor, got {}", res.total_penalty);
-        assert!(res.per_param_penalty[0].1.abs() < 1e-6, "per-param penalty must be 0 at anchor");
+        assert!(
+            res.total_penalty.abs() < 1e-6,
+            "penalty must be 0 at anchor, got {}",
+            res.total_penalty
+        );
+        assert!(
+            res.per_param_penalty[0].1.abs() < 1e-6,
+            "per-param penalty must be 0 at anchor"
+        );
     }
 
     // 27. EwcTrainer with lambda=0 → penalty is always 0
     #[test]
     fn test_zero_lambda_zero_penalty() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 0.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 0.0,
+            ..Default::default()
+        });
         let grads = vec![param("p0", vec![1.0, 2.0])];
-        trainer.register_task("t1", vec![param("p0", vec![0.0; 2])], &grads).expect("t1");
+        trainer
+            .register_task("t1", vec![param("p0", vec![0.0; 2])], &grads)
+            .expect("t1");
         let current = vec![param("p0", vec![999.0, 999.0])];
         let penalty = trainer.total_penalty(&current).expect("penalty");
-        assert!(penalty.abs() < 1e-6, "lambda=0 should give zero penalty, got {penalty}");
+        assert!(
+            penalty.abs() < 1e-6,
+            "lambda=0 should give zero penalty, got {penalty}"
+        );
     }
 
     // 28. compute_fisher with multiple params preserves all names and lengths
     #[test]
     fn test_compute_fisher_multiple_params_names() {
         let grads: Vec<NamedParameter> = (0..5)
-            .map(|i| param(&format!("layer.{i}.weight"), vec![0.1 * (i as f32 + 1.0); 3]))
+            .map(|i| {
+                param(
+                    &format!("layer.{i}.weight"),
+                    vec![0.1 * (i as f32 + 1.0); 3],
+                )
+            })
             .collect();
         let fisher = compute_fisher(&grads);
         assert_eq!(fisher.len(), 5);
@@ -850,15 +923,25 @@ mod tests {
     // 29. FisherInformation::mean on empty → 0.0
     #[test]
     fn test_fisher_mean_empty() {
-        let fi = FisherInformation { name: "empty".into(), fisher: vec![] };
+        let fi = FisherInformation {
+            name: "empty".into(),
+            fisher: vec![],
+        };
         assert_eq!(fi.mean(), 0.0, "mean of empty Fisher should be 0.0");
     }
 
     // 30. FisherInformation::important_fraction on empty → 0.0
     #[test]
     fn test_fisher_important_fraction_empty() {
-        let fi = FisherInformation { name: "empty".into(), fisher: vec![] };
-        assert_eq!(fi.important_fraction(0.5), 0.0, "fraction on empty should be 0.0");
+        let fi = FisherInformation {
+            name: "empty".into(),
+            fisher: vec![],
+        };
+        assert_eq!(
+            fi.important_fraction(0.5),
+            0.0,
+            "fraction on empty should be 0.0"
+        );
     }
 
     // 31. compute_ewc_penalty error: ParamCountMismatch (current != anchor count)
@@ -889,7 +972,10 @@ mod tests {
         let cur = vec![param("w", vec![1.0, 2.0, 3.0])];
         let anc = vec![param("w", vec![1.0, 2.0, 3.0])];
         // Fisher has only 2 elements but param has 3
-        let fi = vec![FisherInformation { name: "w".into(), fisher: vec![1.0, 1.0] }];
+        let fi = vec![FisherInformation {
+            name: "w".into(),
+            fisher: vec![1.0, 1.0],
+        }];
         let cfg = EwcConfig::default();
         let err = compute_ewc_penalty(&cur, &anc, &fi, &cfg).expect_err("size mismatch");
         assert!(matches!(err, EwcError::SizeMismatch { .. }));
@@ -908,7 +994,11 @@ mod tests {
     #[test]
     fn test_ewc_trainer_mean_penalty_empty_history() {
         let trainer = EwcTrainer::new(EwcConfig::default());
-        assert_eq!(trainer.mean_penalty(), 0.0, "mean penalty with no history should be 0.0");
+        assert_eq!(
+            trainer.mean_penalty(),
+            0.0,
+            "mean penalty with no history should be 0.0"
+        );
     }
 
     // 36. EwcTaskAnchor::total_numel for multi-param anchor
@@ -928,73 +1018,111 @@ mod tests {
     #[test]
     fn test_named_parameter_norm_zero_vector() {
         let p = param("zeros", vec![0.0, 0.0, 0.0, 0.0]);
-        assert!((p.norm() - 0.0).abs() < 1e-6, "norm of zero vector should be 0.0");
+        assert!(
+            (p.norm() - 0.0).abs() < 1e-6,
+            "norm of zero vector should be 0.0"
+        );
     }
 
     // 38. Online EWC with gamma=0.0: new Fisher replaces old
     #[test]
     fn test_online_ewc_gamma_zero_replaces() {
-        let cfg = EwcConfig { lambda: 1.0, online: true, gamma: 0.0 };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            online: true,
+            gamma: 0.0,
+        };
         let mut trainer = EwcTrainer::new(cfg);
 
         // First task: Fisher = [8.0]
-        trainer.register_task("t1", vec![param("p0", vec![0.0])], &[param("p0", vec![8.0])]).expect("t1");
+        trainer
+            .register_task(
+                "t1",
+                vec![param("p0", vec![0.0])],
+                &[param("p0", vec![8.0])],
+            )
+            .expect("t1");
 
         // Second task: Fisher = [3.0]; blended = 0.0 * 8.0 + 3.0 = 3.0 (old is zeroed out)
-        trainer.register_task("t2", vec![param("p0", vec![0.0])], &[param("p0", vec![3.0])]).expect("t2");
+        trainer
+            .register_task(
+                "t2",
+                vec![param("p0", vec![0.0])],
+                &[param("p0", vec![3.0])],
+            )
+            .expect("t2");
 
         let blended = trainer.anchors()[0].fisher[0].fisher[0];
-        assert!((blended - 3.0).abs() < 1e-5, "gamma=0 → old Fisher discarded, expected 3.0, got {blended}");
+        assert!(
+            (blended - 3.0).abs() < 1e-5,
+            "gamma=0 → old Fisher discarded, expected 3.0, got {blended}"
+        );
     }
 
     // 39. Non-online EwcTrainer preserves all tasks separately
     #[test]
     fn test_non_online_trainer_keeps_all_tasks() {
-        let cfg = EwcConfig { lambda: 1.0, online: false, gamma: 1.0 };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            online: false,
+            gamma: 1.0,
+        };
         let mut trainer = EwcTrainer::new(cfg);
         for i in 0..5 {
             let grads = vec![param("p0", vec![1.0])];
-            trainer.register_task(&format!("task_{i}"), vec![param("p0", vec![0.0])], &grads)
+            trainer
+                .register_task(&format!("task_{i}"), vec![param("p0", vec![0.0])], &grads)
                 .expect("register");
         }
-        assert_eq!(trainer.num_tasks(), 5, "5 tasks should be stored separately");
+        assert_eq!(
+            trainer.num_tasks(),
+            5,
+            "5 tasks should be stored separately"
+        );
     }
 
     // 40. EwcPenaltyResult fields: check num_params and mean_deviation
     #[test]
     fn test_ewc_penalty_result_fields() {
-        let cur = vec![
-            param("w0", vec![2.0, 3.0]),
-            param("w1", vec![1.0]),
-        ];
-        let anc = vec![
-            param("w0", vec![0.0, 0.0]),
-            param("w1", vec![0.0]),
-        ];
+        let cur = vec![param("w0", vec![2.0, 3.0]), param("w1", vec![1.0])];
+        let anc = vec![param("w0", vec![0.0, 0.0]), param("w1", vec![0.0])];
         let fi = compute_fisher(&[param("w0", vec![1.0, 1.0]), param("w1", vec![1.0])]);
-        let cfg = EwcConfig { lambda: 1.0, ..Default::default() };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        };
         let res = compute_ewc_penalty(&cur, &anc, &fi, &cfg).expect("penalty");
 
         assert_eq!(res.num_params, 2, "num_params should be 2");
         // deviation_w0 = 1*(2^2) + 1*(3^2) = 4+9 = 13
         // deviation_w1 = 1*(1^2) = 1
         // mean_deviation = (13+1)/2 = 7.0
-        assert!((res.mean_deviation - 7.0).abs() < 1e-4, "expected mean_deviation=7.0, got {}", res.mean_deviation);
+        assert!(
+            (res.mean_deviation - 7.0).abs() < 1e-4,
+            "expected mean_deviation=7.0, got {}",
+            res.mean_deviation
+        );
     }
 
     // 41. Online EWC with multiple tasks changes fisher sum
     #[test]
     fn test_online_ewc_accumulates_fisher() {
-        let cfg = EwcConfig { lambda: 1.0, online: true, gamma: 1.0 };
+        let cfg = EwcConfig {
+            lambda: 1.0,
+            online: true,
+            gamma: 1.0,
+        };
         let mut trainer = EwcTrainer::new(cfg);
 
         // Add 3 tasks with Fisher = [1.0] each; accumulated = 3.0
         for i in 0..3 {
-            trainer.register_task(
-                &format!("t{i}"),
-                vec![param("p0", vec![0.0])],
-                &[param("p0", vec![1.0])],
-            ).expect("register");
+            trainer
+                .register_task(
+                    &format!("t{i}"),
+                    vec![param("p0", vec![0.0])],
+                    &[param("p0", vec![1.0])],
+                )
+                .expect("register");
         }
         assert_eq!(trainer.num_tasks(), 1, "online mode should keep 1 anchor");
         let accumulated = trainer.anchors()[0].fisher[0].fisher[0];
@@ -1008,20 +1136,32 @@ mod tests {
     #[test]
     fn test_ewc_config_gamma_default() {
         let cfg = EwcConfig::default();
-        assert!((cfg.gamma - 1.0).abs() < 1e-6, "default gamma should be 1.0");
+        assert!(
+            (cfg.gamma - 1.0).abs() < 1e-6,
+            "default gamma should be 1.0"
+        );
     }
 
     // 43. Penalty history grows with each call to total_penalty
     #[test]
     fn test_penalty_history_grows() {
-        let mut trainer = EwcTrainer::new(EwcConfig { lambda: 1.0, ..Default::default() });
+        let mut trainer = EwcTrainer::new(EwcConfig {
+            lambda: 1.0,
+            ..Default::default()
+        });
         let grads = vec![param("p0", vec![1.0])];
-        trainer.register_task("t1", vec![param("p0", vec![0.0])], &grads).expect("register");
+        trainer
+            .register_task("t1", vec![param("p0", vec![0.0])], &grads)
+            .expect("register");
 
         let cur = vec![param("p0", vec![1.0])];
         for i in 1..=5 {
             trainer.total_penalty(&cur).expect("penalty");
-            assert_eq!(trainer.penalty_history().len(), i, "history length should be {i}");
+            assert_eq!(
+                trainer.penalty_history().len(),
+                i,
+                "history length should be {i}"
+            );
         }
     }
 }

@@ -11,11 +11,23 @@ members = [
     "trustformers-debug",
     "trustformers-serve",
 ]
-exclude = ["examples/server", "examples/grpc-server", "trustformers-py", "trustformers-c"]
+# Packages that live inside the repository tree but are intentionally not built as
+# workspace members. `trustformers-serve/clients/rust` is a standalone generated
+# client that is neither a member nor buildable in place; listing it here makes the
+# exclusion explicit instead of implicit.
+# (`trustformers-js` needs no entry: it contains no Cargo.toml at all, so cargo
+# never considers it a package.)
+exclude = [
+    "examples/server",
+    "examples/grpc-server",
+    "trustformers-py",
+    "trustformers-c",
+    "trustformers-serve/clients/rust",
+]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.89"
 authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
@@ -25,27 +37,32 @@ homepage = "https://github.com/cool-japan/trustformers"
 
 [workspace.dependencies]
 # Internal crate dependencies
-trustformers = { version = "0.2.0", path = "trustformers", default-features = false }
-trustformers-core = { version = "0.2.0", path = "trustformers-core", default-features = false }
-trustformers-tokenizers = { version = "0.2.0", path = "trustformers-tokenizers", default-features = false }
-trustformers-models = { version = "0.2.0", path = "trustformers-models", default-features = false }
-trustformers-optim = { version = "0.2.0", path = "trustformers-optim", default-features = false }
-trustformers-training = { version = "0.2.0", path = "trustformers-training", default-features = false }
-trustformers-wasm = { version = "0.2.0", path = "trustformers-wasm", default-features = false }
-trustformers-mobile = { version = "0.2.0", path = "trustformers-mobile", default-features = false }
-trustformers-debug = { version = "0.2.0", path = "trustformers-debug", default-features = false }
-trustformers-serve = { version = "0.2.0", path = "trustformers-serve", default-features = false }
+trustformers = { version = "0.2.1", path = "trustformers", default-features = false }
+trustformers-core = { version = "0.2.1", path = "trustformers-core", default-features = false }
+trustformers-tokenizers = { version = "0.2.1", path = "trustformers-tokenizers", default-features = false }
+trustformers-models = { version = "0.2.1", path = "trustformers-models", default-features = false, features = ["mamba2"] }
+trustformers-optim = { version = "0.2.1", path = "trustformers-optim", default-features = false }
+trustformers-training = { version = "0.2.1", path = "trustformers-training", default-features = false }
+trustformers-wasm = { version = "0.2.1", path = "trustformers-wasm", default-features = false }
+trustformers-mobile = { version = "0.2.1", path = "trustformers-mobile", default-features = false }
+trustformers-debug = { version = "0.2.1", path = "trustformers-debug", default-features = false }
+trustformers-serve = { version = "0.2.1", path = "trustformers-serve", default-features = false }
 
 # Core dependencies
 anyhow = "1.0.103"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-serde_yaml = "0.9.34"
+# Maintained hard fork of `serde_yaml` 0.9.34 with an API-identical surface.
+# The archived `serde_yaml` entry that used to sit here is gone: its last
+# workspace consumer (`trustformers-models`) was migrated, and an unused
+# `[workspace.dependencies]` entry is still resolved by `cargo update` and
+# audited by `cargo deny`.
+serde_yaml_ng = "0.10.0"
 semver = { version = "1.0.28", features = ["serde"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 log = "0.4.33"
 lazy_static = "1.5.0"
 reqwest = { version = "0.13.4", features = ["json", "stream", "blocking", "form", "query"] }
@@ -55,6 +72,41 @@ indicatif = "0.18.6"
 sha2 = "0.11.0"
 hex = "0.4.3"
 dirs = "6.0.0"
+
+# Cryptography (RustCrypto) — Pure Rust, no C/C++/Fortran in the default tree.
+# Used by trustformers-serve's encryption subsystem for real AEAD, real KDFs and
+# constant-time tag comparison. `getrandom` is the OS CSPRNG (syscall bindings only).
+aes-gcm = { version = "0.11.0", features = ["aes"] }
+chacha20poly1305 = "0.11.0"
+aes = "0.9.2"
+cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
+salsa20 = "0.11.0"
+poly1305 = "0.9.1"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+getrandom = "0.4.3"
+subtle = "2.6.1"
+zeroize = { version = "1.9.0", features = ["derive"] }
+# Post-quantum cryptography (RustCrypto, pure Rust, no C/C++/Fortran).
+# ML-KEM = FIPS 203 (formerly CRYSTALS-Kyber), ML-DSA = FIPS 204 (formerly
+# CRYSTALS-Dilithium), SLH-DSA = FIPS 205 (formerly SPHINCS+).
+ml-kem = { version = "0.3.2", features = ["getrandom"] }
+ml-dsa = "0.1.1"
+slh-dsa = "0.2.0-rc.5"
+# RNG trait crate required for RustCrypto interop (traits only, no generator).
+rand_core = "0.10.1"
+# Arbitrary-precision integers for the Paillier cryptosystem and the
+# Schnorr/Fiat-Shamir sigma protocol (pure Rust).
+num-bigint = { version = "0.5.1", features = ["rand_core_0_10"] }
+num-integer = "0.1.47"
+# Pure-Rust cross-platform system telemetry (CPU utilization, temperature sensors,
+# memory) for hardware/ device metrics. No C/C++ toolchain required.
+# One version for the whole workspace: trustformers-serve used to pin 0.39 locally
+# for `sysinfo::Disks` / `sysinfo::Networks`, which put two majors of sysinfo in
+# every build. It now takes this entry and adds the `disk`/`network` features on
+# top, so the duplicate is gone.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "component"] }
 
 # ML/Math dependencies
 # Note: Per SciRS2 Integration Policy, scientific computing deps are accessed via scirs2-core
@@ -75,16 +127,29 @@ memmap2 = "0.9.11"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex", "progressbar"] }
 unicode-normalization = "0.1"
 regex = "1.12.4"
+# Pure-Rust backtracking regex engine (already in the tree via `tokenizers`'
+# `fancy-regex` feature). Needed for the exact GPT-2 / tiktoken pre-tokenizer
+# patterns, which use lookahead and are therefore not expressible in `regex`.
+fancy-regex = "0.17"
+regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "unicode", "dfa-build", "dfa-search"] }
+# Pure-Rust Jinja2-compatible engine for rendering HuggingFace `chat_template`
+# strings (Llama/Mistral/Qwen/ChatML tokenizer_config.json templates).
+minijinja = "2.24.0"
 
 # Optional dependencies for different backends
-candle-core = "0.11.0"
 safetensors = "0.8"
 
 # Web/Server dependencies  
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+# `rust_crypto` is the pure-Rust backend. It is an all-or-nothing bundle —
+# 11.0.0's table reads
+# `rust_crypto = ["ed25519-dalek", "hmac", "p256", "p384", "rand", "rsa", "sha2"]`
+# — so `rsa` (RUSTSEC-2023-0071, Marvin timing side-channel, no safe upgrade)
+# cannot be dropped from it. The only other backend, `aws_lc_rs`, is C/C++ FFI and
+# banned by the COOLJAPAN Pure-Rust policy. See deny.toml's `[advisories] ignore`.
+jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
 num_cpus = "1.17"
 once_cell = "1.21"
 prometheus = "0.14"
@@ -102,6 +167,13 @@ tonic-prost-build = "0.14.6"
 wasm-bindgen = { version = "0.2.126", features = ["serde-serialize"] }
 wasm-bindgen-futures = "0.4.76"
 js-sys = "0.3.103"
+# `serde` <-> `JsValue` bridge, the pure-Rust allocator used for `wasm32`
+# builds, and the `wasm-bindgen` test harness. Declared here so the versions
+# live in one place, exactly like every other shared dependency; the members
+# add only `optional` / extra `features`.
+serde-wasm-bindgen = "0.6.5"
+dlmalloc = "0.2.14"
+wasm-bindgen-test = "0.3.77"
 web-sys = { version = "0.3.103", features = [
     "console",
     "Navigator",
@@ -114,6 +186,7 @@ web-sys = { version = "0.3.103", features = [
     "WorkerType",
     "MessageEvent",
     "MessagePort",
+    "MessageChannel",
     "DedicatedWorkerGlobalScope",
     "BroadcastChannel",
     "ServiceWorker",
@@ -186,41 +259,49 @@ web-sys = { version = "0.3.103", features = [
     "GpuAdapter",
     "GpuQueue",
     "Geolocation",
+    "Position",
+    "Coordinates",
     "RequestMode",
     "ResponseInit",
     "Screen",
     "ScreenOrientation",
     "Storage",
     "StorageManager",
+    "NetworkInformation",
+    "MediaQueryList",
     "NodeList",
     "HtmlCollection",
+    "Url",
+    "BlobPropertyBag",
 ]}
 
 # Serialization dependencies
 rmp-serde = "1.3"
 
 # Python bindings dependencies
+# NOTE: `numpy = "0.29"` used to be declared here with no consumer anywhere in the
+# workspace (trustformers-py is excluded from the workspace and binds NumPy through
+# `scirs2-numpy`). Removed so every entry in this table has a real user.
 pyo3 = "0.29"
-numpy = "0.29"
 
 # Additional core dependencies
-oxicode = { version = "0.2.4", features = ["serde"] }
+oxicode = { version = "0.2.6", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.2"
-oxiarc-zstd = { version = "0.3.5" }
-oxiarc-deflate = { version = "0.3.5" }
-oxiarc-lz4 = { version = "0.3.5" }
-oxiarc-archive = { version = "0.3.5" }
+oxiarc-zstd = { version = "0.4.1" }
+oxiarc-deflate = { version = "0.4.1" }
+oxiarc-lz4 = { version = "0.4.1" }
+oxiarc-archive = { version = "0.4.1" }
 # Pure-Rust SQLite-compatible backend (COOLJAPAN OxiSQL ecosystem, C-free fork of Limbo).
 # Used for real SQLite-format export in trustformers-debug. NEVER use rusqlite/libsqlite3.
-oxisql-sqlite-compat = { version = "0.3", features = ["blocking"] }
+oxisql-sqlite-compat = { version = "0.4.1", features = ["blocking"] }
 libc = "0.2.186"
 libloading = "0.9"
 
 # BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
-oxiblas = { version = "0.2.1", features = ["parallel"] }
-oxiblas-blas = { version = "0.2.1" }
-oxiblas-matrix = { version = "0.2.1" }
+oxiblas = { version = "0.2.2", features = ["parallel"] }
+oxiblas-blas = { version = "0.2.2" }
+oxiblas-matrix = { version = "0.2.2" }
 
 # Server and networking dependencies
 tokio-util = "0.7"
@@ -230,6 +311,9 @@ colored = "3.1"
 env_logger = "0.11"
 tokio-rustls = "0.26"
 base64 = "0.22"
+# COOLJAPAN FFT (pure Rust, replaces rustfft/FFTW). Used by the media pipelines
+# for STFT / mel-spectrogram feature extraction.
+oxifft = "0.4.2"
 mime_guess = "2.0"
 fastrand = "2.4.1"
 toml = "1.1.2"
@@ -243,7 +327,14 @@ pretty_assertions = "1.4"
 axum-test = "21.0"
 tokio-test = "0.4"
 tempfile = "3.27"
-paste = "1.0"
+# NOTE (2026-08-24): `paste = "1.0"` was here. `trustformers-serve` was its only
+# declarer (a dev-dependency), and that direct declaration is what made
+# RUSTSEC-2024-0436 (unmaintained, no safe upgrade) fire under `deny.toml`'s
+# `[advisories] unmaintained = "workspace"`. Its one use site — the never-invoked
+# `optimized_test_with_progress!` macro in `trustformers-serve/src/test_utilities.rs`
+# — expands nowhere, so nothing needed rewriting. `paste` remains in the graph
+# transitively (metal, pulp, rav1e, simba, tokenizers); that is not actionable
+# here. Use the maintained fork `pastey` if token pasting is ever needed again.
 
 # Debug-specific dependencies
 indexmap = { version = "2.14", features = ["serde"] }
@@ -252,7 +343,6 @@ crossterm = "0.29"
 ratatui = "0.30"
 gif = "0.14"
 image = "0.25.10"
-ffmpeg-next = "8.1"
 statrs = "0.18"
 md5 = "0.8"
 
@@ -271,7 +361,7 @@ wgpu = "30.0"
 # SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.6.0", default-features = false, features = [
+scirs2-core = { version = "0.6.5", default-features = false, features = [
     "array",
     "simd",
     "parallel",
@@ -282,6 +372,112 @@ scirs2-core = { version = "0.6.0", default-features = false, features = [
     "serialization",  # Required for config and model loading
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
+
+# ---------------------------------------------------------------------------
+# COOLJAPAN workspace policy: every dependency version is declared exactly once,
+# here. Members reference them with `<crate>.workspace = true` and add only
+# `optional = true` / extra `features` on top. The entries below were hoisted out
+# of member manifests that used to carry inline version pins; the versions are the
+# ones already selected in Cargo.lock, so hoisting them does not change resolution.
+# ---------------------------------------------------------------------------
+
+# GPU / accelerator backends (trustformers-core, all optional & feature-gated)
+# `mpi` keeps `default-features = false` at the workspace level: its default
+# feature set builds `libffi-sys` (C) and fails on macOS ARM64.
+mpi = { version = "0.8.2", default-features = false }
+pollster = "0.4.0"
+opencl3 = "0.12.3"
+# Apple GPU stack (macOS/iOS target blocks only)
+metal = "0.33.0"
+mpsgraph = "0.2.0"
+# oxicuda: COOLJAPAN pure-Rust CUDA/Metal compute backends
+oxicuda-blas = "0.5.5"
+oxicuda-dnn = "0.5.5"
+oxicuda-memory = "0.5.5"
+oxicuda-driver = "0.5.5"
+oxicuda-metal = "0.5.5"
+oxicuda-backend = "0.5.5"
+
+# Mobile target-specific dependencies (trustformers-mobile). These are only ever
+# compiled for their `cfg(target_os = ...)` block; the versions live here so the
+# workspace has a single source of truth.
+objc = "0.2.7"
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
+cocoa = "0.26.1"
+jni = "0.22.4"
+android_logger = "0.15.1"
+console_error_panic_hook = "0.1.7"
+
+# Tokenizer support crates
+# `mecab` is a C++ libmecab FFI binding: optional and excluded from every default
+# feature set (COOLJAPAN Pure-Rust policy).
+mecab = "0.1.6"
+crc32fast = "1.5.0"
+unicode_categories = "0.1.1"
+
+# Async stream adapters for the umbrella crate's `async` feature
+async-stream = "0.3.6"
+
+# Serving layer: GraphQL / OpenAPI / TLS / observability
+async-graphql = "7.2.1"
+async-graphql-axum = "7.2.1"
+utoipa = "5.5.0"
+# Pulls the banned `zip` crate through its build script; keep it optional and out
+# of every default feature set.
+utoipa-swagger-ui = "9.0.2"
+rustls = "0.23.43"
+glob = "0.3.4"
+# NOTE (2026-08-24): the six OpenTelemetry entries that used to live here
+# (`opentelemetry`, `opentelemetry-otlp`, `opentelemetry-jaeger`,
+# `opentelemetry-zipkin`, `opentelemetry-semantic-conventions`,
+# `tracing-opentelemetry`) are gone. `trustformers-serve` was their only
+# declarer and it never referenced a single one of them in code — its
+# `src/tracing/` module hand-rolls its own span model and serialises it with
+# `serde_json`. `opentelemetry-jaeger` was the root of RUSTSEC-2025-0123
+# (deprecated upstream, no safe upgrade). Deleting them closed that advisory for
+# real; do not re-add one without the code that uses it, or
+# `workspace_dependency_table_has_no_unused_entries` will fail.
+
+# Serving layer: message queues
+# `rdkafka` builds librdkafka (C/C++ via cmake); optional, `kafka` feature only.
+rdkafka = "0.39.0"
+lapin = "4.10.0"
+redis = "1.5.0"
+async-nats = "0.49.1"
+
+# Serving layer: cloud provider SDKs
+#
+# Every `aws-sdk-*` crate below opts out of its own `default` feature set and
+# asks back for exactly `["default-https-client", "rt-tokio"]`. The feature that
+# is deliberately NOT re-enabled is `rustls`, which forwards to
+# `aws-smithy-runtime/tls-rustls` -> `aws-smithy-http-client/legacy-rustls-ring`
+# and drags in a second, obsolete TLS stack (rustls 0.21 + rustls-webpki 0.101.7
+# + hyper 0.14 + h2 0.3) alongside the modern one that `default-https-client`
+# already provides. That obsolete stack was the root of four advisories —
+# RUSTSEC-2026-0098 / -0099 / -0104 (rustls-webpki 0.101.7) and RUSTSEC-2026-0258
+# (h2 0.3.27) — none of which `cargo update` can reach, because rustls 0.21 pins
+# `rustls-webpki ^0.101.7` and `aws-smithy-http-client`'s `hyper-014` pins
+# `h2 ^0.3.24`. It was compiled but never used at runtime; see the long comment
+# in `trustformers-serve/Cargo.toml` for the measurement that establishes that,
+# and for the one remaining gap (`aws-lc-sys`) this does not close.
+#
+# `default-features = false` must live HERE rather than in the member manifest:
+# a member's `default-features = false` is silently ignored when the
+# `[workspace.dependencies]` entry does not set it too.
+aws-config = "1.10.1"
+aws-sdk-sqs = { version = "1.105.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sagemaker = { version = "1.221.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sagemakerruntime = { version = "1.109.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-lambda = { version = "1.138.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-cloudwatch = { version = "1.123.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# NOTE (2026-08-24): `lambda-web = "0.2.1"` was here, declared only by
+# `trustformers-serve`'s (now deleted) optional `lambda` feature. Nothing in that
+# crate ever referenced `lambda_web` or `#[cfg(feature = "lambda")]`, and its
+# sibling `lambda_runtime` had already been removed from this table. It pulled
+# `hyper 0.14` -> `h2 0.3.27` (RUSTSEC-2026-0258) and the banned
+# `brotli`/`brotli-decompressor` crates into the all-features audit graph for no
+# working functionality.
 
 [profile.release]
 lto = true

@@ -20,6 +20,7 @@
 //!     MultiTaskLearningTrainer, MTLConfig, MTLArchitecture,
 //!     LossBalancingStrategy, TaskConfig, TaskType, RegressionLossType,
 //! };
+//! use trustformers_models::continual_learning::NamedParameters;
 //! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
 //! use serde::{Deserialize, Serialize};
 //! use std::collections::HashMap;
@@ -29,15 +30,24 @@
 //! # impl Config for DocConfig {
 //! #     fn architecture(&self) -> &'static str { "doc" }
 //! # }
-//! # struct DocModel;
+//! # struct DocModel { scale: Tensor }
 //! # impl Model for DocModel {
 //! #     type Config = DocConfig;
 //! #     type Input = Tensor;
 //! #     type Output = Tensor;
-//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { input.mul(&self.scale) }
 //! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
 //! #     fn get_config(&self) -> &DocConfig { &DocConfig }
-//! #     fn num_parameters(&self) -> usize { 0 }
+//! #     fn num_parameters(&self) -> usize { 1 }
+//! # }
+//! # impl NamedParameters for DocModel {
+//! #     fn named_parameters(&self) -> Vec<(String, Tensor)> {
+//! #         vec![("scale".to_string(), self.scale.clone())]
+//! #     }
+//! #     fn set_named_parameter(&mut self, name: &str, value: Tensor) -> Result<()> {
+//! #         if name == "scale" { self.scale = value; }
+//! #         Ok(())
+//! #     }
 //! # }
 //!
 //! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -54,7 +64,7 @@
 //!     ..Default::default()
 //! };
 //!
-//! # let base_model = DocModel;
+//! # let base_model = DocModel { scale: Tensor::ones(&[1, 768])? };
 //! let mut trainer = MultiTaskLearningTrainer::new(base_model, config)?;
 //! # let task_data = HashMap::new();
 //! trainer.train_multi_task_step(&task_data)?;
@@ -62,8 +72,9 @@
 //! # }
 //! ```
 
+use crate::continual_learning::NamedParameters;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use trustformers_core::{
     errors::invalid_input,
     layers::Linear,
@@ -382,19 +393,50 @@ pub struct MultiTaskLearningTrainer<M: Model> {
     pub scheduler_state: TaskSchedulerState,
     /// Gradient statistics for balancing
     pub gradient_stats: HashMap<String, GradientStats>,
+    /// Per-task loss history (most recent last), used by Dynamic Weight Average
+    pub task_loss_history: HashMap<String, VecDeque<f32>>,
+    /// First observed loss per task, used as the GradNorm reference `L_k(0)`
+    pub initial_task_losses: HashMap<String, f32>,
+    /// Learned homoscedastic log-variances, used by Uncertainty Weighting
+    pub task_log_variances: HashMap<String, f32>,
 }
 
-impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
+/// Number of past losses retained per task for Dynamic Weight Average.
+const LOSS_HISTORY_CAPACITY: usize = 8;
+
+/// Read a one-element loss tensor as an `f32`.
+fn loss_scalar(tensor: &Tensor) -> Result<f32> {
+    tensor
+        .to_vec_f32()?
+        .first()
+        .copied()
+        .ok_or_else(|| invalid_input("expected a non-empty loss tensor"))
+}
+
+/// Index of the largest element of a slice.
+fn argmax_index(values: &[f32]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+impl<M: Model<Input = Tensor, Output = Tensor> + NamedParameters> MultiTaskLearningTrainer<M> {
     /// Create a new multi-task learning trainer
     pub fn new(base_model: M, config: MTLConfig) -> Result<Self> {
         let mut task_heads = HashMap::new();
         let mut task_weights = HashMap::new();
+        let mut task_log_variances = HashMap::new();
 
         // Initialize task heads
         for task_config in &config.tasks {
             let task_head = TaskHead::new(&task_config.task_type)?;
             task_heads.insert(task_config.name.clone(), task_head);
             task_weights.insert(task_config.name.clone(), task_config.weight);
+            // log sigma^2 = 0 => sigma = 1 => the task starts unweighted.
+            task_log_variances.insert(task_config.name.clone(), 0.0);
         }
 
         let scheduler_state = TaskSchedulerState::new(&config.task_scheduling);
@@ -408,6 +450,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
             step_counter: 0,
             scheduler_state,
             gradient_stats: HashMap::new(),
+            task_loss_history: HashMap::new(),
+            initial_task_losses: HashMap::new(),
+            task_log_variances,
         })
     }
 
@@ -447,6 +492,14 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
             }
         }
 
+        // GradNorm needs real gradient magnitudes against the shared trunk.
+        if matches!(
+            self.config.loss_balancing,
+            LossBalancingStrategy::GradNorm { .. }
+        ) {
+            self.update_gradient_stats(task_data, &active_tasks)?;
+        }
+
         // Balance losses across tasks
         let balanced_losses = self.balance_losses(&task_losses)?;
 
@@ -457,7 +510,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
         }
 
         // Update task weights if using dynamic balancing
-        self.update_task_weights(&task_losses)?;
+        self.record_task_losses(&task_losses)?;
 
         // Update auxiliary tasks if enabled
         if self.config.use_auxiliary_tasks {
@@ -467,12 +520,14 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
 
         self.step_counter += 1;
 
+        let mut reported_losses = HashMap::new();
+        for (task_name, loss) in task_losses {
+            reported_losses.insert(task_name, loss_scalar(&loss)?);
+        }
+
         Ok(MultiTaskOutput {
             total_loss,
-            task_losses: task_losses
-                .into_iter()
-                .map(|(k, v)| (k, v.to_scalar().unwrap_or(0.0)))
-                .collect(),
+            task_losses: reported_losses,
             task_accuracies,
             active_tasks,
             task_weights: self.task_weights.clone(),
@@ -528,7 +583,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
     }
 
     /// Balance losses across tasks
-    fn balance_losses(
+    pub fn balance_losses(
         &self,
         task_losses: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
@@ -536,98 +591,272 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
             LossBalancingStrategy::EqualWeighting => Ok(task_losses.clone()),
             LossBalancingStrategy::ManualWeighting { weights } => {
                 let mut balanced = HashMap::new();
-                for (i, (task_name, loss)) in task_losses.iter().enumerate() {
+                // Iterate in the configured task order so index-based weights
+                // map to a stable task, not to HashMap iteration order.
+                let mut names: Vec<&String> = task_losses.keys().collect();
+                names.sort();
+                for (i, task_name) in names.into_iter().enumerate() {
+                    let Some(loss) = task_losses.get(task_name) else {
+                        continue;
+                    };
                     let weight = weights.get(i).copied().unwrap_or(1.0);
                     balanced.insert(task_name.clone(), loss.scalar_mul(weight)?);
                 }
                 Ok(balanced)
             },
             LossBalancingStrategy::UncertaintyWeighting => {
-                // Implement uncertainty-based weighting
-                // This would typically involve learning task-specific uncertainty parameters
-                Ok(task_losses.clone()) // Simplified for now
+                self.apply_uncertainty_weighting(task_losses)
             },
             LossBalancingStrategy::DynamicWeightAverage => {
-                // Use dynamic weight average algorithm
                 self.apply_dynamic_weight_average(task_losses)
             },
-            LossBalancingStrategy::GradNorm { alpha } => {
-                // Apply GradNorm algorithm
-                self.apply_gradnorm(task_losses, *alpha)
-            },
+            LossBalancingStrategy::GradNorm { alpha } => self.apply_gradnorm(task_losses, *alpha),
             _ => Ok(task_losses.clone()),
         }
     }
 
-    /// Apply dynamic weight average algorithm
-    fn apply_dynamic_weight_average(
+    /// Kendall-style homoscedastic uncertainty weighting.
+    ///
+    /// Each task contributes `L_k / (2 σ_k²) + log σ_k`, where the learned
+    /// log-variance `s_k = log σ_k²` is stored on the trainer and updated by
+    /// [`Self::record_task_losses`]. Tasks with a large learned variance are
+    /// down-weighted, and the `log σ_k` term prevents the trivial solution of
+    /// pushing every variance to infinity.
+    fn apply_uncertainty_weighting(
         &self,
         task_losses: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        // DWA uses relative descent rates to weight tasks
         let mut balanced = HashMap::new();
 
-        if self.step_counter < 2 {
-            return Ok(task_losses.clone());
-        }
-
-        let temperature = 2.0; // DWA temperature parameter
-
         for (task_name, loss) in task_losses {
-            // Get previous loss for this task
-            let prev_loss = self.get_previous_task_loss(task_name);
-            let current_loss = loss.to_scalar().unwrap_or(0.0);
-
-            let weight = if prev_loss > 0.0 {
-                let relative_decrease = current_loss / prev_loss;
-                (relative_decrease / temperature).exp()
-            } else {
-                1.0
-            };
-
-            balanced.insert(task_name.clone(), loss.clone().mul_scalar(weight)?);
+            let log_variance = self.task_log_variances.get(task_name).copied().unwrap_or(0.0);
+            let precision = 0.5 * (-log_variance).exp();
+            let scaled = loss.scalar_mul(precision)?;
+            // + log sigma = 0.5 * log sigma^2
+            balanced.insert(task_name.clone(), scaled.add_scalar(0.5 * log_variance)?);
         }
 
         Ok(balanced)
     }
 
-    /// Apply GradNorm algorithm
+    /// Dynamic Weight Average (Liu et al., 2019).
+    ///
+    /// `w_k(t) = L_k(t-1) / L_k(t-2)` measures how fast task `k` is still
+    /// improving; the weights are `λ_k = K · softmax(w / T)_k`, so they sum to
+    /// the number of tasks and a *slowly* improving task gets a larger weight.
+    /// Before two steps of history exist the losses pass through unchanged.
+    fn apply_dynamic_weight_average(
+        &self,
+        task_losses: &HashMap<String, Tensor>,
+    ) -> Result<HashMap<String, Tensor>> {
+        let temperature = 2.0f32;
+
+        let mut names: Vec<String> = task_losses.keys().cloned().collect();
+        names.sort();
+
+        let mut ratios = Vec::with_capacity(names.len());
+        for name in &names {
+            let Some((previous, before)) = self.previous_two_task_losses(name) else {
+                // Not enough history yet for any task: leave the losses alone.
+                return Ok(task_losses.clone());
+            };
+            if before.abs() <= f32::EPSILON {
+                return Ok(task_losses.clone());
+            }
+            ratios.push(previous / before);
+        }
+
+        let max_ratio = ratios.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exponentials: Vec<f32> =
+            ratios.iter().map(|r| ((r - max_ratio) / temperature).exp()).collect();
+        let total: f32 = exponentials.iter().sum();
+        if total <= 0.0 {
+            return Ok(task_losses.clone());
+        }
+
+        let count = names.len() as f32;
+        let mut balanced = HashMap::new();
+        for (name, exponential) in names.iter().zip(exponentials.iter()) {
+            let Some(loss) = task_losses.get(name) else {
+                continue;
+            };
+            let weight = count * exponential / total;
+            balanced.insert(name.clone(), loss.mul_scalar(weight)?);
+        }
+
+        Ok(balanced)
+    }
+
+    /// GradNorm (Chen et al., 2018).
+    ///
+    /// Uses the per-task gradient norms measured against the shared trunk (see
+    /// [`Self::update_gradient_stats`]) to rescale each task loss towards the
+    /// target `Ḡ · r_k^α`, where `r_k` is the task's relative inverse training
+    /// rate. When no gradient statistics have been measured yet the losses
+    /// pass through unchanged.
     fn apply_gradnorm(
         &self,
         task_losses: &HashMap<String, Tensor>,
-        _alpha: f32,
+        alpha: f32,
     ) -> Result<HashMap<String, Tensor>> {
-        // GradNorm balances gradient magnitudes across tasks
-        // This is a simplified implementation
-        Ok(task_losses.clone())
+        let mut names: Vec<String> = task_losses.keys().cloned().collect();
+        names.sort();
+
+        let mut norms = Vec::with_capacity(names.len());
+        let mut relative_rates = Vec::with_capacity(names.len());
+        for name in &names {
+            let Some(stats) = self.gradient_stats.get(name) else {
+                return Ok(task_losses.clone());
+            };
+            norms.push(stats.gradient_norm.max(0.0));
+
+            let Some(loss) = task_losses.get(name) else {
+                return Ok(task_losses.clone());
+            };
+            let current = loss_scalar(loss)?;
+            let initial = self.initial_task_losses.get(name).copied().unwrap_or(current);
+            relative_rates.push(if initial.abs() > f32::EPSILON { current / initial } else { 1.0 });
+        }
+
+        let mean_norm = norms.iter().sum::<f32>() / norms.len().max(1) as f32;
+        let mean_rate = relative_rates.iter().sum::<f32>() / relative_rates.len().max(1) as f32;
+        if mean_norm <= f32::EPSILON || mean_rate <= f32::EPSILON {
+            return Ok(task_losses.clone());
+        }
+
+        let mut balanced = HashMap::new();
+        for ((name, norm), rate) in names.iter().zip(norms.iter()).zip(relative_rates.iter()) {
+            let Some(loss) = task_losses.get(name) else {
+                continue;
+            };
+            let target = mean_norm * (rate / mean_rate).powf(alpha);
+            let scale = if *norm > f32::EPSILON { (target / norm).clamp(0.1, 10.0) } else { 1.0 };
+            balanced.insert(name.clone(), loss.mul_scalar(scale)?);
+        }
+
+        Ok(balanced)
     }
 
-    /// Update task weights based on performance
-    fn update_task_weights(&mut self, task_losses: &HashMap<String, Tensor>) -> Result<()> {
-        match &self.config.loss_balancing {
-            LossBalancingStrategy::DynamicWeightAverage => {
-                // Update weights based on loss trends
-                for (task_name, loss) in task_losses {
-                    let current_loss = loss.to_scalar().unwrap_or(0.0);
-                    // Update internal weight tracking
-                    // This would be more sophisticated in practice
-                    if let Some(weight) = self.task_weights.get_mut(task_name) {
-                        *weight = (*weight * 0.9 + current_loss * 0.1).clamp(0.1, 10.0);
-                    }
+    /// Measure the gradient norm of each task loss with respect to the shared
+    /// trunk parameters.
+    ///
+    /// Analytic gradients are used when the base model provides them through
+    /// [`NamedParameters::parameter_gradients`]; otherwise the norm is
+    /// estimated with central finite differences, which costs `2 · P` forward
+    /// passes per task for `P` shared scalar parameters.
+    pub fn update_gradient_stats(
+        &mut self,
+        task_data: &HashMap<String, TaskBatch>,
+        active_tasks: &[String],
+    ) -> Result<()> {
+        let epsilon = 1e-3f32;
+
+        for task_name in active_tasks {
+            let Some(batch) = task_data.get(task_name) else {
+                continue;
+            };
+
+            let mut squared_norm = 0.0f32;
+            let parameters = self.base_model.named_parameters();
+
+            if let Some(gradients) =
+                self.base_model.parameter_gradients(&batch.inputs, &batch.targets)?
+            {
+                for gradient in gradients.values() {
+                    squared_norm += gradient.to_vec_f32()?.iter().map(|g| g * g).sum::<f32>();
                 }
-            },
-            _ => {
-                // Other strategies don't update weights dynamically
-            },
+            } else {
+                for (name, tensor) in parameters {
+                    let shape = tensor.shape();
+                    let baseline = tensor.to_vec_f32()?;
+
+                    for index in 0..baseline.len() {
+                        let mut plus = baseline.clone();
+                        plus[index] += epsilon;
+                        self.base_model
+                            .set_named_parameter(&name, Tensor::from_vec(plus, &shape)?)?;
+                        let loss_plus = self.task_loss_value(task_name, batch)?;
+
+                        let mut minus = baseline.clone();
+                        minus[index] -= epsilon;
+                        self.base_model
+                            .set_named_parameter(&name, Tensor::from_vec(minus, &shape)?)?;
+                        let loss_minus = self.task_loss_value(task_name, batch)?;
+
+                        let gradient = (loss_plus - loss_minus) / (2.0 * epsilon);
+                        squared_norm += gradient * gradient;
+                    }
+
+                    self.base_model
+                        .set_named_parameter(&name, Tensor::from_vec(baseline, &shape)?)?;
+                }
+            }
+
+            let weight = self.task_weights.get(task_name).copied().unwrap_or(1.0);
+            let norm = weight * squared_norm.sqrt();
+            let entry = self.gradient_stats.entry(task_name.clone()).or_insert(GradientStats {
+                gradient_norm: norm,
+                gradient_variance: 0.0,
+                update_count: 0,
+            });
+            let previous = entry.gradient_norm;
+            entry.update_count += 1;
+            entry.gradient_norm = norm;
+            entry.gradient_variance = (norm - previous).powi(2);
         }
+
         Ok(())
     }
 
-    /// Get previous task loss for DWA
-    fn get_previous_task_loss(&self, _task_name: &str) -> f32 {
-        // This would get the loss from the previous step
-        // Simplified implementation
-        1.0
+    /// Recompute one task's loss through the current shared trunk and head.
+    fn task_loss_value(&self, task_name: &str, batch: &TaskBatch) -> Result<f32> {
+        let shared_features = self.base_model.forward(batch.inputs.clone())?;
+        let task_head = self
+            .task_heads
+            .get(task_name)
+            .ok_or_else(|| invalid_input(format!("Task head not found: {}", task_name)))?;
+        let outputs = task_head.forward(&shared_features)?;
+        let loss = self.compute_task_loss(task_name, &outputs, &batch.targets)?;
+        loss_scalar(&loss)
+    }
+
+    /// Record this step's losses and advance any learned balancing state.
+    pub fn record_task_losses(&mut self, task_losses: &HashMap<String, Tensor>) -> Result<()> {
+        // Every strategy needs the loss history; record it first.
+        for (task_name, loss) in task_losses {
+            let value = loss_scalar(loss)?;
+            self.initial_task_losses.entry(task_name.clone()).or_insert(value);
+
+            let history = self.task_loss_history.entry(task_name.clone()).or_default();
+            history.push_back(value);
+            while history.len() > LOSS_HISTORY_CAPACITY {
+                history.pop_front();
+            }
+        }
+
+        if let LossBalancingStrategy::UncertaintyWeighting = &self.config.loss_balancing {
+            // Gradient-descent step on Kendall's objective with respect to the
+            // log-variance: d/ds [ L e^{-s} / 2 + s / 2 ] = (1 - L e^{-s}) / 2.
+            let learning_rate = 0.01f32;
+            for (task_name, loss) in task_losses {
+                let value = loss_scalar(loss)?;
+                let entry = self.task_log_variances.entry(task_name.clone()).or_insert(0.0);
+                let gradient = 0.5 * (1.0 - value * (-*entry).exp());
+                *entry = (*entry - learning_rate * gradient).clamp(-5.0, 5.0);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The two most recent recorded losses for a task, `(t-1, t-2)`.
+    fn previous_two_task_losses(&self, task_name: &str) -> Option<(f32, f32)> {
+        let history = self.task_loss_history.get(task_name)?;
+        let length = history.len();
+        if length < 2 {
+            return None;
+        }
+        Some((history[length - 1], history[length - 2]))
     }
 
     /// Compute auxiliary task losses
@@ -672,34 +901,105 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
 
         match &aux_config.auxiliary_type {
             AuxiliaryType::LanguageModeling => {
-                // Compute language modeling loss
+                // Causal LM: predict position t+1 from the features at t.
                 self.compute_lm_loss(&shared_features, &data.targets)
             },
             AuxiliaryType::MaskedLanguageModeling => {
-                // Compute MLM loss
+                // MLM: score only the positions the mask marks as predicted.
                 self.compute_mlm_loss(&shared_features, &data.targets)
             },
-            _ => {
-                // Other auxiliary tasks
-                Ok(Tensor::zeros(&[1])?)
-            },
+            other => Err(invalid_input(format!(
+                "auxiliary task type {:?} has no implemented loss; remove it from \
+                 config.auxiliary_tasks or implement its objective",
+                other
+            ))),
         }
     }
 
-    /// Compute language modeling loss
-    fn compute_lm_loss(&self, _features: &Tensor, _targets: &Tensor) -> Result<Tensor> {
-        // Simplified LM loss computation
-        Tensor::zeros(&[1])
+    /// Causal language-modeling cross-entropy.
+    ///
+    /// `features` are `[batch, seq_len, vocab]` logits and `targets` the
+    /// matching one-hot distribution. Positions are shifted by one so that
+    /// step `t` predicts the token at `t + 1`; a sequence shorter than two
+    /// steps has nothing to predict and scores zero.
+    fn compute_lm_loss(&self, features: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        let shape = features.shape();
+        if shape.len() != 3 {
+            return Err(invalid_input(format!(
+                "language-modeling loss expects [batch, seq_len, vocab] logits, got {:?}",
+                shape
+            )));
+        }
+        let seq_len = shape[1];
+        if seq_len < 2 {
+            return Tensor::from_vec(vec![0.0], &[1]);
+        }
+
+        let predictions = features.slice(1, 0, seq_len - 1)?.contiguous()?;
+        let labels = targets.slice(1, 1, seq_len)?.contiguous()?;
+        if predictions.shape() != labels.shape() {
+            return Err(invalid_input(format!(
+                "language-modeling targets {:?} do not match logits {:?}",
+                labels.shape(),
+                predictions.shape()
+            )));
+        }
+
+        let log_probs = predictions.log_softmax(-1)?;
+        let nll = labels.mul(&log_probs)?.sum(Some(vec![2]), false)?;
+        nll.mean()?.mul_scalar(-1.0)?.reshape(&[1])
     }
 
-    /// Compute masked language modeling loss
-    fn compute_mlm_loss(&self, _features: &Tensor, _targets: &Tensor) -> Result<Tensor> {
-        // Simplified MLM loss computation
-        Tensor::zeros(&[1])
+    /// Masked language-modeling cross-entropy.
+    ///
+    /// Only positions whose one-hot target row is non-empty count towards the
+    /// loss, which is exactly the set of masked positions.
+    fn compute_mlm_loss(&self, features: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        if features.shape() != targets.shape() {
+            return Err(invalid_input(format!(
+                "masked language-modeling targets {:?} do not match logits {:?}",
+                targets.shape(),
+                features.shape()
+            )));
+        }
+
+        let shape = features.shape();
+        let vocab = *shape.last().ok_or_else(|| {
+            invalid_input("masked language-modeling logits need at least one dimension")
+        })?;
+        if vocab == 0 {
+            return Err(invalid_input(
+                "masked language-modeling logits have no vocabulary",
+            ));
+        }
+
+        let log_probs = features.log_softmax(-1)?.to_vec_f32()?;
+        let target_values = targets.to_vec_f32()?;
+        let positions = log_probs.len() / vocab;
+
+        let mut total = 0.0f32;
+        let mut counted = 0usize;
+        for position in 0..positions {
+            let range = position * vocab..(position + 1) * vocab;
+            let mass: f32 = target_values[range.clone()].iter().sum();
+            if mass <= f32::EPSILON {
+                continue; // unmasked position
+            }
+            let contribution: f32 = target_values[range.clone()]
+                .iter()
+                .zip(log_probs[range].iter())
+                .map(|(t, l)| t * l)
+                .sum();
+            total -= contribution / mass;
+            counted += 1;
+        }
+
+        let value = if counted == 0 { 0.0 } else { total / counted as f32 };
+        Tensor::from_vec(vec![value], &[1])
     }
 
     /// Compute task-specific loss
-    fn compute_task_loss(
+    pub fn compute_task_loss(
         &self,
         task_name: &str,
         outputs: &Tensor,
@@ -714,46 +1014,70 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
 
         match &task_config.task_type {
             TaskType::Classification { .. } => {
-                // Cross-entropy loss
-                let log_probs = outputs.softmax(-1)?;
+                // Cross-entropy: -sum(target * log softmax(logits)). The fused
+                // log-softmax is used both for numerical stability and because
+                // plain softmax here would compute -sum(t * p), which is
+                // bounded in [-1, 0] and has the wrong gradient.
+                let log_probs = outputs.log_softmax(-1)?;
                 let nll_loss = targets.mul(&log_probs)?.sum(Some(vec![1]), false)?;
-                Ok(nll_loss.mean()?.mul_scalar(-1.0)?)
+                nll_loss.mean()?.mul_scalar(-1.0)?.reshape(&[1])
             },
             TaskType::Regression { loss_type, .. } => {
+                let diff = outputs.sub(targets)?;
                 match loss_type {
-                    RegressionLossType::MSE => {
-                        let diff = outputs.sub(targets)?;
-                        Ok(diff.mul(&diff)?.mean()?)
-                    },
-                    RegressionLossType::MAE => {
-                        let diff = outputs.sub(targets)?;
-                        Ok(diff.abs()?.mean()?)
-                    },
+                    RegressionLossType::MSE => diff.mul(&diff)?.mean()?.reshape(&[1]),
+                    RegressionLossType::MAE => diff.abs()?.mean()?.reshape(&[1]),
                     RegressionLossType::Huber { delta } => {
-                        let diff = outputs.sub(targets)?;
+                        // where(|d| <= delta, 0.5 d^2, delta |d| - 0.5 delta^2)
                         let abs_diff = diff.abs()?;
-                        let small_loss = diff.mul(&diff)?.mul_scalar(0.5)?;
-                        let _large_loss =
-                            abs_diff.mul_scalar(*delta)?.sub_scalar(*delta * *delta * 0.5)?;
-                        // Simplified Huber loss approximation
-                        Ok(small_loss.mean()?)
+                        let delta_tensor = Tensor::full(*delta, abs_diff.shape())?;
+                        // 1 where |d| > delta, 0 otherwise.
+                        let large = abs_diff.greater(&delta_tensor)?;
+                        let small = Tensor::ones_like(&large)?.sub(&large)?;
+
+                        let quadratic = diff.mul(&diff)?.mul_scalar(0.5)?;
+                        let linear =
+                            abs_diff.mul_scalar(*delta)?.sub_scalar(0.5 * *delta * *delta)?;
+
+                        quadratic.mul(&small)?.add(&linear.mul(&large)?)?.mean()?.reshape(&[1])
                     },
-                    _ => {
-                        // Other regression losses
-                        let diff = outputs.sub(targets)?;
-                        Ok(diff.mul(&diff)?.mean()?)
+                    RegressionLossType::LogCosh => {
+                        // log(cosh(d)) computed as |d| + log1p(exp(-2|d|)) - ln 2
+                        // for numerical stability at large residuals.
+                        let values: Vec<f32> = diff
+                            .to_vec_f32()?
+                            .into_iter()
+                            .map(|d| {
+                                let a = d.abs();
+                                a + (-2.0 * a).exp().ln_1p() - std::f32::consts::LN_2
+                            })
+                            .collect();
+                        let count = values.len().max(1) as f32;
+                        Tensor::from_vec(vec![values.iter().sum::<f32>() / count], &[1])
                     },
                 }
             },
-            _ => {
-                // Other task types
-                Ok(Tensor::zeros(&[1])?)
+            // Token-level cross-entropy over the last dimension.
+            TaskType::SequenceLabeling { .. } | TaskType::Generation { .. } => {
+                let log_probs = outputs.log_softmax(-1)?;
+                let last_axis = outputs.shape().len().saturating_sub(1);
+                let nll = targets.mul(&log_probs)?.sum(Some(vec![last_axis]), false)?;
+                nll.mean()?.mul_scalar(-1.0)?.reshape(&[1])
             },
+            TaskType::Ranking { ranking_type } => Err(invalid_input(format!(
+                "ranking loss ({:?}) needs pairwise/listwise structure that TaskBatch does not \
+                 carry; supply a ranking-aware batch type before selecting this task type",
+                ranking_type
+            ))),
+            TaskType::Auxiliary { .. } => Err(invalid_input(
+                "auxiliary tasks are scored through compute_auxiliary_losses, not \
+                 compute_task_loss",
+            )),
         }
     }
 
     /// Compute task-specific accuracy
-    fn compute_task_accuracy(
+    pub fn compute_task_accuracy(
         &self,
         task_name: &str,
         outputs: &Tensor,
@@ -768,12 +1092,33 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
 
         match &task_config.task_type {
             TaskType::Classification { .. } => {
-                let predicted = outputs.argmax(-1)?;
-                let target_class = targets.argmax(-1)?;
-                let correct = (predicted.to_scalar().unwrap_or(-1.0)
-                    == target_class.to_scalar().unwrap_or(-2.0))
-                    as i32 as f32;
-                Ok(correct)
+                // Batch-wise accuracy: compare argmax per row, not only the
+                // first element of the batch.
+                let classes = *outputs.shape().last().ok_or_else(|| {
+                    invalid_input("classification outputs need at least one dimension")
+                })?;
+                if classes == 0 {
+                    return Err(invalid_input("classification outputs have zero classes"));
+                }
+                let output_values = outputs.to_vec_f32()?;
+                let target_values = targets.to_vec_f32()?;
+                if target_values.len() != output_values.len() {
+                    return Err(invalid_input(
+                        "classification accuracy needs one-hot targets matching the logits",
+                    ));
+                }
+
+                let rows = output_values.len() / classes;
+                let mut correct = 0usize;
+                for row in 0..rows {
+                    let range = row * classes..(row + 1) * classes;
+                    let predicted = argmax_index(&output_values[range.clone()]);
+                    let expected = argmax_index(&target_values[range]);
+                    if predicted == expected {
+                        correct += 1;
+                    }
+                }
+                Ok(correct as f32 / rows.max(1) as f32)
             },
             TaskType::Regression { .. } => {
                 // For regression, compute R² or similar metric
@@ -782,9 +1127,14 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
                 let mean_targets = targets.mean()?;
                 let diff_from_mean = targets.sub(&mean_targets)?;
                 let variance = diff_from_mean.pow_scalar(2.0)?.mean()?;
-                let r_squared =
-                    1.0 - mse.to_scalar().unwrap_or(1.0) / variance.to_scalar().unwrap_or(1.0);
-                Ok(r_squared.max(0.0))
+                let mse_value = loss_scalar(&mse.reshape(&[1])?)?;
+                let variance_value = loss_scalar(&variance.reshape(&[1])?)?;
+                if variance_value.abs() <= f32::EPSILON {
+                    // A constant target has no variance to explain; R^2 is
+                    // undefined, so report perfect fit only for an exact match.
+                    return Ok(if mse_value <= f32::EPSILON { 1.0 } else { 0.0 });
+                }
+                Ok((1.0 - mse_value / variance_value).max(0.0))
             },
             _ => Ok(0.0),
         }
@@ -809,7 +1159,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> MultiTaskLearningTrainer<M> {
                     task_name.clone(),
                     TaskEvaluation {
                         task_name: task_name.clone(),
-                        loss: loss.to_scalar().unwrap_or(0.0),
+                        loss: loss_scalar(&loss)?,
                         accuracy,
                         num_examples: batch.inputs.shape()[0],
                     },
@@ -1128,177 +1478,4 @@ pub struct MTLAnalysis {
     pub positive_transfer_tasks: Vec<String>,
     pub negative_transfer_tasks: Vec<String>,
     pub num_tasks: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mtl_config_default() {
-        let config = MTLConfig::default();
-        assert_eq!(config.tasks.len(), 0);
-        assert!(!config.use_task_embeddings);
-        assert!(!config.use_auxiliary_tasks);
-
-        if let MTLArchitecture::HardParameterSharing {
-            shared_layers,
-            task_specific_layers,
-        } = config.architecture
-        {
-            assert_eq!(shared_layers, 8);
-            assert_eq!(task_specific_layers, 2);
-        } else {
-            panic!("Expected HardParameterSharing architecture");
-        }
-    }
-
-    #[test]
-    fn test_task_config() {
-        let task = TaskConfig::new(
-            "test",
-            TaskType::Classification {
-                num_classes: 10,
-                use_class_weights: false,
-            },
-        );
-
-        assert_eq!(task.name, "test");
-        assert_eq!(task.weight, 1.0);
-        assert!(!task.is_main_task);
-
-        let weighted_task = task.with_weight(2.0);
-        assert_eq!(weighted_task.weight, 2.0);
-    }
-
-    #[test]
-    fn test_classification_task_util() {
-        let task = utils::classification_task("sentiment", 3);
-        assert_eq!(task.name, "sentiment");
-
-        if let TaskType::Classification { num_classes, .. } = task.task_type {
-            assert_eq!(num_classes, 3);
-        } else {
-            panic!("Expected Classification task type");
-        }
-    }
-
-    #[test]
-    fn test_regression_task_util() {
-        let task = utils::regression_task("score", 1);
-        assert_eq!(task.name, "score");
-
-        if let TaskType::Regression { output_dim, .. } = task.task_type {
-            assert_eq!(output_dim, 1);
-        } else {
-            panic!("Expected Regression task type");
-        }
-    }
-
-    #[test]
-    fn test_hard_parameter_sharing_config() {
-        let tasks = vec![
-            utils::classification_task("task1", 5),
-            utils::regression_task("task2", 1),
-        ];
-
-        let config = utils::hard_parameter_sharing_config(tasks, 6, 2);
-        assert_eq!(config.tasks.len(), 2);
-
-        if let MTLArchitecture::HardParameterSharing {
-            shared_layers,
-            task_specific_layers,
-        } = config.architecture
-        {
-            assert_eq!(shared_layers, 6);
-            assert_eq!(task_specific_layers, 2);
-        } else {
-            panic!("Expected HardParameterSharing architecture");
-        }
-    }
-
-    #[test]
-    fn test_soft_parameter_sharing_config() {
-        let tasks = vec![utils::classification_task("task1", 5)];
-        let config = utils::soft_parameter_sharing_config(tasks, 0.01);
-
-        if let MTLArchitecture::SoftParameterSharing {
-            regularization_weight,
-            ..
-        } = config.architecture
-        {
-            assert_eq!(regularization_weight, 0.01);
-        } else {
-            panic!("Expected SoftParameterSharing architecture");
-        }
-    }
-
-    #[test]
-    fn test_mmoe_config() {
-        let tasks = vec![
-            utils::classification_task("task1", 5),
-            utils::classification_task("task2", 3),
-        ];
-
-        let config = utils::mmoe_config(tasks, 4, 128);
-
-        if let MTLArchitecture::MultiGateMixtureOfExperts {
-            num_experts,
-            expert_dim,
-            num_gates,
-        } = config.architecture
-        {
-            assert_eq!(num_experts, 4);
-            assert_eq!(expert_dim, 128);
-            assert_eq!(num_gates, 2);
-        } else {
-            panic!("Expected MultiGateMixtureOfExperts architecture");
-        }
-    }
-
-    #[test]
-    fn test_mlm_auxiliary_task() {
-        let aux_task = utils::mlm_auxiliary_task(0.1);
-        assert_eq!(aux_task.name, "mlm");
-        assert_eq!(aux_task.weight, 0.1);
-
-        if let AuxiliaryType::MaskedLanguageModeling = aux_task.auxiliary_type {
-            // Expected
-        } else {
-            panic!("Expected MaskedLanguageModeling auxiliary type");
-        }
-    }
-
-    #[test]
-    fn test_compute_correlation() {
-        let seq1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let seq2 = vec![2.0, 4.0, 6.0, 8.0, 10.0]; // Perfect positive correlation
-
-        let correlation = utils::compute_correlation(&seq1, &seq2);
-        assert!((correlation - 1.0).abs() < 1e-6);
-
-        let seq3 = vec![5.0, 4.0, 3.0, 2.0, 1.0]; // Perfect negative correlation
-        let correlation_neg = utils::compute_correlation(&seq1, &seq3);
-        assert!((correlation_neg + 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_mtl_analysis() {
-        let mut single_task = HashMap::new();
-        single_task.insert("task1".to_string(), 0.8);
-        single_task.insert("task2".to_string(), 0.7);
-        single_task.insert("task3".to_string(), 0.6);
-
-        let mut multi_task = HashMap::new();
-        multi_task.insert("task1".to_string(), 0.85); // Positive transfer
-        multi_task.insert("task2".to_string(), 0.65); // Negative transfer
-        multi_task.insert("task3".to_string(), 0.65); // Positive transfer
-
-        let analysis = utils::analyze_mtl_effectiveness(&single_task, &multi_task);
-        assert_eq!(analysis.num_tasks, 3);
-        assert_eq!(analysis.positive_transfer_tasks.len(), 2);
-        assert_eq!(analysis.negative_transfer_tasks.len(), 1);
-        assert!(analysis.positive_transfer_tasks.contains(&"task1".to_string()));
-        assert!(analysis.negative_transfer_tasks.contains(&"task2".to_string()));
-    }
 }

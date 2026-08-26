@@ -16,10 +16,17 @@
 //! ## Research Reference
 //!
 //! "Stochastic Gradient Methods with Layer-wise Adaptive Moments for Training
-//! of Deep Networks" - Ginsburg et al., 2019, enhanced for 2025 applications
+//! of Deep Networks" - Ginsburg et al., 2019.
+//!
+//! ## Deviation from the paper
+//!
+//! [`NovoGradConfig::default`] and the task presets enable three extensions the paper
+//! does not describe: bias correction, adaptive weight decay and a Nesterov-style
+//! look-ahead blend (`memory_factor`). Use [`NovoGradConfig::paper_default`] for the
+//! unmodified rule of Ginsburg et al.
 
 use crate::{
-    common::{BiasCorrection, OptimizerState, ParameterUpdate, StateMemoryStats},
+    common::{BiasCorrection, OptimizerState, StateMemoryStats},
     traits::StatefulOptimizer,
 };
 use serde::{Deserialize, Serialize};
@@ -45,7 +52,13 @@ pub struct NovoGradConfig {
     pub bias_correction: bool,
     /// Adaptive weight decay based on layer size
     pub adaptive_weight_decay: bool,
-    /// Memory optimization factor (higher = more memory efficient)
+    /// Nesterov-style look-ahead coefficient blended into the update direction.
+    ///
+    /// The update applied is
+    /// `m̂ + memory_factor · (g / (√v̂ + ε) + λ·w)`, so `memory_factor = 0`
+    /// reproduces Ginsburg et al. exactly and larger values add a fraction of the
+    /// current normalised gradient on top of the momentum. Use
+    /// [`NovoGradConfig::paper_default`] for the unmodified paper rule.
     pub memory_factor: f32,
     /// Enable layer-wise adaptive learning rates
     pub layer_wise_adaptation: bool,
@@ -69,6 +82,29 @@ impl Default for NovoGradConfig {
 }
 
 impl NovoGradConfig {
+    /// Exactly the update rule of Ginsburg et al. (2019), with no look-ahead blend,
+    /// no adaptive learning-rate rescaling and no adaptive weight decay.
+    ///
+    /// ```text
+    /// v_l = β2·v_l + (1 − β2)·‖g_l‖²
+    /// m_l = β1·m_l + (g_l / (√v_l + ε) + λ·w_l)
+    /// w_l = w_l − η·m_l
+    /// ```
+    pub fn paper_default() -> Self {
+        Self {
+            learning_rate: 1e-2,
+            beta1: 0.95,
+            beta2: 0.98,
+            epsilon: 1e-8,
+            weight_decay: 0.0,
+            grad_clipping: None,
+            bias_correction: false,
+            adaptive_weight_decay: false,
+            memory_factor: 0.0,
+            layer_wise_adaptation: false,
+        }
+    }
+
     /// Configuration optimized for very large language models (>1B parameters)
     pub fn for_large_language_models() -> Self {
         Self {
@@ -80,7 +116,7 @@ impl NovoGradConfig {
             grad_clipping: Some(1.0),
             bias_correction: true,
             adaptive_weight_decay: true,
-            memory_factor: 0.9, // Maximum memory efficiency
+            memory_factor: 0.9, // Strong look-ahead blend
             layer_wise_adaptation: true,
         }
     }
@@ -112,7 +148,7 @@ impl NovoGradConfig {
             grad_clipping: Some(1.0),
             bias_correction: false, // Disable for memory savings
             adaptive_weight_decay: false,
-            memory_factor: 1.0, // Maximum memory efficiency
+            memory_factor: 1.0, // Full look-ahead blend
             layer_wise_adaptation: false,
         }
     }
@@ -280,10 +316,146 @@ pub struct MemoryEfficiencyStats {
     pub average_layer_size: usize,
 }
 
+impl NovoGrad {
+    /// Applies one NovoGrad step to a single layer, in place.
+    ///
+    /// `key` is the stable state key from [`crate::param_id::ParamRegistry`]; the
+    /// layer-wise second moment, first moment and step counter are all stored under it.
+    ///
+    /// ```text
+    /// g       = clip(∇L)                              (optional)
+    /// v_l     = β2·v_l + (1 − β2)·‖g‖²                (one scalar per layer)
+    /// m       = β1·m + (g / (√v̂ + ε) + λ·w)
+    /// w      -= η_l · (m̂ + memory_factor · (g / (√v̂ + ε) + λ·w))
+    /// ```
+    fn apply_layer_update(&mut self, key: &str, param: &mut [f32], grad: &[f32]) -> Result<()> {
+        if param.len() != grad.len() {
+            return Err(trustformers_core::errors::TrustformersError::invalid_input(
+                format!(
+                    "NovoGrad: parameter has {} elements but the gradient has {}",
+                    param.len(),
+                    grad.len()
+                ),
+            ));
+        }
+        if param.is_empty() {
+            return Ok(());
+        }
+
+        // Per-layer step counter drives bias correction independently of how many
+        // other layers have been visited.
+        let local_step = self.state.param_steps.entry(key.to_string()).or_insert(0);
+        *local_step += 1;
+        let local_step = *local_step;
+
+        // 1. Optional gradient clipping (layer-wise, by norm).
+        let mut clipped: Vec<f32> = grad.to_vec();
+        if let Some(clip_value) = self.config.grad_clipping {
+            let norm = self.compute_layer_grad_norm(&clipped);
+            if norm > clip_value && norm > 0.0 {
+                let scale = clip_value / norm;
+                for g in clipped.iter_mut() {
+                    *g *= scale;
+                }
+            }
+        }
+
+        // 2. Layer-wise gradient norm — NovoGrad's key quantity.
+        let grad_norm = self.compute_layer_grad_norm(&clipped);
+        self.layer_grad_norms.insert(key.to_string(), grad_norm);
+
+        // 3. Layer-wise second moment. The paper initialises v with ‖g‖² on the very
+        //    first step rather than starting from zero.
+        let layer_v = match self.layer_second_moments.get(key).copied() {
+            Some(previous) => {
+                self.config.beta2 * previous + (1.0 - self.config.beta2) * grad_norm * grad_norm
+            },
+            None => grad_norm * grad_norm,
+        };
+        self.layer_second_moments.insert(key.to_string(), layer_v);
+
+        let (bias_correction1, bias_correction2) = if self.config.bias_correction {
+            BiasCorrection::compute_adam_corrections(
+                self.config.beta1,
+                self.config.beta2,
+                local_step,
+            )
+        } else {
+            (1.0, 1.0)
+        };
+
+        let v_hat = layer_v / bias_correction2;
+        let denominator = v_hat.sqrt() + self.config.epsilon;
+
+        let adaptive_wd = self.compute_adaptive_weight_decay(param.len());
+        let adaptive_lr = self.compute_adaptive_lr(key, grad_norm);
+
+        let momentum = self.state.get_or_create_momentum(key.to_string(), param.len());
+
+        for index in 0..param.len() {
+            // Normalised gradient plus decoupled weight decay on the real parameter.
+            let normalized = clipped[index] / denominator + adaptive_wd * param[index];
+
+            // NovoGrad's first moment accumulates the *normalised* gradient.
+            momentum[index] = self.config.beta1 * momentum[index] + normalized;
+            let m_hat = momentum[index] / bias_correction1;
+
+            let direction = m_hat + self.config.memory_factor * normalized;
+            param[index] -= adaptive_lr * direction;
+        }
+
+        self.total_parameters =
+            self.state.momentum.values().map(|buffer| buffer.len()).sum::<usize>();
+
+        Ok(())
+    }
+
+    /// Updates one parameter that carries a stable caller-supplied name.
+    ///
+    /// Prefer this over [`Optimizer::update`]: NovoGrad's state is layer-wise, and a
+    /// name is the most durable way to identify a layer across processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is not `f32`-readable or the shapes disagree.
+    pub fn update_named(
+        &mut self,
+        name: &str,
+        parameter: &mut Tensor,
+        gradient: &Tensor,
+    ) -> Result<()> {
+        let id = self.state.params.id_for_named_tensor(name, parameter)?;
+        let key = self
+            .state
+            .params
+            .key(id)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("n:{name}"));
+
+        let mut values = parameter.data_f32()?;
+        let grad = gradient.data_f32()?;
+        self.apply_layer_update(&key, &mut values, &grad)?;
+        parameter.set_data_f32(&values)?;
+        self.state.params.rebind(id, parameter)?;
+        Ok(())
+    }
+}
+
 impl Optimizer for NovoGrad {
-    fn update(&mut self, _parameter: &mut Tensor, _gradient: &Tensor) -> Result<()> {
-        // Implementation for single parameter update
-        // This is called by the training framework for each parameter
+    fn update(&mut self, parameter: &mut Tensor, gradient: &Tensor) -> Result<()> {
+        let id = self.state.params.id_for_tensor(parameter)?;
+        let key = self
+            .state
+            .params
+            .key(id)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("p:{}", id.index()));
+
+        let mut values = parameter.data_f32()?;
+        let grad = gradient.data_f32()?;
+        self.apply_layer_update(&key, &mut values, &grad)?;
+        parameter.set_data_f32(&values)?;
+        self.state.params.rebind(id, parameter)?;
         Ok(())
     }
 
@@ -308,100 +480,57 @@ impl Optimizer for NovoGrad {
 
 // Additional method for batch parameter updates (non-trait)
 impl NovoGrad {
-    /// Process multiple parameters at once with NovoGrad's layer-wise approach
-    pub fn step_batch(&mut self, gradients: &HashMap<String, Tensor>) -> Result<()> {
+    /// Updates a whole named parameter set at once with NovoGrad's layer-wise rule.
+    ///
+    /// Parameters are keyed by name, which is the durable identity used for the
+    /// layer-wise state (see [`crate::param_id`]). Every entry present in both maps
+    /// is updated in place; gradients without a matching parameter are an error,
+    /// because silently skipping them is how the previous no-op version hid itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a gradient has no matching parameter, when shapes
+    /// disagree, or when a tensor is not `f32`-readable.
+    pub fn step_batch(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+    ) -> Result<()> {
         self.current_step += 1;
 
-        for (param_name, gradient) in gradients.iter() {
-            let grad_data = gradient.data()?;
-            if grad_data.is_empty() {
+        // Deterministic visit order keeps anonymous registration indices reproducible.
+        let mut names: Vec<&String> = gradients.keys().collect();
+        names.sort();
+
+        for name in names {
+            let gradient = gradients.get(name).ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::invalid_input(format!(
+                    "NovoGrad: gradient '{name}' disappeared during iteration"
+                ))
+            })?;
+            let parameter = parameters.get_mut(name).ok_or_else(|| {
+                trustformers_core::errors::TrustformersError::invalid_input(format!(
+                    "NovoGrad: no parameter named '{name}' to apply its gradient to"
+                ))
+            })?;
+
+            if gradient.is_empty() {
                 continue;
             }
 
-            let param_size = grad_data.len();
-            self.total_parameters = self
-                .total_parameters
-                .max(self.state.momentum.values().map(|v| v.len()).sum::<usize>() + param_size);
+            let id = self.state.params.id_for_named_tensor(name, parameter)?;
+            let key = self
+                .state
+                .params
+                .key(id)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("n:{name}"));
 
-            // Apply gradient clipping if enabled
-            let mut clipped_grad = grad_data.clone();
-            if let Some(clip_value) = self.config.grad_clipping {
-                let grad_norm = self.compute_layer_grad_norm(&clipped_grad);
-                if grad_norm > clip_value {
-                    let scale = clip_value / grad_norm;
-                    for g in clipped_grad.iter_mut() {
-                        *g *= scale;
-                    }
-                }
-            }
-
-            // Compute layer-wise gradient norm (NovoGrad's key innovation)
-            let grad_norm = self.compute_layer_grad_norm(&clipped_grad);
-            self.layer_grad_norms.insert(param_name.clone(), grad_norm);
-
-            // Update layer-wise second moment estimate
-            let prev_layer_v = self.layer_second_moments.get(param_name).copied().unwrap_or(0.0);
-            let layer_v = self.config.beta2 * prev_layer_v
-                + (1.0 - self.config.beta2) * grad_norm * grad_norm;
-
-            // Get momentum separately to avoid borrowing conflicts
-            let momentum = {
-                let momentum = self.state.get_or_create_momentum(param_name.clone(), param_size);
-                momentum.clone()
-            };
-
-            // Compute bias corrections if enabled
-            let (bias_correction1, bias_correction2) = if self.config.bias_correction {
-                BiasCorrection::compute_adam_corrections(
-                    self.config.beta1,
-                    self.config.beta2,
-                    self.current_step,
-                )
-            } else {
-                (1.0, 1.0)
-            };
-
-            // Update first moment estimate (per-parameter)
-            let mut updated_momentum = momentum;
-            for i in 0..param_size {
-                ParameterUpdate::update_ema(
-                    &mut updated_momentum[i],
-                    clipped_grad[i],
-                    self.config.beta1,
-                );
-            }
-
-            // Compute adaptive learning rate for this layer
-            let adaptive_lr = self.compute_adaptive_lr(param_name, grad_norm);
-
-            // Compute adaptive weight decay
-            let adaptive_wd = self.compute_adaptive_weight_decay(param_size);
-
-            // Bias-corrected second moment (layer-wise)
-            let v_hat = layer_v / bias_correction2;
-            let layer_lr_scale = adaptive_lr / (v_hat.sqrt() + self.config.epsilon);
-
-            // NovoGrad update rule: use layer-wise second moment for all parameters in the layer
-            for i in 0..param_size {
-                let m_hat = updated_momentum[i] / bias_correction1;
-
-                // Apply weight decay if specified
-                let grad_with_wd = if adaptive_wd > 0.0 {
-                    // Note: In real implementation, this would use actual parameter values
-                    clipped_grad[i] + adaptive_wd * 0.0 // placeholder for parameter value
-                } else {
-                    clipped_grad[i]
-                };
-
-                // NovoGrad parameter update with layer-wise normalization
-                let _update = layer_lr_scale * (m_hat + self.config.memory_factor * grad_with_wd);
-                // Note: In real implementation, this would update the actual parameters
-                // parameter[i] -= update;
-            }
-
-            // Store updated states back
-            self.state.momentum.insert(param_name.clone(), updated_momentum);
-            self.layer_second_moments.insert(param_name.clone(), layer_v);
+            let mut values = parameter.data_f32()?;
+            let grad = gradient.data_f32()?;
+            self.apply_layer_update(&key, &mut values, &grad)?;
+            parameter.set_data_f32(&values)?;
+            self.state.params.rebind(id, parameter)?;
         }
 
         Ok(())
@@ -694,6 +823,151 @@ mod tests {
 
         let state = state_dict.expect("Operation failed in test");
         assert!(state.contains_key("step"));
+    }
+
+    fn paper_optimizer(lr: f32) -> NovoGrad {
+        NovoGrad::new(NovoGradConfig {
+            learning_rate: lr,
+            ..NovoGradConfig::paper_default()
+        })
+    }
+
+    fn tensor(values: &[f32]) -> Tensor {
+        Tensor::from_vec(values.to_vec(), &[values.len()]).expect("tensor")
+    }
+
+    /// Regression: `Optimizer::update` used to be an empty `Ok(())` stub, so no code
+    /// path in this module ever wrote to a parameter.
+    #[test]
+    fn update_moves_the_parameter() {
+        let mut optimizer = paper_optimizer(0.1);
+        let mut param = tensor(&[3.0, 4.0]);
+        let grad = tensor(&[3.0, 4.0]);
+
+        let before = param.data_f32().expect("data");
+        optimizer.update(&mut param, &grad).expect("update");
+        let after = param.data_f32().expect("data");
+        assert!(
+            after[0] < before[0],
+            "parameter must descend: {before:?} -> {after:?}"
+        );
+        assert!(
+            after[1] < before[1],
+            "parameter must descend: {before:?} -> {after:?}"
+        );
+    }
+
+    /// Exact hand-computed NovoGrad steps for `lr = 0.1`, `β1 = 0.95`, `β2 = 0.98`.
+    ///
+    /// Step 1: `‖g‖ = 5`, `v = 25` (paper initialisation), `ĝ = g/5 = [0.6, 0.8]`,
+    /// `m = ĝ`, so `w = [3, 4] − 0.1·[0.6, 0.8] = [2.94, 3.92]`.
+    ///
+    /// Step 2: `v = 0.98·25 + 0.02·25 = 25`, `m = 0.95·[0.6, 0.8] + [0.6, 0.8]
+    /// = [1.17, 1.56]`, so `w = [2.94, 3.92] − 0.1·[1.17, 1.56] = [2.823, 3.764]`.
+    #[test]
+    fn two_steps_match_hand_computation() {
+        let mut optimizer = paper_optimizer(0.1);
+        let mut param = tensor(&[3.0, 4.0]);
+        let grad = tensor(&[3.0, 4.0]);
+
+        optimizer.update_named("layer", &mut param, &grad).expect("step 1");
+        let after_one = param.data_f32().expect("data");
+        assert!((after_one[0] - 2.94).abs() < 1e-5, "got {}", after_one[0]);
+        assert!((after_one[1] - 3.92).abs() < 1e-5, "got {}", after_one[1]);
+
+        optimizer.update_named("layer", &mut param, &grad).expect("step 2");
+        let after_two = param.data_f32().expect("data");
+        assert!((after_two[0] - 2.823).abs() < 1e-4, "got {}", after_two[0]);
+        assert!((after_two[1] - 3.764).abs() < 1e-4, "got {}", after_two[1]);
+    }
+
+    /// The layer-wise second moment is one scalar per layer, not one per element.
+    #[test]
+    fn second_moment_is_layer_wise() {
+        let mut optimizer = paper_optimizer(0.1);
+        let mut param = tensor(&[1.0; 16]);
+        let grad = tensor(&[0.25; 16]);
+
+        optimizer.update_named("block", &mut param, &grad).expect("update");
+        assert_eq!(optimizer.layer_second_moments.len(), 1);
+        let v = optimizer.layer_second_moments.get("n:block").copied().expect("v");
+        // ‖g‖² = 16 · 0.0625 = 1.0
+        assert!((v - 1.0).abs() < 1e-5, "got {v}");
+    }
+
+    /// Regression: `step_batch` used to take gradients only and could not write.
+    #[test]
+    fn step_batch_updates_every_parameter() {
+        let mut optimizer = paper_optimizer(0.1);
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), tensor(&[1.0, 1.0]));
+        params.insert("b".to_string(), tensor(&[2.0, 2.0]));
+        let before_a = params["a"].data_f32().expect("data");
+        let before_b = params["b"].data_f32().expect("data");
+
+        let mut grads = HashMap::new();
+        grads.insert("a".to_string(), tensor(&[1.0, 1.0]));
+        grads.insert("b".to_string(), tensor(&[1.0, 1.0]));
+
+        optimizer.step_batch(&mut params, &grads).expect("step_batch");
+
+        let after_a = params["a"].data_f32().expect("data");
+        let after_b = params["b"].data_f32().expect("data");
+        assert!(after_a[0] < before_a[0], "'a' must move");
+        assert!(after_b[0] < before_b[0], "'b' must move");
+        assert_eq!(optimizer.layer_second_moments.len(), 2);
+    }
+
+    /// A gradient with no matching parameter is an error, never a silent skip.
+    #[test]
+    fn step_batch_rejects_orphan_gradients() {
+        let mut optimizer = paper_optimizer(0.1);
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), tensor(&[1.0]));
+        let mut grads = HashMap::new();
+        grads.insert("missing".to_string(), tensor(&[1.0]));
+
+        assert!(optimizer.step_batch(&mut params, &grads).is_err());
+    }
+
+    /// Weight decay must use the real parameter value, not the old `* 0.0` placeholder.
+    #[test]
+    fn weight_decay_uses_real_parameter_values() {
+        let mut optimizer = NovoGrad::new(NovoGradConfig {
+            learning_rate: 0.1,
+            weight_decay: 0.5,
+            ..NovoGradConfig::paper_default()
+        });
+        let mut param = tensor(&[10.0]);
+        // A zero gradient means the *only* source of movement is the decay term.
+        let grad = tensor(&[0.0]);
+
+        optimizer.update_named("w", &mut param, &grad).expect("update");
+        let after = param.data_f32().expect("data")[0];
+        assert!(
+            after < 10.0,
+            "weight decay must shrink the parameter, got {after}"
+        );
+    }
+
+    /// Convergence smoke test on the quadratic bowl `f(x) = Σ x²` (`∇f = 2x`).
+    #[test]
+    fn descends_a_quadratic_bowl() {
+        let mut optimizer = paper_optimizer(0.05);
+        let mut param = tensor(&[3.0, -4.0]);
+        let initial: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+
+        for _ in 0..400 {
+            let values = param.data_f32().expect("data");
+            let grad = tensor(&values.iter().map(|v| 2.0 * v).collect::<Vec<_>>());
+            optimizer.update_named("w", &mut param, &grad).expect("step");
+        }
+
+        let final_loss: f32 = param.data_f32().expect("data").iter().map(|v| v * v).sum();
+        assert!(
+            final_loss < initial * 0.05,
+            "loss must fall: {initial} -> {final_loss}"
+        );
     }
 
     #[test]

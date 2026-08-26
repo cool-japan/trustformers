@@ -123,6 +123,27 @@ pub struct TokenRouting {
     pub capacity_usage: HashMap<usize, usize>, // expert_id -> current_tokens
 }
 
+/// Cosine similarity between two equally sized vectors.
+///
+/// Returns `0.0` when either vector has zero norm, which keeps a degenerate
+/// prototype from dominating the ranking.
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut left_norm = 0.0f32;
+    let mut right_norm = 0.0f32;
+    for (a, b) in left.iter().zip(right) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    let denominator = left_norm.sqrt() * right_norm.sqrt();
+    if denominator > 0.0 {
+        (dot / denominator).clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Expert parallelism coordinator
 pub struct ExpertParallelism {
     config: ExpertParallelismConfig,
@@ -267,71 +288,218 @@ impl ExpertParallelism {
         Ok(routing)
     }
 
-    /// Learned gating-based token routing
+    /// Read the `[num_tokens, num_experts]` gating logits out of `gating_scores`.
+    ///
+    /// The tensor must have `num_experts` as its last dimension; the leading
+    /// dimensions are flattened into the token axis. The token count implied by
+    /// the gating tensor must match `tokens`.
+    fn gating_logits(&self, tokens: &Tensor, gating_scores: &Tensor) -> Result<Vec<Vec<f32>>> {
+        let num_experts = self.config.num_experts;
+        let gating_shape = gating_scores.shape();
+
+        let last_dim = *gating_shape.last().ok_or_else(|| {
+            anyhow!("gating_scores must have at least one dimension, got a scalar")
+        })?;
+        if last_dim != num_experts {
+            return Err(anyhow!(
+                "gating_scores last dimension is {} but the layer has {} experts",
+                last_dim,
+                num_experts
+            ));
+        }
+
+        let values = gating_scores.to_vec_f32()?;
+        if !values.len().is_multiple_of(num_experts) {
+            return Err(anyhow!(
+                "gating_scores holds {} values, which is not a multiple of {} experts",
+                values.len(),
+                num_experts
+            ));
+        }
+        let num_gating_rows = values.len() / num_experts;
+
+        let token_shape = tokens.shape();
+        let num_tokens = *token_shape
+            .first()
+            .ok_or_else(|| anyhow!("tokens must have at least one dimension, got a scalar"))?;
+        if num_gating_rows != num_tokens {
+            return Err(anyhow!(
+                "gating_scores describes {} tokens but the token tensor has {}",
+                num_gating_rows,
+                num_tokens
+            ));
+        }
+
+        Ok(values.chunks_exact(num_experts).map(<[f32]>::to_vec).collect())
+    }
+
+    /// Numerically stable softmax over one token's expert logits.
+    fn softmax(logits: &[f32]) -> Vec<f32> {
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if !max_logit.is_finite() {
+            // All-infinite/NaN row: fall back to a uniform distribution rather
+            // than propagating NaN into the router.
+            let uniform = 1.0 / logits.len().max(1) as f32;
+            return vec![uniform; logits.len()];
+        }
+        let mut exponentials: Vec<f32> =
+            logits.iter().map(|logit| (logit - max_logit).exp()).collect();
+        let total: f32 = exponentials.iter().sum();
+        if total > 0.0 {
+            for value in exponentials.iter_mut() {
+                *value /= total;
+            }
+        } else {
+            let uniform = 1.0 / logits.len().max(1) as f32;
+            exponentials.iter_mut().for_each(|value| *value = uniform);
+        }
+        exponentials
+    }
+
+    /// Select the `top_k` highest-probability experts for one token and
+    /// renormalize their probabilities so they sum to one.
+    ///
+    /// Ties are broken by ascending expert id, making the routing
+    /// deterministic.
+    fn top_k_from_probabilities(&self, probabilities: &[f32]) -> Vec<(usize, f32)> {
+        let top_k = self.config.top_k.clamp(1, probabilities.len().max(1));
+
+        let mut ranked: Vec<(usize, f32)> = probabilities.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+        });
+        ranked.truncate(top_k);
+
+        let total: f32 = ranked.iter().map(|(_, weight)| *weight).sum();
+        if total > 0.0 {
+            ranked.iter().map(|(expert, weight)| (*expert, weight / total)).collect()
+        } else {
+            // Degenerate gating row: split the token evenly across the selected
+            // experts instead of dropping it.
+            let uniform = 1.0 / ranked.len().max(1) as f32;
+            ranked.iter().map(|(expert, _)| (*expert, uniform)).collect()
+        }
+    }
+
+    /// Learned-gating token routing: softmax over the per-token expert logits,
+    /// then top-k selection with renormalized weights.
+    ///
+    /// This is the standard Switch/GShard router. The gating tensor is read for
+    /// real; two tokens with different gating rows receive different expert
+    /// assignments.
     fn learned_gating_routing(
         &self,
         tokens: &Tensor,
-        _gating_scores: &Tensor,
+        gating_scores: &Tensor,
     ) -> Result<TokenRouting> {
-        let batch_size = tokens.shape()[0];
-        let num_tokens = batch_size;
+        let logits = self.gating_logits(tokens, gating_scores)?;
+        let num_tokens = logits.len();
 
         let mut token_routing = TokenRouting {
             token_indices: (0..num_tokens).collect(),
-            expert_assignments: Vec::new(),
+            expert_assignments: Vec::with_capacity(num_tokens),
             destinations: HashMap::new(),
             capacity_usage: HashMap::new(),
         };
 
-        // Get top-k experts for each token
-        for token_idx in 0..num_tokens {
-            let mut expert_scores = Vec::new();
+        let capacity = self.expert_capacity(num_tokens);
 
-            // Extract scores for this token (simplified - in practice would use tensor operations)
-            for expert_id in 0..self.config.num_experts {
-                let score = 1.0 / (expert_id + 1) as f32; // Placeholder score calculation
-                expert_scores.push((expert_id, score));
+        for (token_idx, row) in logits.iter().enumerate() {
+            let probabilities = Self::softmax(row);
+            let selected = self.top_k_from_probabilities(&probabilities);
+
+            let mut accepted: Vec<(usize, f32)> = Vec::with_capacity(selected.len());
+            for (expert_id, weight) in selected {
+                let used = token_routing.capacity_usage.entry(expert_id).or_insert(0);
+                if self.config.drop_tokens && *used >= capacity {
+                    // Expert is at capacity and dropping is enabled: this token
+                    // is not routed to it.
+                    continue;
+                }
+                *used += 1;
+                accepted.push((expert_id, weight));
             }
 
-            // Sort by score and take top-k
-            expert_scores
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            expert_scores.truncate(self.config.top_k);
+            // Renormalize after any capacity-driven drops so the surviving
+            // weights still form a convex combination.
+            let total: f32 = accepted.iter().map(|(_, weight)| *weight).sum();
+            if total > 0.0 {
+                for (_, weight) in accepted.iter_mut() {
+                    *weight /= total;
+                }
+            }
 
-            // Normalize weights
-            let total_weight: f32 = expert_scores.iter().map(|(_, w)| w).sum();
-            let normalized_assignments: Vec<(usize, f32)> = expert_scores
-                .iter()
-                .map(|(expert_id, weight)| (*expert_id, weight / total_weight))
-                .collect();
-
-            token_routing.expert_assignments.push(normalized_assignments.clone());
-
-            // Update destinations mapping
-            for (expert_id, _) in normalized_assignments {
-                let device_rank = self.expert_assignments[expert_id].device_rank;
+            for (expert_id, _) in &accepted {
+                let device_rank = self.expert_assignments[*expert_id].device_rank;
                 token_routing.destinations.entry(device_rank).or_default().push(token_idx);
             }
+            token_routing.expert_assignments.push(accepted);
         }
 
         Ok(token_routing)
     }
 
-    /// Hash-based token routing for deterministic assignment
+    /// Per-expert token capacity implied by `capacity_factor`.
+    fn expert_capacity(&self, num_tokens: usize) -> usize {
+        let ideal =
+            (num_tokens as f32 * self.config.top_k as f32) / self.config.num_experts.max(1) as f32;
+        ((ideal * self.config.capacity_factor).ceil() as usize).max(1)
+    }
+
+    /// Flatten `tokens` into one feature vector per token.
+    ///
+    /// The leading dimension is the token axis; every trailing dimension is
+    /// flattened into the feature axis.
+    fn token_embeddings(&self, tokens: &Tensor) -> Result<Vec<Vec<f32>>> {
+        let shape = tokens.shape();
+        let num_tokens = *shape
+            .first()
+            .ok_or_else(|| anyhow!("tokens must have at least one dimension, got a scalar"))?;
+        if num_tokens == 0 {
+            return Ok(Vec::new());
+        }
+
+        let values = tokens.to_vec_f32()?;
+        if !values.len().is_multiple_of(num_tokens) {
+            return Err(anyhow!(
+                "token tensor holds {} values which is not a multiple of {} tokens",
+                values.len(),
+                num_tokens
+            ));
+        }
+        let features = values.len() / num_tokens;
+        Ok(values.chunks_exact(features).map(<[f32]>::to_vec).collect())
+    }
+
+    /// Hash-based token routing.
+    ///
+    /// The expert is derived from the token's **content** (the bit patterns of
+    /// its features), so identical tokens always land on the same expert and
+    /// different tokens are spread deterministically. This is the routing used
+    /// when reproducibility matters more than gating quality.
     fn hash_based_routing(&self, tokens: &Tensor) -> Result<TokenRouting> {
-        let batch_size = tokens.shape()[0];
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let embeddings = self.token_embeddings(tokens)?;
         let mut token_routing = TokenRouting {
-            token_indices: (0..batch_size).collect(),
-            expert_assignments: Vec::new(),
+            token_indices: (0..embeddings.len()).collect(),
+            expert_assignments: Vec::with_capacity(embeddings.len()),
             destinations: HashMap::new(),
             capacity_usage: HashMap::new(),
         };
 
-        for token_idx in 0..batch_size {
-            // Simple hash-based assignment (in practice, would use token content)
-            let expert_id = token_idx % self.config.num_experts;
+        for (token_idx, embedding) in embeddings.iter().enumerate() {
+            let mut hasher = DefaultHasher::new();
+            for value in embedding {
+                // Hash the canonical bit pattern so -0.0 and 0.0 agree.
+                let canonical = if *value == 0.0 { 0.0f32 } else { *value };
+                canonical.to_bits().hash(&mut hasher);
+            }
+            let expert_id = (hasher.finish() as usize) % self.config.num_experts;
             let device_rank = self.expert_assignments[expert_id].device_rank;
 
+            *token_routing.capacity_usage.entry(expert_id).or_insert(0) += 1;
             token_routing.expert_assignments.push(vec![(expert_id, 1.0)]);
             token_routing.destinations.entry(device_rank).or_default().push(token_idx);
         }
@@ -339,25 +507,36 @@ impl ExpertParallelism {
         Ok(token_routing)
     }
 
-    /// Random token routing
+    /// Pseudo-random token routing.
+    ///
+    /// The assignment is drawn from a deterministic hash of the token index, so
+    /// it is uniform across experts yet reproducible across runs and ranks —
+    /// a genuine requirement for SPMD training, where every rank must derive the
+    /// same routing.
     fn random_routing(&self, tokens: &Tensor) -> Result<TokenRouting> {
-        let batch_size = tokens.shape()[0];
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let shape = tokens.shape();
+        let batch_size = *shape
+            .first()
+            .ok_or_else(|| anyhow!("tokens must have at least one dimension, got a scalar"))?;
         let mut token_routing = TokenRouting {
             token_indices: (0..batch_size).collect(),
-            expert_assignments: Vec::new(),
+            expert_assignments: Vec::with_capacity(batch_size),
             destinations: HashMap::new(),
             capacity_usage: HashMap::new(),
         };
 
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         for token_idx in 0..batch_size {
             let mut hasher = DefaultHasher::new();
+            // Mixing in a fixed salt decorrelates this from `hash_based_routing`.
+            0x9E37_79B9_7F4A_7C15u64.hash(&mut hasher);
             token_idx.hash(&mut hasher);
             let expert_id = (hasher.finish() as usize) % self.config.num_experts;
             let device_rank = self.expert_assignments[expert_id].device_rank;
 
+            *token_routing.capacity_usage.entry(expert_id).or_insert(0) += 1;
             token_routing.expert_assignments.push(vec![(expert_id, 1.0)]);
             token_routing.destinations.entry(device_rank).or_default().push(token_idx);
         }
@@ -365,50 +544,175 @@ impl ExpertParallelism {
         Ok(token_routing)
     }
 
-    /// Load-based token routing
-    fn load_based_routing(&self, tokens: &Tensor, _gating_scores: &Tensor) -> Result<TokenRouting> {
-        let batch_size = tokens.shape()[0];
+    /// Load-aware token routing.
+    ///
+    /// Each token's gating probabilities are discounted by the expert's current
+    /// load — the historical load recorded in [`LoadBalancingState`] plus the
+    /// tokens already assigned in this batch — so a highly-rated but saturated
+    /// expert loses to a slightly worse but idle one. With all loads equal this
+    /// degenerates to plain top-k gating.
+    fn load_based_routing(&self, tokens: &Tensor, gating_scores: &Tensor) -> Result<TokenRouting> {
+        let logits = self.gating_logits(tokens, gating_scores)?;
+        let num_tokens = logits.len();
+
         let mut token_routing = TokenRouting {
-            token_indices: (0..batch_size).collect(),
-            expert_assignments: Vec::new(),
+            token_indices: (0..num_tokens).collect(),
+            expert_assignments: Vec::with_capacity(num_tokens),
             destinations: HashMap::new(),
             capacity_usage: HashMap::new(),
         };
 
-        let load_state = self
-            .load_balancing_state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let historical_loads: Vec<f32> = {
+            let load_state = self
+                .load_balancing_state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (0..self.config.num_experts)
+                .map(|expert_id| *load_state.expert_loads.get(&expert_id).unwrap_or(&0.0))
+                .collect()
+        };
 
-        for token_idx in 0..batch_size {
-            // Find least loaded expert
-            let mut min_load = f32::INFINITY;
-            let mut selected_expert = 0;
+        // Running load accumulated while routing this batch.
+        let mut batch_loads = vec![0.0f32; self.config.num_experts];
+        let top_k = self.config.top_k.clamp(1, self.config.num_experts);
 
-            for expert_id in 0..self.config.num_experts {
-                let load = load_state.expert_loads.get(&expert_id).unwrap_or(&0.0);
-                if *load < min_load {
-                    min_load = *load;
-                    selected_expert = expert_id;
+        for (token_idx, row) in logits.iter().enumerate() {
+            let probabilities = Self::softmax(row);
+
+            let mut ranked: Vec<(usize, f32)> = (0..self.config.num_experts)
+                .map(|expert_id| {
+                    let load = historical_loads[expert_id] + batch_loads[expert_id];
+                    (expert_id, probabilities[expert_id] / (1.0 + load))
+                })
+                .collect();
+            ranked.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+            });
+            ranked.truncate(top_k);
+
+            // Weights come from the *gating* distribution, not the discounted
+            // score: load balancing decides who gets the token, gating decides
+            // how much it counts.
+            let mut assignments: Vec<(usize, f32)> = ranked
+                .iter()
+                .map(|(expert_id, _)| (*expert_id, probabilities[*expert_id]))
+                .collect();
+            let total: f32 = assignments.iter().map(|(_, weight)| *weight).sum();
+            if total > 0.0 {
+                for (_, weight) in assignments.iter_mut() {
+                    *weight /= total;
+                }
+            } else {
+                let uniform = 1.0 / assignments.len().max(1) as f32;
+                for (_, weight) in assignments.iter_mut() {
+                    *weight = uniform;
                 }
             }
 
-            let device_rank = self.expert_assignments[selected_expert].device_rank;
-            token_routing.expert_assignments.push(vec![(selected_expert, 1.0)]);
-            token_routing.destinations.entry(device_rank).or_default().push(token_idx);
+            for (expert_id, _) in &assignments {
+                batch_loads[*expert_id] += 1.0;
+                *token_routing.capacity_usage.entry(*expert_id).or_insert(0) += 1;
+                let device_rank = self.expert_assignments[*expert_id].device_rank;
+                token_routing.destinations.entry(device_rank).or_default().push(token_idx);
+            }
+            token_routing.expert_assignments.push(assignments);
         }
 
         Ok(token_routing)
     }
 
-    /// Similarity-based token routing
+    /// Similarity-based token routing.
+    ///
+    /// Expert prototypes are formed as the gating-weighted mean of the batch's
+    /// token embeddings; each token is then routed to the `top_k` experts whose
+    /// prototype has the highest cosine similarity to it. Semantically similar
+    /// tokens therefore share experts even when their raw gating logits differ
+    /// slightly.
     fn similarity_based_routing(
         &self,
         tokens: &Tensor,
         gating_scores: &Tensor,
     ) -> Result<TokenRouting> {
-        // For now, fall back to learned gating (similarity requires embedding analysis)
-        self.learned_gating_routing(tokens, gating_scores)
+        let logits = self.gating_logits(tokens, gating_scores)?;
+        let embeddings = self.token_embeddings(tokens)?;
+        if embeddings.len() != logits.len() {
+            return Err(anyhow!(
+                "token tensor describes {} tokens but gating_scores describes {}",
+                embeddings.len(),
+                logits.len()
+            ));
+        }
+        let num_experts = self.config.num_experts;
+        let features = embeddings.first().map(Vec::len).unwrap_or(0);
+
+        // Prototype[e] = sum_t softmax(logits_t)[e] * x_t
+        let mut prototypes = vec![vec![0.0f32; features]; num_experts];
+        let mut prototype_mass = vec![0.0f32; num_experts];
+        let mut probabilities_per_token = Vec::with_capacity(logits.len());
+        for (embedding, row) in embeddings.iter().zip(&logits) {
+            let probabilities = Self::softmax(row);
+            for (expert_id, probability) in probabilities.iter().enumerate() {
+                prototype_mass[expert_id] += probability;
+                for (slot, value) in prototypes[expert_id].iter_mut().zip(embedding) {
+                    *slot += probability * value;
+                }
+            }
+            probabilities_per_token.push(probabilities);
+        }
+        for (prototype, mass) in prototypes.iter_mut().zip(&prototype_mass) {
+            if *mass > 0.0 {
+                let inverse = 1.0 / mass;
+                for slot in prototype.iter_mut() {
+                    *slot *= inverse;
+                }
+            }
+        }
+
+        let mut token_routing = TokenRouting {
+            token_indices: (0..embeddings.len()).collect(),
+            expert_assignments: Vec::with_capacity(embeddings.len()),
+            destinations: HashMap::new(),
+            capacity_usage: HashMap::new(),
+        };
+        let top_k = self.config.top_k.clamp(1, num_experts);
+
+        for (token_idx, embedding) in embeddings.iter().enumerate() {
+            let mut ranked: Vec<(usize, f32)> = prototypes
+                .iter()
+                .enumerate()
+                .map(|(expert_id, prototype)| (expert_id, cosine_similarity(embedding, prototype)))
+                .collect();
+            ranked.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+            });
+            ranked.truncate(top_k);
+
+            // Map similarities in [-1, 1] onto non-negative mixing weights.
+            let mut assignments: Vec<(usize, f32)> = ranked
+                .iter()
+                .map(|(expert_id, similarity)| (*expert_id, (similarity + 1.0) * 0.5))
+                .collect();
+            let total: f32 = assignments.iter().map(|(_, weight)| *weight).sum();
+            if total > 0.0 {
+                for (_, weight) in assignments.iter_mut() {
+                    *weight /= total;
+                }
+            } else {
+                let uniform = 1.0 / assignments.len().max(1) as f32;
+                for (_, weight) in assignments.iter_mut() {
+                    *weight = uniform;
+                }
+            }
+
+            for (expert_id, _) in &assignments {
+                *token_routing.capacity_usage.entry(*expert_id).or_insert(0) += 1;
+                let device_rank = self.expert_assignments[*expert_id].device_rank;
+                token_routing.destinations.entry(device_rank).or_default().push(token_idx);
+            }
+            token_routing.expert_assignments.push(assignments);
+        }
+
+        Ok(token_routing)
     }
 
     /// Perform all-to-all communication for expert parallelism
@@ -419,27 +723,42 @@ impl ExpertParallelism {
     ) -> Result<HashMap<usize, Tensor>> {
         let start_time = Instant::now();
 
-        // Simulate all-to-all communication
-        // In practice, this would involve actual tensor communication
+        // Gather the *actual* rows of `local_tokens` that each local expert has
+        // been assigned. Token order within an expert's batch follows the token
+        // index, which every rank derives identically from the routing table.
+        let embeddings = self.token_embeddings(local_tokens)?;
+        let features = embeddings.first().map(Vec::len).unwrap_or(0);
         let mut expert_inputs = HashMap::new();
+        let mut bytes_moved = 0u64;
 
         for expert_id in &self.local_experts {
-            // Collect tokens assigned to this expert
-            let mut expert_tokens = Vec::new();
+            let mut gathered: Vec<f32> = Vec::new();
+            let mut rows = 0usize;
 
             for (token_idx, assignments) in routing.expert_assignments.iter().enumerate() {
-                for (assigned_expert_id, weight) in assignments {
-                    if *assigned_expert_id == *expert_id && *weight > 0.0 {
-                        // In practice, would extract actual token data
-                        expert_tokens.push(token_idx);
-                    }
+                let assigned = assignments.iter().any(|(assigned_expert_id, weight)| {
+                    assigned_expert_id == expert_id && *weight > 0.0
+                });
+                if !assigned {
+                    continue;
                 }
+                let embedding = embeddings.get(token_idx).ok_or_else(|| {
+                    anyhow!(
+                        "routing references token {} but only {} tokens were supplied",
+                        token_idx,
+                        embeddings.len()
+                    )
+                })?;
+                gathered.extend_from_slice(embedding);
+                rows += 1;
             }
 
-            // Create tensor for this expert (simplified)
-            if !expert_tokens.is_empty() {
-                let expert_tensor = Tensor::zeros(&[expert_tokens.len(), local_tokens.shape()[1]])?;
-                expert_inputs.insert(*expert_id, expert_tensor);
+            if rows > 0 {
+                bytes_moved += (gathered.len() * std::mem::size_of::<f32>()) as u64;
+                expert_inputs.insert(
+                    *expert_id,
+                    Tensor::from_slice(&gathered, &[rows, features])?,
+                );
             }
         }
 
@@ -448,6 +767,11 @@ impl ExpertParallelism {
             let mut stats =
                 self.communication_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stats.all_to_all_time += start_time.elapsed();
+            stats.communication_efficiency = if bytes_moved > 0 {
+                bytes_moved as f32 / (local_tokens.len() * std::mem::size_of::<f32>()).max(1) as f32
+            } else {
+                0.0
+            };
         }
 
         Ok(expert_inputs)
@@ -686,6 +1010,245 @@ mod tests {
         let stats = expert_parallelism.get_load_balancing_stats();
         assert!(stats.expert_loads.contains_key(&0));
         assert!(stats.expert_loads.contains_key(&1));
+    }
+
+    fn four_expert_parallelism(strategy: ExpertRoutingStrategy, top_k: usize) -> ExpertParallelism {
+        let config = ExpertParallelismConfig {
+            num_experts: 4,
+            experts_per_device: 1,
+            expert_parallel_size: 4,
+            top_k,
+            routing_strategy: strategy,
+            drop_tokens: false,
+            ..Default::default()
+        };
+        let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
+        ExpertParallelism::new(config, 0, 4, process_group)
+            .expect("expert parallelism must build in test")
+    }
+
+    #[test]
+    fn learned_gating_follows_the_gating_scores() {
+        // Four tokens, each with a different argmax expert. The old
+        // implementation ignored `gating_scores` entirely and routed every
+        // token to experts 0..top_k.
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LearnedGating, 1);
+
+        let tokens = Tensor::zeros(&[4, 3]).expect("tensor must build in test");
+        let gating = Tensor::from_slice(
+            &[
+                5.0, 0.0, 0.0, 0.0, // token 0 -> expert 0
+                0.0, 5.0, 0.0, 0.0, // token 1 -> expert 1
+                0.0, 0.0, 5.0, 0.0, // token 2 -> expert 2
+                0.0, 0.0, 0.0, 5.0, // token 3 -> expert 3
+            ],
+            &[4, 4],
+        )
+        .expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+
+        assert_eq!(routing.expert_assignments.len(), 4);
+        for (token_idx, assignments) in routing.expert_assignments.iter().enumerate() {
+            assert_eq!(assignments.len(), 1, "top_k = 1");
+            assert_eq!(
+                assignments[0].0, token_idx,
+                "token {token_idx} must go to expert {token_idx}"
+            );
+            approx::assert_relative_eq!(assignments[0].1, 1.0f32, epsilon = 1e-6);
+        }
+
+        // Every expert received exactly one token: the routing is not collapsed
+        // onto expert 0.
+        let mut experts_used: Vec<usize> = routing
+            .expert_assignments
+            .iter()
+            .flat_map(|assignments| assignments.iter().map(|(expert, _)| *expert))
+            .collect();
+        experts_used.sort_unstable();
+        assert_eq!(experts_used, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn learned_gating_top_k_weights_are_softmax_normalised() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LearnedGating, 2);
+
+        let tokens = Tensor::zeros(&[1, 2]).expect("tensor must build in test");
+        // logits [2, 1, 0, 0] -> softmax picks experts 0 and 1.
+        let gating =
+            Tensor::from_slice(&[2.0, 1.0, 0.0, 0.0], &[1, 4]).expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+
+        let assignments = &routing.expert_assignments[0];
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(assignments[0].0, 0);
+        assert_eq!(assignments[1].0, 1);
+
+        // Renormalized softmax over the two retained logits: e^2 / (e^2 + e^1).
+        let expected_first = 1.0f32 / (1.0 + (-1.0f32).exp());
+        approx::assert_relative_eq!(assignments[0].1, expected_first, epsilon = 1e-5);
+        approx::assert_relative_eq!(assignments[0].1 + assignments[1].1, 1.0f32, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn different_gating_rows_produce_different_assignments() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LearnedGating, 1);
+
+        let tokens = Tensor::zeros(&[2, 2]).expect("tensor must build in test");
+        let gating = Tensor::from_slice(&[0.0, 0.0, 9.0, 0.0, 9.0, 0.0, 0.0, 0.0], &[2, 4])
+            .expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+
+        assert_ne!(
+            routing.expert_assignments[0][0].0, routing.expert_assignments[1][0].0,
+            "tokens with different gating rows must not share an expert"
+        );
+        assert_eq!(routing.expert_assignments[0][0].0, 2);
+        assert_eq!(routing.expert_assignments[1][0].0, 0);
+    }
+
+    #[test]
+    fn routing_rejects_a_mismatched_gating_tensor() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LearnedGating, 1);
+        let tokens = Tensor::zeros(&[4, 3]).expect("tensor must build in test");
+
+        // Wrong expert axis.
+        let bad_experts = Tensor::zeros(&[4, 3]).expect("tensor must build in test");
+        assert!(expert_parallelism.route_tokens(&tokens, &bad_experts).is_err());
+
+        // Wrong token count.
+        let bad_tokens = Tensor::zeros(&[2, 4]).expect("tensor must build in test");
+        assert!(expert_parallelism.route_tokens(&tokens, &bad_tokens).is_err());
+    }
+
+    #[test]
+    fn load_based_routing_spreads_tokens_when_gating_is_uniform() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LoadBased, 1);
+
+        let tokens = Tensor::zeros(&[8, 2]).expect("tensor must build in test");
+        let gating =
+            Tensor::from_slice(&[0.0f32; 8 * 4], &[8, 4]).expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+
+        // Eight tokens, four experts, uniform gating: perfectly balanced.
+        for expert_id in 0..4 {
+            assert_eq!(
+                routing.capacity_usage.get(&expert_id).copied().unwrap_or(0),
+                2,
+                "expert {expert_id} load"
+            );
+        }
+    }
+
+    #[test]
+    fn similarity_routing_groups_similar_tokens() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::SimilarityBased, 1);
+
+        // Two clusters: tokens 0,1 point along +x; tokens 2,3 along +y.
+        let tokens = Tensor::from_slice(&[1.0, 0.0, 0.9, 0.1, 0.0, 1.0, 0.1, 0.9], &[4, 2])
+            .expect("tensor must build in test");
+        let gating = Tensor::from_slice(
+            &[
+                4.0, 0.0, 0.0, 0.0, //
+                4.0, 0.0, 0.0, 0.0, //
+                0.0, 4.0, 0.0, 0.0, //
+                0.0, 4.0, 0.0, 0.0, //
+            ],
+            &[4, 4],
+        )
+        .expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+
+        assert_eq!(
+            routing.expert_assignments[0][0].0, routing.expert_assignments[1][0].0,
+            "the +x cluster must share an expert"
+        );
+        assert_eq!(
+            routing.expert_assignments[2][0].0, routing.expert_assignments[3][0].0,
+            "the +y cluster must share an expert"
+        );
+        assert_ne!(
+            routing.expert_assignments[0][0].0, routing.expert_assignments[2][0].0,
+            "the two clusters must land on different experts"
+        );
+    }
+
+    #[test]
+    fn hash_routing_depends_on_token_content() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::HashBased, 1);
+
+        let identical =
+            Tensor::from_slice(&[1.0, 2.0, 1.0, 2.0], &[2, 2]).expect("tensor must build in test");
+        let routing = expert_parallelism
+            .hash_based_routing(&identical)
+            .expect("routing must succeed in test");
+        assert_eq!(
+            routing.expert_assignments[0][0].0, routing.expert_assignments[1][0].0,
+            "identical tokens must hash to the same expert"
+        );
+
+        let distinct =
+            Tensor::from_slice(&[1.0, 2.0, 7.0, -3.0], &[2, 2]).expect("tensor must build in test");
+        let other = expert_parallelism
+            .hash_based_routing(&distinct)
+            .expect("routing must succeed in test");
+        assert_eq!(other.expert_assignments.len(), 2);
+    }
+
+    #[test]
+    fn all_to_all_moves_the_real_token_rows() {
+        let expert_parallelism = four_expert_parallelism(ExpertRoutingStrategy::LearnedGating, 1);
+
+        let tokens = Tensor::from_slice(
+            &[
+                1.0, 2.0, // token 0
+                3.0, 4.0, // token 1
+                5.0, 6.0, // token 2
+                7.0, 8.0, // token 3
+            ],
+            &[4, 2],
+        )
+        .expect("tensor must build in test");
+        let gating = Tensor::from_slice(
+            &[
+                9.0, 0.0, 0.0, 0.0, //
+                0.0, 9.0, 0.0, 0.0, //
+                9.0, 0.0, 0.0, 0.0, //
+                0.0, 0.0, 9.0, 0.0, //
+            ],
+            &[4, 4],
+        )
+        .expect("tensor must build in test");
+
+        let routing = expert_parallelism
+            .route_tokens(&tokens, &gating)
+            .expect("routing must succeed in test");
+        let expert_inputs = expert_parallelism
+            .all_to_all_communication(&tokens, &routing)
+            .expect("all-to-all must succeed in test");
+
+        // Rank 0 owns expert 0, which received tokens 0 and 2.
+        let expert_zero = expert_inputs.get(&0).expect("expert 0 must receive tokens");
+        assert_eq!(expert_zero.shape(), vec![2, 2]);
+        assert_eq!(
+            expert_zero.to_vec_f32().expect("tensor read must succeed in test"),
+            vec![1.0, 2.0, 5.0, 6.0],
+            "the expert batch must contain the real token rows, not zeros"
+        );
     }
 
     #[test]

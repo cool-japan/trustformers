@@ -104,10 +104,18 @@ pub struct ModelInfo {
     pub size_bytes: usize,
     /// Whether model is loaded
     pub is_loaded: bool,
-    /// Input shape
-    pub input_shape: Vec<usize>,
-    /// Output shape
-    pub output_shape: Vec<usize>,
+    /// Shape of the tensor most recently passed to [`TrustformersReactNative::inference`]
+    /// for this model, or `None` before any inference has run. Model
+    /// checkpoint formats (safetensors/PyTorch/ONNX weight maps) do not
+    /// declare a fixed input signature the way a compiled graph does --
+    /// shape only becomes knowable from a request that actually named one
+    /// -- so this is observed, not declared, and absent rather than a
+    /// fabricated architecture-agnostic guess until then.
+    pub input_shape: Option<Vec<usize>>,
+    /// Shape of the tensor most recently produced by inference for this
+    /// model, or `None` before any inference has run. Same reasoning as
+    /// `input_shape`.
+    pub output_shape: Option<Vec<usize>>,
     /// Supported features
     pub supported_features: Vec<String>,
 }
@@ -139,6 +147,24 @@ pub struct TrustformersReactNative {
     request_cache: Arc<Mutex<HashMap<String, InferenceResponse>>>,
     performance_stats: Arc<Mutex<PerformanceStats>>,
     device_capabilities: DeviceCapabilities,
+    /// Input/output shapes actually observed from the most recent
+    /// successful inference for each `model_id`, keyed by that id. Nothing
+    /// in a loaded checkpoint (safetensors/PyTorch/ONNX weight maps)
+    /// declares a fixed input signature the way a compiled graph would, so
+    /// there is no shape to report until a real request has run through
+    /// `perform_inference_internal` -- see that function's write to this
+    /// map, and `get_model_info`'s read of it. Previously
+    /// `get_model_info`/`get_available_models` returned a hardcoded
+    /// ImageNet-classifier shape (`[1, 224, 224, 3]` / `[1, 1000]`) for
+    /// every model regardless of architecture.
+    observed_shapes: Arc<Mutex<HashMap<String, ObservedShapes>>>,
+}
+
+/// Real input/output tensor shapes captured from an actual inference call.
+#[derive(Debug, Clone)]
+struct ObservedShapes {
+    input_shape: Vec<usize>,
+    output_shape: Vec<usize>,
 }
 
 /// Performance statistics tracking
@@ -164,6 +190,7 @@ impl TrustformersReactNative {
 
         let request_cache = Arc::new(Mutex::new(HashMap::new()));
         let performance_stats = Arc::new(Mutex::new(PerformanceStats::new()));
+        let observed_shapes = Arc::new(Mutex::new(HashMap::new()));
 
         let device_capabilities = Self::detect_device_capabilities()?;
 
@@ -174,6 +201,7 @@ impl TrustformersReactNative {
             request_cache,
             performance_stats,
             device_capabilities,
+            observed_shapes,
         })
     }
 
@@ -287,14 +315,15 @@ impl TrustformersReactNative {
         let model_infos: Vec<ModelInfo> = models
             .iter()
             .map(|metadata| {
+                let (input_shape, output_shape) = self.observed_shapes_for(&metadata.model_id);
                 ModelInfo {
                     model_id: metadata.model_id.clone(),
                     model_type: metadata.model_type.clone(),
                     version: metadata.version.clone(),
                     size_bytes: metadata.size_bytes,
                     is_loaded: self.is_model_loaded(&metadata.model_id),
-                    input_shape: vec![1, 224, 224, 3], // Placeholder
-                    output_shape: vec![1, 1000],       // Placeholder
+                    input_shape,
+                    output_shape,
                     supported_features: vec!["inference".to_string()],
                 }
             })
@@ -428,9 +457,10 @@ impl TrustformersReactNative {
         // Run inference on background thread
         let engine = self.inference_engine.clone();
         let config = self.config.clone();
+        let observed_shapes = self.observed_shapes.clone();
 
         tokio::task::spawn_blocking(move || {
-            Self::perform_inference_internal(engine, request, config)
+            Self::perform_inference_internal(engine, request, config, observed_shapes)
         })
         .await
         .map_err(|e| CoreError::from(TrustformersError::runtime_error(e.to_string())))?
@@ -441,6 +471,7 @@ impl TrustformersReactNative {
             self.inference_engine.clone(),
             request,
             self.config.clone(),
+            self.observed_shapes.clone(),
         )
     }
 
@@ -448,6 +479,7 @@ impl TrustformersReactNative {
         engine: Arc<Mutex<MobileInferenceEngine>>,
         request: InferenceRequest,
         config: ReactNativeConfig,
+        observed_shapes: Arc<Mutex<HashMap<String, ObservedShapes>>>,
     ) -> Result<InferenceResponse> {
         let start_time = std::time::Instant::now();
 
@@ -461,14 +493,23 @@ impl TrustformersReactNative {
 
         // Preprocessing
         let preprocess_start = std::time::Instant::now();
+        let input_shape = request.input_shape.clone();
         let input_tensor = Tensor::from_vec(request.input_data, &request.input_shape)?;
         metrics.preprocessing_time_ms = preprocess_start.elapsed().as_millis() as f64;
 
         // Inference
         let inference_start = std::time::Instant::now();
-        let result = {
+        let (result, memory_used_mb) = {
             let mut engine_lock = engine.lock().unwrap_or_else(|p| p.into_inner());
-            engine_lock.run_inference(&request.model_id, &input_tensor)
+            let result = engine_lock.run_inference(&request.model_id, &input_tensor);
+            // Real estimate from the engine's own loaded-weight parameter
+            // count and quantization scheme (`get_memory_info` ->
+            // `estimate_memory_footprint`), read while still holding the
+            // lock so it reflects the state this exact call just observed.
+            // Previously a hardcoded `50` (success) / `0` (failure)
+            // regardless of the model's actual size.
+            let memory_used_mb = engine_lock.get_memory_info().total_memory_mb;
+            (result, memory_used_mb)
         };
         metrics.inference_time_ms = inference_start.elapsed().as_millis() as f64;
 
@@ -482,13 +523,27 @@ impl TrustformersReactNative {
 
                 let total_time = start_time.elapsed().as_millis() as f64;
 
+                // Record the real shapes this call observed so
+                // `get_model_info`/`get_available_models` can report them
+                // instead of a fabricated architecture-agnostic guess.
+                {
+                    let mut shapes = observed_shapes.lock().unwrap_or_else(|p| p.into_inner());
+                    shapes.insert(
+                        request.model_id.clone(),
+                        ObservedShapes {
+                            input_shape: input_shape.clone(),
+                            output_shape: output_shape.clone(),
+                        },
+                    );
+                }
+
                 Ok(InferenceResponse {
                     request_id: request.request_id,
                     success: true,
                     output_data: output_data.to_vec(),
                     output_shape,
                     inference_time_ms: total_time,
-                    memory_used_mb: 50, // Placeholder
+                    memory_used_mb,
                     error_message: None,
                     metrics,
                 })
@@ -502,7 +557,11 @@ impl TrustformersReactNative {
                     output_data: Vec::new(),
                     output_shape: Vec::new(),
                     inference_time_ms: total_time,
-                    memory_used_mb: 0,
+                    // The engine's real memory footprint, not the previous
+                    // hardcoded `0` -- a failed *inference* (e.g. a shape
+                    // mismatch) does not mean the loaded model stopped
+                    // occupying memory.
+                    memory_used_mb,
                     error_message: Some(error.to_string()),
                     metrics,
                 })
@@ -574,18 +633,34 @@ impl TrustformersReactNative {
         let model_manager = self.model_manager.lock().unwrap_or_else(|p| p.into_inner());
 
         if let Some(metadata) = model_manager.get_model(model_id) {
+            let (input_shape, output_shape) = self.observed_shapes_for(model_id);
             Ok(ModelInfo {
                 model_id: metadata.model_id.clone(),
                 model_type: metadata.model_type.clone(),
                 version: metadata.version.clone(),
                 size_bytes: metadata.size_bytes,
                 is_loaded: self.is_model_loaded(model_id),
-                input_shape: vec![1, 224, 224, 3], // Would get from actual model
-                output_shape: vec![1, 1000],       // Would get from actual model
+                input_shape,
+                output_shape,
                 supported_features: vec!["inference".to_string()],
             })
         } else {
             Err(TrustformersError::runtime_error(format!("Model not found: {}", model_id)).into())
+        }
+    }
+
+    /// Real shapes from the most recent successful inference for
+    /// `model_id`, or `(None, None)` before any inference has run. See
+    /// [`ObservedShapes`] and the write site in
+    /// `perform_inference_internal`.
+    fn observed_shapes_for(&self, model_id: &str) -> (Option<Vec<usize>>, Option<Vec<usize>>) {
+        let observed = self.observed_shapes.lock().unwrap_or_else(|p| p.into_inner());
+        match observed.get(model_id) {
+            Some(shapes) => (
+                Some(shapes.input_shape.clone()),
+                Some(shapes.output_shape.clone()),
+            ),
+            None => (None, None),
         }
     }
 
@@ -701,36 +776,59 @@ impl ReactNativeConfig {
     }
 }
 
-// Mock implementation of MobileInferenceEngine methods for React Native
+// React-Native-facing wrappers around the real `MobileInferenceEngine` API
+// (`inference.rs`). This used to be a "mock implementation... for React
+// Native" that shadowed the same method names with no-ops: `load_model_from_path`
+// did nothing, `run_inference` returned `input.clone()` unchanged,
+// `is_model_loaded` always answered `true`, `unload_model`/`configure_model`
+// were no-ops -- every one of `ReactNativeMobileModule`'s public methods
+// above (`load_model`, `inference`, `remove_model`, `configure_model`)
+// ultimately calls through here, so none of them ever touched real model
+// weights. `MobileInferenceEngine` holds one active model at a time (see
+// its `model_weights: Option<HashMap<String, Tensor>>`); `model_id` here
+// identifies *which* model the caller believes is active for logging
+// purposes; per-ID metadata (size, version, availability) is tracked
+// separately by this module's own `ModelManager`.
 impl MobileInferenceEngine {
     fn initialize(&mut self) -> Result<()> {
-        // Initialize inference engine
+        // `MobileInferenceEngine::new` already performs all real
+        // initialization (config validation, optimizer setup); there is
+        // nothing further to do before a model is loaded.
         Ok(())
     }
 
-    fn load_model_from_path(&mut self, _model_id: &str, _model_path: &str) -> Result<()> {
-        // Load model implementation
-        Ok(())
+    fn load_model_from_path(&mut self, model_id: &str, model_path: &str) -> Result<()> {
+        self.load_model_from_file(model_path).map_err(|e| {
+            CoreError::from(TrustformersError::runtime_error(format!(
+                "failed to load model '{model_id}' from '{model_path}': {e}"
+            )))
+        })
     }
 
     fn unload_model(&mut self, _model_id: &str) -> Result<()> {
-        // Unload model implementation
+        self.clear_loaded_model();
         Ok(())
     }
 
-    fn run_inference(&mut self, _model_id: &str, input: &Tensor) -> Result<Tensor> {
-        // Placeholder inference - return input tensor as output
-        Ok(input.clone())
+    fn run_inference(&mut self, model_id: &str, input: &Tensor) -> Result<Tensor> {
+        if !self.has_loaded_model() {
+            return Err(CoreError::from(TrustformersError::runtime_error(format!(
+                "cannot run inference for model '{model_id}': no model is currently loaded"
+            ))));
+        }
+        self.inference(input).map_err(|e| {
+            CoreError::from(TrustformersError::runtime_error(format!(
+                "inference failed for model '{model_id}': {e}"
+            )))
+        })
     }
 
     fn is_model_loaded(&self, _model_id: &str) -> bool {
-        // Check if model is loaded
-        true // Placeholder
+        self.has_loaded_model()
     }
 
-    fn configure_model(&mut self, _model_id: &str, _config: MobileConfig) -> Result<()> {
-        // Configure model with new settings
-        Ok(())
+    fn configure_model(&mut self, _model_id: &str, config: MobileConfig) -> Result<()> {
+        self.update_config(config).map_err(CoreError::from)
     }
 }
 
@@ -778,8 +876,18 @@ pub mod react_native_exports {
             if let Some(ref module) = TRUSTFORMERS_RN {
                 let request_str = CStr::from_ptr(request_json).to_str().unwrap_or("{}");
 
-                // Note: This is a synchronous wrapper for the async function
-                // In a real implementation, you'd use a runtime like tokio
+                // This C ABI entry point cannot be `async fn` (the C
+                // caller has no executor to poll it), so it calls
+                // `inference_sync` -- the synchronous path that runs
+                // straight on this thread -- rather than the async
+                // `inference()` used by non-FFI callers. `tokio` is a real
+                // workspace dependency and this crate does use it
+                // elsewhere (`inference_background`'s
+                // `tokio::task::spawn_blocking`, reached from `inference()`
+                // when `use_background_thread` is set); it is simply not
+                // reachable from a plain `extern "C" fn` with no `Runtime`
+                // handle in scope, which is why this specific entry point
+                // is intentionally synchronous rather than an omission.
                 let result = module
                     .inference_sync(serde_json::from_str(request_str).unwrap_or_default())
                     .unwrap_or_else(|e| InferenceResponse {
@@ -922,5 +1030,228 @@ mod tests {
 
         let result = TrustformersReactNative::new(rn_config, mobile_config);
         assert!(result.is_ok());
+    }
+
+    /// Regression test for the previous "Mock implementation of
+    /// MobileInferenceEngine methods for React Native": `is_model_loaded`
+    /// always returned the literal `true`, `run_inference` always returned
+    /// `input.clone()` regardless of whether any model was loaded, and
+    /// `load_model_from_path` was a no-op that succeeded for any path
+    /// (including nonexistent ones). All three must now reflect real
+    /// engine state.
+    #[test]
+    fn test_bridge_is_model_loaded_and_run_inference_reflect_real_state() {
+        let config = MobileConfig::default();
+        let mut engine = MobileInferenceEngine::new(config).expect("engine creation failed");
+
+        // Before any model is loaded: old mock said `true` unconditionally.
+        assert!(!MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
+
+        // Running inference with nothing loaded: old mock happily returned
+        // the input tensor back as a "successful" result.
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("tensor");
+        let result = MobileInferenceEngine::run_inference(&mut engine, "model-a", &input);
+        assert!(
+            result.is_err(),
+            "inference with no loaded model must not fabricate success"
+        );
+
+        // A nonexistent model file: old mock's `load_model_from_path`
+        // returned `Ok(())` for literally any path string.
+        let load_result = MobileInferenceEngine::load_model_from_path(
+            &mut engine,
+            "model-a",
+            "/nonexistent/definitely-not-a-real-model-file.safetensors",
+        );
+        assert!(
+            load_result.is_err(),
+            "loading a nonexistent file must not fabricate success"
+        );
+        assert!(
+            !MobileInferenceEngine::is_model_loaded(&engine, "model-a"),
+            "a failed load must not leave the engine reporting a loaded model"
+        );
+    }
+
+    /// After a real model load, `run_inference` must produce real computed
+    /// output (not an identity copy of the input) and `is_model_loaded`
+    /// must report `true`; after `unload_model`, both must revert.
+    #[test]
+    fn test_bridge_load_and_unload_round_trip_with_real_computation() {
+        let config = MobileConfig::default();
+        let mut engine = MobileInferenceEngine::new(config).expect("engine creation failed");
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer.weight".to_string(),
+            Tensor::from_vec(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]).expect("weight tensor"),
+        );
+        engine.load_model(weights).expect("direct load_model failed");
+        assert!(MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
+
+        let input = Tensor::from_vec(vec![1.0, 3.0], &[1, 2]).expect("input tensor");
+        let output = MobileInferenceEngine::run_inference(&mut engine, "model-a", &input)
+            .expect("inference should succeed with a loaded model");
+        assert_ne!(
+            output.data().expect("output data"),
+            input.data().expect("input data"),
+            "output must be real computed data, not the input echoed back"
+        );
+
+        MobileInferenceEngine::unload_model(&mut engine, "model-a").expect("unload failed");
+        assert!(!MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
+    }
+
+    /// Regression test for the previous fabrication: `get_model_info` and
+    /// `get_available_models` returned a hardcoded ImageNet-classifier
+    /// shape (`input_shape: vec![1, 224, 224, 3]`,
+    /// `output_shape: vec![1, 1000]`) for *every* model, regardless of
+    /// architecture. `observed_shapes_for` must report `(None, None)`
+    /// before any inference has run for a given `model_id`, and the real
+    /// shapes that `perform_inference_internal` actually observed once one
+    /// has.
+    #[test]
+    fn test_observed_shapes_are_absent_until_a_real_inference_populates_them() {
+        let rn_config = ReactNativeConfig::default();
+        let mobile_config = MobileConfig::default();
+        let module =
+            TrustformersReactNative::new(rn_config, mobile_config).expect("module creation failed");
+
+        // Before any inference for this model_id: honestly absent, not a
+        // fabricated architecture-agnostic guess.
+        let (before_input, before_output) = module.observed_shapes_for("model-a");
+        assert_eq!(before_input, None);
+        assert_eq!(before_output, None);
+
+        // Load a real (tiny) model directly into the shared engine so
+        // `run_inference` has real weights to compute against.
+        {
+            let mut engine = module.inference_engine.lock().expect("lock poisoned");
+            let mut weights = HashMap::new();
+            weights.insert(
+                "layer.weight".to_string(),
+                Tensor::from_vec(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]).expect("weight tensor"),
+            );
+            engine.load_model(weights).expect("load_model failed");
+        }
+
+        let request = InferenceRequest {
+            request_id: "req-1".to_string(),
+            model_id: "model-a".to_string(),
+            input_data: vec![1.0, 3.0],
+            input_shape: vec![1, 2],
+            config_override: None,
+            enable_preprocessing: true,
+            enable_postprocessing: true,
+        };
+        let response = TrustformersReactNative::perform_inference_internal(
+            module.inference_engine.clone(),
+            request,
+            module.config.clone(),
+            module.observed_shapes.clone(),
+        )
+        .expect("perform_inference_internal should not itself error");
+        assert!(
+            response.success,
+            "inference with a loaded model should succeed"
+        );
+
+        // After a real inference: the observed shapes must be the actual
+        // request/response shapes, never the old hardcoded
+        // `[1, 224, 224, 3]` / `[1, 1000]` (which would not even match --
+        // this test's tensors are 2-D `[1, 2]`).
+        let (after_input, after_output) = module.observed_shapes_for("model-a");
+        assert_eq!(after_input, Some(vec![1, 2]));
+        assert_eq!(after_output, Some(response.output_shape.clone()));
+        assert_ne!(after_input, Some(vec![1, 224, 224, 3]));
+        assert_ne!(after_output, Some(vec![1, 1000]));
+
+        // A different, never-run model_id must still report absent --
+        // shapes are per-model, not a global fallback once anything has
+        // run once.
+        let (other_input, other_output) = module.observed_shapes_for("model-b");
+        assert_eq!(other_input, None);
+        assert_eq!(other_output, None);
+    }
+
+    /// Regression test for the previous `memory_used_mb: 50 // Placeholder`
+    /// (success path) and `memory_used_mb: 0` (failure path, coincidentally
+    /// honest for an unloaded engine but for the wrong reason -- it was a
+    /// constant either way). Both paths must now report the engine's real
+    /// `get_memory_info().total_memory_mb`.
+    #[test]
+    fn test_memory_used_mb_reflects_real_engine_footprint_not_a_constant() {
+        let rn_config = ReactNativeConfig::default();
+        let mobile_config = MobileConfig::default();
+        let module =
+            TrustformersReactNative::new(rn_config, mobile_config).expect("module creation failed");
+
+        // Failure path: no model loaded, so `run_inference` errors. The
+        // real footprint of an empty engine is whatever
+        // `get_memory_info()` reports for zero parameters (not necessarily
+        // the old hardcoded `0`, though it may coincide -- the point is
+        // this now genuinely reads the engine rather than asserting a
+        // constant).
+        let expected_empty_mb = {
+            let engine = module.inference_engine.lock().expect("lock poisoned");
+            engine.get_memory_info().total_memory_mb
+        };
+        let request = InferenceRequest {
+            request_id: "req-fail".to_string(),
+            model_id: "model-a".to_string(),
+            input_data: vec![1.0, 2.0, 3.0],
+            input_shape: vec![3],
+            config_override: None,
+            enable_preprocessing: true,
+            enable_postprocessing: true,
+        };
+        let response = TrustformersReactNative::perform_inference_internal(
+            module.inference_engine.clone(),
+            request,
+            module.config.clone(),
+            module.observed_shapes.clone(),
+        )
+        .expect("perform_inference_internal should not itself error");
+        assert!(!response.success, "no model is loaded: inference must fail");
+        assert_eq!(response.memory_used_mb, expected_empty_mb);
+
+        // Success path: load a real model with known parameter count and
+        // confirm the reported figure tracks the *loaded* footprint, which
+        // must differ from the empty-engine figure above for a nonzero
+        // weight tensor.
+        {
+            let mut engine = module.inference_engine.lock().expect("lock poisoned");
+            let mut weights = HashMap::new();
+            weights.insert(
+                "layer.weight".to_string(),
+                Tensor::from_vec(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]).expect("weight tensor"),
+            );
+            engine.load_model(weights).expect("load_model failed");
+        }
+        let expected_loaded_mb = {
+            let engine = module.inference_engine.lock().expect("lock poisoned");
+            engine.get_memory_info().total_memory_mb
+        };
+        let request = InferenceRequest {
+            request_id: "req-ok".to_string(),
+            model_id: "model-a".to_string(),
+            input_data: vec![1.0, 3.0],
+            input_shape: vec![1, 2],
+            config_override: None,
+            enable_preprocessing: true,
+            enable_postprocessing: true,
+        };
+        let response = TrustformersReactNative::perform_inference_internal(
+            module.inference_engine.clone(),
+            request,
+            module.config.clone(),
+            module.observed_shapes.clone(),
+        )
+        .expect("perform_inference_internal should not itself error");
+        assert!(
+            response.success,
+            "inference with a loaded model should succeed"
+        );
+        assert_eq!(response.memory_used_mb, expected_loaded_mb);
     }
 }

@@ -4,15 +4,12 @@
 //! configuration structs, response types, state management, metrics, error handling,
 //! and quality analysis types.
 
-use crate::core::traits::{Model, Tokenizer};
 use crate::pipeline::conversational::types::*;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use trustformers_models::common_patterns::GenerativeModel;
 
 // ================================================================================================
 // CONFIGURATION TYPES
@@ -976,58 +973,21 @@ pub enum FlowAction {
 }
 
 // ================================================================================================
-// MANAGER AND COORDINATOR TYPES (STRUCT DEFINITIONS ONLY)
+// INTERNAL MANAGER TYPES
+//
+// `ErrorRecoveryManager` and `QualityAnalyzer` here are the versions actually
+// used internally by `coordinator.rs`/`chunking.rs`/`state_management.rs`
+// (each pulls this module in via `use super::types::*;`, with no local
+// struct of the same name to shadow it). This is distinct from the
+// same-named `QualityAnalyzer` re-exported from `quality_analyzer.rs` at
+// `streaming::QualityAnalyzer` in `mod.rs`'s public surface — an existing
+// naming collision predating this cleanup pass, out of scope to unify here.
+// The other manager structs that used to live in this section
+// (StreamingCoordinator, ResponseChunker, TypingSimulator, StreamStateManager,
+// BackpressureController, ConversationalStreamingPipeline, StreamingManager)
+// were unused duplicates of the real types owned by their dedicated files
+// and have been removed.
 // ================================================================================================
-
-/// Central coordinator for streaming responses
-#[derive(Debug)]
-pub struct StreamingCoordinator {
-    /// Configuration for streaming
-    config: AdvancedStreamingConfig,
-    /// Active streams registry
-    active_streams: Arc<RwLock<std::collections::HashMap<String, StreamSession>>>,
-    /// Global metrics
-    global_metrics: Arc<RwLock<GlobalStreamingMetrics>>,
-    /// Quality analyzer
-    quality_analyzer: QualityAnalyzer,
-    /// Error recovery manager
-    error_recovery: ErrorRecoveryManager,
-}
-
-/// Advanced response chunker with multiple strategies
-#[derive(Debug)]
-pub struct ResponseChunker {
-    /// Chunking strategy
-    strategy: ChunkingStrategy,
-    /// Configuration
-    config: AdvancedStreamingConfig,
-    /// Quality analyzer
-    quality_analyzer: QualityAnalyzer,
-}
-
-/// Natural typing simulator for human-like response delivery
-#[derive(Debug)]
-pub struct TypingSimulator {
-    /// Configuration
-    config: AdvancedStreamingConfig,
-    /// Random number generator state
-    rng_state: std::sync::Mutex<fastrand::Rng>,
-    /// Typing patterns analyzer
-    patterns: TypingPatterns,
-}
-
-/// Stream state manager for maintaining streaming sessions
-#[derive(Debug)]
-pub struct StreamStateManager {
-    /// Configuration
-    config: AdvancedStreamingConfig,
-    /// Current state
-    current_state: Arc<RwLock<StreamState>>,
-    /// State history for debugging
-    state_history: Arc<RwLock<VecDeque<StateTransition>>>,
-    /// Error recovery manager
-    error_recovery: ErrorRecoveryManager,
-}
 
 /// Error recovery manager for handling streaming failures
 #[derive(Debug)]
@@ -1054,19 +1014,23 @@ impl ErrorRecoveryManager {
             max_attempts: 3,
         }
     }
-}
 
-/// Backpressure controller for managing streaming flow
-#[derive(Debug)]
-pub struct BackpressureController {
-    /// Configuration
-    config: AdvancedStreamingConfig,
-    /// Current pressure level
-    pressure_level: Arc<RwLock<PressureLevel>>,
-    /// Flow control state
-    flow_state: Arc<RwLock<FlowState>>,
-    /// Metrics collector
-    metrics: Arc<RwLock<BackpressureMetrics>>,
+    /// Recovery strategies configured for each error type.
+    pub fn strategies(&self) -> &std::collections::HashMap<StreamErrorType, Vec<RecoveryStrategy>> {
+        &self.strategies
+    }
+
+    /// Shared, async-lockable recovery-attempt counters per error type.
+    pub fn recovery_attempts(
+        &self,
+    ) -> &Arc<RwLock<std::collections::HashMap<StreamErrorType, usize>>> {
+        &self.recovery_attempts
+    }
+
+    /// Maximum recovery attempts allowed before giving up on an error.
+    pub fn max_attempts(&self) -> usize {
+        self.max_attempts
+    }
 }
 
 /// Quality analyzer for streaming performance
@@ -1112,41 +1076,6 @@ impl QualityAnalyzer {
     }
 }
 
-/// Main streaming pipeline for conversational responses
-pub struct ConversationalStreamingPipeline<M, T>
-where
-    M: Model + Send + Sync + GenerativeModel,
-    T: Tokenizer + Send + Sync,
-{
-    /// Model reference
-    model: Arc<M>,
-    /// Tokenizer reference
-    tokenizer: Arc<T>,
-    /// Streaming coordinator
-    coordinator: StreamingCoordinator,
-    /// Response chunker
-    chunker: ResponseChunker,
-    /// Typing simulator
-    typing_simulator: TypingSimulator,
-    /// State manager
-    state_manager: StreamStateManager,
-    /// Backpressure controller
-    backpressure_controller: BackpressureController,
-}
-
-/// Streaming manager
-#[derive(Debug)]
-pub struct StreamingManager {
-    /// Configuration
-    config: StreamingConfig,
-    /// Active sessions
-    active_sessions: HashMap<String, StreamingSession>,
-    /// Typing simulator
-    typing_simulator: Option<TypingSimulator>,
-    /// Quality analyzer
-    quality_analyzer: QualityAnalyzer,
-}
-
 // ================================================================================================
 // TESTS
 // ================================================================================================
@@ -1154,7 +1083,6 @@ pub struct StreamingManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     // --- AdvancedStreamingConfig tests ---
 

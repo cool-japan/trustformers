@@ -61,6 +61,50 @@ pub struct JAXOptimizerState {
     pub inner_state: serde_json::Value,
 }
 
+/// Reads a per-parameter moment buffer out of the functional Optax-style state.
+///
+/// Optax keeps optimizer state *outside* the optimizer object (`update` takes `&self`),
+/// so the moments live in [`JAXOptimizerState::params`] as JSON arrays. A missing or
+/// wrongly-sized entry is treated as a fresh zero buffer, which matches Optax's
+/// behaviour when a parameter tree grows between steps.
+fn read_moment(state: &JAXOptimizerState, key: &str, len: usize) -> Vec<f32> {
+    match state.params.get(key).and_then(|value| value.as_array()) {
+        Some(values) if values.len() == len => {
+            values.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()
+        },
+        _ => vec![0.0_f32; len],
+    }
+}
+
+/// Writes a per-parameter moment buffer back into the functional state.
+fn write_moment(state: &mut JAXOptimizerState, key: &str, values: &[f32]) {
+    let encoded: Vec<serde_json::Value> = values
+        .iter()
+        .map(|&v| {
+            serde_json::Number::from_f64(v as f64)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        })
+        .collect();
+    state.params.insert(key.to_string(), serde_json::Value::Array(encoded));
+}
+
+/// Allocates zeroed moment buffers for every parameter under the given suffixes.
+fn init_moments(params: &HashMap<String, Tensor>, suffixes: &[&str]) -> JAXOptimizerState {
+    let mut state = JAXOptimizerState {
+        step: 0,
+        params: HashMap::new(),
+        inner_state: serde_json::json!({}),
+    };
+    for (name, param) in params {
+        let len = param.shape().iter().product::<usize>();
+        for suffix in suffixes {
+            write_moment(&mut state, &format!("{name}{suffix}"), &vec![0.0_f32; len]);
+        }
+    }
+    state
+}
+
 /// JAX-compatible gradient transformation
 pub trait JAXGradientTransformation: Send + Sync {
     /// Initialize the gradient transformation state
@@ -394,20 +438,17 @@ impl JAXAdam {
 
 impl JAXGradientTransformation for JAXAdam {
     fn init(&self, params: &HashMap<String, Tensor>) -> Result<JAXOptimizerState> {
-        let mut state_params = HashMap::new();
-
-        for (name, param) in params {
-            state_params.insert(format!("{}_m", name), serde_json::json!(param.shape()));
-            state_params.insert(format!("{}_v", name), serde_json::json!(param.shape()));
-        }
-
-        Ok(JAXOptimizerState {
-            step: 0,
-            params: state_params,
-            inner_state: serde_json::json!({}),
-        })
+        Ok(init_moments(params, &["_m", "_v"]))
     }
 
+    /// Applies one Optax `adam` (or `adamw`, when `weight_decay` is set) step.
+    ///
+    /// ```text
+    /// m_t = b1 * m_{t-1} + (1 - b1) * g
+    /// v_t = b2 * v_{t-1} + (1 - b2) * g^2
+    /// update = lr * (m_t / (1 - b1^t)) / (sqrt(v_t / (1 - b2^t) + eps_root) + eps)
+    /// p_t = p_{t-1} - update - lr * weight_decay * p_{t-1}
+    /// ```
     fn update(
         &self,
         gradients: &HashMap<String, Tensor>,
@@ -425,34 +466,55 @@ impl JAXGradientTransformation for JAXAdam {
             self.learning_rate
         };
 
+        let step = new_state.step.max(1) as i32;
+        let bias_correction1 = 1.0 - self.b1.powi(step);
+        let bias_correction2 = 1.0 - self.b2.powi(step);
+        let weight_decay = self.weight_decay.unwrap_or(0.0);
+
         if let Some(params) = params {
             for (name, param) in params {
-                if let Some(grad) = gradients.get(name) {
-                    // Apply Adam update using inner optimizer
-                    let updated_param = param.clone();
-
-                    // Temporary config values for current learning rate
-                    let _current_lr = current_lr as f32;
-                    let _beta1 = self.b1 as f32;
-                    let _beta2 = self.b2 as f32;
-                    let _epsilon = self.eps as f32;
-                    let _weight_decay = self.weight_decay.unwrap_or(0.0) as f32;
-
-                    // Apply weight decay if specified
-                    if let Some(weight_decay) = self.weight_decay {
-                        updated_param.add_scalar((-current_lr * weight_decay) as f32)?;
-                    }
-
-                    // Apply gradient update
-                    // In a real implementation, this would use the inner optimizer's step method
-                    // For now, we'll do a simple gradient descent step
-                    let scaled_grad = grad.mul_scalar(current_lr as f32)?;
-                    updated_param.sub(&scaled_grad)?;
-
-                    updated_params.insert(name.clone(), updated_param);
-                } else {
+                let Some(grad) = gradients.get(name) else {
                     updated_params.insert(name.clone(), param.clone());
+                    continue;
+                };
+
+                let param_data = param.data_f32()?;
+                let grad_data = grad.data_f32()?;
+                if grad_data.len() != param_data.len() {
+                    return Err(trustformers_core::errors::TrustformersError::invalid_input(
+                        format!(
+                            "gradient for '{name}' has {} elements but the parameter has {}",
+                            grad_data.len(),
+                            param_data.len()
+                        ),
+                    ));
                 }
+
+                let mut mu = read_moment(state, &format!("{name}_m"), param_data.len());
+                let mut nu = read_moment(state, &format!("{name}_v"), param_data.len());
+                let mut updated = Vec::with_capacity(param_data.len());
+
+                for index in 0..param_data.len() {
+                    let g = grad_data[index] as f64;
+                    let p = param_data[index] as f64;
+
+                    mu[index] = (self.b1 * mu[index] as f64 + (1.0 - self.b1) * g) as f32;
+                    nu[index] = (self.b2 * nu[index] as f64 + (1.0 - self.b2) * g * g) as f32;
+
+                    let m_hat = mu[index] as f64 / bias_correction1;
+                    let v_hat = nu[index] as f64 / bias_correction2;
+
+                    let mut delta =
+                        current_lr * m_hat / ((v_hat + self.eps_root).sqrt() + self.eps);
+                    // Optax applies decoupled weight decay (`adamw`) on top of the
+                    // Adam update, not to the gradient.
+                    delta += current_lr * weight_decay * p;
+                    updated.push((p - delta) as f32);
+                }
+
+                write_moment(&mut new_state, &format!("{name}_m"), &mu);
+                write_moment(&mut new_state, &format!("{name}_v"), &nu);
+                updated_params.insert(name.clone(), Tensor::from_vec(updated, &param.shape())?);
             }
         }
 
@@ -549,58 +611,41 @@ impl JAXAdamW {
 
 impl JAXGradientTransformation for JAXAdamW {
     fn init(&self, params: &HashMap<String, Tensor>) -> Result<JAXOptimizerState> {
-        let mut state_params = HashMap::new();
-
-        for (name, param) in params {
-            state_params.insert(format!("{}_m", name), serde_json::json!(param.shape()));
-            state_params.insert(format!("{}_v", name), serde_json::json!(param.shape()));
-        }
-
-        Ok(JAXOptimizerState {
-            step: 0,
-            params: state_params,
-            inner_state: serde_json::json!({}),
-        })
+        Ok(init_moments(params, &["_m", "_v"]))
     }
 
+    /// Applies one Optax `adamw` step (Adam plus decoupled weight decay).
     fn update(
         &self,
         gradients: &HashMap<String, Tensor>,
         state: &JAXOptimizerState,
         params: Option<&HashMap<String, Tensor>>,
     ) -> Result<(HashMap<String, Tensor>, JAXOptimizerState)> {
-        let mut updated_params = HashMap::new();
-        let mut new_state = state.clone();
-        new_state.step += 1;
-
-        // Update learning rate if schedule is set
-        let current_lr = if let Some(ref schedule) = self.lr_schedule {
-            schedule.get_lr(new_state.step)
-        } else {
-            self.learning_rate
+        // AdamW is exactly Adam with a mandatory decoupled decay term, so route it
+        // through one implementation instead of duplicating the math.
+        let adam = JAXAdam {
+            inner: Adam::new(
+                self.learning_rate as f32,
+                (self.b1 as f32, self.b2 as f32),
+                self.eps as f32,
+                0.0,
+            ),
+            learning_rate: self.learning_rate,
+            b1: self.b1,
+            b2: self.b2,
+            eps: self.eps,
+            eps_root: self.eps_root,
+            weight_decay: Some(self.weight_decay),
+            lr_schedule: None,
         };
 
-        if let Some(params) = params {
-            for (name, param) in params {
-                if let Some(grad) = gradients.get(name) {
-                    // Apply AdamW update using inner optimizer
-                    let updated_param = param.clone();
-
-                    // Apply weight decay (AdamW style - directly to parameters)
-                    updated_param.mul_scalar((1.0 - current_lr * self.weight_decay) as f32)?;
-
-                    // Apply gradient update
-                    let scaled_grad = grad.mul_scalar(current_lr as f32)?;
-                    updated_param.sub(&scaled_grad)?;
-
-                    updated_params.insert(name.clone(), updated_param);
-                } else {
-                    updated_params.insert(name.clone(), param.clone());
-                }
-            }
+        // Resolve the schedule here: the delegate has no schedule of its own.
+        let mut delegate = adam;
+        if let Some(ref schedule) = self.lr_schedule {
+            delegate.learning_rate = schedule.get_lr(state.step + 1);
         }
 
-        Ok((updated_params, new_state))
+        delegate.update(gradients, state, params)
     }
 
     fn name(&self) -> &str {
@@ -683,24 +728,22 @@ impl JAXSGD {
 
 impl JAXGradientTransformation for JAXSGD {
     fn init(&self, params: &HashMap<String, Tensor>) -> Result<JAXOptimizerState> {
-        let mut state_params = HashMap::new();
-
         if self.momentum > 0.0 {
-            for (name, param) in params {
-                state_params.insert(
-                    format!("{}_momentum", name),
-                    serde_json::json!(param.shape()),
-                );
-            }
+            Ok(init_moments(params, &["_momentum"]))
+        } else {
+            Ok(init_moments(params, &[]))
         }
-
-        Ok(JAXOptimizerState {
-            step: 0,
-            params: state_params,
-            inner_state: serde_json::json!({}),
-        })
     }
 
+    /// Applies one Optax `sgd` step.
+    ///
+    /// ```text
+    /// g'   = g + weight_decay * p
+    /// buf  = momentum * buf + g'                 (only when momentum > 0)
+    /// d    = g' + momentum * buf   if nesterov
+    ///        buf                   otherwise
+    /// p_t  = p_{t-1} - lr * d
+    /// ```
     fn update(
         &self,
         gradients: &HashMap<String, Tensor>,
@@ -718,24 +761,53 @@ impl JAXGradientTransformation for JAXSGD {
             self.learning_rate
         };
 
+        let weight_decay = self.weight_decay.unwrap_or(0.0);
+
         if let Some(params) = params {
             for (name, param) in params {
-                if let Some(grad) = gradients.get(name) {
-                    let updated_param = param.clone();
-
-                    // Apply weight decay if specified
-                    if let Some(weight_decay) = self.weight_decay {
-                        updated_param.add_scalar((-current_lr * weight_decay) as f32)?;
-                    }
-
-                    // Apply SGD update
-                    let scaled_grad = grad.mul_scalar(current_lr as f32)?;
-                    updated_param.sub(&scaled_grad)?;
-
-                    updated_params.insert(name.clone(), updated_param);
-                } else {
+                let Some(grad) = gradients.get(name) else {
                     updated_params.insert(name.clone(), param.clone());
+                    continue;
+                };
+
+                let param_data = param.data_f32()?;
+                let grad_data = grad.data_f32()?;
+                if grad_data.len() != param_data.len() {
+                    return Err(trustformers_core::errors::TrustformersError::invalid_input(
+                        format!(
+                            "gradient for '{name}' has {} elements but the parameter has {}",
+                            grad_data.len(),
+                            param_data.len()
+                        ),
+                    ));
                 }
+
+                let mut buffer = read_moment(state, &format!("{name}_momentum"), param_data.len());
+                let mut updated = Vec::with_capacity(param_data.len());
+
+                for index in 0..param_data.len() {
+                    let p = param_data[index] as f64;
+                    let g = grad_data[index] as f64 + weight_decay * p;
+
+                    let direction = if self.momentum > 0.0 {
+                        let buf = self.momentum * buffer[index] as f64 + g;
+                        buffer[index] = buf as f32;
+                        if self.nesterov {
+                            g + self.momentum * buf
+                        } else {
+                            buf
+                        }
+                    } else {
+                        g
+                    };
+
+                    updated.push((p - current_lr * direction) as f32);
+                }
+
+                if self.momentum > 0.0 {
+                    write_moment(&mut new_state, &format!("{name}_momentum"), &buffer);
+                }
+                updated_params.insert(name.clone(), Tensor::from_vec(updated, &param.shape())?);
             }
         }
 
@@ -1060,6 +1132,137 @@ mod tests {
 
         assert_eq!(optimizer.learning_rate, 0.1);
         assert!(optimizer.lr_schedule.is_some());
+    }
+
+    fn single(name: &str, values: &[f32]) -> HashMap<String, Tensor> {
+        let mut map = HashMap::new();
+        map.insert(
+            name.to_string(),
+            Tensor::from_vec(values.to_vec(), &[values.len()]).expect("tensor"),
+        );
+        map
+    }
+
+    /// Regression: `update` used to drop every tensor-op result and return the
+    /// parameter completely unchanged.
+    #[test]
+    fn jax_adam_moves_the_parameter() {
+        let optimizer = JAXAdam::from_params(0.1, 0.9, 0.999, 1e-8, 0.0, None).expect("adam");
+        let params = single("w", &[1.0, -2.0, 3.0]);
+        let grads = single("w", &[2.0, 2.0, 2.0]);
+        let state = optimizer.init(&params).expect("init");
+
+        let (updated, _) = optimizer.update(&grads, &state, Some(&params)).expect("update");
+        let after = updated["w"].data_f32().expect("data");
+        let before = params["w"].data_f32().expect("data");
+        for (a, b) in after.iter().zip(before.iter()) {
+            assert!((a - b).abs() > 1e-6, "parameter must move: {a} vs {b}");
+        }
+    }
+
+    /// Exact hand-computed first Adam step.
+    ///
+    /// `m = 0.1 * 2 = 0.2`, `v = 0.001 * 4 = 0.004`, `m̂ = 2.0`, `v̂ = 4.0`,
+    /// `Δ = 0.1 * 2 / (2 + 1e-8) = 0.1`, so `1.0 - 0.1 = 0.9`.
+    #[test]
+    fn jax_adam_first_step_matches_hand_computation() {
+        let optimizer = JAXAdam::from_params(0.1, 0.9, 0.999, 1e-8, 0.0, None).expect("adam");
+        let params = single("w", &[1.0]);
+        let grads = single("w", &[2.0]);
+        let state = optimizer.init(&params).expect("init");
+
+        let (updated, new_state) = optimizer.update(&grads, &state, Some(&params)).expect("update");
+        assert_eq!(new_state.step, 1);
+        let value = updated["w"].data_f32().expect("data")[0];
+        assert!((value - 0.9).abs() < 1e-5, "expected 0.9, got {value}");
+    }
+
+    /// The moments must survive from one functional step to the next.
+    #[test]
+    fn jax_adam_carries_state_between_steps() {
+        let optimizer = JAXAdam::from_params(0.1, 0.9, 0.999, 1e-8, 0.0, None).expect("adam");
+        let params = single("w", &[1.0]);
+        let grads = single("w", &[2.0]);
+        let state = optimizer.init(&params).expect("init");
+
+        let (after_one, state_one) =
+            optimizer.update(&grads, &state, Some(&params)).expect("step 1");
+        let mu = read_moment(&state_one, "w_m", 1)[0];
+        assert!((mu - 0.2).abs() < 1e-6, "m after one step: {mu}");
+
+        // A *zero* gradient on the second step can only move the parameter if the
+        // first step's momentum survived. With the old no-op update — and with any
+        // implementation that re-zeroes the moments — the second step does nothing.
+        let zero = single("w", &[0.0]);
+        let (after_two, _) = optimizer.update(&zero, &state_one, Some(&after_one)).expect("step 2");
+        let delta2 = after_one["w"].data_f32().expect("data")[0]
+            - after_two["w"].data_f32().expect("data")[0];
+        assert!(
+            delta2 > 1e-3,
+            "carried momentum must still drive step 2, moved only {delta2}"
+        );
+    }
+
+    /// Exact hand-computed heavy-ball SGD steps.
+    #[test]
+    fn jax_sgd_momentum_matches_hand_computation() {
+        let optimizer = JAXSGD::from_params(0.1, 0.9, false, None).expect("sgd");
+        let params = single("w", &[1.0]);
+        let grads = single("w", &[2.0]);
+        let state = optimizer.init(&params).expect("init");
+
+        let (after_one, state_one) =
+            optimizer.update(&grads, &state, Some(&params)).expect("step 1");
+        let value1 = after_one["w"].data_f32().expect("data")[0];
+        assert!((value1 - 0.8).abs() < 1e-6, "expected 0.8, got {value1}");
+
+        // buf = 0.9 * 2 + 2 = 3.8 → 0.8 - 0.38 = 0.42
+        let (after_two, _) =
+            optimizer.update(&grads, &state_one, Some(&after_one)).expect("step 2");
+        let value2 = after_two["w"].data_f32().expect("data")[0];
+        assert!((value2 - 0.42).abs() < 1e-5, "expected 0.42, got {value2}");
+    }
+
+    /// AdamW's decoupled decay must actually shrink a zero-gradient parameter.
+    #[test]
+    fn jax_adamw_applies_decoupled_weight_decay() {
+        let optimizer = JAXAdamW::from_params(0.1, 0.9, 0.999, 1e-8, 0.0, 0.5).expect("adamw");
+        let params = single("w", &[1.0]);
+        let grads = single("w", &[0.0]);
+        let state = optimizer.init(&params).expect("init");
+
+        let (updated, _) = optimizer.update(&grads, &state, Some(&params)).expect("update");
+        let value = updated["w"].data_f32().expect("data")[0];
+        // Δ = lr * wd * p = 0.1 * 0.5 * 1.0 = 0.05
+        assert!((value - 0.95).abs() < 1e-6, "expected 0.95, got {value}");
+    }
+
+    /// Convergence smoke test on the quadratic bowl `f(x) = Σ x²` (`∇f = 2x`).
+    #[test]
+    fn jax_adam_descends_a_quadratic_bowl() {
+        let optimizer = JAXAdam::from_params(0.1, 0.9, 0.999, 1e-8, 0.0, None).expect("adam");
+        let mut params = single("w", &[3.0, -4.0]);
+        let mut state = optimizer.init(&params).expect("init");
+
+        let loss = |p: &HashMap<String, Tensor>| -> f32 {
+            p["w"].data_f32().expect("data").iter().map(|v| v * v).sum()
+        };
+        let initial = loss(&params);
+
+        for _ in 0..200 {
+            let values = params["w"].data_f32().expect("data");
+            let grad: Vec<f32> = values.iter().map(|v| 2.0 * v).collect();
+            let grads = single("w", &grad);
+            let (next, next_state) = optimizer.update(&grads, &state, Some(&params)).expect("step");
+            params = next;
+            state = next_state;
+        }
+
+        let final_loss = loss(&params);
+        assert!(
+            final_loss < initial * 0.01,
+            "loss must decrease: {initial} -> {final_loss}"
+        );
     }
 
     #[test]

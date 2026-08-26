@@ -66,6 +66,13 @@
 
 pub mod ab_testing;
 pub mod adaptive_computation;
+// Standalone attention research module: an O(N^2) `Vec<Vec<f64>>` *reference*
+// implementation plus a flat-slice f32 FlashAttention v2, GQA/MQA/ALiBi variants
+// and sliding-window attention. It is deliberately independent of the production
+// `layers::attention` stack (which is the tensor-backed path used by models);
+// `attention` is exported for cross-checking and research, not as the default
+// inference path, so nothing here is re-exported at the crate root.
+pub mod attention;
 pub mod autodiff;
 pub mod blas;
 pub mod cache;
@@ -77,6 +84,13 @@ pub mod error;
 pub mod errors;
 pub mod evaluation;
 pub mod export;
+// Fused elementwise/linear op primitives operating on flat `&[f32]` slices,
+// consumed by `fusion_graph`. Distinct from `kernel_fusion`, which is a
+// graph-level analysis/codegen tool.
+pub mod fused;
+// Layer-fusion graph: records layer ops and detects adjacent patterns that the
+// `fused` module can execute as one pass.
+pub mod fusion_graph;
 pub mod generation;
 pub mod gpu;
 // Disabled under the `cuda` feature: these modules call the removed cudarc kernel API
@@ -94,12 +108,18 @@ mod error_tests;
 pub mod grad_checkpoint;
 #[cfg(not(feature = "cuda"))]
 pub mod hardware_acceleration;
+/// Model interpretability: attention-pattern analysis, gradient-based
+/// attribution and neuron statistics.
+pub mod interpretability;
 pub mod kernel_fusion;
 pub mod kernel_tuning;
 pub mod kernels;
 pub mod layers;
 pub mod leaderboard;
 pub mod memory;
+// Mixture-of-Experts routing (top-k / Expert-Choice / Switch / hash), load
+// balancing losses and an expert-parallel all-to-all scheduling model.
+pub mod moe;
 pub mod monitoring;
 pub mod neuromorphic;
 pub mod numa_optimization;
@@ -112,8 +132,14 @@ pub mod performance;
 pub mod plugins;
 pub mod quantization;
 pub mod quantum;
+// COO / CSR / block-sparse containers with flat-slice kernels. Complements
+// `sparse_tensor` (Tensor-backed) and `sparse_ops` (structured sparsity patterns).
+pub mod sparse;
 pub mod sparse_ops;
 pub mod sparse_tensor;
+/// Statistical primitives (Student-t, incomplete beta, Welch t-test) shared by
+/// the benchmarking and A/B-testing code.
+pub mod statistics;
 pub mod tensor;
 pub mod tensor_debugger;
 pub mod testing;
@@ -121,6 +147,10 @@ pub mod testing;
 pub mod tests;
 pub mod tokenizer_backend;
 pub mod traits;
+// Training building blocks: gradient accumulation with clipping/normalisation
+// and AMP-style mixed precision (BF16/FP16 casting, dynamic loss scaling,
+// FP32 master weights).
+pub mod training;
 #[cfg(test)]
 mod traits_tests;
 pub mod utils;
@@ -220,12 +250,9 @@ pub use export::{
     GGUFExporter, ModelExporter, ONNXExporter, TensorRTExporter, UniversalExporter,
 };
 pub use generation::{
-    FinishReason,
-    GenerationConfig,
-    GenerationStrategy,
-    GenerationStream,
-    // KVCache, // Now exported from cache module
-    // SpeculativeDecoder, TextGenerator,  // Temporarily disabled due to missing modules
+    BeamSearchConfig, BeamSearchDecoder, CFGGenerator, ConstraintValidator, FinishReason,
+    GenerationConfig, GenerationStrategy, GenerationStream, Grammar, GrammarValidator, JsonSchema,
+    JsonSchemaValidator, SamplingConfig, SamplingMethod, TextGenerator,
 };
 #[cfg(not(feature = "cuda"))]
 pub use gpu_accelerated::{GpuAcceleratedOps, GpuOpsConfig, GpuPrecision};

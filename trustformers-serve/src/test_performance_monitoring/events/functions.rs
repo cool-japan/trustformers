@@ -99,7 +99,7 @@ mod tests {
                 source_version: Some("1.0".to_string()),
                 host_info: HostInfo {
                     hostname: "localhost".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
+                    ip_address: Some("127.0.0.1".to_string()),
                     operating_system: "Linux".to_string(),
                     architecture: "x86_64".to_string(),
                     process_id: 1234,
@@ -114,13 +114,13 @@ mod tests {
                     execution_id: "exec1".to_string(),
                     parent_execution_id: None,
                     execution_environment: "test".to_string(),
-                    resource_allocation: ResourceAllocation {
+                    resource_allocation: Some(ResourceAllocation {
                         cpu_cores: 4,
                         memory_mb: 1024,
                         disk_space_mb: 10240,
                         network_bandwidth_mbps: 100.0,
                         gpu_allocation: None,
-                    },
+                    }),
                     configuration_snapshot: HashMap::new(),
                     dependency_versions: HashMap::new(),
                 },
@@ -162,7 +162,7 @@ mod tests {
                 source_version: Some("1.0".to_string()),
                 host_info: HostInfo {
                     hostname: "localhost".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
+                    ip_address: Some("127.0.0.1".to_string()),
                     operating_system: "Linux".to_string(),
                     architecture: "x86_64".to_string(),
                     process_id: 1234,
@@ -177,13 +177,13 @@ mod tests {
                     execution_id: "exec1".to_string(),
                     parent_execution_id: None,
                     execution_environment: "test".to_string(),
-                    resource_allocation: ResourceAllocation {
+                    resource_allocation: Some(ResourceAllocation {
                         cpu_cores: 4,
                         memory_mb: 1024,
                         disk_space_mb: 10240,
                         network_bandwidth_mbps: 100.0,
                         gpu_allocation: None,
-                    },
+                    }),
                     configuration_snapshot: HashMap::new(),
                     dependency_versions: HashMap::new(),
                 },

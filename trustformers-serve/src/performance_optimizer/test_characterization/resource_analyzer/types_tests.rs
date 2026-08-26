@@ -4,30 +4,46 @@ use super::types::*;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-struct Lcg { state: u64 }
+struct Lcg {
+    state: u64,
+}
 impl Lcg {
-    fn new(seed: u64) -> Self { Self { state: seed } }
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
     }
-    fn next_f64(&mut self) -> f64 { (self.next_u64() % 100000) as f64 / 100000.0 }
+    fn next_f64(&mut self) -> f64 {
+        (self.next_u64() % 100000) as f64 / 100000.0
+    }
 }
 
 #[test]
-fn test_performance_based_strategy_new() { let _ = PerformanceBasedStrategy::new(); }
+fn test_performance_based_strategy_new() {
+    let _ = PerformanceBasedStrategy::new();
+}
 
 #[test]
-fn test_hybrid_selection_strategy_new() { let _ = HybridSelectionStrategy::new(); }
+fn test_hybrid_selection_strategy_new() {
+    let _ = HybridSelectionStrategy::new();
+}
 
 #[test]
-fn test_characteristic_based_strategy_new() { let _ = CharacteristicBasedStrategy::new(); }
+fn test_characteristic_based_strategy_new() {
+    let _ = CharacteristicBasedStrategy::new();
+}
 
 #[test]
-fn test_peak_intensity_algorithm_new() { let _ = PeakIntensityAlgorithm::new(); }
+fn test_peak_intensity_algorithm_new() {
+    let _ = PeakIntensityAlgorithm::new();
+}
 
 #[test]
-fn test_mean_intensity_algorithm_new() { let _ = MeanIntensityAlgorithm::new(); }
+fn test_mean_intensity_algorithm_new() {
+    let _ = MeanIntensityAlgorithm::new();
+}
 
 #[test]
 fn test_exponential_intensity_algorithm_new() {
@@ -36,16 +52,26 @@ fn test_exponential_intensity_algorithm_new() {
 }
 
 #[test]
-fn test_weighted_intensity_algorithm_new() { let _ = WeightedIntensityAlgorithm::new(); }
+fn test_weighted_intensity_algorithm_new() {
+    let _ = WeightedIntensityAlgorithm::new();
+}
 
 #[test]
-fn test_adaptive_intensity_algorithm_new() { let _ = AdaptiveIntensityAlgorithm::new(); }
+fn test_adaptive_intensity_algorithm_new() {
+    let _ = AdaptiveIntensityAlgorithm::new();
+}
 
 #[test]
 fn test_collection_statistics_new() {
     let stats = CollectionStatistics::new();
-    assert_eq!(stats.total_snapshots.load(std::sync::atomic::Ordering::Relaxed), 0);
-    assert_eq!(stats.failed_collections.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        stats.total_snapshots.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        stats.failed_collections.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
@@ -65,25 +91,35 @@ fn test_statistics_summary_fields() {
         success_rate: 0.95,
         cache_hit_rate: 0.75,
     };
-    assert_eq!(summary.successful_analyses + summary.failed_analyses, summary.total_analyses);
+    assert_eq!(
+        summary.successful_analyses + summary.failed_analyses,
+        summary.total_analyses
+    );
 }
 
 #[test]
 fn test_resource_intensity_has_default() {
-    let ri: crate::performance_optimizer::test_characterization::types::ResourceIntensity = Default::default();
+    let ri: crate::performance_optimizer::test_characterization::types::ResourceIntensity =
+        Default::default();
     assert!((ri.io_intensity - 0.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_collection_statistics_zero_initial() {
     let stats = CollectionStatistics::new();
-    assert_eq!(stats.collection_started.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        stats.collection_started.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
 fn test_collection_statistics_zero_failed() {
     let stats = CollectionStatistics::new();
-    assert_eq!(stats.collection_stopped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        stats.collection_stopped.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[test]
@@ -113,7 +149,9 @@ fn test_selection_preferences_creation() {
 fn test_lcg_deterministic() {
     let mut a = Lcg::new(42);
     let mut b = Lcg::new(42);
-    for _ in 0..50 { assert_eq!(a.next_u64(), b.next_u64()); }
+    for _ in 0..50 {
+        assert_eq!(a.next_u64(), b.next_u64());
+    }
 }
 
 #[test]
@@ -121,25 +159,29 @@ fn test_lcg_f64_range() {
     let mut lcg = Lcg::new(42);
     for _ in 0..100 {
         let v = lcg.next_f64();
-        assert!(v >= 0.0 && v < 1.0);
+        assert!((0.0..1.0).contains(&v));
     }
 }
 
 #[test]
 fn test_resource_intensity_default() {
-    let ri: crate::performance_optimizer::test_characterization::types::ResourceIntensity = Default::default();
+    let ri: crate::performance_optimizer::test_characterization::types::ResourceIntensity =
+        Default::default();
     assert!((ri.cpu_intensity - 0.0).abs() < f64::EPSILON);
     assert!((ri.memory_intensity - 0.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_pid_sample_rate_algorithm() {
-    let _ = crate::performance_optimizer::real_time_metrics::collector::PidSampleRateAlgorithm::new();
+    let _ =
+        crate::performance_optimizer::real_time_metrics::collector::PidSampleRateAlgorithm::new();
 }
 
 #[test]
 fn test_impact_recommendation_engine() {
-    let _ = crate::performance_optimizer::real_time_metrics::collector::ImpactRecommendationEngine::new();
+    let _ =
+        crate::performance_optimizer::real_time_metrics::collector::ImpactRecommendationEngine::new(
+        );
 }
 
 #[test]

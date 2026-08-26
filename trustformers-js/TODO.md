@@ -1523,10 +1523,10 @@ npm run demo:classifier     # Launch image classifier demo
 
 ---
 
-**Last Updated:** 2025-11-10 (Session 4 completed)
+**Last Updated:** 2026-07-09 (Session 4 completed)
 **Status:** Production-ready JavaScript/TypeScript bindings with full test coverage and documentation
 **NPM:** Available as `trustformers-js` package
-**Version:** 0.1.4
+**Version:** 0.2.1
 **Test Coverage:** ✅ Comprehensive (Session 3 features: 100%)
 **TypeScript Support:** ✅ Full definitions
 **Documentation:** ✅ Complete API reference

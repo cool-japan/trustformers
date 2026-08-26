@@ -10,6 +10,12 @@ pub mod framework;
 pub mod providers;
 pub mod results;
 
+// `device_farm_tests.rs` existed in the tree without a `mod` declaration, so
+// none of its tests were ever compiled or run. Wired in here.
+#[cfg(test)]
+#[path = "device_farm_tests.rs"]
+mod device_farm_tests;
+
 // Re-export key types from submodules
 pub use config::*;
 pub use device_farm::{
@@ -143,59 +149,39 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// Detect current device information (simplified implementation)
+    /// Describe the machine this process is running on, measured.
+    ///
+    /// RAM comes from the same real detector the rest of the crate uses
+    /// ([`crate::device_info::MobileDeviceDetector`]); total storage from
+    /// `sysinfo::Disks`; OS and architecture from the build target. Screen
+    /// resolution and the sensor list have no portable source, so they are
+    /// reported as absent/empty.
+    ///
+    /// The previous body returned one of three fixed device descriptions per
+    /// compilation target (an "iPhone" with 6 GB / 128 GB / 1170x2532, a
+    /// "Generic Android" with 8 GB / 256 GB / 1080x2340, or a 4 GB / 64 GB
+    /// fallback) regardless of the actual machine, which
+    /// [`Self::meets_requirements`] and [`Self::get_performance_tier`] then
+    /// answered from.
     pub fn detect_current_device() -> Result<Self> {
-        // This would normally use platform-specific APIs to detect device info
-        // For now, return a mock device based on compilation target
+        let detected = crate::device_info::MobileDeviceDetector::detect()?;
 
-        #[cfg(target_os = "ios")]
-        return Ok(Self {
-            device_name: "ios-device".to_string(),
-            os_name: "iOS".to_string(),
-            os_version: "17.0".to_string(),
-            device_type: DeviceType::Phone,
-            hardware_model: "iPhone".to_string(),
-            cpu_architecture: "arm64".to_string(),
-            ram_mb: 6144,
-            storage_gb: 128,
-            screen_resolution: (1170, 2532),
-            sensors: vec![
-                "camera".to_string(),
-                "lidar".to_string(),
-                "accelerometer".to_string(),
-            ],
-        });
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let storage_gb = (disks.iter().map(|disk| disk.total_space()).max().unwrap_or(0)
+            / (1024 * 1024 * 1024)) as usize;
 
-        #[cfg(target_os = "android")]
-        return Ok(Self {
-            device_name: "android-device".to_string(),
-            os_name: "Android".to_string(),
-            os_version: "14".to_string(),
-            device_type: DeviceType::Phone,
-            hardware_model: "Generic Android".to_string(),
-            cpu_architecture: "aarch64".to_string(),
-            ram_mb: 8192,
-            storage_gb: 256,
-            screen_resolution: (1080, 2340),
-            sensors: vec![
-                "camera".to_string(),
-                "fingerprint".to_string(),
-                "accelerometer".to_string(),
-            ],
-        });
-
-        // Default for other platforms
         Ok(Self {
-            device_name: "generic-device".to_string(),
-            os_name: "Unknown".to_string(),
-            os_version: "Unknown".to_string(),
+            device_name: detected.basic_info.hardware_id.clone(),
+            os_name: std::env::consts::OS.to_string(),
+            os_version: detected.basic_info.os_version.clone(),
             device_type: DeviceType::Generic,
-            hardware_model: "Generic Device".to_string(),
-            cpu_architecture: "unknown".to_string(),
-            ram_mb: 4096,
-            storage_gb: 64,
-            screen_resolution: (1080, 1920),
-            sensors: vec!["camera".to_string()],
+            hardware_model: detected.basic_info.model.clone(),
+            cpu_architecture: std::env::consts::ARCH.to_string(),
+            ram_mb: detected.memory_info.total_mb,
+            storage_gb,
+            // No portable API reports these for a host process.
+            screen_resolution: (0, 0),
+            sensors: Vec::new(),
         })
     }
 

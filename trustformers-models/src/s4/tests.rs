@@ -67,7 +67,7 @@ fn test_discretization_stability() {
     ];
 
     for method in methods {
-        let (a_bar, b_bar) = method.discretize(&a, &b, dt);
+        let (a_bar, b_bar) = method.discretize(&a, &b, dt).expect("discretization must succeed");
 
         // Check dimensions preserved
         assert_eq!(a_bar.shape(), &[n, n]);

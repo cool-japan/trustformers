@@ -5,13 +5,20 @@ pub mod factory;
 pub mod ggml;
 pub mod gguf;
 pub mod gguf_enhanced;
+pub mod gguf_format;
 pub mod nnef;
 pub mod onnx;
+pub mod onnx_cpu;
+pub mod onnx_optimize;
+pub mod onnx_proto;
 pub mod onnx_runtime;
 pub mod openvino;
 pub mod optimization;
 pub mod tensorrt;
 pub mod tvm;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use async_export::{
     export_model_async, AsyncExportHandle, AsyncExportManager, ExportProgress, ExportStep,
@@ -35,8 +42,47 @@ pub use optimization::{
 pub use tensorrt::*;
 pub use tvm::*;
 
-use crate::traits::Model;
-use anyhow::Result;
+use crate::tensor::Tensor;
+use crate::traits::{Config, Model};
+use anyhow::{anyhow, Result};
+
+/// Collects the real parameters of `model` for serialisation.
+///
+/// Every exporter in this module routes through this function so that no exporter
+/// can ever write invented weights: a model that does not override
+/// [`Model::named_tensors`] yields an error
+/// instead of a plausible-looking file.
+///
+/// # Errors
+///
+/// Returns an error when the model exposes no named tensors, or when two
+/// parameters share a name (which would silently drop one of them).
+pub fn collect_model_tensors<M: Model>(model: &M) -> Result<Vec<(String, Tensor)>> {
+    let named = model.named_tensors();
+    if named.is_empty() {
+        return Err(anyhow!(
+            "model '{}' exposes no named tensors: `Model::named_tensors` is not implemented for \
+             this type, so there are no real weights to export. Implement `named_tensors` (and \
+             `named_tensors_mut`) for the model; exporters refuse to synthesise weights.",
+            model.get_config().architecture()
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(named.len());
+    let mut tensors = Vec::with_capacity(named.len());
+    for (name, tensor) in named {
+        if !seen.insert(name.clone()) {
+            return Err(anyhow!(
+                "model '{}' returned duplicate tensor name '{}' from `named_tensors`",
+                model.get_config().architecture(),
+                name
+            ));
+        }
+        tensors.push((name, tensor.clone()));
+    }
+
+    Ok(tensors)
+}
 
 /// Supported export formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

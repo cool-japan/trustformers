@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     sync::{broadcast, mpsc, Mutex, RwLock, Semaphore},
-    time::{sleep, timeout},
+    time::timeout,
 };
 
 /// GPU memory scheduling configuration
@@ -298,6 +298,22 @@ pub struct GpuScheduler {
 
     /// Round-robin counter
     round_robin_counter: Arc<Mutex<usize>>,
+
+    /// Executor that performs the real GPU work. Without one, submitted tasks
+    /// fail with an explicit error instead of being simulated.
+    executor: Arc<RwLock<Option<Arc<dyn GpuTaskExecutor>>>>,
+}
+
+/// Performs the real work of a scheduled GPU task.
+///
+/// The scheduler owns placement, admission and accounting; the executor owns the
+/// kernel launch or model step. There is no default implementation: a scheduler
+/// without an executor reports an error rather than sleeping and claiming
+/// success.
+#[async_trait::async_trait]
+pub trait GpuTaskExecutor: Send + Sync {
+    /// Execute `task` on `gpu_id`.
+    async fn execute(&self, task: &GpuTask, gpu_id: usize) -> Result<()>;
 }
 
 /// GPU scheduler events
@@ -397,11 +413,22 @@ impl GpuScheduler {
             task_handles: Arc::new(Mutex::new(Vec::new())),
             gpu_semaphores: Arc::new(RwLock::new(gpu_semaphores)),
             round_robin_counter: Arc::new(Mutex::new(0)),
+            executor: Arc::new(RwLock::new(None)),
         };
 
         scheduler.start_background_tasks(task_receiver);
 
         scheduler
+    }
+
+    /// Install the executor that performs the real GPU work.
+    pub async fn set_executor(&self, executor: Arc<dyn GpuTaskExecutor>) {
+        *self.executor.write().await = Some(executor);
+    }
+
+    /// Whether an executor capable of running GPU work is installed.
+    pub async fn has_executor(&self) -> bool {
+        self.executor.read().await.is_some()
     }
 
     /// Start the GPU scheduler
@@ -837,10 +864,10 @@ impl GpuScheduler {
             let start_time = Instant::now();
             let started_at = chrono::Utc::now();
 
-            // Simulate task execution
+            // Run the task on the registered executor.
             let execution_result = timeout(
                 Duration::from_secs(self.config.task_timeout_seconds),
-                self.simulate_task_execution(&task, gpu_id),
+                self.run_task(&task, gpu_id),
             )
             .await;
 
@@ -921,33 +948,29 @@ impl GpuScheduler {
         }
     }
 
-    /// Simulate task execution
-    async fn simulate_task_execution(&self, task: &GpuTask, _gpu_id: usize) -> Result<()> {
-        // Use hash-based randomness (Send-safe)
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        task.task_id.hash(&mut hasher);
-        let hash1 = hasher.finish();
+    /// Run a task through the registered [`GpuTaskExecutor`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no executor is registered. No sleep stands in for
+    /// GPU work, and no synthetic failure rate is injected: every failure this
+    /// scheduler reports came from the executor.
+    async fn run_task(&self, task: &GpuTask, gpu_id: usize) -> Result<()> {
+        let executor = {
+            let executor = self.executor.read().await;
+            executor.clone()
+        };
 
-        task.task_type.hash(&mut hasher);
-        let hash2 = hasher.finish();
+        let executor = executor.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no GPU task executor is registered; call GpuScheduler::set_executor before \
+                 submitting work (task {} targeted GPU {})",
+                task.task_id,
+                gpu_id
+            )
+        })?;
 
-        // Simulate processing time
-        let processing_time = Duration::from_millis(
-            (task.estimated_duration_seconds * 1000) + (hash1 % 1000), // Add some randomness
-        );
-
-        sleep(processing_time).await;
-
-        // Simulate occasional failures
-        let failure_value = (hash2 % 100) as f64 / 100.0;
-        if failure_value < 0.05 {
-            // 5% failure rate
-            return Err(anyhow::anyhow!("Simulated task failure"));
-        }
-
-        Ok(())
+        executor.execute(task, gpu_id).await
     }
 
     /// Update GPU memory usage
@@ -1015,13 +1038,63 @@ impl GpuScheduler {
         });
     }
 
-    /// Update GPU memory monitoring
+    /// Refresh GPU memory status from the driver.
+    ///
+    /// Devices whose telemetry the driver does not report keep their last known
+    /// figures and are left with a stale `last_updated`, so a consumer can tell
+    /// measured data from data that could not be refreshed.
     async fn update_gpu_memory_monitoring(&self) {
-        // This would integrate with actual GPU monitoring libraries
-        // For now, we just update the timestamp
-        let mut gpu_status = self.gpu_status.write().await;
-        for status in gpu_status.values_mut() {
-            status.last_updated = chrono::Utc::now();
+        let ids: Vec<usize> = {
+            let gpu_status = self.gpu_status.read().await;
+            gpu_status.keys().copied().collect()
+        };
+
+        for gpu_id in ids {
+            let sample =
+                crate::resource_management::gpu_manager::GpuResourceManager::device_telemetry(
+                    gpu_id,
+                )
+                .await;
+
+            match sample {
+                Ok(Some(sample)) => {
+                    // Each reading is written only when the driver actually
+                    // reported it. 0.2.1: the telemetry sample used to fall
+                    // back to `0` for an unreadable sensor, so this wrote
+                    // "0 MB used, 0% utilized" -- a perfectly idle GPU -- into
+                    // the status table whenever a sensor was unavailable.
+                    let mut gpu_status = self.gpu_status.write().await;
+                    if let Some(status) = gpu_status.get_mut(&gpu_id) {
+                        let mut updated = false;
+                        if let Some(memory_used_mb) = sample.memory_used_mb {
+                            status.used_memory_mb = memory_used_mb as usize;
+                            updated = true;
+                        }
+                        if let Some(utilization_percent) = sample.utilization_percent {
+                            status.utilization_percent = utilization_percent;
+                            updated = true;
+                        }
+                        if updated {
+                            status.last_updated = chrono::Utc::now();
+                        } else {
+                            tracing::debug!(
+                                "GPU {} telemetry carried no memory or utilization reading; \
+                                 leaving its status unchanged",
+                                gpu_id
+                            );
+                        }
+                    }
+                },
+                Ok(None) => {
+                    tracing::debug!(
+                        "no driver telemetry for GPU {}; leaving its status unchanged",
+                        gpu_id
+                    );
+                },
+                Err(e) => {
+                    tracing::warn!("GPU {} telemetry query failed: {}", gpu_id, e);
+                },
+            }
         }
     }
 
@@ -1065,6 +1138,7 @@ impl Clone for GpuScheduler {
             task_handles: Arc::clone(&self.task_handles),
             gpu_semaphores: Arc::clone(&self.gpu_semaphores),
             round_robin_counter: Arc::clone(&self.round_robin_counter),
+            executor: Arc::clone(&self.executor),
         }
     }
 }
@@ -1134,5 +1208,94 @@ mod tests {
 
         let status = scheduler.get_task_status(&task_id).await;
         assert!(status.is_some());
+    }
+
+    /// Regression: the scheduler used to sleep and inject a synthetic 5% failure
+    /// rate. Without an executor it must now fail loudly; with one, the
+    /// executor's own result is what is reported.
+    #[tokio::test]
+    async fn scheduler_requires_a_real_executor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let scheduler = GpuScheduler::new(GpuSchedulerConfig::default());
+        assert!(!scheduler.has_executor().await);
+
+        let task = GpuTask {
+            task_id: "task-1".to_string(),
+            required_memory_mb: 1,
+            estimated_duration_seconds: 0,
+            priority: 1,
+            task_type: "inference".to_string(),
+            client_id: None,
+            metadata: HashMap::new(),
+            created_at: chrono::Utc::now(),
+            preemptible: false,
+        };
+
+        let error = scheduler
+            .run_task(&task, 0)
+            .await
+            .expect_err("a scheduler without an executor must not claim success");
+        assert!(error.to_string().contains("no GPU task executor is registered"));
+
+        #[derive(Debug)]
+        struct CountingExecutor {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl GpuTaskExecutor for CountingExecutor {
+            async fn execute(&self, _task: &GpuTask, _gpu_id: usize) -> Result<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        scheduler
+            .set_executor(Arc::new(CountingExecutor {
+                calls: Arc::clone(&calls),
+            }))
+            .await;
+        assert!(scheduler.has_executor().await);
+
+        scheduler.run_task(&task, 0).await.expect("the executor must be used");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Regression: no synthetic failure rate may be injected. Running the same
+    /// task many times through an always-succeeding executor must never fail.
+    #[tokio::test]
+    async fn no_synthetic_failures_are_injected() {
+        #[derive(Debug)]
+        struct AlwaysOk;
+
+        #[async_trait::async_trait]
+        impl GpuTaskExecutor for AlwaysOk {
+            async fn execute(&self, _task: &GpuTask, _gpu_id: usize) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let scheduler = GpuScheduler::new(GpuSchedulerConfig::default());
+        scheduler.set_executor(Arc::new(AlwaysOk)).await;
+
+        for i in 0..200 {
+            let task = GpuTask {
+                task_id: format!("task-{i}"),
+                required_memory_mb: 1,
+                estimated_duration_seconds: 0,
+                priority: 1,
+                task_type: "inference".to_string(),
+                client_id: None,
+                metadata: HashMap::new(),
+                created_at: chrono::Utc::now(),
+                preemptible: false,
+            };
+            scheduler
+                .run_task(&task, 0)
+                .await
+                .unwrap_or_else(|e| panic!("task {i} must not fail spuriously: {e}"));
+        }
     }
 }

@@ -24,14 +24,11 @@ spec:
     ports:
     - protocol: TCP
       port: 8080
-  # Allow traffic from monitoring namespace
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: monitoring
-    ports:
-    - protocol: TCP
-      port: 8080
+  # A previous version of this policy also allowed a `monitoring` namespace
+  # in on this port for Prometheus scraping. trustformers-server exposes no
+  # /metrics endpoint (verified against src/main.rs's route table), so there
+  # was nothing there for a scraper to reach; the rule granted network access
+  # for a capability that does not exist and has been removed.
   # Allow traffic from same namespace
   - from:
     - podSelector: {}

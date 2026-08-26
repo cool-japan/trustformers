@@ -30,7 +30,7 @@ pub struct WeightMappingRule {
 }
 
 /// Transformations that may be needed when converting weights
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WeightTransform {
     /// No transformation
     Identity,
@@ -50,6 +50,39 @@ pub enum WeightTransform {
 pub enum ConvFormat {
     NCHW, // PyTorch default
     NHWC, // TensorFlow default
+}
+
+impl WeightTransform {
+    /// The transform that undoes this one.
+    ///
+    /// `None` for transforms that cannot be inverted from the transform alone:
+    /// `Reshape` (the original shape is not recorded) and `Split`/`Merge`
+    /// (they change the number of tensors).
+    pub fn inverse(&self) -> Option<WeightTransform> {
+        match self {
+            WeightTransform::Identity => Some(WeightTransform::Identity),
+            // A permutation is its own kind of inverse: invert the permutation.
+            WeightTransform::Transpose(permutation) => {
+                let mut inverse = vec![0usize; permutation.len()];
+                for (position, axis) in permutation.iter().enumerate() {
+                    if *axis >= permutation.len() {
+                        return None;
+                    }
+                    inverse[*axis] = position;
+                }
+                Some(WeightTransform::Transpose(inverse))
+            },
+            WeightTransform::ConvFormat { from, to } => Some(WeightTransform::ConvFormat {
+                from: *to,
+                to: *from,
+            }),
+            // The pre-reshape shape is not recorded, so this cannot be undone.
+            WeightTransform::Reshape(_) => None,
+            // These change the tensor count; the inverse is the other one, but
+            // the conversion pipeline has no multi-tensor path to apply it.
+            WeightTransform::Split { .. } | WeightTransform::Merge { .. } => None,
+        }
+    }
 }
 
 impl WeightMapping {
@@ -78,25 +111,136 @@ impl WeightMapping {
         Ok((self.default_pytorch_to_tf(name), None))
     }
 
-    /// Map TensorFlow weight name to PyTorch format
+    /// Map a TensorFlow weight name back to PyTorch format.
+    ///
+    /// The forward rules are applied in reverse: the rule whose *replacement*
+    /// produced this name is found and its transform is inverted. Dropping the
+    /// transform (as this used to) silently produced transposed weights,
+    /// because TensorFlow stores dense kernels as `[in, out]` and PyTorch as
+    /// `[out, in]`.
+    ///
+    /// Rules whose transform has no inverse (`Split` / `Merge`) are reported as
+    /// an error rather than mapped without their transform.
     pub fn tensorflow_to_pytorch(&self, name: &str) -> Result<(String, Option<WeightTransform>)> {
-        // Reverse mapping - this is simplified, in practice we'd need reverse rules
+        for rule in &self.rules {
+            // The forward direction rewrote `pattern` into `replacement`;
+            // recognise the rewritten form to walk back.
+            let Some(reverse) = Self::reverse_pattern(rule) else {
+                continue;
+            };
+            if !reverse.is_match(name) {
+                continue;
+            }
+
+            let original = reverse.replace(name, Self::pattern_template(rule)).to_string();
+            let transform = match &rule.transform {
+                None => None,
+                Some(transform) => Some(transform.inverse().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "weight '{}' maps back through a {:?} transform, which has no inverse",
+                        name,
+                        transform
+                    )
+                })?),
+            };
+            return Ok((original, transform));
+        }
+
         Ok((self.default_tf_to_pytorch(name), None))
     }
 
-    /// Map JAX weight name to PyTorch format
+    /// Build the regex that recognises a rule's *output* names.
+    ///
+    /// Returns `None` for replacements that use capture groups, which cannot be
+    /// mechanically reversed; such a rule is skipped rather than mis-applied.
+    fn reverse_pattern(rule: &WeightMappingRule) -> Option<Regex> {
+        if !rule.replacement.contains('$') {
+            // A literal replacement: match it exactly.
+            return Regex::new(&format!("^{}$", regex::escape(&rule.replacement))).ok();
+        }
+
+        // `foo/$1/bar` -> `^foo/(.+)/bar$`, so the captured text can be put back.
+        let mut pattern = String::from("^");
+        let mut characters = rule.replacement.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '$' {
+                // Skip the group number.
+                while characters.peek().is_some_and(|next| next.is_ascii_digit()) {
+                    characters.next();
+                }
+                pattern.push_str("(.+)");
+            } else {
+                pattern.push_str(&regex::escape(&character.to_string()));
+            }
+        }
+        pattern.push('$');
+        Regex::new(&pattern).ok()
+    }
+
+    /// The template that rebuilds a PyTorch name from a reversed match.
+    ///
+    /// The forward `pattern` is a regex; its literal parts plus `$n` for each
+    /// capture group reconstruct the original name.
+    fn pattern_template(rule: &WeightMappingRule) -> String {
+        let source = rule.pattern.as_str();
+        let mut template = String::with_capacity(source.len());
+        let mut group = 0usize;
+        let mut characters = source.chars().peekable();
+
+        while let Some(character) = characters.next() {
+            match character {
+                '^' | '$' => {},
+                '\\' => {
+                    // Escaped literal: keep the escaped character.
+                    if let Some(next) = characters.next() {
+                        template.push(next);
+                    }
+                },
+                '(' => {
+                    group += 1;
+                    template.push_str(&format!("${}", group));
+                    // Skip to the matching ')'.
+                    let mut depth = 1;
+                    for inner in characters.by_ref() {
+                        match inner {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            },
+                            _ => {},
+                        }
+                    }
+                },
+                other => template.push(other),
+            }
+        }
+
+        template
+    }
+
+    /// Map JAX weight name to PyTorch format.
+    ///
+    /// JAX/Flax parameter trees use `.`-separated paths under `params`; the
+    /// PyTorch equivalent is the same path with `.` separators, so only the
+    /// `params.` prefix is stripped. Replacing every `.` with `_` (as this used
+    /// to) destroyed the module hierarchy and produced names no PyTorch
+    /// state dict contains.
     pub fn jax_to_pytorch(&self, name: &str) -> Result<(String, Option<WeightTransform>)> {
-        // JAX uses hierarchical names with dots
-        let pytorch_name = name.replace("params.", "").replace(".", "_");
+        let pytorch_name = name.strip_prefix("params.").unwrap_or(name).to_string();
         Ok((pytorch_name, None))
     }
 
-    /// Map PyTorch weight name to JAX format
+    /// Map PyTorch weight name to JAX format.
+    ///
+    /// Inverse of [`Self::jax_to_pytorch`]: the `.`-separated PyTorch path is
+    /// kept as-is under a `params.` prefix. Splitting on `_` (as this used to)
+    /// mangled every name containing an underscore, such as
+    /// `layer_norm.weight`.
     pub fn pytorch_to_jax(&self, name: &str) -> Result<(String, Option<WeightTransform>)> {
-        // Convert underscores to dots for JAX hierarchical structure
-        let parts: Vec<&str> = name.split('_').collect();
-        let jax_name = format!("params.{}", parts.join("."));
-        Ok((jax_name, None))
+        Ok((format!("params.{}", name), None))
     }
 
     fn bert_rules() -> Result<Vec<WeightMappingRule>> {
@@ -380,6 +524,100 @@ impl LayerMapping {
 mod tests {
     use super::*;
 
+    /// Regression test: `WeightTransform` had no inverse, so
+    /// `tensorflow_to_pytorch` dropped every transform and silently produced
+    /// transposed weights.
+    #[test]
+    fn test_transform_inverses() {
+        assert_eq!(
+            WeightTransform::Identity.inverse(),
+            Some(WeightTransform::Identity)
+        );
+
+        // Inverting a permutation twice is the identity permutation.
+        let permutation = WeightTransform::Transpose(vec![2, 0, 1]);
+        let inverse = permutation.inverse().expect("a permutation is invertible");
+        assert_eq!(inverse, WeightTransform::Transpose(vec![1, 2, 0]));
+        assert_eq!(inverse.inverse(), Some(permutation));
+
+        // A simple 2-D transpose is its own inverse.
+        let swap = WeightTransform::Transpose(vec![1, 0]);
+        assert_eq!(swap.inverse(), Some(swap.clone()));
+
+        assert_eq!(
+            WeightTransform::ConvFormat {
+                from: ConvFormat::NCHW,
+                to: ConvFormat::NHWC
+            }
+            .inverse(),
+            Some(WeightTransform::ConvFormat {
+                from: ConvFormat::NHWC,
+                to: ConvFormat::NCHW
+            })
+        );
+
+        // These genuinely have no in-place inverse and must say so.
+        assert!(WeightTransform::Reshape(vec![-1, 8]).inverse().is_none());
+        assert!(WeightTransform::Split {
+            axis: 0,
+            sizes: vec![1, 1]
+        }
+        .inverse()
+        .is_none());
+        assert!(WeightTransform::Merge { axis: 0 }.inverse().is_none());
+    }
+
+    /// The reverse mapping must carry the inverted transform, not `None`.
+    #[test]
+    fn test_reverse_mapping_carries_the_inverse_transform() -> Result<()> {
+        let mapping = WeightMapping {
+            rules: vec![WeightMappingRule {
+                pattern: Regex::new(r"^encoder\.dense\.weight$")?,
+                replacement: "encoder/dense/kernel".to_string(),
+                transform: Some(WeightTransform::Transpose(vec![1, 0])),
+            }],
+            model_type: ModelType::Generic,
+        };
+
+        let (tf_name, forward_transform) = mapping.pytorch_to_tensorflow("encoder.dense.weight")?;
+        assert_eq!(tf_name, "encoder/dense/kernel");
+        assert_eq!(
+            forward_transform,
+            Some(WeightTransform::Transpose(vec![1, 0]))
+        );
+
+        let (pt_name, reverse_transform) = mapping.tensorflow_to_pytorch("encoder/dense/kernel")?;
+        assert_eq!(pt_name, "encoder.dense.weight", "the name must round-trip");
+        assert_eq!(
+            reverse_transform,
+            Some(WeightTransform::Transpose(vec![1, 0])),
+            "the reverse direction must transpose back, not silently skip it"
+        );
+        assert!(
+            reverse_transform.is_some(),
+            "dropping the transform is what produced transposed weights"
+        );
+
+        Ok(())
+    }
+
+    /// JAX names must keep their module hierarchy in both directions.
+    #[test]
+    fn test_jax_name_mapping_round_trips() -> Result<()> {
+        let mapping = WeightMapping::new(ModelType::Generic);
+
+        let (jax, _) = mapping.pytorch_to_jax("encoder.layer_norm.weight")?;
+        assert_eq!(jax, "params.encoder.layer_norm.weight");
+
+        let (pytorch, _) = mapping.jax_to_pytorch(&jax)?;
+        assert_eq!(
+            pytorch, "encoder.layer_norm.weight",
+            "the underscore in layer_norm must survive the round trip"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_bert_mapping() {
         let mapping = WeightMapping::new(ModelType::BERT);
@@ -407,18 +645,21 @@ mod tests {
         assert!(matches!(transform, Some(WeightTransform::Transpose(_))));
     }
 
+    /// Regression test: this used to assert the `_`-splitting behaviour, which
+    /// mangled any PyTorch name containing an underscore. PyTorch state dict
+    /// keys are `.`-separated; the mapping must preserve them.
     #[test]
     fn test_jax_mapping() {
         let mapping = WeightMapping::new(ModelType::Generic);
 
         let (jax_name, _) = mapping
-            .pytorch_to_jax("encoder_layer_0_attention_query_weight")
+            .pytorch_to_jax("encoder.layer.0.attention.query.weight")
             .expect("operation failed in test");
         assert_eq!(jax_name, "params.encoder.layer.0.attention.query.weight");
 
         let (pytorch_name, _) = mapping
             .jax_to_pytorch("params.encoder.layer.0.attention.query.weight")
             .expect("operation failed in test");
-        assert_eq!(pytorch_name, "encoder_layer_0_attention_query_weight");
+        assert_eq!(pytorch_name, "encoder.layer.0.attention.query.weight");
     }
 }

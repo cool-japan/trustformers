@@ -132,7 +132,12 @@ impl AsciiLossPlotter {
         }
 
         // x-axis
-        out.push(format!("{:>width$}+{}", "", separator, width = y_label_width));
+        out.push(format!(
+            "{:>width$}+{}",
+            "",
+            separator,
+            width = y_label_width
+        ));
         // x labels
         let step_range = x_max - x_min;
         let left = format!("{}", x_min);
@@ -285,11 +290,7 @@ impl GradientHistogram {
                 // Linear interpolation within bucket i.
                 let lo = self.buckets[i];
                 let hi = self.buckets[i + 1];
-                let bucket_frac = if count == 0 {
-                    0.0
-                } else {
-                    (target - cum) / count as f32
-                };
+                let bucket_frac = if count == 0 { 0.0 } else { (target - cum) / count as f32 };
                 return lo + bucket_frac * (hi - lo);
             }
             cum = next;
@@ -311,11 +312,9 @@ impl GradientHistogram {
             let lo = self.buckets[i];
             let hi = self.buckets[i + 1];
             let cnt = self.counts[i];
-            let bar_len = if max_count == 0 {
-                0
-            } else {
-                (cnt * bar_width) / max_count
-            };
+            // `checked_div` covers the empty-histogram case (max_count == 0)
+            // in one step; the bar is then zero-length.
+            let bar_len = (cnt * bar_width).checked_div(max_count).unwrap_or(0);
             let bar = "█".repeat(bar_len);
             out.push_str(&format!(
                 "[{:>8.3e},{:>8.3e}) {:>6} |{}\n",
@@ -388,11 +387,8 @@ impl ActivationLayerStats {
             running_m2 += delta * delta2;
         }
 
-        let std_val = if activations.len() > 1 {
-            (running_m2 / (n - 1.0)).sqrt() as f32
-        } else {
-            0.0
-        };
+        let std_val =
+            if activations.len() > 1 { (running_m2 / (n - 1.0)).sqrt() as f32 } else { 0.0 };
 
         // Saturation: |v| > 0.99 * max_abs.
         let max_abs = min_val.abs().max(max_val.abs());
@@ -446,7 +442,10 @@ pub struct AttentionVisualizer {
 
 impl AttentionVisualizer {
     pub fn new(head_idx: usize, layer_idx: usize) -> Self {
-        Self { head_idx, layer_idx }
+        Self {
+            head_idx,
+            layer_idx,
+        }
     }
 
     /// Render an attention matrix as a compact ASCII heatmap.
@@ -505,7 +504,11 @@ impl AttentionVisualizer {
             .iter()
             .filter_map(|&p| {
                 let pn = p / scale;
-                if pn > 0.0 { Some(pn * pn.ln()) } else { None }
+                if pn > 0.0 {
+                    Some(pn * pn.ln())
+                } else {
+                    None
+                }
             })
             .sum::<f32>()
     }
@@ -766,7 +769,11 @@ mod tests {
         // All mass on one token → entropy = 0.
         let row = vec![0.0_f32, 0.0, 1.0, 0.0];
         let h = AttentionVisualizer::entropy(&row);
-        assert!(h < 1e-4, "entropy for concentrated distribution should be ~0, got {}", h);
+        assert!(
+            h < 1e-4,
+            "entropy for concentrated distribution should be ~0, got {}",
+            h
+        );
     }
 
     #[test]
@@ -777,7 +784,7 @@ mod tests {
     #[test]
     fn test_attention_all_entropies_per_row() {
         let matrix = vec![
-            vec![0.25_f32; 4],  // uniform
+            vec![0.25_f32; 4],        // uniform
             vec![0.0, 0.0, 1.0, 0.0], // concentrated
         ];
         let entropies = AttentionVisualizer::all_entropies(&matrix);

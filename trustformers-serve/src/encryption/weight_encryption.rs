@@ -1,9 +1,24 @@
-//! Model Weight Encryption using ChaCha20 Stream Cipher
+//! Model Weight Encryption using ChaCha20-Poly1305
 //!
-//! Pure-Rust weight encryption using ChaCha20 stream cipher for secure
-//! model deployment and serving. For production use, consider a formally
-//! verified cryptographic library.
+//! Pure-Rust weight encryption for secure model deployment and serving.
+//!
+//! Layer payloads are protected with the RFC 8439 ChaCha20-Poly1305 AEAD from
+//! the RustCrypto [`chacha20poly1305`] crate: the Poly1305 tag is a real
+//! message authentication code, so a modified ciphertext, a modified nonce, a
+//! modified layer id or a wrong key all fail authentication. Keys are derived
+//! from the password with PBKDF2-HMAC-SHA256, which — unlike a non-cryptographic
+//! hash — cannot be inverted or brute-forced cheaply and does not collapse the
+//! password's entropy into a single 64-bit accumulator.
+//!
+//! The hand-written ChaCha20 core below (quarter round, block function, keystream
+//! XOR) is retained as a verified low-level building block and is covered by the
+//! RFC 7539 test vectors, but it is **not** used on its own for weight
+//! protection: a bare stream cipher provides no integrity.
 
+use chacha20poly1305::aead::{AeadInOut, KeyInit, Nonce, Tag};
+use chacha20poly1305::ChaCha20Poly1305;
+use hmac::Hmac;
+use sha2::Sha256;
 use std::fmt;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13,8 +28,14 @@ use std::fmt;
 /// Errors produced by weight encryption operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WeightEncryptionError {
-    /// Checksum mismatch during decryption — data is corrupt or tampered.
-    ChecksumMismatch { expected: u32, actual: u32 },
+    /// Poly1305 tag verification failed — the blob was tampered with, the layer
+    /// id does not match, or the key/password is wrong.
+    AuthenticationFailed,
+    /// Key derivation rejected its parameters (for example a zero iteration
+    /// count).
+    KeyDerivationFailed(String),
+    /// The AEAD implementation rejected the input (message too long).
+    CipherRejectedInput(String),
     /// Ciphertext length is not a valid multiple for decryption.
     InvalidCiphertextLength(usize),
     /// Byte slice length is not a multiple of 4 and cannot be converted to f32 slice.
@@ -28,11 +49,13 @@ pub enum WeightEncryptionError {
 impl fmt::Display for WeightEncryptionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ChecksumMismatch { expected, actual } => write!(
+            Self::AuthenticationFailed => write!(
                 f,
-                "Adler-32 checksum mismatch: expected {:#010x}, got {:#010x}",
-                expected, actual
+                "Poly1305 authentication failed: the encrypted weights are tampered, \
+                 mislabelled or were produced with a different key"
             ),
+            Self::KeyDerivationFailed(msg) => write!(f, "Key derivation failed: {msg}"),
+            Self::CipherRejectedInput(msg) => write!(f, "Cipher rejected input: {msg}"),
             Self::InvalidCiphertextLength(n) => {
                 write!(f, "Invalid ciphertext length: {} bytes", n)
             },
@@ -42,7 +65,11 @@ impl fmt::Display for WeightEncryptionError {
                 n
             ),
             Self::LayerIndexOutOfRange(idx) => {
-                write!(f, "Layer index {} is out of range for nonce construction", idx)
+                write!(
+                    f,
+                    "Layer index {} is out of range for nonce construction",
+                    idx
+                )
             },
             Self::LayerCountMismatch { expected, actual } => write!(
                 f,
@@ -85,7 +112,12 @@ pub fn chacha20_quarter_round(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32,
 /// Read a little-endian u32 from a byte slice at the given offset.
 #[inline(always)]
 fn read_le_u32(buf: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+    u32::from_le_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+    ])
 }
 
 /// Produce one 64-byte ChaCha20 keystream block.
@@ -219,6 +251,13 @@ pub fn chacha20_decrypt(
 const ADLER32_MOD: u32 = 65521;
 
 /// Compute the Adler-32 checksum of a byte slice.
+///
+/// # Warning
+///
+/// Adler-32 is a **non-cryptographic** checksum: an attacker who changes the
+/// plaintext can trivially adjust other bytes so the checksum still matches. It
+/// detects accidental corruption only, and is never used for the tamper
+/// detection performed by [`WeightEncryptor`] — that relies on the Poly1305 tag.
 pub fn adler32(data: &[u8]) -> u32 {
     let mut a: u32 = 1;
     let mut b: u32 = 0;
@@ -232,56 +271,41 @@ pub fn adler32(data: &[u8]) -> u32 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Key Derivation (PBKDF2-like using FNV-1a mixing)
+// Key Derivation (PBKDF2-HMAC-SHA256, RFC 8018)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const KDF_ITERATIONS: u32 = 10_000;
-const FNV_OFFSET_BASIS_64: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME_64: u64 = 0x0000_0100_0000_01b3;
-
-/// FNV-1a 64-bit hash over a byte slice.
-#[inline]
-fn fnv1a_64(data: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS_64;
-    for &byte in data {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME_64);
-    }
-    hash
-}
-
-/// Derive a 32-byte key from a password and a 16-byte salt.
+/// Default PBKDF2-HMAC-SHA256 iteration count.
 ///
-/// Uses 10 000 iterations of FNV-1a mixing, expanded to 32 bytes via XOR
-/// folding of successive digests. This is a simplified key derivation scheme
-/// intended to demonstrate the pattern; for production use a proper KDF such
-/// as Argon2 or PBKDF2-HMAC-SHA256.
-pub fn derive_key_from_password(password: &str, salt: &[u8; 16]) -> [u8; 32] {
-    // Seed the initial state from password + salt.
-    let mut acc: u64 = fnv1a_64(password.as_bytes());
-    acc ^= fnv1a_64(salt);
+/// Matches the OWASP Password Storage Cheat Sheet recommendation for
+/// PBKDF2-HMAC-SHA256. Callers who need a different work factor set
+/// [`WeightEncryptionConfig::kdf_iterations`].
+pub const DEFAULT_KDF_ITERATIONS: u32 = 210_000;
 
-    // Iterate the mixing step.
-    for i in 0u32..KDF_ITERATIONS {
-        let iter_bytes = i.to_le_bytes();
-        let combined: [u64; 3] = [acc, fnv1a_64(&iter_bytes), fnv1a_64(password.as_bytes())];
-        let combined_bytes: Vec<u8> = combined.iter().flat_map(|v| v.to_le_bytes()).collect();
-        acc = fnv1a_64(&combined_bytes);
-        acc ^= fnv1a_64(salt);
+/// Derive a 32-byte key from a password and a 16-byte salt using
+/// PBKDF2-HMAC-SHA256 (RFC 8018).
+///
+/// Unlike a plain hash chain, PBKDF2 keeps the full entropy of the password in
+/// the derived key and imposes `iterations` HMAC evaluations on every guess.
+///
+/// # Errors
+///
+/// Returns [`WeightEncryptionError::KeyDerivationFailed`] when `iterations` is
+/// zero, which would make the KDF a single HMAC evaluation.
+pub fn derive_key_from_password(
+    password: &str,
+    salt: &[u8; 16],
+    iterations: u32,
+) -> Result<[u8; 32], WeightEncryptionError> {
+    if iterations == 0 {
+        return Err(WeightEncryptionError::KeyDerivationFailed(
+            "PBKDF2 iteration count must be greater than zero".to_string(),
+        ));
     }
-
-    // Expand 8 bytes → 32 bytes via XOR-folded successive hashes.
     let mut key = [0u8; 32];
-    let mut current = acc;
-    for chunk_start in (0..32usize).step_by(8) {
-        let bytes = current.to_le_bytes();
-        let end = (chunk_start + 8).min(32);
-        key[chunk_start..end].copy_from_slice(&bytes[..end - chunk_start]);
-        // Advance state for next 8-byte chunk.
-        current = fnv1a_64(&current.to_le_bytes());
-        current ^= acc;
-    }
-    key
+    pbkdf2::pbkdf2::<Hmac<Sha256>>(password.as_bytes(), salt, iterations, &mut key).map_err(
+        |e| WeightEncryptionError::KeyDerivationFailed(format!("PBKDF2-HMAC-SHA256: {e}")),
+    )?;
+    Ok(key)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,18 +323,21 @@ pub struct WeightEncryptionConfig {
     pub use_per_layer_nonce: bool,
     /// When `true`, compress plaintext before encrypting (not yet implemented).
     pub compress_before_encrypt: bool,
+    /// PBKDF2-HMAC-SHA256 iteration count used to turn the password into a key.
+    pub kdf_iterations: u32,
 }
 
 impl Default for WeightEncryptionConfig {
     fn default() -> Self {
         Self {
             key_derivation_salt: [
-                0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x23, 0x45, 0x67, 0x89,
-                0xab, 0xcd, 0xef,
+                0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
             ],
             nonce_prefix: [0x54, 0x52, 0x53, 0x54, 0x46, 0x4d, 0x52, 0x53], // "TRSTFMRS"
             use_per_layer_nonce: true,
             compress_before_encrypt: false,
+            kdf_iterations: DEFAULT_KDF_ITERATIONS,
         }
     }
 }
@@ -326,8 +353,12 @@ pub struct EncryptedWeightBlob {
     pub layer_id: u32,
     /// Original plaintext size in bytes (before encryption).
     pub original_size: usize,
-    /// Adler-32 checksum of the plaintext, for integrity verification.
-    pub checksum: u32,
+    /// Poly1305 authentication tag over the ciphertext and the layer id.
+    ///
+    /// Verified in constant time by [`WeightEncryptor::decrypt_layer`]; any
+    /// modification of `ciphertext`, `nonce`, `layer_id` or the key makes
+    /// decryption fail with [`WeightEncryptionError::AuthenticationFailed`].
+    pub tag: [u8; 16],
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -356,9 +387,26 @@ impl fmt::Debug for WeightEncryptor {
 
 impl WeightEncryptor {
     /// Create a new `WeightEncryptor` by deriving a key from `password` and
-    /// the salt stored in `config`.
-    pub fn new(password: &str, config: WeightEncryptionConfig) -> Self {
-        let key = derive_key_from_password(password, &config.key_derivation_salt);
+    /// the salt stored in `config` with PBKDF2-HMAC-SHA256.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WeightEncryptionError::KeyDerivationFailed`] if
+    /// `config.kdf_iterations` is zero.
+    pub fn new(
+        password: &str,
+        config: WeightEncryptionConfig,
+    ) -> Result<Self, WeightEncryptionError> {
+        let key =
+            derive_key_from_password(password, &config.key_derivation_salt, config.kdf_iterations)?;
+        Ok(Self { config, key })
+    }
+
+    /// Create a `WeightEncryptor` from an already-derived 32-byte key.
+    ///
+    /// Use this when the key comes from a key-management system rather than a
+    /// password, so no KDF work is repeated.
+    pub fn from_key(key: [u8; 32], config: WeightEncryptionConfig) -> Self {
         Self { config, key }
     }
 
@@ -376,47 +424,73 @@ impl WeightEncryptor {
         nonce
     }
 
-    /// Encrypt a single layer's weight slice.
+    /// Encrypt a single layer's weight slice with ChaCha20-Poly1305.
     ///
-    /// The `f32` slice is reinterpreted as raw bytes, checksummed, then
-    /// encrypted with ChaCha20.  The resulting [`EncryptedWeightBlob`] is
-    /// self-contained: all information needed for decryption is stored inside
-    /// it (except the key / password).
-    pub fn encrypt_layer(&self, weights: &[f32], layer_id: u32) -> EncryptedWeightBlob {
+    /// The `f32` slice is reinterpreted as little-endian bytes and sealed under
+    /// the layer's nonce, with the layer id authenticated as associated data so
+    /// blobs cannot be swapped between layers. The resulting
+    /// [`EncryptedWeightBlob`] is self-contained: all information needed for
+    /// decryption is stored inside it (except the key / password).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WeightEncryptionError::CipherRejectedInput`] if the AEAD
+    /// rejects the message (only possible for absurdly large layers).
+    pub fn encrypt_layer(
+        &self,
+        weights: &[f32],
+        layer_id: u32,
+    ) -> Result<EncryptedWeightBlob, WeightEncryptionError> {
         // Serialize f32 values to little-endian bytes.
-        let plaintext: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut buffer: Vec<u8> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let original_size = buffer.len();
 
-        let checksum = adler32(&plaintext);
-        let nonce = self.nonce_for_layer(layer_id);
-        let ciphertext = chacha20_encrypt(&plaintext, &self.key, &nonce, 0);
-        let original_size = plaintext.len();
+        let nonce_bytes = self.nonce_for_layer(layer_id);
+        let cipher = self.aead()?;
+        let nonce = Nonce::<ChaCha20Poly1305>::from(nonce_bytes);
+        let tag = cipher
+            .encrypt_inout_detached(
+                &nonce,
+                &layer_id.to_le_bytes(),
+                buffer.as_mut_slice().into(),
+            )
+            .map_err(|e| WeightEncryptionError::CipherRejectedInput(e.to_string()))?;
 
-        EncryptedWeightBlob { ciphertext, nonce, layer_id, original_size, checksum }
+        Ok(EncryptedWeightBlob {
+            ciphertext: buffer,
+            nonce: nonce_bytes,
+            layer_id,
+            original_size,
+            tag: tag.into(),
+        })
     }
 
     /// Decrypt a single layer blob back into an `f32` weight slice.
     ///
     /// # Errors
-    /// - [`WeightEncryptionError::ChecksumMismatch`] if integrity fails.
+    /// - [`WeightEncryptionError::AuthenticationFailed`] if the Poly1305 tag
+    ///   does not verify (tampering, wrong layer id, or wrong key).
     /// - [`WeightEncryptionError::InvalidF32Alignment`] if byte count is not
     ///   divisible by 4.
     pub fn decrypt_layer(
         &self,
         blob: &EncryptedWeightBlob,
     ) -> Result<Vec<f32>, WeightEncryptionError> {
-        let plaintext = chacha20_decrypt(&blob.ciphertext, &self.key, &blob.nonce, 0);
-
-        // Verify integrity.
-        let actual_checksum = adler32(&plaintext);
-        if actual_checksum != blob.checksum {
-            return Err(WeightEncryptionError::ChecksumMismatch {
-                expected: blob.checksum,
-                actual: actual_checksum,
-            });
-        }
+        let mut plaintext = blob.ciphertext.clone();
+        let cipher = self.aead()?;
+        let nonce = Nonce::<ChaCha20Poly1305>::from(blob.nonce);
+        let tag = Tag::<ChaCha20Poly1305>::from(blob.tag);
+        cipher
+            .decrypt_inout_detached(
+                &nonce,
+                &blob.layer_id.to_le_bytes(),
+                plaintext.as_mut_slice().into(),
+                &tag,
+            )
+            .map_err(|_| WeightEncryptionError::AuthenticationFailed)?;
 
         // Convert bytes → f32.
-        if plaintext.len() % 4 != 0 {
+        if !plaintext.len().is_multiple_of(4) {
             return Err(WeightEncryptionError::InvalidF32Alignment(plaintext.len()));
         }
 
@@ -431,10 +505,24 @@ impl WeightEncryptor {
         Ok(weights)
     }
 
+    /// Build the AEAD instance for this encryptor's key.
+    fn aead(&self) -> Result<ChaCha20Poly1305, WeightEncryptionError> {
+        ChaCha20Poly1305::new_from_slice(&self.key).map_err(|e| {
+            WeightEncryptionError::KeyDerivationFailed(format!("invalid ChaCha20 key: {e}"))
+        })
+    }
+
     /// Encrypt an entire model represented as a slice of weight layers.
     ///
     /// Layer `i` receives `layer_id = i as u32`.
-    pub fn encrypt_model(&self, layers: &[Vec<f32>]) -> Vec<EncryptedWeightBlob> {
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from [`Self::encrypt_layer`].
+    pub fn encrypt_model(
+        &self,
+        layers: &[Vec<f32>],
+    ) -> Result<Vec<EncryptedWeightBlob>, WeightEncryptionError> {
         layers
             .iter()
             .enumerate()
@@ -467,8 +555,7 @@ mod tests {
     #[test]
     fn test_chacha20_quarter_round_known_values() {
         // Values taken from RFC 7539 §2.1.1 test vector.
-        let (a, b, c, d) =
-            chacha20_quarter_round(0x11111111, 0x01020304, 0x9b8d6f43, 0x01234567);
+        let (a, b, c, d) = chacha20_quarter_round(0x11111111, 0x01020304, 0x9b8d6f43, 0x01234567);
         assert_eq!(a, 0xea2a92f4);
         assert_eq!(b, 0xcb1cf8ce);
         assert_eq!(c, 0x4581472e);
@@ -536,12 +623,25 @@ mod tests {
         assert_eq!(adler32(&[0u8]), (1u32 << 16) | 1u32);
     }
 
+    /// Config with a small KDF work factor so the test suite stays fast; the
+    /// production default is [`DEFAULT_KDF_ITERATIONS`].
+    fn fast_config() -> WeightEncryptionConfig {
+        WeightEncryptionConfig {
+            kdf_iterations: 1_000,
+            ..Default::default()
+        }
+    }
+
+    fn encryptor(password: &str) -> WeightEncryptor {
+        WeightEncryptor::new(password, fast_config()).expect("key derivation must succeed")
+    }
+
     // ── 7. Key derivation is deterministic ───────────────────────────────────
     #[test]
     fn test_key_derivation_is_deterministic() {
         let salt = [0x11u8; 16];
-        let key_a = derive_key_from_password("my-secret-password", &salt);
-        let key_b = derive_key_from_password("my-secret-password", &salt);
+        let key_a = derive_key_from_password("my-secret-password", &salt, 1_000).expect("kdf");
+        let key_b = derive_key_from_password("my-secret-password", &salt, 1_000).expect("kdf");
         assert_eq!(key_a, key_b);
     }
 
@@ -550,18 +650,51 @@ mod tests {
     fn test_key_derivation_different_inputs() {
         let salt1 = [0x11u8; 16];
         let salt2 = [0x22u8; 16];
-        let key1 = derive_key_from_password("password", &salt1);
-        let key2 = derive_key_from_password("password", &salt2);
+        let key1 = derive_key_from_password("password", &salt1, 1_000).expect("kdf");
+        let key2 = derive_key_from_password("password", &salt2, 1_000).expect("kdf");
         assert_ne!(key1, key2);
 
-        let key3 = derive_key_from_password("other-password", &salt1);
+        let key3 = derive_key_from_password("other-password", &salt1, 1_000).expect("kdf");
         assert_ne!(key1, key3);
+    }
+
+    /// Regression test for the FNV-1a KDF: it funnelled every password through a
+    /// single 64-bit accumulator, so the derived key never carried more than
+    /// 64 bits of entropy and the iteration count changed nothing observable.
+    /// PBKDF2 keeps the work factor meaningful — a different iteration count
+    /// must produce a different key.
+    #[test]
+    fn test_iteration_count_changes_derived_key() {
+        let salt = [0x33u8; 16];
+        let k1 = derive_key_from_password("password", &salt, 1_000).expect("kdf");
+        let k2 = derive_key_from_password("password", &salt, 2_000).expect("kdf");
+        assert_ne!(k1, k2, "PBKDF2 output must depend on the iteration count");
+    }
+
+    /// PBKDF2-HMAC-SHA256 known answer for ("password", "salt", c = 2, dkLen = 32).
+    #[test]
+    fn test_key_derivation_known_answer() {
+        // The published vector uses a 4-byte salt, so call PBKDF2 directly
+        // rather than through the 16-byte-salt wrapper.
+        let mut key = [0u8; 32];
+        pbkdf2::pbkdf2::<Hmac<Sha256>>(b"password", b"salt", 2, &mut key).expect("pbkdf2");
+        assert_eq!(
+            hex::encode(key),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        );
+    }
+
+    #[test]
+    fn test_zero_iterations_is_rejected() {
+        let err = derive_key_from_password("password", &[0u8; 16], 0)
+            .expect_err("zero iterations must be rejected");
+        assert!(matches!(err, WeightEncryptionError::KeyDerivationFailed(_)));
     }
 
     // ── 9. Per-layer nonce produces different nonces for different layers ──────
     #[test]
     fn test_per_layer_nonce_differs() {
-        let encryptor = WeightEncryptor::new("pass", WeightEncryptionConfig::default());
+        let encryptor = encryptor("pass");
         let nonce0 = encryptor.nonce_for_layer(0);
         let nonce1 = encryptor.nonce_for_layer(1);
         assert_ne!(nonce0, nonce1);
@@ -570,11 +703,10 @@ mod tests {
     // ── 10. Weight encrypt / decrypt round-trip (f32 slice) ───────────────────
     #[test]
     fn test_weight_encrypt_decrypt_roundtrip() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("secret-model-key", config);
+        let encryptor = encryptor("secret-model-key");
 
         let weights: Vec<f32> = vec![1.0, -2.5, 3.14, 0.0, f32::MAX, f32::MIN_POSITIVE];
-        let blob = encryptor.encrypt_layer(&weights, 0);
+        let blob = encryptor.encrypt_layer(&weights, 0).expect("encrypt");
 
         let recovered = encryptor.decrypt_layer(&blob).expect("decryption should succeed");
         assert_eq!(recovered.len(), weights.len());
@@ -583,27 +715,68 @@ mod tests {
         }
     }
 
-    // ── 11. Checksum verification failure is detected ─────────────────────────
+    // ── 11. Tampering with the ciphertext is detected ─────────────────────────
+    //
+    // Regression test for the Adler-32 "tamper detection" claim: with a stream
+    // cipher an attacker could flip plaintext bits and repair the checksum.
+    // Poly1305 makes that computationally infeasible.
     #[test]
-    fn test_checksum_verification_failure() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("secret", config);
+    fn test_tampered_ciphertext_is_detected() {
+        let encryptor = encryptor("secret");
 
         let weights = vec![1.0f32, 2.0, 3.0];
-        let mut blob = encryptor.encrypt_layer(&weights, 0);
-
-        // Tamper with the stored checksum.
-        blob.checksum ^= 0xDEAD_BEEF;
+        let mut blob = encryptor.encrypt_layer(&weights, 0).expect("encrypt");
+        blob.ciphertext[0] ^= 0x01;
 
         let result = encryptor.decrypt_layer(&blob);
-        assert!(matches!(result, Err(WeightEncryptionError::ChecksumMismatch { .. })));
+        assert_eq!(result, Err(WeightEncryptionError::AuthenticationFailed));
+    }
+
+    #[test]
+    fn test_tampered_tag_is_detected() {
+        let encryptor = encryptor("secret");
+        let mut blob = encryptor.encrypt_layer(&[1.0f32, 2.0], 0).expect("encrypt");
+        blob.tag[15] ^= 0x80;
+        assert_eq!(
+            encryptor.decrypt_layer(&blob),
+            Err(WeightEncryptionError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn test_relabelled_layer_is_detected() {
+        let encryptor = encryptor("secret");
+        let mut blob = encryptor.encrypt_layer(&[1.0f32, 2.0], 3).expect("encrypt");
+        // The layer id is authenticated as associated data, so relabelling the
+        // blob must fail even though the ciphertext bytes are untouched.
+        blob.layer_id = 4;
+        assert_eq!(
+            encryptor.decrypt_layer(&blob),
+            Err(WeightEncryptionError::AuthenticationFailed)
+        );
+    }
+
+    /// A stream cipher alone lets an attacker flip any plaintext bit by flipping
+    /// the corresponding ciphertext bit. With Poly1305 the forgery is rejected
+    /// rather than silently decoded into different weights.
+    #[test]
+    fn test_bit_flip_forgery_is_rejected() {
+        let encryptor = encryptor("secret");
+        let weights = vec![1.0f32];
+        let mut blob = encryptor.encrypt_layer(&weights, 0).expect("encrypt");
+        // Flip the sign bit of the single f32 (byte 3, bit 7 little-endian).
+        blob.ciphertext[3] ^= 0x80;
+        assert_eq!(
+            encryptor.decrypt_layer(&blob),
+            Err(WeightEncryptionError::AuthenticationFailed),
+            "a targeted bit flip must not silently change the decrypted weight"
+        );
     }
 
     // ── 12. encrypt_model / decrypt_model full pipeline ───────────────────────
     #[test]
     fn test_encrypt_decrypt_model_pipeline() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("model-password", config);
+        let encryptor = encryptor("model-password");
 
         let model: Vec<Vec<f32>> = vec![
             vec![0.1, 0.2, 0.3],
@@ -611,7 +784,7 @@ mod tests {
             vec![f32::NAN], // NaN preserved bit-for-bit
         ];
 
-        let blobs = encryptor.encrypt_model(&model);
+        let blobs = encryptor.encrypt_model(&model).expect("encrypt model");
         assert_eq!(blobs.len(), 3);
         assert_eq!(blobs[0].layer_id, 0);
         assert_eq!(blobs[1].layer_id, 1);
@@ -620,7 +793,6 @@ mod tests {
         let recovered = encryptor.decrypt_model(&blobs).expect("model decryption should succeed");
         assert_eq!(recovered.len(), 3);
 
-        // NaN bit pattern must be preserved.
         assert_eq!(
             model[2][0].to_bits(),
             recovered[2][0].to_bits(),
@@ -630,7 +802,6 @@ mod tests {
         for (orig_layer, rec_layer) in model.iter().zip(recovered.iter()) {
             assert_eq!(orig_layer.len(), rec_layer.len());
             for (o, r) in orig_layer.iter().zip(rec_layer.iter()) {
-                // Use bit comparison to handle NaN correctly.
                 assert_eq!(o.to_bits(), r.to_bits());
             }
         }
@@ -639,11 +810,10 @@ mod tests {
     // ── 13. Large weight buffer round-trip (stress) ───────────────────────────
     #[test]
     fn test_large_weight_buffer_roundtrip() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("stress-test-key", config);
+        let encryptor = encryptor("stress-test-key");
 
         let weights: Vec<f32> = (0..4096).map(|i| (i as f32) * 0.001).collect();
-        let blob = encryptor.encrypt_layer(&weights, 7);
+        let blob = encryptor.encrypt_layer(&weights, 7).expect("encrypt");
         let recovered = encryptor.decrypt_layer(&blob).expect("large buffer decryption");
         assert_eq!(weights, recovered);
     }
@@ -653,18 +823,20 @@ mod tests {
     fn test_custom_nonce_prefix_changes_nonce() {
         let config_a = WeightEncryptionConfig {
             nonce_prefix: [0x11u8; 8],
-            ..Default::default()
+            ..fast_config()
         };
         let config_b = WeightEncryptionConfig {
             nonce_prefix: [0x22u8; 8],
-            ..Default::default()
+            ..fast_config()
         };
-        let enc_a = WeightEncryptor::new("pass", config_a);
-        let enc_b = WeightEncryptor::new("pass", config_b);
+        let enc_a = WeightEncryptor::new("pass", config_a).expect("kdf");
+        let enc_b = WeightEncryptor::new("pass", config_b).expect("kdf");
 
-        let nonce_a = enc_a.nonce_for_layer(0);
-        let nonce_b = enc_b.nonce_for_layer(0);
-        assert_ne!(nonce_a, nonce_b, "different nonce_prefix must produce different nonces");
+        assert_ne!(
+            enc_a.nonce_for_layer(0),
+            enc_b.nonce_for_layer(0),
+            "different nonce_prefix must produce different nonces"
+        );
     }
 
     // ── 15. use_per_layer_nonce=false: all layers share the same nonce ────────
@@ -672,53 +844,77 @@ mod tests {
     fn test_no_per_layer_nonce_same_for_all_layers() {
         let config = WeightEncryptionConfig {
             use_per_layer_nonce: false,
-            ..Default::default()
+            ..fast_config()
         };
-        let encryptor = WeightEncryptor::new("pass", config);
+        let encryptor = WeightEncryptor::new("pass", config).expect("kdf");
 
         let nonce0 = encryptor.nonce_for_layer(0);
         let nonce1 = encryptor.nonce_for_layer(1);
         let nonce255 = encryptor.nonce_for_layer(255);
 
-        assert_eq!(nonce0, nonce1,  "all layers must share the same nonce when per-layer is off");
-        assert_eq!(nonce0, nonce255, "all layers must share the same nonce when per-layer is off");
+        assert_eq!(
+            nonce0, nonce1,
+            "all layers must share the same nonce when per-layer is off"
+        );
+        assert_eq!(
+            nonce0, nonce255,
+            "all layers must share the same nonce when per-layer is off"
+        );
     }
 
     // ── 16. Empty weights layer produces a valid zero-element round-trip ──────
     #[test]
     fn test_empty_layer_roundtrip() {
-        let encryptor = WeightEncryptor::new("key", WeightEncryptionConfig::default());
+        let encryptor = encryptor("key");
         let empty: Vec<f32> = vec![];
-        let blob = encryptor.encrypt_layer(&empty, 0);
+        let blob = encryptor.encrypt_layer(&empty, 0).expect("encrypt");
 
         assert_eq!(blob.original_size, 0);
         let recovered = encryptor.decrypt_layer(&blob).expect("empty layer must decrypt");
         assert!(recovered.is_empty());
     }
 
-    // ── 17. Wrong key cannot decrypt: checksum mismatch ───────────────────────
+    // ── 17. Wrong key cannot decrypt ──────────────────────────────────────────
     #[test]
-    fn test_wrong_key_yields_checksum_mismatch() {
-        let config = WeightEncryptionConfig::default();
-        let correct_enc = WeightEncryptor::new("correct-password", config.clone());
-        let wrong_enc   = WeightEncryptor::new("wrong-password",   config);
+    fn test_wrong_key_fails_authentication() {
+        let correct_enc = encryptor("correct-password");
+        let wrong_enc = encryptor("wrong-password");
 
         let weights = vec![1.0f32, 2.0, 3.0, 4.0];
-        let blob = correct_enc.encrypt_layer(&weights, 0);
+        let blob = correct_enc.encrypt_layer(&weights, 0).expect("encrypt");
 
-        let result = wrong_enc.decrypt_layer(&blob);
-        assert!(matches!(result, Err(WeightEncryptionError::ChecksumMismatch { .. })),
-            "decrypting with the wrong key must yield ChecksumMismatch");
+        assert_eq!(
+            wrong_enc.decrypt_layer(&blob),
+            Err(WeightEncryptionError::AuthenticationFailed),
+            "decrypting with the wrong key must fail authentication"
+        );
     }
 
     // ── 18. WeightEncryptionConfig fields have expected defaults ──────────────
     #[test]
     fn test_config_default_values() {
         let config = WeightEncryptionConfig::default();
-        assert!(config.use_per_layer_nonce, "per-layer nonce should be on by default");
-        assert!(!config.compress_before_encrypt, "compression should be off by default");
-        assert_ne!(config.key_derivation_salt, [0u8; 16], "salt must not be all-zero");
-        assert_ne!(config.nonce_prefix, [0u8; 8], "nonce prefix must not be all-zero");
+        assert!(
+            config.use_per_layer_nonce,
+            "per-layer nonce should be on by default"
+        );
+        assert!(
+            !config.compress_before_encrypt,
+            "compression should be off by default"
+        );
+        assert_ne!(
+            config.key_derivation_salt, [0u8; 16],
+            "salt must not be all-zero"
+        );
+        assert_ne!(
+            config.nonce_prefix, [0u8; 8],
+            "nonce prefix must not be all-zero"
+        );
+        assert_eq!(config.kdf_iterations, DEFAULT_KDF_ITERATIONS);
+        assert!(
+            config.kdf_iterations >= 100_000,
+            "the default PBKDF2 work factor must be meaningful"
+        );
     }
 
     // ── 19. Nonce construction embeds layer_id in last four bytes ─────────────
@@ -727,27 +923,30 @@ mod tests {
         let config = WeightEncryptionConfig {
             nonce_prefix: [0xAAu8; 8],
             use_per_layer_nonce: true,
-            ..Default::default()
+            ..fast_config()
         };
-        let encryptor = WeightEncryptor::new("key", config);
+        let encryptor = WeightEncryptor::new("key", config).expect("kdf");
 
         let layer_id: u32 = 0xDEAD_BEEFu32;
         let nonce = encryptor.nonce_for_layer(layer_id);
 
-        // Last 4 bytes must be the little-endian representation of layer_id.
-        assert_eq!(&nonce[8..12], &layer_id.to_le_bytes(),
-            "last 4 bytes of nonce must be layer_id in little-endian");
-        // First 8 bytes must be the prefix.
-        assert_eq!(&nonce[..8], &[0xAAu8; 8], "first 8 bytes must be the nonce_prefix");
+        assert_eq!(
+            &nonce[8..12],
+            &layer_id.to_le_bytes(),
+            "last 4 bytes of nonce must be layer_id in little-endian"
+        );
+        assert_eq!(
+            &nonce[..8],
+            &[0xAAu8; 8],
+            "first 8 bytes must be the nonce_prefix"
+        );
     }
 
     // ── 20. Many-layer model: each blob carries the correct layer_id ──────────
     #[test]
     fn test_many_layer_model_blob_ids() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("model-key", config);
+        let encryptor = encryptor("model-key");
 
-        // 16 layers, each with a distinct weight signature via LCG.
         let mut lcg: u64 = 0xACE1_ACE1_ACE1_ACE1;
         let model: Vec<Vec<f32>> = (0..16u32)
             .map(|_| {
@@ -757,47 +956,68 @@ mod tests {
             })
             .collect();
 
-        let blobs = encryptor.encrypt_model(&model);
+        let blobs = encryptor.encrypt_model(&model).expect("encrypt model");
         assert_eq!(blobs.len(), 16);
         for (i, blob) in blobs.iter().enumerate() {
-            assert_eq!(blob.layer_id, i as u32,
-                "blob at index {} must have layer_id = {}", i, i);
+            assert_eq!(
+                blob.layer_id, i as u32,
+                "blob at index {i} must have layer_id = {i}"
+            );
         }
     }
 
     // ── 21. decrypt_model propagates first error ───────────────────────────────
     #[test]
     fn test_decrypt_model_propagates_error() {
-        let config = WeightEncryptionConfig::default();
-        let encryptor = WeightEncryptor::new("pass", config);
+        let encryptor = encryptor("pass");
 
         let weights = vec![1.0f32, 2.0, 3.0];
-        let mut blobs = encryptor.encrypt_model(&[weights.clone(), weights.clone()]);
-
-        // Corrupt the checksum of the second blob.
-        blobs[1].checksum ^= 0xFFFF_FFFF;
+        let mut blobs =
+            encryptor.encrypt_model(&[weights.clone(), weights.clone()]).expect("encrypt");
+        blobs[1].tag[0] ^= 0xFF;
 
         let result = encryptor.decrypt_model(&blobs);
-        assert!(result.is_err(), "decrypt_model must propagate the checksum error");
+        assert!(
+            result.is_err(),
+            "decrypt_model must propagate the authentication error"
+        );
     }
 
     // ── 22. EncryptedWeightBlob stores exact original_size ────────────────────
     #[test]
     fn test_blob_stores_correct_original_size() {
-        let encryptor = WeightEncryptor::new("k", WeightEncryptionConfig::default());
+        let encryptor = encryptor("k");
         let weights: Vec<f32> = (0..100).map(|i| i as f32).collect();
-        let blob = encryptor.encrypt_layer(&weights, 0);
-        // Each f32 is 4 bytes.
+        let blob = encryptor.encrypt_layer(&weights, 0).expect("encrypt");
         assert_eq!(blob.original_size, weights.len() * 4);
     }
 
-    // ── 23. ciphertext length equals original_size (stream cipher, no padding)
+    // ── 23. Detached tag keeps the ciphertext length equal to the plaintext ───
     #[test]
     fn test_ciphertext_length_equals_original_size() {
-        let encryptor = WeightEncryptor::new("k", WeightEncryptionConfig::default());
+        let encryptor = encryptor("k");
         let weights: Vec<f32> = vec![0.0f32; 37]; // non-power-of-two size
-        let blob = encryptor.encrypt_layer(&weights, 0);
-        assert_eq!(blob.ciphertext.len(), blob.original_size,
-            "ChaCha20 stream cipher must not change the byte length");
+        let blob = encryptor.encrypt_layer(&weights, 0).expect("encrypt");
+        assert_eq!(
+            blob.ciphertext.len(),
+            blob.original_size,
+            "the detached Poly1305 tag must not inflate the ciphertext"
+        );
+        assert_eq!(blob.tag.len(), 16);
+    }
+
+    // ── 24. from_key skips the KDF but produces an interoperable encryptor ────
+    #[test]
+    fn test_from_key_matches_password_derived_encryptor() {
+        let config = fast_config();
+        let key =
+            derive_key_from_password("pw", &config.key_derivation_salt, config.kdf_iterations)
+                .expect("kdf");
+        let via_password = WeightEncryptor::new("pw", config.clone()).expect("kdf");
+        let via_key = WeightEncryptor::from_key(key, config);
+
+        let blob = via_password.encrypt_layer(&[1.0f32, 2.0], 0).expect("encrypt");
+        let recovered = via_key.decrypt_layer(&blob).expect("decrypt");
+        assert_eq!(recovered, vec![1.0f32, 2.0]);
     }
 }

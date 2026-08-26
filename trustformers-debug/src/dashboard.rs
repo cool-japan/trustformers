@@ -131,9 +131,19 @@ impl TrainingMonitor {
         &self.active_alerts
     }
 
-    /// Clear resolved alerts
-    pub fn clear_alert(&mut self, _alert_type: AlertType) {
-        self.active_alerts.retain(|alert| !matches!(&alert.alert_type, _alert_type));
+    /// Drop every active alert whose [`AlertType`] equals `alert_type`,
+    /// leaving alerts of any other type in place.
+    ///
+    /// The previous body was
+    /// `retain(|alert| !matches!(&alert.alert_type, _alert_type))`. In
+    /// `matches!` the second operand is a *pattern*, and a bare identifier
+    /// there is an irrefutable binding rather than a comparison against the
+    /// parameter -- so the arm always matched, the negation was always
+    /// `false`, and the call cleared **all** alerts regardless of which type
+    /// was asked for. The `_` prefix additionally silenced the
+    /// unused-variable lint that would otherwise have exposed it.
+    pub fn clear_alert(&mut self, alert_type: AlertType) {
+        self.active_alerts.retain(|alert| alert.alert_type != alert_type);
     }
 
     /// Set custom alert thresholds
@@ -431,62 +441,123 @@ impl ModelComparator {
         }
     }
 
+    /// Relative difference in the configured `primary_metric` between the two
+    /// models, or `None` when it cannot be computed.
+    ///
+    /// `None` is returned when either model never recorded the metric, or when
+    /// the reference model's value is `0.0` (the relative difference would be
+    /// a division by zero). This used to return a bare `0.0` in exactly those
+    /// cases, which a caller could not tell apart from the genuine "both
+    /// models scored identically" answer.
     fn calculate_performance_difference(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-    ) -> f64 {
+    ) -> Option<f64> {
         match self.comparison_config.primary_metric.as_str() {
             "loss" => {
-                if let (Some(loss_a), Some(loss_b)) = (model_a.final_loss, model_b.final_loss) {
-                    (loss_b - loss_a) / loss_a // Negative means model_a is better
-                } else {
-                    0.0
+                let (loss_a, loss_b) = (model_a.final_loss?, model_b.final_loss?);
+                if loss_a == 0.0 {
+                    return None;
                 }
+                Some((loss_b - loss_a) / loss_a) // Negative means model_a is better
             },
             "accuracy" => {
-                if let (Some(acc_a), Some(acc_b)) = (model_a.final_accuracy, model_b.final_accuracy)
-                {
-                    (acc_b - acc_a) / acc_a // Positive means model_b is better
-                } else {
-                    0.0
+                let (acc_a, acc_b) = (model_a.final_accuracy?, model_b.final_accuracy?);
+                if acc_a == 0.0 {
+                    return None;
                 }
+                Some((acc_b - acc_a) / acc_a) // Positive means model_b is better
             },
-            _ => 0.0,
+            // An unrecognised `primary_metric` names nothing this comparator
+            // can read, so there is no difference to report.
+            _ => None,
         }
     }
 
+    /// Mean of the relative training-time and model-size differences, or
+    /// `None` when either reference quantity is zero.
+    ///
+    /// A `ModelMetrics` built before training has run (or before the model
+    /// size is known) carries `training_time == Duration::ZERO` /
+    /// `model_size_mb == 0.0`; dividing by those produced `inf`/`NaN`, and the
+    /// only reason the old code did not surface them is that nothing checked.
+    /// Absence is now reported as absence.
     fn calculate_efficiency_difference(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-    ) -> f64 {
+    ) -> Option<f64> {
+        let time_a = model_a.training_time.as_secs_f64();
+        if time_a == 0.0 || model_a.model_size_mb == 0.0 {
+            return None;
+        }
+
         // Compare training time efficiency
-        let time_diff =
-            model_b.training_time.as_secs_f64() / model_a.training_time.as_secs_f64() - 1.0;
+        let time_diff = model_b.training_time.as_secs_f64() / time_a - 1.0;
 
         // Compare model size efficiency
         let size_diff = model_b.model_size_mb / model_a.model_size_mb - 1.0;
 
         // Combined efficiency score (lower is better)
-        (time_diff + size_diff) / 2.0
+        Some((time_diff + size_diff) / 2.0)
     }
 
+    /// Extract the recorded per-step samples of `comparison_config.primary_metric`
+    /// ("loss" or "accuracy") from a model's real `metrics_history`, dropping
+    /// steps where that metric was not recorded. An unrecognised
+    /// `primary_metric` yields no samples (matching
+    /// [`Self::calculate_performance_difference`]'s own `_ => None` arm),
+    /// never a fabricated series.
+    fn metric_samples(&self, model: &ModelMetrics) -> Vec<f64> {
+        match self.comparison_config.primary_metric.as_str() {
+            "loss" => model.metrics_history.iter().filter_map(|m| m.loss).collect(),
+            "accuracy" => model.metrics_history.iter().filter_map(|m| m.accuracy).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Real two-sample Welch's t-test (unequal variances, unequal sample
+    /// sizes) between `model_a` and `model_b`'s recorded per-step
+    /// `primary_metric` samples, reusing the same
+    /// [`crate::differential_debugging::welch_t_test`] machinery that
+    /// backs `DifferentialDebugger::perform_ab_statistical_tests`. Returns
+    /// `None` --
+    /// never a fabricated `true`/`false` -- when either model has fewer than
+    /// 2 recorded samples of the metric, or when the underlying test itself
+    /// has no meaningful result (both samples degenerate constants; see
+    /// `welch_t_test`'s own doc comment).
     fn test_statistical_significance(
         &self,
-        _model_a: &ModelMetrics,
-        _model_b: &ModelMetrics,
-    ) -> bool {
-        // Simplified statistical test - in practice would use proper statistical methods
-        true // Placeholder
+        model_a: &ModelMetrics,
+        model_b: &ModelMetrics,
+    ) -> Option<bool> {
+        let samples_a = self.metric_samples(model_a);
+        let samples_b = self.metric_samples(model_b);
+        crate::differential_debugging::welch_t_test(
+            &samples_a,
+            &samples_b,
+            self.comparison_config.significance_threshold,
+        )
+        .map(|result| result.is_significant)
     }
 
+    /// Human-readable verdict derived from
+    /// [`Self::calculate_performance_difference`]. When that is `None` the
+    /// recommendation says so instead of claiming the models are equivalent
+    /// (which is what a `0.0` difference used to make it say).
     fn generate_recommendation(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-        perf_diff: f64,
+        perf_diff: Option<f64>,
     ) -> String {
+        let Some(perf_diff) = perf_diff else {
+            return format!(
+                "Cannot compare {} and {}: the '{}' metric was not recorded for both models",
+                model_a.model_name, model_b.model_name, self.comparison_config.primary_metric
+            );
+        };
         if perf_diff.abs() < 0.01 {
             "Models perform similarly - choose based on other factors".to_string()
         } else if perf_diff < 0.0 {
@@ -722,7 +793,7 @@ pub struct InteractiveDashboard {
     model_comparator: ModelComparator,
     hyperparameter_explorer: HyperparameterExplorer,
     dashboard_state: DashboardState,
-    websocket_server: Option<WebSocketServer>,
+    websocket_server: Option<DashboardEndpoint>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -744,10 +815,37 @@ pub enum DisplayMode {
 
 /// WebSocket server for real-time dashboard updates
 #[derive(Debug)]
-pub struct WebSocketServer {
+/// Endpoint configuration plus the queue of dashboard updates waiting to be
+/// delivered to clients.
+///
+/// It is **not** a WebSocket server: nothing binds `port` and no protocol
+/// handshake happens here. [`InteractiveDashboard::update`] queues each metrics
+/// snapshot; whatever transport the embedding application uses drains the queue
+/// with [`InteractiveDashboard::drain_pending_updates`] and delivers them.
+pub struct DashboardEndpoint {
+    /// Port the embedding application intends to serve on.
     port: u16,
+    /// Client identifiers the embedding application has registered.
     connected_clients: Arc<Mutex<Vec<String>>>,
+    /// Metrics snapshots queued since the last drain, oldest first, capped at
+    /// [`MAX_PENDING_DASHBOARD_UPDATES`].
+    pending_updates: Arc<Mutex<VecDeque<DashboardMetrics>>>,
 }
+
+impl DashboardEndpoint {
+    /// Port the embedding application intends to serve on.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Client identifiers registered by the embedding application.
+    pub fn connected_clients(&self) -> Vec<String> {
+        self.connected_clients.lock().map(|clients| clients.clone()).unwrap_or_default()
+    }
+}
+
+/// Most queued dashboard updates retained before the oldest are dropped.
+const MAX_PENDING_DASHBOARD_UPDATES: usize = 1000;
 
 impl InteractiveDashboard {
     /// Create new interactive dashboard
@@ -771,23 +869,42 @@ impl InteractiveDashboard {
     pub async fn start(&mut self, port: Option<u16>) -> Result<()> {
         let port = port.unwrap_or(8080);
 
-        self.websocket_server = Some(WebSocketServer {
+        self.websocket_server = Some(DashboardEndpoint {
             port,
             connected_clients: Arc::new(Mutex::new(Vec::new())),
+            pending_updates: Arc::new(Mutex::new(VecDeque::new())),
         });
 
-        tracing::info!("Interactive dashboard started on port {}", port);
+        // Deliberately not "started on port {port}": no socket is bound here.
+        tracing::info!(
+            port,
+            "interactive dashboard activated; updates will be queued for the embedding \
+             application to deliver"
+        );
         Ok(())
+    }
+
+    /// Take every dashboard update queued since the last call, oldest first.
+    ///
+    /// Returns an empty vector when the dashboard has not been started.
+    pub fn drain_pending_updates(&self) -> Vec<DashboardMetrics> {
+        let Some(endpoint) = self.websocket_server.as_ref() else {
+            return Vec::new();
+        };
+        endpoint
+            .pending_updates
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// Update dashboard with new metrics
     pub fn update(&mut self, metrics: DashboardMetrics) {
         self.training_monitor.update_metrics(metrics.clone());
 
-        // Broadcast to connected clients if WebSocket server is running
-        if let Some(_ws_server) = &self.websocket_server {
-            self.broadcast_update(metrics);
-        }
+        // Queue the snapshot for whatever transport the embedding application
+        // uses; see `drain_pending_updates`.
+        self.queue_update(metrics);
     }
 
     /// Get current dashboard snapshot
@@ -822,9 +939,21 @@ impl InteractiveDashboard {
         Ok(())
     }
 
-    fn broadcast_update(&self, _metrics: DashboardMetrics) {
-        // In a real implementation, this would send updates to WebSocket clients
-        tracing::debug!("Broadcasting dashboard update to connected clients");
+    /// Queue one metrics snapshot for delivery, dropping the oldest once the
+    /// queue reaches [`MAX_PENDING_DASHBOARD_UPDATES`].
+    ///
+    /// This replaces `broadcast_update`, which sent nothing at all while
+    /// logging "Broadcasting dashboard update to connected clients".
+    fn queue_update(&self, metrics: DashboardMetrics) {
+        let Some(endpoint) = self.websocket_server.as_ref() else {
+            return;
+        };
+        if let Ok(mut queue) = endpoint.pending_updates.lock() {
+            queue.push_back(metrics);
+            while queue.len() > MAX_PENDING_DASHBOARD_UPDATES {
+                queue.pop_front();
+            }
+        }
     }
 }
 
@@ -870,9 +999,20 @@ pub struct ModelComparisonReport {
 pub struct ModelComparison {
     pub model_a_id: String,
     pub model_b_id: String,
-    pub performance_difference: f64,
-    pub efficiency_difference: f64,
-    pub statistical_significance: bool,
+    /// Relative change in the configured `primary_metric` from `model_a` to
+    /// `model_b`, or `None` when at least one of them never recorded that
+    /// metric (or the reference value is zero) -- never a `0.0` standing in
+    /// for "nothing was measured".
+    pub performance_difference: Option<f64>,
+    /// Mean of the relative training-time and model-size changes, or `None`
+    /// when `model_a` has no recorded training time or model size.
+    pub efficiency_difference: Option<f64>,
+    /// `Some(true)`/`Some(false)` from a real Welch's t-test over both
+    /// models' recorded `primary_metric` samples (see
+    /// `ModelComparator::test_statistical_significance`), or `None` when
+    /// there was not enough recorded history to run the test -- never a
+    /// fabricated constant.
+    pub statistical_significance: Option<bool>,
     pub recommendation: String,
 }
 
@@ -1013,6 +1153,43 @@ impl InteractiveDashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2: real update queue, no fake broadcast --------
+
+    #[tokio::test]
+    async fn dashboard_updates_are_really_queued_for_delivery() {
+        let config = DebugConfig::default();
+        let mut dashboard = InteractiveDashboard::new(&config);
+        // Nothing is queued before the dashboard is started.
+        dashboard.update(make_metrics_simple());
+        assert!(dashboard.drain_pending_updates().is_empty());
+
+        dashboard.start(Some(9_999)).await.expect("start");
+        dashboard.update(make_metrics_simple());
+        dashboard.update(make_metrics_simple());
+
+        let drained = dashboard.drain_pending_updates();
+        assert_eq!(drained.len(), 2, "both updates must really be retained");
+        assert!(
+            dashboard.drain_pending_updates().is_empty(),
+            "draining must consume the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pending_update_queue_is_bounded() {
+        let config = DebugConfig::default();
+        let mut dashboard = InteractiveDashboard::new(&config);
+        dashboard.start(None).await.expect("start");
+        for _ in 0..(MAX_PENDING_DASHBOARD_UPDATES + 50) {
+            dashboard.update(make_metrics_simple());
+        }
+        assert_eq!(
+            dashboard.drain_pending_updates().len(),
+            MAX_PENDING_DASHBOARD_UPDATES,
+            "the oldest updates must be dropped, not accumulated without bound"
+        );
+    }
 
     fn make_config() -> DebugConfig {
         DebugConfig::default()
@@ -1346,8 +1523,200 @@ mod tests {
             parameter_count: 1000,
             model_size_mb: 10.0,
         };
-        let rec = comparator.generate_recommendation(&ma, &ma, 0.0);
+        let rec = comparator.generate_recommendation(&ma, &ma, Some(0.0));
         assert!(rec.contains("similarly"));
+    }
+
+    #[test]
+    fn test_model_comparator_recommendation_reports_missing_metric_not_similarity() {
+        // `None` means "the primary metric was never recorded", which must not
+        // be reported as "the two models perform similarly".
+        let comparator = ModelComparator::new();
+        let ma = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: None,
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        };
+        let rec = comparator.generate_recommendation(&ma, &ma, None);
+        assert!(!rec.contains("similarly"), "got {rec}");
+        assert!(rec.contains("not recorded"), "got {rec}");
+    }
+
+    #[test]
+    fn test_performance_difference_is_none_when_metric_never_recorded() {
+        let comparator = ModelComparator::new();
+        let unmeasured = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: None,
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        };
+        assert_eq!(
+            comparator.calculate_performance_difference(&unmeasured, &unmeasured),
+            None,
+            "no final loss on either side: absence, not a 0.0 tie"
+        );
+
+        let measured_a = model_with_loss_history("a", &[0.5]);
+        let measured_b = model_with_loss_history("b", &[0.4]);
+        let diff = comparator
+            .calculate_performance_difference(&measured_a, &measured_b)
+            .expect("both models recorded a final loss");
+        assert!(
+            (diff - (-0.2)).abs() < 1e-12,
+            "(0.4 - 0.5)/0.5 = -0.2, got {diff}"
+        );
+    }
+
+    #[test]
+    fn test_efficiency_difference_is_none_without_a_reference_scale() {
+        let comparator = ModelComparator::new();
+        let zeroed = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: None,
+            training_time: Duration::ZERO,
+            parameter_count: 1000,
+            model_size_mb: 0.0,
+        };
+        assert_eq!(
+            comparator.calculate_efficiency_difference(&zeroed, &zeroed),
+            None,
+            "dividing by a zero reference used to yield NaN/inf, not a real ratio"
+        );
+
+        let a = model_with_loss_history("a", &[0.5]);
+        let mut b = model_with_loss_history("b", &[0.5]);
+        b.training_time = Duration::from_secs(150);
+        b.model_size_mb = 20.0;
+        let diff = comparator
+            .calculate_efficiency_difference(&a, &b)
+            .expect("both scales are non-zero");
+        // time 150/100 - 1 = 0.5, size 20/10 - 1 = 1.0, mean = 0.75
+        assert!((diff - 0.75).abs() < 1e-12, "got {diff}");
+    }
+
+    #[test]
+    fn test_clear_alert_removes_only_the_requested_alert_type() {
+        let config = DebugConfig::default();
+        let mut monitor = TrainingMonitor::new(&config);
+        for alert_type in [
+            AlertType::LossIncrease,
+            AlertType::MemoryOveruse,
+            AlertType::TrainingStalled,
+        ] {
+            monitor.active_alerts.push(TrainingAlert {
+                alert_type,
+                severity: AlertSeverity::Warning,
+                message: "test".to_string(),
+                timestamp: SystemTime::now(),
+                metric_value: 1.0,
+                threshold: 0.5,
+                suggested_action: "none".to_string(),
+            });
+        }
+        assert_eq!(monitor.get_active_alerts().len(), 3);
+
+        monitor.clear_alert(AlertType::MemoryOveruse);
+
+        // The old `matches!(x, _alert_type)` body cleared all three.
+        let remaining: Vec<&AlertType> =
+            monitor.get_active_alerts().iter().map(|a| &a.alert_type).collect();
+        assert_eq!(remaining.len(), 2, "only the MemoryOveruse alert may go");
+        assert!(remaining.contains(&&AlertType::LossIncrease));
+        assert!(remaining.contains(&&AlertType::TrainingStalled));
+        assert!(!remaining.contains(&&AlertType::MemoryOveruse));
+
+        // Clearing a type that is not present must be a no-op.
+        monitor.clear_alert(AlertType::GradientExplosion);
+        assert_eq!(monitor.get_active_alerts().len(), 2);
+    }
+
+    fn model_with_loss_history(model_id: &str, losses: &[f64]) -> ModelMetrics {
+        ModelMetrics {
+            model_id: model_id.to_string(),
+            model_name: model_id.to_string(),
+            metrics_history: losses
+                .iter()
+                .map(|&l| make_metrics_with(Some(l), None, 1024.0))
+                .collect(),
+            final_loss: losses.last().copied(),
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        }
+    }
+
+    #[test]
+    fn test_statistical_significance_none_with_empty_history() {
+        // No recorded `loss` samples on either side -- an honest `None`,
+        // never a fabricated `true`.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[]);
+        let mb = model_with_loss_history("b", &[]);
+        assert_eq!(comparator.test_statistical_significance(&ma, &mb), None);
+    }
+
+    #[test]
+    fn test_statistical_significance_none_with_single_sample() {
+        // A single recorded sample per model is not enough for a real
+        // two-sample t-test.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.5]);
+        let mb = model_with_loss_history("b", &[0.2]);
+        assert_eq!(comparator.test_statistical_significance(&ma, &mb), None);
+    }
+
+    #[test]
+    fn test_statistical_significance_true_for_clearly_separated_models() {
+        // Two tight, well-separated loss distributions: a real Welch's
+        // t-test must find this significant.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.51, 0.49, 0.50, 0.52, 0.48, 0.50, 0.51]);
+        let mb = model_with_loss_history("b", &[0.20, 0.21, 0.19, 0.20, 0.22, 0.18, 0.20, 0.21]);
+        assert_eq!(
+            comparator.test_statistical_significance(&ma, &mb),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_statistical_significance_false_for_overlapping_models() {
+        // Two noisy loss distributions with (almost) the same mean and
+        // overlapping spread: a real Welch's t-test must NOT find this
+        // significant -- this is exactly the case the old `true //
+        // Placeholder` got wrong for every pair.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.55, 0.45, 0.52, 0.48, 0.51, 0.49, 0.53]);
+        let mb = model_with_loss_history("b", &[0.51, 0.46, 0.54, 0.49, 0.52, 0.47, 0.53, 0.50]);
+        assert_eq!(
+            comparator.test_statistical_significance(&ma, &mb),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_compare_two_models_publishes_option_significance() {
+        // End-to-end: `compare_two_models` (called from `compare_models`,
+        // in turn from `get_dashboard_snapshot`) must publish the same
+        // real `Option<bool>`, not a constant.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.51, 0.49, 0.50, 0.52, 0.48, 0.50, 0.51]);
+        let mb = model_with_loss_history("b", &[0.20, 0.21, 0.19, 0.20, 0.22, 0.18, 0.20, 0.21]);
+        let comparison = comparator.compare_two_models(&ma, &mb);
+        assert_eq!(comparison.statistical_significance, Some(true));
     }
 
     // --- HyperparameterExplorer tests ---

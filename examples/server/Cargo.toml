@@ -1,42 +1,108 @@
 [package]
 name = "trustformers-server"
-version.workspace = true
-edition.workspace = true
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.89"
 publish = false
+# Matches the root `[workspace.package]` license and this crate's own
+# README.md `## License` section. A non-member cannot inherit
+# `license.workspace = true` (same reason `version`/`edition` are literal
+# above), and the field was simply missing before — `cargo deny check
+# licenses` (run from this directory) failed with `unlicensed` for exactly
+# that reason.
+license = "Apache-2.0"
+
+# This directory lives inside the repository tree but is listed in the root
+# `[workspace] exclude` list, so it is NOT a workspace member. A non-member
+# cannot inherit `[workspace.package]` values: the previous
+# `version.workspace = true` / `edition.workspace = true` made even
+# `cargo metadata` fail with "failed to find a workspace root" (the same defect
+# `examples/grpc-server/Cargo.toml` had before it was fixed). The empty
+# `[workspace]` table below makes this directory its own workspace root, and
+# the literal `version` / `edition` / `rust-version` above mirror the
+# repository root's `[workspace.package]` values.
+[workspace]
+
+# Mirrors the repository root's `[workspace.lints]` (and `examples/grpc-server`'s
+# copy of the same). A non-member cannot inherit it with `[lints] workspace =
+# true`, so it is repeated here rather than left off: this example is held to
+# the same lint policy as the crates it exercises.
+[lints.rust]
+unused_variables = "warn"
+unused_imports = "warn"
+dead_code = "warn"
+unused_mut = "warn"
+unused_assignments = "warn"
+deprecated = "warn"
+
+[lints.clippy]
+all = "warn"
 
 [dependencies]
-# Web framework
-axum = { version = "0.8", features = ["json", "ws"] }
-tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-full"] }
-hyper = { version = "1.0", features = ["full"] }
+# Web framework. Versions mirror the repository root's
+# `[workspace.dependencies]` pins (`trustformers-serve` depends on the same
+# majors) rather than the stale 0.6-era pins the previous manifest carried.
+#
+# `tower-http`'s feature set intentionally excludes every `compression-*` /
+# `decompression-*` feature: all four backends (`compression-br` ->
+# `brotli`, `compression-deflate` / `compression-gzip` -> `flate2`,
+# `compression-zstd` -> `zstd`/`zstd-sys`) route through `async-compression`
+# to a crate this repository's `deny.toml` explicitly bans — there is no
+# compliant compression backend to opt into, only banned ones. A previous
+# version of this manifest enabled `compression-full` and `main.rs` installed
+# `CompressionLayer`; `cargo deny check bans` (run from this directory) failed
+# on `brotli`, `brotli-decompressor`, `flate2`, `zstd`, `zstd-safe`, and
+# `zstd-sys`, all reachable only through that one feature. Matches
+# `examples/grpc-server/Cargo.toml`'s documented removal of tonic's `gzip`
+# feature for the same reason (its comment: "`flate2` is banned by the
+# COOLJAPAN pure-Rust policy"), and the repository root's own
+# `[workspace.dependencies]` entry for `tower-http`, which also carries only
+# `cors`/`trace`.
+axum = { version = "0.8.9", features = ["macros"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 
-# Error handling
-anyhow = "1.0"
-thiserror = "2.0"
+# Error handling. `AppError` carries every failure message as a string built at
+# the failure site, so there is no `anyhow` here (the previous manifest listed
+# it but no code path in this crate ever produced an `anyhow::Error`).
+thiserror = "2.0.18"
 
-# TrustformeRS
+# TrustformeRS. `all-models` turns on bert/roberta/albert/gpt2/gpt_neo/gpt_j/t5;
+# the task-specific `AutoModelFor*` loaders this server drives need at least
+# one architecture per task family (bert/roberta/albert for classification,
+# NER and QA; gpt2/gpt_neo/gpt_j for causal generation) and there is no
+# narrower feature set that covers all four REST endpoints. Everything this
+# crate uses (`AutoConfig`, `AutoTokenizer`, `AutoModelForSequenceClassification`,
+# `AutoModelForTokenClassification`, `AutoModelForQuestionAnswering`,
+# `AutoModelForCausalLM`, the `core::traits::{Model, Tokenizer}` re-export) is
+# reached through the umbrella crate, so — like `examples/grpc-server` —
+# neither `trustformers-core` nor `trustformers-tokenizers` is a direct
+# dependency here.
 trustformers = { path = "../../trustformers", features = ["all-models"] }
-trustformers-core = { path = "../../trustformers-core" }
-trustformers-models = { path = "../../trustformers-models" }
-trustformers-tokenizers = { path = "../../trustformers-tokenizers" }
 
 # Utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
-once_cell = "1.0"
-dashmap = "6.0"
+uuid = { version = "1.23.4", features = ["v4"] }
+dashmap = "6.2"
 chrono = { version = "0.4", features = ["serde"] }
+
+# No [dev-dependencies]: every test in src/ (`cargo test`) is a synchronous
+# `#[test]` exercising `ModelManager`/handler-level pure logic directly —
+# real filesystem behaviour via `std::env::temp_dir()`, no HTTP round trip —
+# so no test-only crate (an HTTP test client, an extra tokio feature set) is
+# needed on top of what `[dependencies]` above already provides. A real
+# forward pass through a trained checkpoint needs an actual
+# `model.safetensors` this environment has none of (see README.md); nothing
+# short of that is untested.
 
 [[bin]]
 name = "trustformers-server"

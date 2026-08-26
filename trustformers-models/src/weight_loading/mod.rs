@@ -9,13 +9,30 @@
 /// - GGUF quantized format support
 /// - Automatic format detection
 /// - Load balancing and fault tolerance
+pub mod binding;
+pub mod checkpoint;
 pub mod config;
 pub mod distributed;
 pub mod gguf;
+pub mod gguf_dequant;
 pub mod huggingface;
 pub mod memory_mapped;
 pub mod streaming;
 pub mod utils;
+
+#[cfg(test)]
+pub mod test_support;
+
+#[cfg(test)]
+mod tests;
+
+pub use binding::{
+    bind_embedding, bind_head_layer_norm, bind_head_linear, bind_linear, take_norm_bias,
+    take_norm_weight, DecoderShapes, DECODER_BUFFER_SUFFIXES,
+};
+pub use checkpoint::{
+    Checkpoint, CheckpointFormat, CheckpointReader, LoadReport, UnusedTensors, WeightBinder,
+};
 
 // Re-export common types and traits
 pub use config::{

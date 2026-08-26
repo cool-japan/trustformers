@@ -16,10 +16,20 @@ pub struct ZeroCopyHeader {
     pub version: u32,
     /// Size of the header
     pub header_size: u32,
-    /// Offset to vocabulary section
+    /// Offset to vocabulary section (entries array, immediately followed
+    /// by the entries' string data)
     pub vocab_offset: u64,
-    /// Size of vocabulary section
+    /// Size of vocabulary section in bytes (entries array + string data
+    /// combined)
     pub vocab_size: u64,
+    /// Number of [`ZeroCopyVocabEntry`] records at the start of the
+    /// vocabulary section. Recorded explicitly rather than derived by
+    /// dividing `vocab_size` by `size_of::<ZeroCopyVocabEntry>()`: that
+    /// division is only correct when the trailing string data happens to
+    /// be shorter than one entry, and silently overcounts (reading
+    /// string-data bytes as bogus extra entries) for any realistic
+    /// vocabulary.
+    pub vocab_entry_count: u64,
     /// Offset to metadata section
     pub metadata_offset: u64,
     /// Size of metadata section
@@ -28,7 +38,8 @@ pub struct ZeroCopyHeader {
     pub special_tokens_offset: u64,
     /// Size of special tokens section
     pub special_tokens_size: u64,
-    /// Checksum of the entire file
+    /// CRC32 checksum of the vocabulary + metadata + special-tokens
+    /// sections, verified by [`ZeroCopyTokenizer::from_file`].
     pub checksum: u64,
     /// Padding for alignment
     pub padding: [u8; 8],
@@ -36,13 +47,19 @@ pub struct ZeroCopyHeader {
 
 impl ZeroCopyHeader {
     const MAGIC: [u8; 4] = *b"TFZC"; // TrustFormeR Zero Copy
-    const VERSION: u32 = 1;
+                                     // Bumped from 1: version 1 headers have no `vocab_entry_count` field
+                                     // and cannot be read correctly (see the field's doc comment), so
+                                     // `validate()` rejecting them is the correct behavior, not a
+                                     // regression.
+    const VERSION: u32 = 2;
     const SIZE: usize = std::mem::size_of::<Self>();
 
     /// Create a new header with the given parameters
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         vocab_offset: u64,
         vocab_size: u64,
+        vocab_entry_count: u64,
         metadata_offset: u64,
         metadata_size: u64,
         special_tokens_offset: u64,
@@ -55,6 +72,7 @@ impl ZeroCopyHeader {
             header_size: Self::SIZE as u32,
             vocab_offset,
             vocab_size,
+            vocab_entry_count,
             metadata_offset,
             metadata_size,
             special_tokens_offset,
@@ -126,14 +144,44 @@ impl ZeroCopyVocabEntry {
     }
 }
 
+/// Bounds-checked byte slice of `data[start..start + len]`.
+///
+/// Used everywhere a section is carved out of the memory-mapped file from
+/// header-supplied offsets/lengths, which may be corrupted or hostile:
+/// `start + len` is computed with `checked_add` (a wraparound must not
+/// silently produce a small, in-bounds-looking `end`), and the range is
+/// bounds-checked against `data.len()` before slicing, so a malformed file
+/// produces an `Err` instead of an indexing panic.
+fn checked_slice<'a>(data: &'a [u8], start: usize, len: usize, label: &str) -> Result<&'a [u8]> {
+    let end = start.checked_add(len).ok_or_else(|| {
+        TrustformersError::serialization_error(format!(
+            "{} section offset+length overflows: start={}, len={}",
+            label, start, len
+        ))
+    })?;
+    data.get(start..end).ok_or_else(|| {
+        TrustformersError::serialization_error(format!(
+            "{} section [{}..{}) extends beyond the file (len {})",
+            label,
+            start,
+            end,
+            data.len()
+        ))
+    })
+}
+
 /// Zero-copy tokenizer implementation
 pub struct ZeroCopyTokenizer {
     /// Memory-mapped file
     mmap: Mmap,
     /// Header information
     header: ZeroCopyHeader,
-    /// Vocabulary entries
-    vocab_entries: &'static [ZeroCopyVocabEntry],
+    /// Byte offset of the vocabulary-entries array within `mmap` (validated
+    /// in [`Self::from_file`]).
+    vocab_entries_offset: usize,
+    /// Number of [`ZeroCopyVocabEntry`] records at `vocab_entries_offset`
+    /// (validated in [`Self::from_file`]).
+    vocab_entries_count: usize,
     /// Token-to-ID mapping for fast lookup
     token_to_id: HashMap<String, u32>,
     /// ID-to-token mapping for fast lookup
@@ -159,23 +207,60 @@ impl ZeroCopyTokenizer {
 
         header.validate()?;
 
-        // Read vocabulary entries
-        let vocab_start = header.vocab_offset as usize;
-        let vocab_end = vocab_start + header.vocab_size as usize;
-
-        if vocab_end > mmap.len() {
+        // Bounds-check every section against the mapped file length up
+        // front, with checked arithmetic throughout: a corrupted or
+        // maliciously crafted header must produce a structured `Err`
+        // here, not a slicing panic (or a usize overflow wrapping into an
+        // in-bounds-looking range) the first time a caller touches that
+        // section.
+        let vocab_entries_offset = header.vocab_offset as usize;
+        let vocab_entries_count = header.vocab_entry_count as usize;
+        let entry_size = std::mem::size_of::<ZeroCopyVocabEntry>();
+        let entries_byte_len = vocab_entries_count.checked_mul(entry_size).ok_or_else(|| {
+            TrustformersError::serialization_error(
+                "vocabulary entry count overflows a byte length".to_string(),
+            )
+        })?;
+        let entries_bytes = checked_slice(
+            &mmap,
+            vocab_entries_offset,
+            entries_byte_len,
+            "vocabulary entries",
+        )?;
+        // The entries array must itself fit inside the (entries + string
+        // data) vocabulary section the header advertises.
+        if entries_byte_len > header.vocab_size as usize {
             return Err(TrustformersError::serialization_error(
-                "Vocabulary section extends beyond file".to_string(),
+                "vocabulary entry count exceeds the vocabulary section size".to_string(),
             ));
         }
+        checked_slice(
+            &mmap,
+            header.vocab_offset as usize,
+            header.vocab_size as usize,
+            "vocabulary",
+        )?;
+        checked_slice(
+            &mmap,
+            header.metadata_offset as usize,
+            header.metadata_size as usize,
+            "metadata",
+        )?;
+        checked_slice(
+            &mmap,
+            header.special_tokens_offset as usize,
+            header.special_tokens_size as usize,
+            "special tokens",
+        )?;
 
-        let entry_size = std::mem::size_of::<ZeroCopyVocabEntry>();
-        let num_entries = header.vocab_size as usize / entry_size;
-
-        let vocab_entries = unsafe {
+        // SAFETY: `ZeroCopyVocabEntry` is `#[repr(C, packed)]`, giving it
+        // alignment 1 (so any byte offset is validly aligned), and
+        // `entries_bytes` was just bounds-checked above to be exactly
+        // `vocab_entries_count * size_of::<ZeroCopyVocabEntry>()` bytes.
+        let vocab_entries: &[ZeroCopyVocabEntry] = unsafe {
             slice::from_raw_parts(
-                mmap[vocab_start..].as_ptr() as *const ZeroCopyVocabEntry,
-                num_entries,
+                entries_bytes.as_ptr() as *const ZeroCopyVocabEntry,
+                vocab_entries_count,
             )
         };
 
@@ -184,31 +269,69 @@ impl ZeroCopyTokenizer {
         let mut id_to_token = HashMap::new();
 
         for entry in vocab_entries {
-            let token_start = entry.token_offset as usize;
-            let token_end = token_start + entry.token_length as usize;
-
-            if token_end > mmap.len() {
-                return Err(TrustformersError::serialization_error(
-                    "Token string extends beyond file".to_string(),
-                ));
-            }
-
-            let token_bytes = &mmap[token_start..token_end];
+            let token_bytes = checked_slice(
+                &mmap,
+                entry.token_offset as usize,
+                entry.token_length as usize,
+                "token string",
+            )?;
             let token = String::from_utf8(token_bytes.to_vec()).map_err(|e| {
                 TrustformersError::serialization_error(format!("Invalid UTF-8 in token: {}", e))
             })?;
 
-            token_to_id.insert(token.clone(), entry.id);
-            id_to_token.insert(entry.id, token);
+            let id = entry.id;
+            token_to_id.insert(token.clone(), id);
+            id_to_token.insert(id, token);
         }
 
-        Ok(Self {
+        let tokenizer = Self {
             mmap,
             header,
-            vocab_entries,
+            vocab_entries_offset,
+            vocab_entries_count,
             token_to_id,
             id_to_token,
-        })
+        };
+
+        // The header carries a checksum, but previously only the
+        // separate (easy to forget to call) `ZeroCopyUtils::validate_file`
+        // helper ever checked it -- `from_file` itself accepted a
+        // corrupted or tampered file outright. Verify it unconditionally
+        // here so loading a zero-copy tokenizer is never silently unsafe.
+        if !tokenizer.verify_integrity()? {
+            return Err(TrustformersError::serialization_error(
+                "Zero-copy tokenizer file failed checksum verification (corrupted or tampered)"
+                    .to_string(),
+            ));
+        }
+
+        Ok(tokenizer)
+    }
+
+    /// Reconstruct the vocabulary-entries slice from the offset/count
+    /// recorded (and bounds-checked) at load time in [`Self::from_file`].
+    ///
+    /// This is deliberately *not* a stored field: keeping a
+    /// `&'static [ZeroCopyVocabEntry]` slice borrowed from `self.mmap`
+    /// inside the struct itself would be a self-referential struct
+    /// laundered through an unsound `'static` lifetime. Reconstructing the
+    /// slice on each access instead ties its lifetime correctly to
+    /// `&self`, with no unsafety beyond the single documented cast below.
+    fn vocab_entries_slice(&self) -> &[ZeroCopyVocabEntry] {
+        let entry_size = std::mem::size_of::<ZeroCopyVocabEntry>();
+        let byte_len = self.vocab_entries_count * entry_size;
+        let bytes = &self.mmap[self.vocab_entries_offset..self.vocab_entries_offset + byte_len];
+        // SAFETY: `ZeroCopyVocabEntry` is `#[repr(C, packed)]` (alignment
+        // 1); `from_file` bounds-checked `vocab_entries_offset` /
+        // `vocab_entries_count` against the file length before ever
+        // constructing a `Self`, and neither field nor `self.mmap` changes
+        // after construction, so this slice is always in-bounds.
+        unsafe {
+            slice::from_raw_parts(
+                bytes.as_ptr() as *const ZeroCopyVocabEntry,
+                self.vocab_entries_count,
+            )
+        }
     }
 
     /// Get the header information
@@ -218,21 +341,24 @@ impl ZeroCopyTokenizer {
 
     /// Get vocabulary size
     pub fn vocab_size(&self) -> usize {
-        self.vocab_entries.len()
+        self.vocab_entries_count
     }
 
     /// Get a token by ID without copying
     pub fn get_token_unchecked(&self, id: u32) -> Option<&str> {
-        self.vocab_entries.iter().find(|entry| entry.id == id).and_then(|entry| {
-            let token_start = entry.token_offset as usize;
-            let token_end = token_start + entry.token_length as usize;
-
-            if token_end <= self.mmap.len() {
-                std::str::from_utf8(&self.mmap[token_start..token_end]).ok()
-            } else {
-                None
-            }
-        })
+        self.vocab_entries_slice()
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| {
+                checked_slice(
+                    &self.mmap,
+                    entry.token_offset as usize,
+                    entry.token_length as usize,
+                    "token string",
+                )
+                .ok()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            })
     }
 
     /// Get token ID without copying
@@ -242,12 +368,12 @@ impl ZeroCopyTokenizer {
 
     /// Get vocabulary entry by index
     pub fn get_vocab_entry(&self, index: usize) -> Option<&ZeroCopyVocabEntry> {
-        self.vocab_entries.get(index)
+        self.vocab_entries_slice().get(index)
     }
 
     /// Iterate over all vocabulary entries
     pub fn vocab_entries(&self) -> impl Iterator<Item = &ZeroCopyVocabEntry> {
-        self.vocab_entries.iter()
+        self.vocab_entries_slice().iter()
     }
 
     /// Get metadata section as bytes
@@ -305,6 +431,13 @@ impl ZeroCopyTokenizer {
 }
 
 impl Tokenizer for ZeroCopyTokenizer {
+    /// Whitespace-split lookup against the memory-mapped vocabulary.
+    ///
+    /// `offset_mapping` is `None`: this encoder computes no spans (and silently
+    /// skips words the vocabulary does not contain, so positions would not tile
+    /// the input anyway). `None` states that absence rather than inventing
+    /// spans — the `WordPieceTokenizer`/`BPETokenizer` encoders are the ones
+    /// that produce real offsets, see `crate::offsets`.
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
         // Simple word-based tokenization for demonstration
         let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -506,6 +639,7 @@ impl ZeroCopyBuilder {
         let header = ZeroCopyHeader::new(
             vocab_offset,
             vocab_size,
+            self.vocabulary.len() as u64,
             metadata_offset,
             metadata_size,
             special_tokens_offset,
@@ -598,17 +732,18 @@ impl ZeroCopyUtils {
         let mut info = HashMap::new();
         // Copy packed struct fields to local variables to avoid alignment issues
         let version = header.version;
-        let vocab_size = header.vocab_size;
+        let vocab_entry_count = header.vocab_entry_count;
         let metadata_size = header.metadata_size;
         let special_tokens_size = header.special_tokens_size;
 
         info.insert("format".to_string(), "ZeroCopy".to_string());
         info.insert("version".to_string(), version.to_string());
         info.insert("file_size".to_string(), mmap.len().to_string());
-        info.insert(
-            "vocab_size".to_string(),
-            (vocab_size / std::mem::size_of::<ZeroCopyVocabEntry>() as u64).to_string(),
-        );
+        // The entry count is read directly from the header rather than
+        // derived by dividing the combined entries+string-data section
+        // size by `size_of::<ZeroCopyVocabEntry>()` -- see the field's doc
+        // comment on `ZeroCopyHeader::vocab_entry_count`.
+        info.insert("vocab_size".to_string(), vocab_entry_count.to_string());
         info.insert("metadata_size".to_string(), metadata_size.to_string());
         info.insert(
             "special_tokens_size".to_string(),
@@ -655,7 +790,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_header() {
-        let header = ZeroCopyHeader::new(100, 200, 300, 50, 350, 25, 0x12345678);
+        let header = ZeroCopyHeader::new(100, 200, 5, 300, 50, 350, 25, 0x12345678);
 
         assert_eq!(header.magic, ZeroCopyHeader::MAGIC);
         // Copy fields to local variables to avoid unaligned reference errors
@@ -870,5 +1005,78 @@ mod tests {
         for (token, &expected_id) in &vocab {
             assert_eq!(tokenizer.get_id_unchecked(token), Some(expected_id));
         }
+    }
+
+    /// Regression test for the entry-count miscalculation: the vocabulary
+    /// section's *string data* (not just the entries array) is included in
+    /// `header.vocab_size`, so deriving the entry count via
+    /// `header.vocab_size / size_of::<ZeroCopyVocabEntry>()` silently
+    /// overcounts and reads string-data bytes as bogus extra entries
+    /// whenever the string data is at least as large as one entry
+    /// (`size_of::<ZeroCopyVocabEntry>()` == 28 bytes). Ten 10-byte tokens
+    /// produce 100 bytes of string data against 280 bytes of entries
+    /// (380 total): the old buggy division gives `380 / 28 == 13`, three
+    /// more than the real count of 10, which the old code would have
+    /// accepted as valid entries instead of rejecting or reporting the
+    /// correct count of 10.
+    #[test]
+    fn test_vocab_entry_count_is_exact_not_derived_from_combined_section_size() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let file_path = temp_dir.path().join("test_entry_count.zc");
+
+        let mut builder = ZeroCopyBuilder::new();
+        for i in 0..10u32 {
+            builder.add_token(format!("token{:05}", i), i, 1.0, false); // 10 bytes/token
+        }
+        builder.build_to_file(&file_path).expect("Operation failed in test");
+
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
+        assert_eq!(
+            tokenizer.vocab_size(),
+            10,
+            "entry count must come from the header field, not a division that silently miscounts"
+        );
+
+        for i in 0..10u32 {
+            let token = format!("token{:05}", i);
+            assert_eq!(tokenizer.get_id_unchecked(&token), Some(i));
+            assert_eq!(tokenizer.get_token_unchecked(i), Some(token.as_str()));
+        }
+    }
+
+    /// Regression test: `from_file` must itself verify the header
+    /// checksum and reject a corrupted file, not silently load
+    /// (possibly-garbage) vocabulary data and leave verification as an
+    /// opt-in the caller has to remember (`ZeroCopyUtils::validate_file`).
+    #[test]
+    fn test_from_file_rejects_checksum_mismatch() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let file_path = temp_dir.path().join("test_corrupt.zc");
+
+        let mut builder = ZeroCopyBuilder::new();
+        builder.add_token("hello".to_string(), 1, 1.0, false).add_token(
+            "world".to_string(),
+            2,
+            1.0,
+            false,
+        );
+        builder.build_to_file(&file_path).expect("Operation failed in test");
+
+        // Loading the untouched file must succeed.
+        assert!(ZeroCopyTokenizer::from_file(&file_path).is_ok());
+
+        // Flip a byte inside the vocabulary section's string data (right
+        // after the header + two 28-byte entries) without touching the
+        // header's checksum field, simulating file corruption/tampering.
+        let mut bytes = std::fs::read(&file_path).expect("Operation failed in test");
+        let corrupt_at = ZeroCopyHeader::SIZE + 2 * std::mem::size_of::<ZeroCopyVocabEntry>();
+        bytes[corrupt_at] ^= 0xFF;
+        std::fs::write(&file_path, &bytes).expect("Operation failed in test");
+
+        let result = ZeroCopyTokenizer::from_file(&file_path);
+        assert!(
+            result.is_err(),
+            "a corrupted file must fail checksum verification, not load silently"
+        );
     }
 }

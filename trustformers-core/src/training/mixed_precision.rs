@@ -111,18 +111,12 @@ impl fmt::Display for BFloat16 {
 
 /// Convert a slice of `f32` values to BF16 bit patterns (`u16`).
 pub fn cast_fp32_to_bf16(fp32_slice: &[f32]) -> Vec<u16> {
-    fp32_slice
-        .iter()
-        .map(|&v| BFloat16::from_f32(v).bits)
-        .collect()
+    fp32_slice.iter().map(|&v| BFloat16::from_f32(v).bits).collect()
 }
 
 /// Convert a slice of BF16 bit patterns back to `f32`.
 pub fn cast_bf16_to_fp32(bf16_slice: &[u16]) -> Vec<f32> {
-    bf16_slice
-        .iter()
-        .map(|&bits| BFloat16 { bits }.to_f32())
-        .collect()
+    bf16_slice.iter().map(|&bits| BFloat16 { bits }.to_f32()).collect()
 }
 
 /// Convert a slice of `f32` values to IEEE 754 FP16 bit patterns (`u16`).
@@ -294,10 +288,7 @@ impl LossScaler {
     ///
     /// Returns `true` if all gradients are finite (i.e., the step is safe).
     pub fn check_gradients(&self, grads: &[Vec<f32>]) -> bool {
-        grads
-            .iter()
-            .flat_map(|g| g.iter())
-            .all(|v| v.is_finite())
+        grads.iter().flat_map(|g| g.iter()).all(|v| v.is_finite())
     }
 
     /// Update the scale after one optimizer step.
@@ -384,11 +375,8 @@ impl MixedPrecisionContext {
     /// `param_shapes` is a slice where each element is the number of scalar
     /// parameters in that tensor.  Master weights are initialized to zero.
     pub fn new(mode: TrainingPrecisionMode, param_shapes: &[usize]) -> Self {
-        let loss_scaler = if mode == TrainingPrecisionMode::Fp16 {
-            Some(LossScaler::new())
-        } else {
-            None
-        };
+        let loss_scaler =
+            if mode == TrainingPrecisionMode::Fp16 { Some(LossScaler::new()) } else { None };
         let master_weights = param_shapes.iter().map(|&n| vec![0.0_f32; n]).collect();
         Self {
             mode,
@@ -406,16 +394,12 @@ impl MixedPrecisionContext {
     /// of obtaining low-precision weights).
     pub fn get_compute_weights(&self) -> Vec<Vec<u16>> {
         match self.mode {
-            TrainingPrecisionMode::Bf16 => self
-                .master_weights
-                .iter()
-                .map(|w| cast_fp32_to_bf16(w))
-                .collect(),
-            TrainingPrecisionMode::Fp16 => self
-                .master_weights
-                .iter()
-                .map(|w| cast_fp32_to_fp16(w))
-                .collect(),
+            TrainingPrecisionMode::Bf16 => {
+                self.master_weights.iter().map(|w| cast_fp32_to_bf16(w)).collect()
+            },
+            TrainingPrecisionMode::Fp16 => {
+                self.master_weights.iter().map(|w| cast_fp32_to_fp16(w)).collect()
+            },
             TrainingPrecisionMode::Fp32 | TrainingPrecisionMode::Fp8E4M3 => {
                 // For FP32 mode, return the raw f32 bits split into u16 pairs
                 // (high word first) so that the shape is preserved.
@@ -430,7 +414,7 @@ impl MixedPrecisionContext {
                             .collect()
                     })
                     .collect()
-            }
+            },
         }
     }
 
@@ -452,10 +436,7 @@ impl MixedPrecisionContext {
     /// Delegates to `LossScaler::check_gradients` when a scaler is present,
     /// otherwise checks directly.
     pub fn check_overflow(&self, grads: &[Vec<f32>]) -> bool {
-        let all_finite = grads
-            .iter()
-            .flat_map(|g| g.iter())
-            .all(|v| v.is_finite());
+        let all_finite = grads.iter().flat_map(|g| g.iter()).all(|v| v.is_finite());
         !all_finite
     }
 }
@@ -473,7 +454,7 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_bf16_round_trip() {
-        let values: &[f32] = &[1.0, -1.0, 0.5, 3.14, 100.0, -0.001, 1024.0];
+        let values: &[f32] = &[1.0, -1.0, 0.5, 3.25, 100.0, -0.001, 1024.0];
         for &v in values {
             let bf = BFloat16::from_f32(v);
             let back = bf.to_f32();
@@ -545,8 +526,14 @@ mod tests {
         let scale = scaler.current_scale();
         let mut grads = vec![vec![scale * 2.0_f32, scale * 4.0_f32]];
         scaler.unscale_gradients(&mut grads);
-        assert!((grads[0][0] - 2.0).abs() < 1e-4, "unscaled[0] should be 2.0");
-        assert!((grads[0][1] - 4.0).abs() < 1e-4, "unscaled[1] should be 4.0");
+        assert!(
+            (grads[0][0] - 2.0).abs() < 1e-4,
+            "unscaled[0] should be 2.0"
+        );
+        assert!(
+            (grads[0][1] - 4.0).abs() < 1e-4,
+            "unscaled[1] should be 4.0"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -654,12 +641,9 @@ mod tests {
         ctx.update_master_weights(&grads, lr);
 
         // Expected: w - lr * g.
-        let expected = vec![1.0 - 0.01, 2.0 - 0.02, 3.0 - 0.03];
+        let expected = [1.0 - 0.01, 2.0 - 0.02, 3.0 - 0.03];
         for (w, e) in ctx.master_weights[0].iter().zip(expected.iter()) {
-            assert!(
-                (w - e).abs() < 1e-6,
-                "SGD update: expected {e}, got {w}"
-            );
+            assert!((w - e).abs() < 1e-6, "SGD update: expected {e}, got {w}");
         }
     }
 

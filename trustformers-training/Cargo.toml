@@ -2,6 +2,7 @@
 name = "trustformers-training"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -34,6 +35,8 @@ hex.workspace = true
 half.workspace = true
 rmp-serde.workspace = true
 log.workspace = true
+regex.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
@@ -43,9 +46,8 @@ tempfile.workspace = true
 
 [features]
 default = []
-candle = ["trustformers-core/candle"]
 # Full feature set for testing
-full = ["candle", "trustformers-core/full"]
+full = ["trustformers-core/full"]
 
 [[example]]
 name = "simple_classification"

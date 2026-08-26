@@ -486,6 +486,7 @@ impl StatefulOptimizer for DiWo {
                 third_moment: HashMap::new(),
                 param_steps: HashMap::new(),
                 velocity: HashMap::new(),
+                ..Default::default()
             });
             // This is still unsafe because we're returning a reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
@@ -509,6 +510,7 @@ impl StatefulOptimizer for DiWo {
                 third_moment: HashMap::new(),
                 param_steps: HashMap::new(),
                 velocity: HashMap::new(),
+                ..Default::default()
             });
             // This is still unsafe because we're returning a mutable reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
@@ -660,8 +662,6 @@ pub struct MeZOV2 {
     step: usize,
     /// Random seed for reproducible perturbations
     random_seed: u64,
-    /// Parameter history for momentum-like behavior
-    parameter_history: HashMap<String, Vec<Tensor>>,
 }
 
 /// MeZO-V2 configuration
@@ -702,7 +702,6 @@ impl MeZOV2 {
             perturbation_levels: vec![1.0, 0.1, 0.01],
             step: 0,
             random_seed: 42,
-            parameter_history: HashMap::new(),
         }
     }
 
@@ -728,163 +727,201 @@ impl MeZOV2 {
         optimizer
     }
 
-    /// Estimate gradient using zeroth-order method
-    fn estimate_gradient(
+    /// Deterministically regenerates the Rademacher perturbation for `seed`.
+    ///
+    /// MeZO's memory efficiency comes from *not storing* the perturbation: the same
+    /// seed is replayed to apply `+ε·z`, `−2ε·z`, `+ε·z` and finally the update
+    /// `−lr·ĝ·z`, so only one `u64` is carried between the phases.
+    fn perturbation_at(seed: u64, index: usize) -> f32 {
+        let mut z = seed.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        if z & 1 == 0 {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Adds `amount · z(seed)` to every parameter, in registration-sorted name order.
+    ///
+    /// The index stream is continuous across parameters so one seed covers the whole
+    /// model, exactly as MeZO requires.
+    fn perturb_in_place(
+        parameters: &mut HashMap<String, Tensor>,
+        names: &[String],
+        seed: u64,
+        amount: f32,
+    ) -> Result<()> {
+        let mut offset = 0_usize;
+        for name in names {
+            let parameter = parameters.get_mut(name).ok_or_else(|| {
+                TrustformersError::invalid_input(format!("MeZO: parameter '{name}' disappeared"))
+            })?;
+            let mut values = parameter.data_f32()?;
+            for (index, value) in values.iter_mut().enumerate() {
+                *value += amount * Self::perturbation_at(seed, offset + index);
+            }
+            offset += values.len();
+            parameter.set_data_f32(&values)?;
+        }
+        Ok(())
+    }
+
+    /// Runs one genuine MeZO step over a whole named parameter map.
+    ///
+    /// This is the *only* path that implements zeroth-order optimization, because it
+    /// is the only one that can evaluate the objective. For each of `num_samples`
+    /// probes and each configured perturbation level:
+    ///
+    /// ```text
+    /// z ~ Rademacher(seed)                       (regenerated, never stored)
+    /// θ ← θ + εz;   l₊ = loss(θ)
+    /// θ ← θ − 2εz;  l₋ = loss(θ)
+    /// θ ← θ + εz                                 (restored exactly)
+    /// ĝ  = (l₊ − l₋) / (2ε)                      (one scalar for the whole model)
+    /// θ ← θ − (lr / probes) · ĝ · z
+    /// ```
+    ///
+    /// Returns the loss measured at the unperturbed parameters before the update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the objective fails, when a parameter is not
+    /// `f32`-readable, or when `num_samples` or the perturbation levels are empty.
+    pub fn step_with_loss<F>(
         &mut self,
-        param: &Tensor,
-        loss_fn: impl Fn(&Tensor) -> Result<f32>,
-    ) -> Result<Tensor> {
-        let param_data = param.data()?;
-        let mut gradient_estimate = vec![0.0f32; param_data.len()];
+        parameters: &mut HashMap<String, Tensor>,
+        mut loss_fn: F,
+    ) -> Result<f32>
+    where
+        F: FnMut(&HashMap<String, Tensor>) -> Result<f32>,
+    {
+        if self.num_samples == 0 {
+            return Err(TrustformersError::invalid_config(
+                "MeZO requires num_samples >= 1".to_string(),
+            ));
+        }
+        if self.perturbation_levels.is_empty() {
+            return Err(TrustformersError::invalid_config(
+                "MeZO requires at least one perturbation level".to_string(),
+            ));
+        }
 
-        // Use multi-scale perturbations for better approximation
-        let perturbation_levels = self.perturbation_levels.clone();
-        for &scale_factor in &perturbation_levels {
-            let current_scale = self.perturbation_scale * scale_factor;
+        // A deterministic, order-independent traversal so a seed maps to the same
+        // coordinates on every phase and in every process.
+        let mut names: Vec<String> = parameters.keys().cloned().collect();
+        names.sort();
 
-            for _ in 0..self.num_samples {
-                // Generate random perturbation
-                let perturbation = self.generate_perturbation(&param_data, current_scale)?;
+        let baseline_loss = loss_fn(parameters)?;
 
-                // Forward perturbation
-                let perturbed_forward_data: Vec<f32> =
-                    param_data.iter().zip(perturbation.iter()).map(|(p, pert)| p + pert).collect();
-                let param_forward = Tensor::new(perturbed_forward_data)?;
-                let loss_forward = loss_fn(&param_forward)?;
+        self.step += 1;
+        let levels = self.perturbation_levels.clone();
+        let probes = self.num_samples * levels.len();
+        let mut projected_sum = 0.0_f32;
 
-                // Backward perturbation
-                let perturbed_backward_data: Vec<f32> =
-                    param_data.iter().zip(perturbation.iter()).map(|(p, pert)| p - pert).collect();
-                let param_backward = Tensor::new(perturbed_backward_data)?;
-                let loss_backward = loss_fn(&param_backward)?;
+        for (level_index, &level) in levels.iter().enumerate() {
+            let epsilon = self.perturbation_scale * level;
+            if epsilon <= 0.0 {
+                return Err(TrustformersError::invalid_config(format!(
+                    "MeZO perturbation scale must be positive, got {epsilon}"
+                )));
+            }
 
-                // Central difference approximation
-                let loss_diff = loss_forward - loss_backward;
-                let gradient_scale =
-                    loss_diff / (2.0 * current_scale) / self.perturbation_levels.len() as f32;
+            for sample in 0..self.num_samples {
+                let seed = self
+                    .random_seed
+                    .wrapping_add((self.step as u64).wrapping_mul(0x0100_0000_01B3))
+                    .wrapping_add((level_index as u64) << 32)
+                    .wrapping_add(sample as u64);
 
-                for (i, &pert) in perturbation.iter().enumerate() {
-                    gradient_estimate[i] += gradient_scale * pert.signum();
-                }
+                // θ + εz
+                Self::perturb_in_place(parameters, &names, seed, epsilon)?;
+                let loss_plus = loss_fn(parameters)?;
+
+                // θ − εz
+                Self::perturb_in_place(parameters, &names, seed, -2.0 * epsilon)?;
+                let loss_minus = loss_fn(parameters)?;
+
+                // Restore θ exactly.
+                Self::perturb_in_place(parameters, &names, seed, epsilon)?;
+
+                // The two-point estimate: one scalar for the entire model.
+                let projected = (loss_plus - loss_minus) / (2.0 * epsilon);
+                projected_sum += projected.abs();
+
+                // θ ← θ − (lr / probes) · ĝ · z, regenerating z from the same seed.
+                let step_size = self.learning_rate * projected / probes as f32;
+                Self::perturb_in_place(parameters, &names, seed, -step_size)?;
             }
         }
 
-        // Average over samples
-        for grad in gradient_estimate.iter_mut() {
-            *grad /= self.num_samples as f32;
-        }
-
-        Tensor::new(gradient_estimate)
+        self.adapt_perturbation_scale_from_estimate(projected_sum / probes as f32);
+        Ok(baseline_loss)
     }
 
-    /// Generate perturbation vector
-    fn generate_perturbation(&mut self, param_data: &[f32], scale: f32) -> Result<Vec<f32>> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        // Create reproducible random perturbation
-        let mut hasher = DefaultHasher::new();
-        self.step.hash(&mut hasher);
-        self.random_seed.hash(&mut hasher);
-        let seed = hasher.finish();
-
-        let mut rng_state = seed;
-        let perturbation: Vec<f32> = param_data
-            .iter()
-            .map(|_| {
-                // Simple linear congruential generator for reproducibility
-                rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-                let random_val = (rng_state >> 16) as f32 / (1u32 << 16) as f32;
-                scale * (2.0 * random_val - 1.0) // Scale to [-scale, scale]
-            })
-            .collect();
-
-        Ok(perturbation)
+    /// Convenience wrapper for a single unnamed parameter tensor.
+    ///
+    /// # Errors
+    ///
+    /// See [`MeZOV2::step_with_loss`].
+    pub fn step_with_loss_single<F>(
+        &mut self,
+        parameter: &mut Tensor,
+        mut loss_fn: F,
+    ) -> Result<f32>
+    where
+        F: FnMut(&Tensor) -> Result<f32>,
+    {
+        let mut parameters = HashMap::new();
+        parameters.insert("theta".to_string(), parameter.clone());
+        let loss = self.step_with_loss(&mut parameters, |params| {
+            let tensor = params.get("theta").ok_or_else(|| {
+                TrustformersError::invalid_state("MeZO: 'theta' vanished".to_string())
+            })?;
+            loss_fn(tensor)
+        })?;
+        *parameter = parameters.remove("theta").ok_or_else(|| {
+            TrustformersError::invalid_state("MeZO: 'theta' vanished".to_string())
+        })?;
+        Ok(loss)
     }
 
-    /// Adapt perturbation scale based on optimization progress
-    fn adapt_perturbation_scale(&mut self, param: &Tensor, _gradient_norm: f32) {
+    /// Adapts the perturbation scale from the *measured* directional derivative.
+    ///
+    /// A vanishing estimate means the two probe losses are indistinguishable, so the
+    /// step is too small to resolve; a very large one means the objective is changing
+    /// faster than the finite difference can track.
+    fn adapt_perturbation_scale_from_estimate(&mut self, mean_abs_projection: f32) {
         if !self.adaptive_perturbation {
             return;
         }
-
-        let param_id = format!("param_{}", self.parameter_history.len());
-
-        // Track parameter changes
-        let history = self.parameter_history.entry(param_id).or_default();
-        history.push(param.clone());
-
-        // Keep only recent history
-        if history.len() > 10 {
-            history.remove(0);
+        if mean_abs_projection < 1e-8 {
+            self.perturbation_scale *= 1.1;
+        } else if mean_abs_projection > 1e3 {
+            self.perturbation_scale *= 0.9;
         }
-
-        // Adapt based on gradient norm and parameter change rate
-        if history.len() >= 2 {
-            let recent = &history[history.len() - 1];
-            let previous = &history[history.len() - 2];
-
-            if let (Ok(recent_data), Ok(previous_data)) = (recent.data(), previous.data()) {
-                let param_change_norm: f32 = recent_data
-                    .iter()
-                    .zip(previous_data.iter())
-                    .map(|(r, p)| (r - p).abs())
-                    .sum::<f32>()
-                    / recent_data.len() as f32;
-
-                // If parameter changes are very small, increase perturbation
-                if param_change_norm < 1e-8 {
-                    self.perturbation_scale *= 1.1;
-                } else if param_change_norm > 1e-3 {
-                    // If parameter changes are large, decrease perturbation
-                    self.perturbation_scale *= 0.9;
-                }
-
-                // Clamp perturbation scale
-                self.perturbation_scale = self.perturbation_scale.clamp(1e-6, 1e-1);
-            }
-        }
+        self.perturbation_scale = self.perturbation_scale.clamp(1e-6, 1e-1);
     }
 }
 
 impl Optimizer for MeZOV2 {
-    fn update(&mut self, param: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        // MeZO-V2 doesn't use provided gradients directly, but we can use them as a reference
-        let gradient_norm = gradient.norm()?;
-
-        // For this implementation, we'll simulate zeroth-order optimization
-        // In a real implementation, this would require access to the loss function
-        // which isn't available through the standard Optimizer trait
-
-        // Apply simple update with adaptive scaling
-        let param_data = param.data()?;
-        let grad_data = gradient.data()?;
-
-        // Simulate zeroth-order gradient estimation by adding noise to provided gradient
-        let mut rng_state = (self.step as u64).wrapping_mul(1664525).wrapping_add(1013904223);
-        let noisy_grad_data: Vec<f32> = grad_data
-            .iter()
-            .map(|&g| {
-                rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
-                let noise_factor = ((rng_state >> 16) as f32 / (1u32 << 16) as f32 - 0.5) * 0.1;
-                g * (1.0 + noise_factor) // Add noise to simulate FD approximation
-            })
-            .collect();
-
-        // Apply update with adaptive perturbation scaling
-        let effective_lr = self.learning_rate * (1.0 + self.perturbation_scale);
-        let updated_param_data: Vec<f32> = param_data
-            .iter()
-            .zip(noisy_grad_data.iter())
-            .map(|(p, g)| p - effective_lr * g)
-            .collect();
-
-        *param = Tensor::new(updated_param_data)?;
-
-        // Adapt perturbation scale
-        self.adapt_perturbation_scale(param, gradient_norm);
-
-        Ok(())
+    /// Always returns [`ErrorKind::NotImplemented`](trustformers_core::errors::ErrorKind).
+    ///
+    /// MeZO is a *zeroth-order* method: its whole premise is that back-propagated
+    /// gradients are unavailable, and its update direction comes from two loss
+    /// evaluations at `θ ± εz`. The bare [`Optimizer`] signature carries no objective,
+    /// so there is nothing honest this method can compute — an earlier version
+    /// multiplied the supplied first-order gradient by random noise and called the
+    /// result a finite-difference approximation. Use
+    /// [`MeZOV2::step_with_loss`] (or [`MeZOV2::step_with_loss_single`]) instead.
+    fn update(&mut self, _param: &mut Tensor, _gradient: &Tensor) -> Result<()> {
+        Err(TrustformersError::not_implemented(
+            "MeZOV2 is a zeroth-order optimizer and cannot use a supplied gradient; \
+             call MeZOV2::step_with_loss with an objective closure instead"
+                .to_string(),
+        ))
     }
 
     fn step(&mut self) {
@@ -1337,16 +1374,19 @@ mod tests {
 
     #[test]
     fn test_mezov2_update() -> Result<()> {
-        let mut optimizer = MeZOV2::new(1e-3, 1e-4, 1);
+        let mut optimizer = MeZOV2::new(1e-2, 1e-3, 1);
+        optimizer.adaptive_perturbation = false;
+        optimizer.perturbation_levels = vec![1.0];
 
-        let mut param = Tensor::new(vec![1.0, 2.0, 3.0])?;
-        let gradient = Tensor::new(vec![0.1, 0.2, 0.1])?;
+        let mut param = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0], &[3])?;
+        let original_param = param.data_f32()?;
 
-        let original_param = param.data()?;
-        optimizer.update(&mut param, &gradient)?;
-        optimizer.step();
+        // MeZO drives the update from loss evaluations, never from a gradient.
+        optimizer.step_with_loss_single(&mut param, |t| {
+            Ok(t.data_f32()?.iter().map(|v| v * v).sum::<f32>())
+        })?;
 
-        let updated_param = param.data()?;
+        let updated_param = param.data_f32()?;
 
         // Parameter should have changed
         assert_ne!(original_param, updated_param);
@@ -1373,5 +1413,125 @@ mod tests {
         assert_eq!(optimizer.step, 1);
 
         Ok(())
+    }
+
+    /// Regression: `Optimizer::update` used to multiply the supplied *first-order*
+    /// gradient by random noise and present the result as a finite-difference
+    /// estimate. A zeroth-order optimizer cannot honestly consume a gradient.
+    #[test]
+    fn mezo_update_rejects_a_supplied_gradient() {
+        let mut optimizer = MeZOV2::new(1e-2, 1e-3, 1);
+        let mut param = Tensor::from_vec(vec![1.0_f32], &[1]).expect("tensor");
+        let grad = Tensor::from_vec(vec![1.0_f32], &[1]).expect("grad");
+        let before = param.data_f32().expect("data");
+
+        let result = optimizer.update(&mut param, &grad);
+        assert!(
+            result.is_err(),
+            "the gradient path must not fabricate a step"
+        );
+        assert_eq!(
+            param.data_f32().expect("data"),
+            before,
+            "a refused update must leave the parameter untouched"
+        );
+    }
+
+    /// The two-point estimate must recover the true directional derivative of a
+    /// quadratic to within the finite-difference truncation error.
+    ///
+    /// For `f(θ) = Σ θ²` at `θ = [2, −3]` and a Rademacher `z`, the exact directional
+    /// derivative is `∇f·z = 2·(2·z₀ − 3·z₁)`, and the central difference is exact for
+    /// a quadratic. The realised step must therefore be `−lr·(∇f·z)·z`, which for
+    /// `z ∈ {±1}` equals `−lr·∇f` projected onto `z`.
+    #[test]
+    fn mezo_step_matches_the_exact_directional_derivative() {
+        let mut optimizer = MeZOV2::new(0.1, 1e-2, 1);
+        optimizer.adaptive_perturbation = false;
+        optimizer.perturbation_levels = vec![1.0];
+
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "w".to_string(),
+            Tensor::from_vec(vec![2.0_f32, -3.0], &[2]).expect("tensor"),
+        );
+        let before = parameters["w"].data_f32().expect("data");
+
+        let mut calls = 0_usize;
+        let baseline = optimizer
+            .step_with_loss(&mut parameters, |params| {
+                calls += 1;
+                Ok(params["w"].data_f32()?.iter().map(|v| v * v).sum::<f32>())
+            })
+            .expect("step");
+
+        // 1 baseline evaluation + 2 per probe.
+        assert_eq!(calls, 3, "MeZO must evaluate the objective, not a gradient");
+        assert!((baseline - 13.0).abs() < 1e-4, "baseline loss: {baseline}");
+
+        // Recover z from the realised displacement: every coordinate moved by
+        // −lr·ĝ·z_i, so the two coordinates moved by the same magnitude.
+        let after = parameters["w"].data_f32().expect("data");
+        let delta: Vec<f32> = after.iter().zip(before.iter()).map(|(a, b)| a - b).collect();
+        assert!(
+            (delta[0].abs() - delta[1].abs()).abs() < 1e-4,
+            "a Rademacher probe moves every coordinate by the same magnitude: {delta:?}"
+        );
+
+        // |ĝ| = |∇f·z| = |2·(2·z₀ − 3·z₁)| ∈ {2, 10} for z ∈ {±1}²; the step magnitude
+        // is lr·|ĝ| = 0.1·|ĝ|.
+        let magnitude = delta[0].abs();
+        assert!(
+            (magnitude - 0.2).abs() < 1e-3 || (magnitude - 1.0).abs() < 1e-3,
+            "step magnitude {magnitude} must equal lr·|∇f·z|"
+        );
+    }
+
+    /// The perturbation must be restored exactly: a constant objective leaves the
+    /// parameters untouched because the two-point estimate is identically zero.
+    #[test]
+    fn mezo_restores_parameters_when_the_objective_is_flat() {
+        let mut optimizer = MeZOV2::new(0.5, 1e-3, 2);
+        optimizer.adaptive_perturbation = false;
+
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "w".to_string(),
+            Tensor::from_vec(vec![1.0_f32, 2.0, 3.0], &[3]).expect("tensor"),
+        );
+
+        optimizer.step_with_loss(&mut parameters, |_| Ok(7.0)).expect("step");
+
+        let after = parameters["w"].data_f32().expect("data");
+        for (value, want) in after.iter().zip([1.0_f32, 2.0, 3.0].iter()) {
+            assert!(
+                (value - want).abs() < 1e-5,
+                "a flat objective must leave θ unchanged: {value} vs {want}"
+            );
+        }
+    }
+
+    /// Convergence smoke test: MeZO must descend the quadratic bowl using only loss
+    /// evaluations.
+    #[test]
+    fn mezo_descends_a_quadratic_bowl_from_losses_alone() {
+        let mut optimizer = MeZOV2::new(0.05, 1e-2, 4);
+        optimizer.adaptive_perturbation = false;
+        optimizer.perturbation_levels = vec![1.0];
+
+        let mut param = Tensor::from_vec(vec![3.0_f32, -4.0], &[2]).expect("tensor");
+        let objective =
+            |t: &Tensor| -> Result<f32> { Ok(t.data_f32()?.iter().map(|v| v * v).sum()) };
+        let initial = objective(&param).expect("loss");
+
+        for _ in 0..400 {
+            optimizer.step_with_loss_single(&mut param, objective).expect("step");
+        }
+
+        let final_loss = objective(&param).expect("loss");
+        assert!(
+            final_loss < initial * 0.2,
+            "loss must fall using only loss evaluations: {initial} -> {final_loss}"
+        );
     }
 }

@@ -86,6 +86,13 @@ pub struct EscalationState {
     /// Alert ID being escalated
     pub alert_id: String,
 
+    /// Name of the policy this escalation was started under.
+    ///
+    /// Added in 0.2.1. Without it `process_escalation` had no way to find the
+    /// policy governing an escalation and simply took whichever one iterated
+    /// first out of a `HashMap` -- see the note there.
+    pub policy_name: String,
+
     /// Current escalation level
     pub current_level: u8,
 
@@ -302,6 +309,7 @@ impl EscalationManager {
 
         let escalation_state = EscalationState {
             alert_id: alert.alert_id.clone(),
+            policy_name: policy_name.to_string(),
             current_level: 0,
             started_at: Utc::now(),
             next_escalation: Utc::now()
@@ -416,8 +424,14 @@ impl EscalationManager {
     ) {
         let policies_guard = policies.read().unwrap_or_else(|p| p.into_inner());
 
-        // Find appropriate policy (simplified - in practice, this would be more sophisticated)
-        if let Some(policy) = policies_guard.values().next() {
+        // Look up the policy this escalation was actually started under.
+        //
+        // Until 0.2.1 this was `policies_guard.values().next()` -- whichever
+        // policy the `HashMap` happened to iterate first. With the two policies
+        // `initialize_default_policies` installs, an alert escalated under the
+        // "performance" policy was as likely as not to be escalated on the
+        // "default" policy's levels, timings and notification targets.
+        if let Some(policy) = policies_guard.get(&escalation_state.policy_name) {
             if escalation_state.current_level < policy.max_level
                 && escalation_state.current_level < policy.levels.len() as u8
             {
@@ -609,5 +623,85 @@ impl Default for EscalationConfig {
             check_interval: Duration::from_secs(30),
             enable_notifications: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod escalation_tests {
+    use super::*;
+
+    /// The two policies `initialize_default_policies` installs differ: the
+    /// "default" policy has two levels starting at 5 minutes, "performance" has
+    /// one starting at 3 minutes.
+    fn manager_policies(
+        manager: &EscalationManager,
+    ) -> Arc<RwLock<HashMap<String, EscalationPolicy>>> {
+        Arc::clone(&manager.policies)
+    }
+
+    /// Regression: `process_escalation` used to pick the governing policy with
+    /// `policies.values().next()` -- whichever the `HashMap` iterated first --
+    /// so an alert escalated under one policy could be escalated on another
+    /// policy's levels, timings and notification targets.
+    #[tokio::test]
+    async fn escalation_follows_the_policy_it_was_started_under() {
+        let manager = EscalationManager::new().await.expect("manager constructs");
+        let policies = manager_policies(&manager);
+        let stats = Arc::clone(&manager.stats);
+
+        let mut state = EscalationState {
+            alert_id: "alert-1".to_string(),
+            policy_name: "performance".to_string(),
+            current_level: 0,
+            started_at: Utc::now(),
+            next_escalation: Utc::now(),
+            escalation_history: Vec::new(),
+            acknowledged: false,
+            acknowledged_at: None,
+        };
+        EscalationManager::process_escalation(&mut state, &policies, &stats);
+
+        // The performance policy has exactly one level, so escalating from 0
+        // reaches level 1 and stops there.
+        assert_eq!(state.current_level, 1);
+        let recipients = {
+            let guard = policies.read().unwrap_or_else(|p| p.into_inner());
+            guard
+                .get("performance")
+                .expect("policy installed")
+                .levels
+                .first()
+                .expect("level installed")
+                .recipients
+                .clone()
+        };
+        assert_eq!(recipients, vec!["performance-team@company.com".to_string()]);
+    }
+
+    /// An escalation naming a policy that no longer exists must not silently
+    /// fall through onto some other policy's levels.
+    #[tokio::test]
+    async fn an_unknown_policy_escalates_nothing() {
+        let manager = EscalationManager::new().await.expect("manager constructs");
+        let policies = manager_policies(&manager);
+        let stats = Arc::clone(&manager.stats);
+
+        let mut state = EscalationState {
+            alert_id: "alert-2".to_string(),
+            policy_name: "removed-policy".to_string(),
+            current_level: 0,
+            started_at: Utc::now(),
+            next_escalation: Utc::now(),
+            escalation_history: Vec::new(),
+            acknowledged: false,
+            acknowledged_at: None,
+        };
+        EscalationManager::process_escalation(&mut state, &policies, &stats);
+
+        assert_eq!(
+            state.current_level, 0,
+            "no policy governs this escalation, so no level was reached"
+        );
+        assert!(state.escalation_history.is_empty());
     }
 }

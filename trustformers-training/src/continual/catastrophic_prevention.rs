@@ -101,12 +101,31 @@ impl RegularizationMethod for EWCRegularization {
     }
 }
 
-/// Learning without Forgetting regularization
+/// Learning without Forgetting (Li & Hoiem, 2016) regularization.
+///
+/// LwF is an *output-space* method: at a task boundary it snapshots the model's logits on a
+/// set of anchor inputs, and while the next task trains it penalises the divergence between
+/// the current logits on those same anchors and the snapshot.
+///
+/// # Contract
+///
+/// Because [`RegularizationMethod`] is expressed over named `Array1<f32>` vectors, LwF
+/// interprets those vectors as **logits on the anchor inputs**, not as parameters:
+///
+/// * [`RegularizationMethod::update`] stores the supplied vectors as the previous task's
+///   soft targets (one entry per anchor key).
+/// * [`RegularizationMethod::compute_penalty`] expects the *current* logits under the same
+///   keys and returns `alpha · Σ_k T² · KL(p_old‖p_new)`.
+///
+/// Keys with no stored counterpart are ignored, so before the first task boundary the penalty
+/// is legitimately zero — after one, it is not.
 #[derive(Debug)]
 pub struct LwFRegularization {
     alpha: f32,
     temperature: f32,
     old_outputs: HashMap<String, Array1<f32>>,
+    /// Id of the task whose outputs are currently stored.
+    previous_task: Option<String>,
 }
 
 impl LwFRegularization {
@@ -115,25 +134,77 @@ impl LwFRegularization {
             alpha,
             temperature,
             old_outputs: HashMap::new(),
+            previous_task: None,
         }
     }
 
-    /// Compute knowledge distillation loss
+    /// Temperature-scaled softmax, numerically stabilised.
+    fn soft_targets(logits: &Array1<f32>, temperature: f32) -> Array1<f32> {
+        let t = if temperature.abs() < f32::EPSILON { 1.0 } else { temperature };
+        let scaled: Vec<f32> = logits.iter().map(|&x| x / t).collect();
+        let max = scaled.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let mut exps: Vec<f32> = scaled.iter().map(|&x| (x - max).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        if sum > 0.0 {
+            for e in exps.iter_mut() {
+                *e /= sum;
+            }
+        }
+        Array1::from_vec(exps)
+    }
+
+    /// Temperature-scaled knowledge-distillation divergence between two logit vectors.
+    ///
+    /// `T² · KL(softmax(old/T) ‖ softmax(new/T))` — the standard Hinton et al. formulation,
+    /// with the `T²` factor that keeps the gradient magnitude comparable across temperatures.
+    /// The result is `0` exactly when the two distributions coincide and strictly positive
+    /// otherwise.
     pub fn distillation_loss(&self, new_outputs: &Array1<f32>, old_outputs: &Array1<f32>) -> f32 {
-        // Simplified distillation loss computation
-        let diff = new_outputs - old_outputs;
-        (&diff * &diff).sum() / new_outputs.len() as f32
+        if new_outputs.len() != old_outputs.len() || new_outputs.is_empty() {
+            return 0.0;
+        }
+        let p_old = Self::soft_targets(old_outputs, self.temperature);
+        let p_new = Self::soft_targets(new_outputs, self.temperature);
+        let mut kl = 0.0f32;
+        for (&p, &q) in p_old.iter().zip(p_new.iter()) {
+            if p > 0.0 {
+                kl += p * (p.max(f32::MIN_POSITIVE).ln() - q.max(f32::MIN_POSITIVE).ln());
+            }
+        }
+        let t = if self.temperature.abs() < f32::EPSILON { 1.0 } else { self.temperature };
+        kl.max(0.0) * t * t
+    }
+
+    /// The task whose outputs are currently held as soft targets.
+    pub fn previous_task(&self) -> Option<&str> {
+        self.previous_task.as_deref()
+    }
+
+    /// Number of stored anchor outputs.
+    pub fn num_stored_outputs(&self) -> usize {
+        self.old_outputs.len()
     }
 }
 
 impl RegularizationMethod for LwFRegularization {
-    fn compute_penalty(&self, _current_params: &HashMap<String, Array1<f32>>) -> f32 {
-        // LwF penalty is computed differently - this is a placeholder
-        0.0
+    fn compute_penalty(&self, current_params: &HashMap<String, Array1<f32>>) -> f32 {
+        let mut penalty = 0.0f32;
+        for (key, current) in current_params {
+            if let Some(old) = self.old_outputs.get(key) {
+                penalty += self.distillation_loss(current, old);
+            }
+        }
+        penalty * self.alpha
     }
 
-    fn update(&mut self, _task_id: &str, _params: &HashMap<String, Array1<f32>>) -> Result<()> {
-        // Store outputs from previous task for distillation
+    fn update(&mut self, task_id: &str, params: &HashMap<String, Array1<f32>>) -> Result<()> {
+        // Snapshot the finishing task's outputs on the anchor inputs; these become the soft
+        // targets that the next task is distilled against.
+        self.old_outputs.clear();
+        for (key, values) in params {
+            self.old_outputs.insert(key.clone(), values.clone());
+        }
+        self.previous_task = Some(task_id.to_string());
         Ok(())
     }
 
@@ -143,6 +214,7 @@ impl RegularizationMethod for LwFRegularization {
 
     fn reset(&mut self) {
         self.old_outputs.clear();
+        self.previous_task = None;
     }
 }
 
@@ -271,12 +343,54 @@ impl MemoryRegularization {
 }
 
 impl RegularizationMethod for MemoryRegularization {
-    fn compute_penalty(&self, _current_params: &HashMap<String, Array1<f32>>) -> f32 {
-        // Memory-based methods use constraints rather than penalties
-        0.0
+    /// Squared-hinge penalty on the distance from the stored episodic targets.
+    ///
+    /// GEM/A-GEM express their constraint on gradients rather than on parameters, but the
+    /// stored `(input, target)` pairs still define a measurable violation: any current vector
+    /// that has drifted further than `margin` from the memorised target for the same anchor
+    /// contributes `(distance − margin)²`. Anchors are matched positionally against the
+    /// sorted keys of `current_params`, so the penalty is deterministic.
+    fn compute_penalty(&self, current_params: &HashMap<String, Array1<f32>>) -> f32 {
+        if self.episodic_memory.is_empty() || current_params.is_empty() {
+            return 0.0;
+        }
+        let mut keys: Vec<&String> = current_params.keys().collect();
+        keys.sort();
+
+        let mut penalty = 0.0f32;
+        for (idx, (_input, target)) in self.episodic_memory.iter().enumerate() {
+            let Some(key) = keys.get(idx % keys.len()) else {
+                continue;
+            };
+            let Some(current) = current_params.get(*key) else {
+                continue;
+            };
+            if current.len() != target.len() {
+                continue;
+            }
+            let diff = current - target;
+            let distance = diff.dot(&diff).sqrt();
+            if distance > self.margin {
+                let excess = distance - self.margin;
+                penalty += excess * excess;
+            }
+        }
+        penalty
     }
 
-    fn update(&mut self, _task_id: &str, _params: &HashMap<String, Array1<f32>>) -> Result<()> {
+    /// Record the task's parameter vectors as episodic memory anchors.
+    ///
+    /// The vector is stored as both the "input" and the "target" of the anchor: GEM's memory
+    /// exists to remember where the model was at the task boundary, which is exactly this
+    /// snapshot. Insertion honours `memory_size` through [`MemoryRegularization::add_memory`].
+    fn update(&mut self, _task_id: &str, params: &HashMap<String, Array1<f32>>) -> Result<()> {
+        let mut keys: Vec<&String> = params.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(values) = params.get(key) {
+                self.add_memory(values.clone(), values.clone());
+            }
+        }
         Ok(())
     }
 
@@ -448,6 +562,115 @@ mod tests {
         combined.update("task1", &params).expect("operation failed in test");
         let penalty = combined.compute_penalty(&params);
         assert!(penalty >= 0.0);
+    }
+
+    // ── LwF regression tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_lwf_penalty_is_zero_before_a_task_boundary_and_nonzero_after() {
+        // Regression: `compute_penalty` used to return a hardcoded 0.0 and `update` stored
+        // nothing, so selecting LwF applied no regularization whatsoever.
+        let mut lwf = LwFRegularization::new(1.0, 2.0);
+
+        let mut old_outputs = HashMap::new();
+        old_outputs.insert("head".to_string(), Array1::from_vec(vec![3.0, 0.0, 0.0]));
+        let mut new_outputs = HashMap::new();
+        new_outputs.insert("head".to_string(), Array1::from_vec(vec![0.0, 3.0, 0.0]));
+
+        assert_eq!(
+            lwf.compute_penalty(&new_outputs),
+            0.0,
+            "with nothing stored the penalty must be exactly 0"
+        );
+
+        lwf.update("task_a", &old_outputs).expect("update failed");
+        assert_eq!(lwf.previous_task(), Some("task_a"));
+        assert_eq!(lwf.num_stored_outputs(), 1);
+
+        let penalty = lwf.compute_penalty(&new_outputs);
+        assert!(
+            penalty > 0.0,
+            "after a task switch a diverged head must be penalised, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn test_lwf_penalty_vanishes_when_outputs_are_unchanged() {
+        let mut lwf = LwFRegularization::new(1.0, 2.0);
+        let mut outputs = HashMap::new();
+        outputs.insert("head".to_string(), Array1::from_vec(vec![1.0, 2.0, 3.0]));
+        lwf.update("task_a", &outputs).expect("update failed");
+        let penalty = lwf.compute_penalty(&outputs);
+        assert!(
+            penalty.abs() < 1e-5,
+            "identical outputs must give a zero KD penalty, got {penalty}"
+        );
+    }
+
+    #[test]
+    fn test_lwf_distillation_loss_matches_hand_computed_kl() {
+        // T = 1, old logits [0, ln 3] -> p = [0.25, 0.75]; new logits [0, 0] -> q = [0.5, 0.5].
+        // KL = 0.25*ln(0.25/0.5) + 0.75*ln(0.75/0.5)
+        let lwf = LwFRegularization::new(1.0, 1.0);
+        let old = Array1::from_vec(vec![0.0, 3.0f32.ln()]);
+        let new = Array1::from_vec(vec![0.0, 0.0]);
+        let expected = 0.25f32 * (0.25f32 / 0.5).ln() + 0.75f32 * (0.75f32 / 0.5).ln();
+        let got = lwf.distillation_loss(&new, &old);
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "expected {expected}, got {got}"
+        );
+    }
+
+    #[test]
+    fn test_lwf_penalty_scales_with_alpha() {
+        let mut outputs_old = HashMap::new();
+        outputs_old.insert("head".to_string(), Array1::from_vec(vec![2.0, 0.0]));
+        let mut outputs_new = HashMap::new();
+        outputs_new.insert("head".to_string(), Array1::from_vec(vec![0.0, 2.0]));
+
+        let mut a = LwFRegularization::new(1.0, 2.0);
+        a.update("t", &outputs_old).expect("update");
+        let mut b = LwFRegularization::new(3.0, 2.0);
+        b.update("t", &outputs_old).expect("update");
+
+        let pa = a.compute_penalty(&outputs_new);
+        let pb = b.compute_penalty(&outputs_new);
+        assert!((pb - 3.0 * pa).abs() < 1e-4, "alpha must scale the penalty");
+    }
+
+    #[test]
+    fn test_lwf_reset_clears_the_stored_outputs() {
+        let mut lwf = LwFRegularization::new(1.0, 2.0);
+        let mut outputs = HashMap::new();
+        outputs.insert("head".to_string(), Array1::from_vec(vec![1.0, 0.0]));
+        lwf.update("t", &outputs).expect("update");
+        lwf.reset();
+        assert_eq!(lwf.num_stored_outputs(), 0);
+        assert!(lwf.previous_task().is_none());
+    }
+
+    #[test]
+    fn test_memory_regularization_update_records_anchors_and_penalises_drift() {
+        // Regression: `update` was `Ok(())`, so the episodic memory stayed empty forever.
+        let mut memory_reg = MemoryRegularization::new(10, 0.5);
+        let mut params = HashMap::new();
+        params.insert("w".to_string(), Array1::from_vec(vec![0.0, 0.0]));
+        memory_reg.update("task_a", &params).expect("update failed");
+        assert_eq!(memory_reg.episodic_memory.len(), 1);
+
+        // Unchanged parameters: distance 0 < margin => no penalty.
+        assert_eq!(memory_reg.compute_penalty(&params), 0.0);
+
+        // Drift well beyond the margin => positive penalty.
+        let mut drifted = HashMap::new();
+        drifted.insert("w".to_string(), Array1::from_vec(vec![3.0, 4.0])); // distance 5
+        let penalty = memory_reg.compute_penalty(&drifted);
+        let expected = (5.0f32 - 0.5).powi(2);
+        assert!(
+            (penalty - expected).abs() < 1e-4,
+            "expected {expected}, got {penalty}"
+        );
     }
 
     #[test]

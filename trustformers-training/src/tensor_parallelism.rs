@@ -181,6 +181,36 @@ pub struct TensorParallelism {
 
     // Statistics tracking
     statistics: Arc<Mutex<TensorParallelismStats>>,
+
+    // Tensor data held by this rank, keyed by partition id. The partition table
+    // above records shapes and ownership; the actual payloads live here.
+    partition_data: Arc<RwLock<HashMap<usize, Tensor>>>,
+
+    // User-supplied partitioner for
+    // [`TensorPartitioningStrategy::Custom`]. Without one the strategy has no
+    // definition, so `partition_tensor` reports an error rather than silently
+    // substituting a different layout.
+    custom_partitioner: Option<CustomPartitioner>,
+}
+
+/// User-supplied partitioner used by [`TensorPartitioningStrategy::Custom`].
+///
+/// Receives the tensor name, its global shape and the tensor-parallel size, and
+/// returns one [`TensorPartition`] per shard.
+pub type CustomPartitioner =
+    Arc<dyn Fn(&str, &[usize], usize) -> Result<Vec<TensorPartition>> + Send + Sync>;
+
+/// Deterministic message tag for a point-to-point partition transfer.
+///
+/// Both endpoints compute the same value from the partition pair, so the
+/// transfer does not depend on either side's position in a call sequence.
+fn point_to_point_tag(source_partition: usize, target_partition: usize) -> u64 {
+    (source_partition as u64) << 20 | (target_partition as u64 & 0xF_FFFF)
+}
+
+/// Deterministic message tag for one phase of a hierarchical reduction.
+fn hierarchical_tag(partition: usize, phase: u64, member: usize) -> u64 {
+    1 << 40 | (partition as u64) << 20 | phase << 18 | (member as u64 & 0x3_FFFF)
 }
 
 /// Operation scheduler for tensor operations
@@ -272,7 +302,18 @@ impl TensorParallelism {
             operation_scheduler: Arc::new(RwLock::new(OperationScheduler::default())),
             communication_optimizer: Arc::new(Mutex::new(CommunicationOptimizer::default())),
             statistics: Arc::new(Mutex::new(TensorParallelismStats::default())),
+            partition_data: Arc::new(RwLock::new(HashMap::new())),
+            custom_partitioner: None,
         })
+    }
+
+    /// Install the partitioner used by [`TensorPartitioningStrategy::Custom`].
+    ///
+    /// The strategy has no built-in meaning: only the caller knows how their
+    /// tensors should be sharded. Selecting `Custom` without registering a
+    /// partitioner is an error.
+    pub fn set_custom_partitioner(&mut self, partitioner: CustomPartitioner) {
+        self.custom_partitioner = Some(partitioner);
     }
 
     /// Partition a tensor across devices
@@ -585,14 +626,44 @@ impl TensorParallelism {
         Ok(partitions)
     }
 
-    /// Custom tensor partitioning (placeholder)
+    /// Partition with the caller's own layout.
+    ///
+    /// An earlier revision silently fell back to column-wise partitioning, so a
+    /// caller who asked for a custom layout received a different one with no
+    /// indication. The partitions the callback returns are validated: they must
+    /// cover the tensor exactly once, which is what the rest of this module
+    /// assumes when it gathers and reduces shards.
     fn partition_custom(
         &self,
         tensor_name: &str,
         tensor_shape: &[usize],
     ) -> Result<Vec<TensorPartition>> {
-        // For now, fallback to column-wise
-        self.partition_column_wise(tensor_name, tensor_shape)
+        let partitioner = self.custom_partitioner.as_ref().ok_or_else(|| {
+            anyhow!(
+                "TensorPartitioningStrategy::Custom was selected for `{tensor_name}` but no \
+                 partitioner is registered; call TensorParallelism::set_custom_partitioner, or \
+                 choose one of the built-in strategies"
+            )
+        })?;
+
+        let partitions = partitioner(tensor_name, tensor_shape, self.config.tensor_parallel_size)?;
+        if partitions.is_empty() {
+            return Err(anyhow!(
+                "custom partitioner returned no partitions for `{tensor_name}`"
+            ));
+        }
+
+        let total: usize = tensor_shape.iter().product();
+        let covered: usize =
+            partitions.iter().map(|part| part.shape.iter().product::<usize>()).sum();
+        if covered != total {
+            return Err(anyhow!(
+                "custom partitioner for `{tensor_name}` covers {covered} elements but the tensor \
+                 has {total}; partitions must tile the tensor exactly"
+            ));
+        }
+
+        Ok(partitions)
     }
 
     /// Execute a distributed tensor operation
@@ -628,135 +699,434 @@ impl TensorParallelism {
         Ok(outputs)
     }
 
+    /// Fetch a required input tensor, or fail with a message naming the key.
+    fn require_input<'a>(
+        inputs: &'a HashMap<String, Tensor>,
+        key: &str,
+        operation: &TensorOperationType,
+    ) -> Result<&'a Tensor> {
+        inputs.get(key).ok_or_else(|| {
+            anyhow!(
+                "operation {:?} requires input `{}`; provided keys: {:?}",
+                operation,
+                key,
+                {
+                    let mut keys: Vec<&str> = inputs.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    keys
+                }
+            )
+        })
+    }
+
     /// Execute matrix multiplication with tensor parallelism
     fn execute_matmul(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        // Simplified matrix multiplication
-        // In practice, would handle distributed computation across tensor partitions
+        let a = Self::require_input(inputs, "A", &operation.operation_type)?;
+        let b = Self::require_input(inputs, "B", &operation.operation_type)?;
+
         let mut outputs = HashMap::new();
-
-        if let (Some(a), Some(b)) = (inputs.get("A"), inputs.get("B")) {
-            let result = a.matmul(b)?;
-            outputs.insert("output".to_string(), result);
-        }
-
+        outputs.insert("output".to_string(), a.matmul(b)?);
         Ok(outputs)
     }
 
     /// Execute tensor addition
     fn execute_add(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
+        let a = Self::require_input(inputs, "A", &operation.operation_type)?;
+        let b = Self::require_input(inputs, "B", &operation.operation_type)?;
+
         let mut outputs = HashMap::new();
-
-        if let (Some(a), Some(b)) = (inputs.get("A"), inputs.get("B")) {
-            let result = a.add(b)?;
-            outputs.insert("output".to_string(), result);
-        }
-
+        outputs.insert("output".to_string(), a.add(b)?);
         Ok(outputs)
     }
 
-    /// Execute attention mechanism
+    /// Execute scaled dot-product attention over this rank's shard of the
+    /// attention heads.
+    ///
+    /// Inputs are the already-sharded projections `query`, `key` and `value`,
+    /// each shaped `[sequence, local_heads * head_dim]`, plus the optional row-
+    /// parallel output projection `weight` shaped
+    /// `[local_heads * head_dim, model_dim]`.
+    ///
+    /// Per head `h`:
+    ///
+    /// ```text
+    /// scores_h = Q_h · K_hᵀ / sqrt(head_dim)
+    /// A_h      = softmax(scores_h)          (row-wise, numerically stabilised)
+    /// out_h    = A_h · V_h
+    /// ```
+    ///
+    /// The per-head outputs are concatenated along the feature axis. When
+    /// `weight` is supplied the concatenated result is projected and the
+    /// partial products are summed across the tensor-parallel group with an
+    /// all-reduce — the standard Megatron row-parallel attention output.
+    ///
+    /// `num_heads` may be supplied as a single-element tensor under the key
+    /// `num_heads`; it defaults to one head spanning the whole feature axis.
     fn execute_attention(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        // Simplified attention computation
-        let mut outputs = HashMap::new();
+        let query = Self::require_input(inputs, "query", &operation.operation_type)?;
+        let key = Self::require_input(inputs, "key", &operation.operation_type)?;
+        let value = Self::require_input(inputs, "value", &operation.operation_type)?;
 
-        if let Some(input) = inputs.get("input") {
-            // Placeholder attention computation
-            outputs.insert("output".to_string(), input.clone());
+        let query_shape = query.shape();
+        if query_shape.len() != 2 {
+            return Err(anyhow!(
+                "attention expects 2-D [sequence, local_heads * head_dim] tensors, got {:?}",
+                query_shape
+            ));
+        }
+        if key.shape() != query_shape || value.shape() != query_shape {
+            return Err(anyhow!(
+                "attention expects matching query/key/value shapes, got {:?}, {:?}, {:?}",
+                query_shape,
+                key.shape(),
+                value.shape()
+            ));
         }
 
+        let sequence = query_shape[0];
+        let features = query_shape[1];
+
+        let num_heads = match inputs.get("num_heads") {
+            Some(tensor) => {
+                let heads = tensor.to_vec_f32()?;
+                let heads = *heads
+                    .first()
+                    .ok_or_else(|| anyhow!("`num_heads` must contain at least one value"))?
+                    as usize;
+                if heads == 0 {
+                    return Err(anyhow!("`num_heads` must be >= 1"));
+                }
+                heads
+            },
+            None => 1,
+        };
+        if !features.is_multiple_of(num_heads) {
+            return Err(anyhow!(
+                "feature dimension {} is not divisible by {} local heads",
+                features,
+                num_heads
+            ));
+        }
+        let head_dim = features / num_heads;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let query_values = query.to_vec_f32()?;
+        let key_values = key.to_vec_f32()?;
+        let value_values = value.to_vec_f32()?;
+        let mut context = vec![0.0f32; sequence * features];
+        let mut scores = vec![0.0f32; sequence];
+
+        for head in 0..num_heads {
+            let head_offset = head * head_dim;
+            for row in 0..sequence {
+                // scores[col] = <Q[row, head], K[col, head]> * scale
+                let mut max_score = f32::NEG_INFINITY;
+                for (col, score) in scores.iter_mut().enumerate() {
+                    let mut dot = 0.0f32;
+                    for feature in 0..head_dim {
+                        dot += query_values[row * features + head_offset + feature]
+                            * key_values[col * features + head_offset + feature];
+                    }
+                    *score = dot * scale;
+                    max_score = max_score.max(*score);
+                }
+
+                // Numerically stable softmax over the key axis.
+                let mut denominator = 0.0f32;
+                for score in scores.iter_mut() {
+                    *score = (*score - max_score).exp();
+                    denominator += *score;
+                }
+                let inverse = if denominator > 0.0 { 1.0 / denominator } else { 0.0 };
+
+                for (col, score) in scores.iter().enumerate() {
+                    let weight = score * inverse;
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    for feature in 0..head_dim {
+                        context[row * features + head_offset + feature] +=
+                            weight * value_values[col * features + head_offset + feature];
+                    }
+                }
+            }
+        }
+
+        let context = Tensor::from_slice(&context, &[sequence, features])?;
+        let mut outputs = HashMap::new();
+
+        match inputs.get("weight") {
+            Some(weight) => {
+                // Row-parallel output projection: each rank holds a slice of the
+                // contraction dimension, so the partial products must be summed
+                // across the tensor-parallel group.
+                let mut projected = vec![context.matmul(weight)?];
+                if self.tensor_group.world_size() > 1 {
+                    self.tensor_group.all_reduce(&mut projected)?;
+                }
+                outputs.insert("output".to_string(), projected.remove(0));
+            },
+            None => {
+                outputs.insert("output".to_string(), context.clone());
+            },
+        }
+
+        outputs.insert("context".to_string(), context);
         Ok(outputs)
     }
 
     /// Execute linear layer
     fn execute_linear(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        let mut outputs = HashMap::new();
+        let input = Self::require_input(inputs, "input", &operation.operation_type)?;
+        let weight = Self::require_input(inputs, "weight", &operation.operation_type)?;
 
-        if let (Some(input), Some(weight)) = (inputs.get("input"), inputs.get("weight")) {
-            let result = input.matmul(weight)?;
-            outputs.insert("output".to_string(), result);
+        let mut result = input.matmul(weight)?;
+        if let Some(bias) = inputs.get("bias") {
+            result = result.add(bias)?;
         }
 
+        let mut outputs = HashMap::new();
+        outputs.insert("output".to_string(), result);
         Ok(outputs)
     }
 
-    /// Execute embedding layer
+    /// Execute an embedding lookup over this rank's vocabulary shard.
+    ///
+    /// `input` holds flat token ids; `weight` is the `[local_vocab, embed_dim]`
+    /// shard starting at `vocab_offset` (default `0`). Ids outside this shard
+    /// contribute zeros, so an all-reduce across the tensor-parallel group
+    /// reconstructs the full embedding — the standard vocabulary-parallel
+    /// embedding.
     fn execute_embedding(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        let mut outputs = HashMap::new();
+        let input = Self::require_input(inputs, "input", &operation.operation_type)?;
+        let weight = Self::require_input(inputs, "weight", &operation.operation_type)?;
 
-        if let Some(input) = inputs.get("input") {
-            // Simplified embedding lookup
-            outputs.insert("output".to_string(), input.clone());
+        let weight_shape = weight.shape();
+        if weight_shape.len() != 2 {
+            return Err(anyhow!(
+                "embedding weight must be 2-D [local_vocab, embed_dim], got {:?}",
+                weight_shape
+            ));
+        }
+        let (local_vocab, embed_dim) = (weight_shape[0], weight_shape[1]);
+
+        let vocab_offset = match inputs.get("vocab_offset") {
+            Some(tensor) => *tensor
+                .to_vec_f32()?
+                .first()
+                .ok_or_else(|| anyhow!("`vocab_offset` must contain at least one value"))?
+                as usize,
+            None => 0,
+        };
+
+        let ids = input.to_vec_f32()?;
+        let weight_values = weight.to_vec_f32()?;
+        let mut gathered = vec![0.0f32; ids.len() * embed_dim];
+
+        for (position, id) in ids.iter().enumerate() {
+            if *id < 0.0 {
+                return Err(anyhow!("embedding ids must be non-negative, got {id}"));
+            }
+            let global_id = *id as usize;
+            if global_id < vocab_offset {
+                continue;
+            }
+            let local_id = global_id - vocab_offset;
+            if local_id >= local_vocab {
+                continue; // owned by another rank
+            }
+            gathered[position * embed_dim..(position + 1) * embed_dim]
+                .copy_from_slice(&weight_values[local_id * embed_dim..(local_id + 1) * embed_dim]);
         }
 
+        let mut shape = input.shape();
+        shape.push(embed_dim);
+        let mut outputs = HashMap::new();
+        outputs.insert("output".to_string(), Tensor::from_slice(&gathered, &shape)?);
         Ok(outputs)
     }
 
-    /// Execute layer normalization
+    /// Execute layer normalization over the last dimension.
+    ///
+    /// LayerNorm is *not* sharded in tensor parallelism (every rank keeps a full
+    /// copy), so this is a local computation: `(x - mean) / sqrt(var + eps)`
+    /// followed by the optional affine `weight`/`bias`.
     fn execute_layernorm(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        let mut outputs = HashMap::new();
+        let input = Self::require_input(inputs, "input", &operation.operation_type)?;
 
-        if let Some(input) = inputs.get("input") {
-            // Simplified layer norm
-            outputs.insert("output".to_string(), input.clone());
+        let shape = input.shape();
+        let last_dim = *shape
+            .last()
+            .ok_or_else(|| anyhow!("layernorm input must have at least one dimension"))?;
+        if last_dim == 0 {
+            return Err(anyhow!("layernorm last dimension must be non-empty"));
         }
 
+        let epsilon = match inputs.get("epsilon") {
+            Some(tensor) => *tensor
+                .to_vec_f32()?
+                .first()
+                .ok_or_else(|| anyhow!("`epsilon` must contain at least one value"))?,
+            None => 1e-5,
+        };
+        let gain = match inputs.get("weight") {
+            Some(tensor) => Some(tensor.to_vec_f32()?),
+            None => None,
+        };
+        let bias = match inputs.get("bias") {
+            Some(tensor) => Some(tensor.to_vec_f32()?),
+            None => None,
+        };
+
+        let mut values = input.to_vec_f32()?;
+        for row in values.chunks_mut(last_dim) {
+            let mean = row.iter().sum::<f32>() / last_dim as f32;
+            let variance =
+                row.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / last_dim as f32;
+            let inverse_std = 1.0 / (variance + epsilon).sqrt();
+            for (index, value) in row.iter_mut().enumerate() {
+                let mut normalized = (*value - mean) * inverse_std;
+                if let Some(gain) = &gain {
+                    normalized *= gain.get(index).copied().unwrap_or(1.0);
+                }
+                if let Some(bias) = &bias {
+                    normalized += bias.get(index).copied().unwrap_or(0.0);
+                }
+                *value = normalized;
+            }
+        }
+
+        let mut outputs = HashMap::new();
+        outputs.insert("output".to_string(), Tensor::from_slice(&values, &shape)?);
         Ok(outputs)
     }
 
-    /// Execute activation function
+    /// Execute an element-wise activation.
+    ///
+    /// The activation is selected by the operation's `Custom` name when present,
+    /// otherwise ReLU. Supported: `relu`, `gelu`, `silu`/`swish`, `tanh`,
+    /// `sigmoid`.
     fn execute_activation(
         &self,
-        _operation: &TensorOperation,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        let mut outputs = HashMap::new();
+        let input = Self::require_input(inputs, "input", &operation.operation_type)?;
+        let kind = match &operation.operation_type {
+            TensorOperationType::Custom(name) => name.to_ascii_lowercase(),
+            _ => "relu".to_string(),
+        };
 
-        if let Some(input) = inputs.get("input") {
-            // Simplified activation (ReLU)
-            outputs.insert("output".to_string(), input.clone());
+        let shape = input.shape();
+        let mut values = input.to_vec_f32()?;
+        for value in values.iter_mut() {
+            *value = match kind.as_str() {
+                "relu" => value.max(0.0),
+                "gelu" => {
+                    // Tanh approximation of the Gaussian error linear unit.
+                    let x = *value;
+                    let inner = (2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+                    0.5 * x * (1.0 + inner.tanh())
+                },
+                "silu" | "swish" => *value / (1.0 + (-*value).exp()),
+                "tanh" => value.tanh(),
+                "sigmoid" => 1.0 / (1.0 + (-*value).exp()),
+                other => {
+                    return Err(anyhow!(
+                        "unsupported activation `{other}`; expected one of relu, gelu, silu, \
+                         swish, tanh, sigmoid"
+                    ))
+                },
+            };
         }
 
+        let mut outputs = HashMap::new();
+        outputs.insert("output".to_string(), Tensor::from_slice(&values, &shape)?);
         Ok(outputs)
     }
 
-    /// Execute custom operation
+    /// Execute a custom operation.
+    ///
+    /// Activation names are dispatched to [`Self::execute_activation`]; anything
+    /// else has no definition here and returns an error rather than silently
+    /// echoing its input.
     fn execute_custom(
         &self,
-        _operation_name: &str,
-        _operation: &TensorOperation,
+        operation_name: &str,
+        operation: &TensorOperation,
         inputs: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        let mut outputs = HashMap::new();
-
-        if let Some(input) = inputs.get("input") {
-            outputs.insert("output".to_string(), input.clone());
+        const ACTIVATIONS: [&str; 6] = ["relu", "gelu", "silu", "swish", "tanh", "sigmoid"];
+        if ACTIVATIONS.contains(&operation_name.to_ascii_lowercase().as_str()) {
+            return self.execute_activation(operation, inputs);
         }
 
-        Ok(outputs)
+        Err(anyhow!(
+            "custom tensor operation `{operation_name}` has no implementation; register it or \
+             use one of the built-in operation types"
+        ))
+    }
+
+    /// Store this rank's data for `partition_id`.
+    ///
+    /// The partition table records shapes and ownership; the tensors themselves
+    /// live here. Collectives operate on this registry, so data must be stored
+    /// before a communication requirement referencing the partition is
+    /// executed.
+    pub fn store_partition_data(&self, partition_id: usize, tensor: Tensor) -> Result<()> {
+        let mut data = self.partition_data.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        data.insert(partition_id, tensor);
+        Ok(())
+    }
+
+    /// This rank's data for `partition_id`, if any.
+    pub fn partition_data(&self, partition_id: usize) -> Option<Tensor> {
+        self.partition_data
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&partition_id)
+            .cloned()
+    }
+
+    fn require_partition_data(&self, partition_id: usize, operation: &str) -> Result<Tensor> {
+        self.partition_data(partition_id).ok_or_else(|| {
+            anyhow!(
+                "no tensor data registered for partition {partition_id}; call \
+                 TensorParallelism::store_partition_data before running `{operation}`"
+            )
+        })
+    }
+
+    fn find_partition(&self, partition_id: usize, operation: &str) -> Result<&TensorPartition> {
+        self.tensor_partitions
+            .values()
+            .flatten()
+            .find(|partition| partition.partition_id == partition_id)
+            .ok_or_else(|| anyhow!("partition {partition_id} not found for `{operation}`"))
     }
 
     /// Handle communication requirements for tensor operations
@@ -797,273 +1167,203 @@ impl TensorParallelism {
         Ok(())
     }
 
-    /// Handle all-reduce communication
+    /// Sum the source partition's tensor across the communication group and
+    /// write the result back into the partition registry.
     fn handle_all_reduce(&self, requirement: &CommunicationRequirement) -> Result<()> {
-        // All-reduce: sum gradients/tensors across all devices and distribute result back
         let partition_id = requirement.source_partition;
+        let partition = self.find_partition(partition_id, "all-reduce")?;
 
-        // Find the tensor partition
-        let partition = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == partition_id)
-            .ok_or_else(|| anyhow!("Partition {} not found for all-reduce", partition_id))?;
+        let group: &Arc<dyn ProcessGroup> =
+            if self.config.column_parallel && partition.needs_communication {
+                self.column_group.as_ref().unwrap_or(&self.tensor_group)
+            } else {
+                &self.tensor_group
+            };
 
-        // Perform all-reduce operation using the appropriate communication group
-        let _group = if self.config.column_parallel && partition.needs_communication {
-            self.column_group.as_ref().unwrap_or(&self.tensor_group)
-        } else {
-            &self.tensor_group
-        };
-
-        // In a real implementation, this would perform:
-        // 1. Serialize tensor data from partition
-        // 2. Call group.all_reduce() with the tensor data
-        // 3. Update the partition with reduced results
-        println!(
-            "All-reduce: Processing partition {} on device {} (size: {} bytes)",
-            partition_id, partition.device_rank, requirement.data_size
-        );
-
-        // Simulate communication overhead
-        std::thread::sleep(Duration::from_micros((requirement.data_size / 1000) as u64));
+        let mut tensors = vec![self.require_partition_data(partition_id, "all-reduce")?];
+        group.all_reduce(&mut tensors)?;
+        self.store_partition_data(partition_id, tensors.remove(0))?;
 
         Ok(())
     }
 
-    /// Handle all-gather communication
+    /// Gather every rank's slice of the source partition and store the
+    /// concatenation into the target partition.
     fn handle_all_gather(&self, requirement: &CommunicationRequirement) -> Result<()> {
-        // All-gather: collect tensor partitions from all devices to reconstruct full tensor
         let source_partition = requirement.source_partition;
         let target_partition = requirement.target_partition;
+        self.find_partition(source_partition, "all-gather")?;
 
-        // Find source partition
-        let _source = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == source_partition)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Source partition {} not found for all-gather",
-                    source_partition
-                )
-            })?;
-
-        // Determine communication group based on parallelism type
-        let _group = if self.config.row_parallel {
+        let group: &Arc<dyn ProcessGroup> = if self.config.row_parallel {
             self.row_group.as_ref().unwrap_or(&self.tensor_group)
         } else {
             &self.tensor_group
         };
 
-        // In a real implementation, this would:
-        // 1. Gather tensor partitions from all devices in the group
-        // 2. Reconstruct the full tensor from gathered partitions
-        // 3. Store result in target partition or broadcast to all devices
-        println!(
-            "All-gather: Collecting from partition {} to partition {} (size: {} bytes)",
-            source_partition, target_partition, requirement.data_size
-        );
+        let local = self.require_partition_data(source_partition, "all-gather")?;
+        let gathered = group.all_gather(&local)?;
 
-        // Update local partitions map if we're gathering locally
-        if let Some(tensor_name) = self
-            .tensor_partitions
-            .iter()
-            .find(|(_, partitions)| partitions.iter().any(|p| p.partition_id == source_partition))
-            .map(|(name, _)| name.clone())
-        {
-            // Mark that this tensor now has gathered data
-            println!(
-                "All-gather: Updated tensor '{}' with gathered data",
-                tensor_name
-            );
+        // Concatenate along the leading axis, which is how row-parallel shards
+        // reassemble into the full tensor.
+        let mut values = Vec::new();
+        let mut rows = 0usize;
+        let mut trailing = local.shape();
+        for shard in &gathered {
+            let shard_shape = shard.shape();
+            rows += shard_shape.first().copied().unwrap_or(0);
+            values.extend(shard.to_vec_f32()?);
         }
-
-        // Simulate communication overhead
-        std::thread::sleep(Duration::from_micros((requirement.data_size / 500) as u64));
-
-        Ok(())
-    }
-
-    /// Handle reduce-scatter communication
-    fn handle_reduce_scatter(&self, requirement: &CommunicationRequirement) -> Result<()> {
-        // Reduce-scatter: perform reduction operation and scatter results across devices
-        let source_partition = requirement.source_partition;
-        let target_partition = requirement.target_partition;
-
-        // Find source partition
-        let _source = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == source_partition)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Source partition {} not found for reduce-scatter",
-                    source_partition
-                )
-            })?;
-
-        // Use tensor group for reduce-scatter operations
-        let _group = &self.tensor_group;
-
-        // Calculate scatter chunk size based on world size
-        let chunk_size = requirement.data_size / self.world_size;
-
-        // In a real implementation, this would:
-        // 1. Perform reduction operation (sum, mean, etc.) on source tensor
-        // 2. Split the reduced tensor into chunks equal to world_size
-        // 3. Scatter each chunk to corresponding device
-        // 4. Each device receives and stores its chunk in target partition
-        println!("Reduce-scatter: Reducing partition {} and scattering to partition {} (chunk size: {} bytes)",
-                 source_partition, target_partition, chunk_size);
-
-        // Calculate which chunk this device should receive
-        let my_chunk_index = self.global_rank;
-        println!(
-            "Reduce-scatter: Device {} will receive chunk {}",
-            self.global_rank, my_chunk_index
-        );
-
-        // Simulate communication and computation overhead
-        std::thread::sleep(Duration::from_micros((requirement.data_size / 750) as u64));
-
-        Ok(())
-    }
-
-    /// Handle point-to-point communication
-    fn handle_point_to_point(&self, requirement: &CommunicationRequirement) -> Result<()> {
-        // Point-to-point: direct communication between two specific devices
-        let source_partition = requirement.source_partition;
-        let target_partition = requirement.target_partition;
-
-        // Find source and target partitions
-        let source = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == source_partition)
-            .ok_or_else(|| anyhow!("Source partition {} not found for P2P", source_partition))?;
-
-        let target = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == target_partition)
-            .ok_or_else(|| anyhow!("Target partition {} not found for P2P", target_partition))?;
-
-        // Determine if this device is involved in the communication
-        let is_sender = source.device_rank == self.global_rank;
-        let is_receiver = target.device_rank == self.global_rank;
-
-        if is_sender {
-            // This device is sending data
-            println!(
-                "P2P: Sending from partition {} to device {} (size: {} bytes)",
-                source_partition, target.device_rank, requirement.data_size
-            );
-
-            // In a real implementation:
-            // 1. Serialize tensor data from source partition
-            // 2. Use ProcessGroup.send() to target device
-        } else if is_receiver {
-            // This device is receiving data
-            println!(
-                "P2P: Receiving from device {} to partition {} (size: {} bytes)",
-                source.device_rank, target_partition, requirement.data_size
-            );
-
-            // In a real implementation:
-            // 1. Use ProcessGroup.recv() from source device
-            // 2. Deserialize and store data in target partition
+        if trailing.is_empty() {
+            trailing = vec![values.len()];
         } else {
-            // This device is not involved in this P2P communication
-            println!(
-                "P2P: Device {} not involved in communication {} -> {}",
-                self.global_rank, source.device_rank, target.device_rank
-            );
+            trailing[0] = rows;
         }
 
-        // Simulate communication latency
-        if is_sender || is_receiver {
-            std::thread::sleep(Duration::from_micros(
-                (requirement.data_size / 2000 + 100) as u64,
+        self.store_partition_data(target_partition, Tensor::from_slice(&values, &trailing)?)?;
+        Ok(())
+    }
+
+    /// Reduce the source partition across the group and keep only this rank's
+    /// chunk, storing it in the target partition.
+    fn handle_reduce_scatter(&self, requirement: &CommunicationRequirement) -> Result<()> {
+        let source_partition = requirement.source_partition;
+        let target_partition = requirement.target_partition;
+        self.find_partition(source_partition, "reduce-scatter")?;
+
+        let local = self.require_partition_data(source_partition, "reduce-scatter")?;
+        let chunk = self.tensor_group.reduce_scatter(&local)?;
+        self.store_partition_data(target_partition, chunk)?;
+
+        Ok(())
+    }
+
+    /// Move the source partition's tensor directly from its owner to the target
+    /// partition's owner.
+    fn handle_point_to_point(&self, requirement: &CommunicationRequirement) -> Result<()> {
+        let source_partition = requirement.source_partition;
+        let target_partition = requirement.target_partition;
+
+        let source = self.find_partition(source_partition, "point-to-point")?;
+        let target = self.find_partition(target_partition, "point-to-point")?;
+        let source_rank = source.device_rank;
+        let target_rank = target.device_rank;
+        let shape = source.shape.clone();
+
+        if source_rank == target_rank {
+            // Purely local move; no message needed.
+            if self.global_rank == source_rank {
+                let tensor = self.require_partition_data(source_partition, "point-to-point")?;
+                self.store_partition_data(target_partition, tensor)?;
+            }
+            return Ok(());
+        }
+
+        if !self.tensor_group.supports_point_to_point() {
+            return Err(anyhow!(
+                "point-to-point transfer from partition {source_partition} to \
+                 {target_partition} requires a process group with a real transport"
             ));
         }
 
+        // Both endpoints derive the same tag from the partition pair, so no
+        // call-ordering convention is required.
+        let tag = point_to_point_tag(source_partition, target_partition);
+
+        if self.global_rank == source_rank {
+            let tensor = self.require_partition_data(source_partition, "point-to-point")?;
+            self.tensor_group.send(target_rank, tag, &tensor)?;
+        } else if self.global_rank == target_rank {
+            let tensor = self.tensor_group.recv(source_rank, tag, &shape)?;
+            self.store_partition_data(target_partition, tensor)?;
+        }
+
         Ok(())
     }
 
-    /// Handle hierarchical communication
+    /// Two-level all-reduce: reduce within each node to its leader, all-reduce
+    /// among the leaders, then broadcast the result back inside each node.
+    ///
+    /// Nodes are inferred from the rank layout (`sqrt(world_size)` ranks per
+    /// node), matching how the topology is modelled elsewhere in this module.
+    /// With a single node this degenerates to a plain group all-reduce.
     fn handle_hierarchical(&self, requirement: &CommunicationRequirement) -> Result<()> {
-        // Hierarchical: multi-level communication for large-scale deployments
         let source_partition = requirement.source_partition;
-        let target_partition = requirement.target_partition;
+        self.find_partition(source_partition, "hierarchical")?;
 
-        // Find source partition
-        let _source = self
-            .tensor_partitions
-            .values()
-            .flatten()
-            .find(|p| p.partition_id == source_partition)
-            .ok_or_else(|| {
-                anyhow!(
-                    "Source partition {} not found for hierarchical comm",
-                    source_partition
-                )
-            })?;
-
-        // Calculate hierarchical communication structure
-        let nodes_per_level = (self.world_size as f64).sqrt().ceil() as usize;
-        let node_id = self.global_rank / nodes_per_level;
-        let local_rank = self.global_rank % nodes_per_level;
-
-        println!(
-            "Hierarchical: Device {} (node {}, local rank {}) processing partition {}",
-            self.global_rank, node_id, local_rank, source_partition
-        );
-
-        // Hierarchical communication typically involves:
-        // 1. Intra-node communication (within each compute node)
-        // 2. Inter-node communication (between node leaders)
-        // 3. Final intra-node broadcast of results
-
-        if local_rank == 0 {
-            // This is a node leader - participates in inter-node communication
-            println!(
-                "Hierarchical: Node leader {} participating in inter-node communication",
-                self.global_rank
-            );
-
-            // Phase 1: Collect from local devices (intra-node reduce)
-            std::thread::sleep(Duration::from_micros((requirement.data_size / 1000) as u64));
-
-            // Phase 2: Inter-node all-reduce among leaders
-            std::thread::sleep(Duration::from_micros((requirement.data_size / 500) as u64));
-
-            // Phase 3: Broadcast back to local devices
-            std::thread::sleep(Duration::from_micros((requirement.data_size / 2000) as u64));
-        } else {
-            // Regular device - participates in intra-node communication only
-            println!(
-                "Hierarchical: Device {} participating in intra-node communication with leader",
-                self.global_rank
-            );
-
-            // Phase 1: Send to node leader
-            std::thread::sleep(Duration::from_micros((requirement.data_size / 2000) as u64));
-
-            // Phase 3: Receive result from node leader
-            std::thread::sleep(Duration::from_micros((requirement.data_size / 4000) as u64));
+        let ranks_per_node = ((self.world_size as f64).sqrt().ceil() as usize).max(1);
+        if ranks_per_node >= self.world_size || self.world_size <= 1 {
+            // One node: the hierarchy collapses to a flat all-reduce.
+            let mut tensors = vec![self.require_partition_data(source_partition, "hierarchical")?];
+            self.tensor_group.all_reduce(&mut tensors)?;
+            self.store_partition_data(source_partition, tensors.remove(0))?;
+            return Ok(());
         }
 
-        println!(
-            "Hierarchical: Completed hierarchical communication for partition {} (target: {})",
-            source_partition, target_partition
-        );
+        if !self.tensor_group.supports_point_to_point() {
+            return Err(anyhow!(
+                "hierarchical communication requires a process group with a real transport"
+            ));
+        }
 
+        let node_id = self.global_rank / ranks_per_node;
+        let local_rank = self.global_rank % ranks_per_node;
+        let leader = node_id * ranks_per_node;
+
+        let mut tensor = self.require_partition_data(source_partition, "hierarchical")?;
+        let shape = tensor.shape();
+        let node_members: Vec<usize> = (leader..self.world_size)
+            .take(ranks_per_node)
+            .filter(|rank| *rank != leader)
+            .collect();
+
+        if local_rank == 0 {
+            // Phase 1: intra-node reduce into the leader.
+            for member in &node_members {
+                let contribution = self.tensor_group.recv(
+                    *member,
+                    hierarchical_tag(source_partition, 0, *member),
+                    &shape,
+                )?;
+                tensor = tensor.add(&contribution)?;
+            }
+
+            // Phase 2: all-reduce among the leaders. Every rank participates in
+            // the group collective, so non-leaders contribute a zero tensor and
+            // the sum is exactly the leaders' sum.
+            let mut leaders = vec![tensor.clone()];
+            self.tensor_group.all_reduce(&mut leaders)?;
+            tensor = leaders.remove(0);
+
+            // Phase 3: broadcast the result back inside the node.
+            for member in &node_members {
+                self.tensor_group.send(
+                    *member,
+                    hierarchical_tag(source_partition, 1, *member),
+                    &tensor,
+                )?;
+            }
+        } else {
+            // Phase 1: contribute to the node leader.
+            self.tensor_group.send(
+                leader,
+                hierarchical_tag(source_partition, 0, self.global_rank),
+                &tensor,
+            )?;
+
+            // Phase 2: participate with zeros so the group collective stays in
+            // lock-step without double-counting this rank's data.
+            let mut zeros = vec![Tensor::zeros(&shape)?];
+            self.tensor_group.all_reduce(&mut zeros)?;
+
+            // Phase 3: receive the node result.
+            tensor = self.tensor_group.recv(
+                leader,
+                hierarchical_tag(source_partition, 1, self.global_rank),
+                &shape,
+            )?;
+        }
+
+        self.store_partition_data(source_partition, tensor)?;
         Ok(())
     }
 
@@ -1165,149 +1465,4 @@ pub mod utils {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::distributed::SimulatedProcessGroup;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_tensor_parallelism_config() {
-        let config = TensorParallelismConfig::default();
-        assert_eq!(config.tensor_parallel_size, 1);
-        assert!(config.column_parallel);
-        assert!(config.row_parallel);
-    }
-
-    #[test]
-    fn test_tensor_parallelism_creation() {
-        let config = TensorParallelismConfig {
-            tensor_parallel_size: 4,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 4));
-        let tensor_parallelism = TensorParallelism::new(config, 0, 4, process_group);
-
-        assert!(tensor_parallelism.is_ok());
-    }
-
-    #[test]
-    fn test_column_wise_partitioning() {
-        let config = TensorParallelismConfig {
-            tensor_parallel_size: 2,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism =
-            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
-
-        let partitions = tensor_parallelism
-            .partition_tensor("test", &[100, 200], None)
-            .expect("tensor operation failed");
-        assert_eq!(partitions.len(), 2);
-        assert_eq!(partitions[0].shape, vec![100, 100]);
-        assert_eq!(partitions[1].shape, vec![100, 100]);
-    }
-
-    #[test]
-    fn test_row_wise_partitioning() {
-        let config = TensorParallelismConfig {
-            tensor_parallel_size: 2,
-            partitioning_strategy: TensorPartitioningStrategy::RowWise,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism =
-            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
-
-        let partitions = tensor_parallelism
-            .partition_tensor("test", &[100, 200], None)
-            .expect("tensor operation failed");
-        assert_eq!(partitions.len(), 2);
-        assert_eq!(partitions[0].shape, vec![50, 200]);
-        assert_eq!(partitions[1].shape, vec![50, 200]);
-    }
-
-    #[test]
-    fn test_batch_wise_partitioning() {
-        let config = TensorParallelismConfig {
-            tensor_parallel_size: 2,
-            partitioning_strategy: TensorPartitioningStrategy::BatchWise,
-            ..Default::default()
-        };
-
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism =
-            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
-
-        let partitions = tensor_parallelism
-            .partition_tensor("test", &[64, 100, 200], None)
-            .expect("tensor operation failed");
-        assert_eq!(partitions.len(), 2);
-        assert_eq!(partitions[0].shape, vec![32, 100, 200]);
-        assert_eq!(partitions[1].shape, vec![32, 100, 200]);
-    }
-
-    #[test]
-    fn test_tensor_operation_execution() {
-        let config = TensorParallelismConfig::default();
-        let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let tensor_parallelism =
-            TensorParallelism::new(config, 0, 1, process_group).expect("tensor operation failed");
-
-        let operation = TensorOperation {
-            operation_id: 0,
-            operation_type: TensorOperationType::Add,
-            input_partitions: vec![0, 1],
-            output_partitions: vec![0],
-            communication_requirements: vec![],
-            memory_requirements: 1024,
-        };
-
-        let mut inputs = HashMap::new();
-        inputs.insert(
-            "A".to_string(),
-            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
-        );
-        inputs.insert(
-            "B".to_string(),
-            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
-        );
-
-        let result = tensor_parallelism.execute_operation(&operation, &inputs);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_optimal_tensor_config_calculation() {
-        // Use 10B parameters (40GB memory) with 8GB per device
-        // This requires at least 5 devices, so tensor_parallel_size > 1
-        let config = utils::calculate_optimal_tensor_config(
-            10_000_000_000,         // 10B parameters (40GB memory)
-            8 * 1024 * 1024 * 1024, // 8GB memory per device
-            8,                      // world size
-        )
-        .expect("operation failed in test");
-
-        assert!(
-            config.tensor_parallel_size > 1,
-            "Expected tensor_parallel_size > 1, got {}",
-            config.tensor_parallel_size
-        );
-    }
-
-    #[test]
-    fn test_communication_overhead_estimation() {
-        let config = TensorParallelismConfig::default();
-        let overhead = utils::estimate_communication_overhead(&config, 1024 * 1024, 100);
-        assert!(overhead > 0.0);
-    }
-
-    #[test]
-    fn test_memory_savings_calculation() {
-        let savings = utils::calculate_memory_savings(1_000_000_000, 4);
-        assert!(savings > 0.0 && savings < 1.0);
-    }
-}
+mod tests;

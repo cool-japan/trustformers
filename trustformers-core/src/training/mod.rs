@@ -17,8 +17,8 @@ pub use gradient_accumulation::{
     GradientAccumulator, GradientBuffer,
 };
 pub use mixed_precision::{
-    cast_bf16_to_fp32, cast_fp16_to_fp32, cast_fp32_to_bf16, cast_fp32_to_fp16, AmpStats,
-    BFloat16, LossScaler, MixedPrecisionContext, TrainingPrecisionMode,
+    cast_bf16_to_fp32, cast_fp16_to_fp32, cast_fp32_to_bf16, cast_fp32_to_fp16, AmpStats, BFloat16,
+    LossScaler, MixedPrecisionContext, TrainingPrecisionMode,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,10 +63,7 @@ mod tests {
         // [3, 4] split across two parameters: sqrt(9 + 16) = 5
         let grads = vec![vec![3.0_f32], vec![4.0_f32]];
         let norm = global_grad_norm(&grads);
-        assert!(
-            (norm - 5.0).abs() < 1e-5,
-            "expected 5.0, got {norm}"
-        );
+        assert!((norm - 5.0).abs() < 1e-5, "expected 5.0, got {norm}");
     }
 
     // -----------------------------------------------------------------------
@@ -77,7 +74,10 @@ mod tests {
         let mut grads = vec![vec![3.0_f32], vec![4.0_f32]]; // norm = 5
         let original = grads.clone();
         clip_grad_norm_(&mut grads, 5.0);
-        assert_eq!(grads, original, "grad should not change when norm == max_norm");
+        assert_eq!(
+            grads, original,
+            "grad should not change when norm == max_norm"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -93,8 +93,7 @@ mod tests {
         };
         let mut buf = GradientBuffer::new(&[4_usize]);
         for _ in 0..7 {
-            buf.accumulate(&[vec![1.0_f32; 4]], &config)
-                .expect("accumulate");
+            buf.accumulate(&[vec![1.0_f32; 4]], &config).expect("accumulate");
         }
         assert!(!buf.is_ready, "buffer should not be ready after 7/8 steps");
     }
@@ -121,8 +120,16 @@ mod tests {
         assert!(r3.is_some(), "step 3 should yield gradients");
         let grads = r3.expect("some");
         // Normalized by 3 → mean(1.0, 1.0, 1.0) = 1.0
-        assert!((grads[0][0] - 1.0).abs() < 1e-5, "expected 1.0, got {}", grads[0][0]);
-        assert!((grads[0][1] - 2.0).abs() < 1e-5, "expected 2.0, got {}", grads[0][1]);
+        assert!(
+            (grads[0][0] - 1.0).abs() < 1e-5,
+            "expected 1.0, got {}",
+            grads[0][0]
+        );
+        assert!(
+            (grads[0][1] - 2.0).abs() < 1e-5,
+            "expected 2.0, got {}",
+            grads[0][1]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -177,8 +184,15 @@ mod tests {
     #[test]
     fn test_bf16_batch_round_trip_wide_range() {
         let values: Vec<f32> = vec![
-            0.0, 1.0, -1.0, 0.5, -0.5, 2048.0, -2048.0,
-            f32::INFINITY, f32::NEG_INFINITY,
+            0.0,
+            1.0,
+            -1.0,
+            0.5,
+            -0.5,
+            2048.0,
+            -2048.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
         ];
         let bf16_bits = cast_fp32_to_bf16(&values);
         let recovered = cast_bf16_to_fp32(&bf16_bits);
@@ -237,7 +251,10 @@ mod tests {
     #[test]
     fn test_mixed_precision_context_fp16_creates_scaler() {
         let ctx = MixedPrecisionContext::new(TrainingPrecisionMode::Fp16, &[4_usize]);
-        assert!(ctx.loss_scaler.is_some(), "FP16 mode must have a loss scaler");
+        assert!(
+            ctx.loss_scaler.is_some(),
+            "FP16 mode must have a loss scaler"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -246,7 +263,10 @@ mod tests {
     #[test]
     fn test_mixed_precision_context_bf16_no_scaler() {
         let ctx = MixedPrecisionContext::new(TrainingPrecisionMode::Bf16, &[4_usize]);
-        assert!(ctx.loss_scaler.is_none(), "BF16 mode must not have a loss scaler");
+        assert!(
+            ctx.loss_scaler.is_none(),
+            "BF16 mode must not have a loss scaler"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -279,11 +299,8 @@ mod tests {
         let compute = ctx.get_compute_weights();
         let recovered = cast_bf16_to_fp32(&compute[0]);
         for (orig, rec) in ctx.master_weights[0].iter().zip(recovered.iter()) {
-            let rel = if orig.abs() > 1e-6 {
-                ((rec - orig) / orig).abs()
-            } else {
-                (rec - orig).abs()
-            };
+            let rel =
+                if orig.abs() > 1e-6 { ((rec - orig) / orig).abs() } else { (rec - orig).abs() };
             assert!(rel < 0.01, "bf16 weight encoding: {orig} → {rec}");
         }
     }
@@ -364,7 +381,10 @@ mod tests {
 
         assert_eq!(amp_stats.successful_steps, 2, "both steps should succeed");
         assert_eq!(amp_stats.overflow_count, 0, "no overflows expected");
-        assert!(update_result.is_some(), "second step should yield gradients");
+        assert!(
+            update_result.is_some(),
+            "second step should yield gradients"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -375,14 +395,24 @@ mod tests {
         use std::fmt::Write as _;
         let mut buf = String::new();
 
-        let e1 = GradError::ShapeMismatch { expected: 2, got: 3 };
+        let e1 = GradError::ShapeMismatch {
+            expected: 2,
+            got: 3,
+        };
         write!(buf, "{e1}").expect("format");
         assert!(!buf.is_empty(), "ShapeMismatch display must be non-empty");
         buf.clear();
 
-        let e2 = GradError::TensorLengthMismatch { param_idx: 0, expected: 4, got: 2 };
+        let e2 = GradError::TensorLengthMismatch {
+            param_idx: 0,
+            expected: 4,
+            got: 2,
+        };
         write!(buf, "{e2}").expect("format");
-        assert!(!buf.is_empty(), "TensorLengthMismatch display must be non-empty");
+        assert!(
+            !buf.is_empty(),
+            "TensorLengthMismatch display must be non-empty"
+        );
         buf.clear();
 
         let e3 = GradError::EmptyBuffer;
@@ -445,10 +475,7 @@ mod tests {
             recovered[1].is_infinite() && recovered[1].is_sign_negative(),
             "-Inf should survive FP16 round-trip"
         );
-        assert!(
-            recovered[2].is_nan(),
-            "NaN should survive FP16 round-trip"
-        );
+        assert!(recovered[2].is_nan(), "NaN should survive FP16 round-trip");
     }
 
     // -----------------------------------------------------------------------

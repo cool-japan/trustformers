@@ -51,19 +51,34 @@ impl DeepSeekRmsNorm {
     }
 
     /// Forward on a flat tensor interpreted as `[..., size]`.
+    ///
+    /// Each trailing `size`-element vector is normalised **independently** —
+    /// RMSNorm is a per-token operation, so pooling the mean square over the
+    /// whole batch would leak information between tokens.
     pub fn forward_tensor(&self, input: &Tensor) -> Result<Tensor> {
         match input {
             Tensor::F32(arr) => {
                 let eps_f32 = self.eps as f32;
-                let mean_sq = arr.iter().map(|x| x * x).sum::<f32>() / arr.len() as f32;
-                let rms = (mean_sq + eps_f32).sqrt();
-                let normalized = arr.mapv(|x| x / rms);
-                // broadcast weight across all positions
-                let w_f32: Vec<f32> = self.weight.iter().map(|&w| w as f32).collect();
                 let size = self.weight.len();
-                let total = normalized.len();
-                let data: Vec<f32> =
-                    normalized.iter().enumerate().map(|(i, &v)| v * w_f32[i % size]).collect();
+                if size == 0 || !arr.len().is_multiple_of(size) {
+                    return Err(tensor_op_error(
+                        "DeepSeekRmsNorm::forward_tensor",
+                        format!(
+                            "tensor of {} elements is not a multiple of the norm size {size}",
+                            arr.len()
+                        ),
+                    ));
+                }
+                let w_f32: Vec<f32> = self.weight.iter().map(|&w| w as f32).collect();
+                let values: Vec<f32> = arr.iter().copied().collect();
+                let mut data = Vec::with_capacity(values.len());
+                for chunk in values.chunks(size) {
+                    let mean_sq = chunk.iter().map(|x| x * x).sum::<f32>() / size as f32;
+                    let inv_rms = 1.0 / (mean_sq + eps_f32).sqrt();
+                    for (value, weight) in chunk.iter().zip(w_f32.iter()) {
+                        data.push(value * inv_rms * weight);
+                    }
+                }
                 use scirs2_core::ndarray::{ArrayD, IxDyn};
                 let out = ArrayD::from_shape_vec(IxDyn(arr.shape()), data).map_err(|e| {
                     tensor_op_error(
@@ -71,7 +86,6 @@ impl DeepSeekRmsNorm {
                         format!("shape error: {e}"),
                     )
                 })?;
-                let _ = total;
                 Ok(Tensor::F32(out))
             },
             _ => Err(tensor_op_error(
@@ -353,6 +367,12 @@ impl Layer for DeepSeekMoeLayer {
 ///
 /// This design reduces the KV cache from `O(L * nheads * head_dim)` to
 /// `O(L * kv_lora_rank)` where `kv_lora_rank << nheads * head_dim`.
+///
+/// Positional information travels on a **decoupled RoPE path** (DeepSeek-V2,
+/// §2.1.2): the compressed content path carries no position, so an extra
+/// `W_QR`/`W_KR` pair produces `rope_head_dim` channels that are rotated and
+/// concatenated to the content scores. The key half `k_r` is shared by every
+/// head, which is what keeps the cache small.
 pub struct DeepSeekMlaAttention {
     /// Downproject hidden -> kv_lora_rank
     w_dkv: Vec<Vec<f64>>,
@@ -362,13 +382,42 @@ pub struct DeepSeekMlaAttention {
     w_uv: Vec<Vec<f64>>,
     /// Query projection: hidden -> nheads * head_dim
     w_q: Vec<Vec<f64>>,
+    /// Decoupled RoPE query projection: hidden -> nheads * rope_head_dim
+    w_qr: Vec<Vec<f64>>,
+    /// Decoupled RoPE key projection (shared across heads): hidden -> rope_head_dim
+    w_kr: Vec<Vec<f64>>,
     /// Output projection: nheads * v_head_dim -> hidden
     w_o: Vec<Vec<f64>>,
     num_heads: usize,
     head_dim: usize,
     v_head_dim: usize,
+    rope_head_dim: usize,
+    rope_theta: f64,
     kv_lora_rank: usize,
     hidden_size: usize,
+}
+
+/// Deterministic weight initialisation.
+///
+/// A zero-initialised projection makes every attention score identical and hides
+/// bugs behind a constant output, so the matrices are filled with a reproducible
+/// pseudo-random draw scaled by `1/sqrt(fan_in)` (the usual Xavier-style scale).
+/// Loading real checkpoint weights replaces them wholesale via the setters.
+fn init_matrix(rows: usize, cols: usize, seed: u64) -> Vec<Vec<f64>> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+    let scale = 1.0 / (cols.max(1) as f64).sqrt();
+    (0..rows)
+        .map(|_| {
+            (0..cols)
+                .map(|_| {
+                    state =
+                        state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    let unit = ((state >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+                    unit * scale
+                })
+                .collect()
+        })
+        .collect()
 }
 
 impl DeepSeekMlaAttention {
@@ -378,54 +427,275 @@ impl DeepSeekMlaAttention {
         let v_head_dim = config.v_head_dim;
         let kv_lora_rank = config.kv_lora_rank;
         let hidden_size = config.hidden_size;
+        let rope_head_dim = config.rope_head_dim;
 
-        // Initialise all weight matrices to zero
-        let w_dkv = vec![vec![0.0f64; hidden_size]; kv_lora_rank];
-        let w_uk = vec![vec![0.0f64; kv_lora_rank]; num_heads * head_dim];
-        let w_uv = vec![vec![0.0f64; kv_lora_rank]; num_heads * v_head_dim];
-        let w_q = vec![vec![0.0f64; hidden_size]; num_heads * head_dim];
-        let w_o = vec![vec![0.0f64; num_heads * v_head_dim]; hidden_size];
+        let w_dkv = init_matrix(kv_lora_rank, hidden_size, 0x0D5E);
+        let w_uk = init_matrix(num_heads * head_dim, kv_lora_rank, 0x0D5F);
+        let w_uv = init_matrix(num_heads * v_head_dim, kv_lora_rank, 0x0D60);
+        let w_q = init_matrix(num_heads * head_dim, hidden_size, 0x0D61);
+        let w_qr = init_matrix(num_heads * rope_head_dim, hidden_size, 0x0D62);
+        let w_kr = init_matrix(rope_head_dim, hidden_size, 0x0D63);
+        let w_o = init_matrix(hidden_size, num_heads * v_head_dim, 0x0D64);
 
         Self {
             w_dkv,
             w_uk,
             w_uv,
             w_q,
+            w_qr,
+            w_kr,
             w_o,
             num_heads,
             head_dim,
             v_head_dim,
+            rope_head_dim,
+            rope_theta: config.rope_theta,
             kv_lora_rank,
             hidden_size,
         }
     }
 
-    /// MLA forward for a single token vector.
+    fn check_shape(name: &str, matrix: &[Vec<f64>], rows: usize, cols: usize) -> Result<()> {
+        if matrix.len() != rows || matrix.iter().any(|row| row.len() != cols) {
+            return Err(tensor_op_error(
+                name,
+                format!(
+                    "expected a [{rows}, {cols}] matrix, got [{}, {}]",
+                    matrix.len(),
+                    matrix.first().map(|row| row.len()).unwrap_or(0)
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace `W_DKV` (`[kv_lora_rank, hidden_size]`).
+    pub fn set_kv_down_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_kv_down_proj",
+            &weight,
+            self.kv_lora_rank,
+            self.hidden_size,
+        )?;
+        self.w_dkv = weight;
+        Ok(())
+    }
+
+    /// Replace `W_UK` (`[num_heads * head_dim, kv_lora_rank]`).
+    pub fn set_key_up_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_key_up_proj",
+            &weight,
+            self.num_heads * self.head_dim,
+            self.kv_lora_rank,
+        )?;
+        self.w_uk = weight;
+        Ok(())
+    }
+
+    /// Replace `W_UV` (`[num_heads * v_head_dim, kv_lora_rank]`).
+    pub fn set_value_up_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_value_up_proj",
+            &weight,
+            self.num_heads * self.v_head_dim,
+            self.kv_lora_rank,
+        )?;
+        self.w_uv = weight;
+        Ok(())
+    }
+
+    /// Replace `W_Q` (`[num_heads * head_dim, hidden_size]`).
+    pub fn set_query_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_query_proj",
+            &weight,
+            self.num_heads * self.head_dim,
+            self.hidden_size,
+        )?;
+        self.w_q = weight;
+        Ok(())
+    }
+
+    /// Replace the decoupled-RoPE query projection
+    /// (`[num_heads * rope_head_dim, hidden_size]`).
+    pub fn set_query_rope_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_query_rope_proj",
+            &weight,
+            self.num_heads * self.rope_head_dim,
+            self.hidden_size,
+        )?;
+        self.w_qr = weight;
+        Ok(())
+    }
+
+    /// Replace the shared decoupled-RoPE key projection
+    /// (`[rope_head_dim, hidden_size]`).
+    pub fn set_key_rope_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_key_rope_proj",
+            &weight,
+            self.rope_head_dim,
+            self.hidden_size,
+        )?;
+        self.w_kr = weight;
+        Ok(())
+    }
+
+    /// Replace `W_O` (`[hidden_size, num_heads * v_head_dim]`).
+    pub fn set_output_proj(&mut self, weight: Vec<Vec<f64>>) -> Result<()> {
+        Self::check_shape(
+            "DeepSeekMlaAttention::set_output_proj",
+            &weight,
+            self.hidden_size,
+            self.num_heads * self.v_head_dim,
+        )?;
+        self.w_o = weight;
+        Ok(())
+    }
+
+    /// Rotate `vector` (length `rope_head_dim`) for absolute position `pos`.
     ///
-    /// Returns the output vector `[hidden_size]`.
-    pub fn forward_token(&self, x: &[f32]) -> Vec<f32> {
-        // Compress KV: c_kv = W_DKV @ x  [kv_lora_rank]
-        let c_kv = matmul_vec(&self.w_dkv, x);
-        // Decompress K: k = W_UK @ c_kv  [nheads * head_dim]
-        let _k = matmul_vec(&self.w_uk, &c_kv);
-        // Decompress V: v = W_UV @ c_kv  [nheads * v_head_dim]
-        let v = matmul_vec(&self.w_uv, &c_kv);
-        // Query: q = W_Q @ x  [nheads * head_dim]
-        let _q = matmul_vec(&self.w_q, x);
+    /// Uses the `rotate_half` convention: channel `i` pairs with `i + rd/2`.
+    fn apply_rope(&self, vector: &mut [f32], pos: usize) {
+        let half = self.rope_head_dim / 2;
+        for i in 0..half {
+            let inv_freq = 1.0 / self.rope_theta.powf(2.0 * i as f64 / self.rope_head_dim as f64);
+            let angle = (pos as f64 * inv_freq) as f32;
+            let (sin_val, cos_val) = angle.sin_cos();
+            let x0 = vector[i];
+            let x1 = vector[i + half];
+            vector[i] = x0 * cos_val - x1 * sin_val;
+            vector[i + half] = x0 * sin_val + x1 * cos_val;
+        }
+    }
 
-        // Simplified attention: scale q and matmul with v (proxy for softmax(qk^T)v)
-        let scale = (self.head_dim as f32).sqrt().recip();
-        let attn_out: Vec<f32> = v.iter().map(|&vi| vi * scale).collect();
-
-        // Pad / truncate attn_out to nheads * v_head_dim before output proj
-        let attn_size = self.num_heads * self.v_head_dim;
-        let mut padded = vec![0.0f32; attn_size];
-        for (i, &val) in attn_out.iter().take(attn_size).enumerate() {
-            padded[i] = val;
+    /// Full Multi-head Latent Attention over one sequence.
+    ///
+    /// `x` is a flat `[seq_len * hidden_size]` buffer; the result has the same
+    /// shape. The computation follows DeepSeek-V2:
+    ///
+    /// 1. `c_kv = W_DKV x` compresses the KV state to `kv_lora_rank` channels,
+    /// 2. `k_c = W_UK c_kv` / `v = W_UV c_kv` decompress per head,
+    /// 3. `q_c = W_Q x` and the decoupled RoPE halves `q_r`, `k_r` add position,
+    /// 4. scores are `(q_c·k_c + q_r·k_r) / sqrt(head_dim + rope_head_dim)`,
+    ///    causally masked and softmaxed,
+    /// 5. the value-weighted sum is projected back with `W_O`.
+    pub fn forward_sequence(&self, x: &[f32], seq_len: usize) -> Result<Vec<f32>> {
+        let hidden = self.hidden_size;
+        if seq_len == 0 {
+            return Ok(Vec::new());
+        }
+        if x.len() != seq_len * hidden {
+            return Err(tensor_op_error(
+                "DeepSeekMlaAttention::forward_sequence",
+                format!("expected {} elements, got {}", seq_len * hidden, x.len()),
+            ));
         }
 
-        // Output projection: y = W_O @ attn_out  [hidden_size]
-        matmul_vec(&self.w_o, &padded)
+        let head_dim = self.head_dim;
+        let v_head_dim = self.v_head_dim;
+        let rope_dim = self.rope_head_dim;
+        let num_heads = self.num_heads;
+
+        // Per-token projections.
+        let mut keys = Vec::with_capacity(seq_len); // [nheads * head_dim]
+        let mut values = Vec::with_capacity(seq_len); // [nheads * v_head_dim]
+        let mut queries = Vec::with_capacity(seq_len); // [nheads * head_dim]
+        let mut query_rope = Vec::with_capacity(seq_len); // [nheads * rope_dim]
+        let mut key_rope = Vec::with_capacity(seq_len); // [rope_dim] (shared)
+
+        for (pos, token) in x.chunks(hidden).enumerate().take(seq_len) {
+            let c_kv = matmul_vec(&self.w_dkv, token);
+            keys.push(matmul_vec(&self.w_uk, &c_kv));
+            values.push(matmul_vec(&self.w_uv, &c_kv));
+            queries.push(matmul_vec(&self.w_q, token));
+
+            if rope_dim >= 2 {
+                let mut q_r = matmul_vec(&self.w_qr, token);
+                for head in 0..num_heads {
+                    self.apply_rope(&mut q_r[head * rope_dim..(head + 1) * rope_dim], pos);
+                }
+                query_rope.push(q_r);
+
+                let mut k_r = matmul_vec(&self.w_kr, token);
+                self.apply_rope(&mut k_r, pos);
+                key_rope.push(k_r);
+            }
+        }
+
+        let use_rope = rope_dim >= 2;
+        let scale = 1.0 / ((head_dim + if use_rope { rope_dim } else { 0 }) as f32).sqrt();
+
+        let mut context = vec![0.0f32; seq_len * num_heads * v_head_dim];
+        let mut scores = vec![0.0f32; seq_len];
+        for head in 0..num_heads {
+            for query_pos in 0..seq_len {
+                let mut max_score = f32::NEG_INFINITY;
+                for key_pos in 0..=query_pos {
+                    let mut dot = 0.0f32;
+                    for d in 0..head_dim {
+                        dot += queries[query_pos][head * head_dim + d]
+                            * keys[key_pos][head * head_dim + d];
+                    }
+                    if use_rope {
+                        for d in 0..rope_dim {
+                            dot +=
+                                query_rope[query_pos][head * rope_dim + d] * key_rope[key_pos][d];
+                        }
+                    }
+                    dot *= scale;
+                    scores[key_pos] = dot;
+                    if dot > max_score {
+                        max_score = dot;
+                    }
+                }
+
+                let mut sum = 0.0f32;
+                for score in scores.iter_mut().take(query_pos + 1) {
+                    *score = (*score - max_score).exp();
+                    sum += *score;
+                }
+                let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+
+                let out_base = (query_pos * num_heads + head) * v_head_dim;
+                for key_pos in 0..=query_pos {
+                    let weight = scores[key_pos] * inv_sum;
+                    for d in 0..v_head_dim {
+                        context[out_base + d] += weight * values[key_pos][head * v_head_dim + d];
+                    }
+                }
+            }
+        }
+
+        // Output projection per token.
+        let attn_size = num_heads * v_head_dim;
+        let mut output = Vec::with_capacity(seq_len * hidden);
+        for token_context in context.chunks(attn_size) {
+            output.extend_from_slice(&matmul_vec(&self.w_o, token_context));
+        }
+        Ok(output)
+    }
+
+    /// MLA forward for a single token vector.
+    ///
+    /// A one-token sequence attends only to itself, so the softmax is trivially
+    /// `1` and the output is `W_O · v` — the real mechanism, not an approximation.
+    /// Returns the output vector `[hidden_size]`.
+    ///
+    /// `x` must be exactly `hidden_size` long. A shorter or longer buffer is a
+    /// caller error and is reported as one: zero-padding a short input (and
+    /// silently dropping the tail of a long one) would hand back a full-length
+    /// vector that no caller can tell apart from a genuine activation.
+    pub fn forward_token(&self, x: &[f32]) -> Result<Vec<f32>> {
+        if x.len() != self.hidden_size {
+            return Err(tensor_op_error(
+                "DeepSeekMlaAttention::forward_token",
+                format!("expected {} elements, got {}", self.hidden_size, x.len()),
+            ));
+        }
+        self.forward_sequence(x, 1)
     }
 
     pub fn kv_lora_rank(&self) -> usize {
@@ -436,13 +706,20 @@ impl DeepSeekMlaAttention {
         self.num_heads
     }
 
+    /// Per-head dimension of the decoupled RoPE path.
+    pub fn rope_head_dim(&self) -> usize {
+        self.rope_head_dim
+    }
+
     pub fn parameter_count(&self) -> usize {
         let w_dkv = self.kv_lora_rank * self.hidden_size;
         let w_uk = self.num_heads * self.head_dim * self.kv_lora_rank;
         let w_uv = self.num_heads * self.v_head_dim * self.kv_lora_rank;
         let w_q = self.num_heads * self.head_dim * self.hidden_size;
+        let w_qr = self.num_heads * self.rope_head_dim * self.hidden_size;
+        let w_kr = self.rope_head_dim * self.hidden_size;
         let w_o = self.hidden_size * self.num_heads * self.v_head_dim;
-        w_dkv + w_uk + w_uv + w_q + w_o
+        w_dkv + w_uk + w_uv + w_q + w_qr + w_kr + w_o
     }
 }
 
@@ -471,13 +748,22 @@ impl Layer for DeepSeekMlaAttention {
             },
         };
 
-        let num_tokens = batch * seq_len;
         let hs = self.hidden_size;
-        let mut out_data = Vec::with_capacity(num_tokens * hs);
-        for tok in 0..num_tokens {
-            let tok_vec = &data[tok * hs..(tok + 1) * hs];
-            let tok_out = self.forward_token(tok_vec);
-            out_data.extend_from_slice(&tok_out);
+        if data.len() != batch * seq_len * hs {
+            return Err(tensor_op_error(
+                "DeepSeekMlaAttention::forward",
+                format!(
+                    "expected {} elements, got {}",
+                    batch * seq_len * hs,
+                    data.len()
+                ),
+            ));
+        }
+
+        // Attention runs over each sequence in the batch independently.
+        let mut out_data = Vec::with_capacity(batch * seq_len * hs);
+        for sequence in data.chunks(seq_len * hs) {
+            out_data.extend_from_slice(&self.forward_sequence(sequence, seq_len)?);
         }
 
         Tensor::from_vec(out_data, &[batch, seq_len, hs])
@@ -647,9 +933,23 @@ impl Model for DeepSeekModel {
         self.run(input_ids)
     }
 
+    /// Not supported yet — returns a structured error rather than pretending.
+    ///
+    /// A DeepSeek-V2 checkpoint stores MLA as fused tensors
+    /// (`self_attn.q_proj` = `[num_heads * (qk_nope_head_dim + qk_rope_head_dim), hidden]`,
+    /// `self_attn.kv_a_proj_with_mqa` = `[kv_lora_rank + qk_rope_head_dim, hidden]`,
+    /// `self_attn.kv_b_proj` = `[num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]`)
+    /// plus a `kv_a_layernorm` that this implementation does not model, so the
+    /// checkpoint cannot be bound without inventing a correspondence. Build the
+    /// weights explicitly through the `DeepSeekMlaAttention::set_*` setters until
+    /// the fused split is implemented.
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
         Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for DeepSeek".to_string(),
+            "DeepSeek-V2 checkpoint loading is not implemented: the MLA weights are fused \
+             (q_proj = nope+rope rows, kv_a_proj_with_mqa = c_kv+rope rows, kv_b_proj = k+v rows) \
+             and kv_a_layernorm is not modelled. Use the DeepSeekMlaAttention::set_* setters to \
+             install weights explicitly."
+                .to_string(),
         ))
     }
 
@@ -706,9 +1006,23 @@ impl Model for DeepSeekForCausalLM {
         DeepSeekForCausalLM::forward(self, input_ids)
     }
 
+    /// Not supported yet — returns a structured error rather than pretending.
+    ///
+    /// A DeepSeek-V2 checkpoint stores MLA as fused tensors
+    /// (`self_attn.q_proj` = `[num_heads * (qk_nope_head_dim + qk_rope_head_dim), hidden]`,
+    /// `self_attn.kv_a_proj_with_mqa` = `[kv_lora_rank + qk_rope_head_dim, hidden]`,
+    /// `self_attn.kv_b_proj` = `[num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]`)
+    /// plus a `kv_a_layernorm` that this implementation does not model, so the
+    /// checkpoint cannot be bound without inventing a correspondence. Build the
+    /// weights explicitly through the `DeepSeekMlaAttention::set_*` setters until
+    /// the fused split is implemented.
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
         Err(TrustformersError::not_implemented(
-            "Weight loading not yet implemented for DeepSeek".to_string(),
+            "DeepSeek-V2 checkpoint loading is not implemented: the MLA weights are fused \
+             (q_proj = nope+rope rows, kv_a_proj_with_mqa = c_kv+rope rows, kv_b_proj = k+v rows) \
+             and kv_a_layernorm is not modelled. Use the DeepSeekMlaAttention::set_* setters to \
+             install weights explicitly."
+                .to_string(),
         ))
     }
 
@@ -961,12 +1275,44 @@ mod tests {
         let cfg = test_cfg();
         let mla = DeepSeekMlaAttention::new(&cfg);
         let x = lcg_vec(cfg.hidden_size, 5);
-        let out = mla.forward_token(&x);
+        let out = mla.forward_token(&x).expect("forward_token");
         assert_eq!(
             out.len(),
             cfg.hidden_size,
             "MLA forward_token output should have hidden_size elements"
         );
+    }
+
+    /// A wrong-length token must be reported, not padded/truncated into a
+    /// full-length answer. The previous implementation zero-padded a short input
+    /// and returned `hidden_size` plausible values.
+    #[test]
+    fn test_mla_forward_token_rejects_wrong_length() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        assert!(
+            mla.forward_token(&lcg_vec(cfg.hidden_size - 1, 6)).is_err(),
+            "a short token must not be zero-padded into a fabricated activation"
+        );
+        assert!(
+            mla.forward_token(&lcg_vec(cfg.hidden_size + 1, 7)).is_err(),
+            "a long token must not be silently truncated"
+        );
+    }
+
+    /// `forward_token` is the one-token case of `forward_sequence`, not a
+    /// separate approximation: the two must agree exactly.
+    #[test]
+    fn test_mla_forward_token_matches_single_step_sequence() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        let x = lcg_vec(cfg.hidden_size, 8);
+        let token_out = mla.forward_token(&x).expect("forward_token");
+        let seq_out = mla.forward_sequence(&x, 1).expect("forward_sequence");
+        assert_eq!(token_out.len(), seq_out.len());
+        for (i, (a, b)) in token_out.iter().zip(seq_out.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "element {i}: {a} vs {b}");
+        }
     }
 
     #[test]
@@ -980,6 +1326,193 @@ mod tests {
         assert_eq!(shape[0], 2, "batch dim preserved");
         assert_eq!(shape[1], 4, "seq dim preserved");
         assert_eq!(shape[2], cfg.hidden_size, "hidden dim preserved");
+    }
+
+    /// MLA must read the decompressed keys: perturbing an earlier token has to
+    /// change the last token's output. The old code discarded `k` and `q` and
+    /// returned a scaled `v`, so earlier tokens had no effect at all.
+    #[test]
+    fn test_mla_attends_to_previous_tokens() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        let seq_len = 3;
+        let hidden = cfg.hidden_size;
+        let base = lcg_vec(seq_len * hidden, 101);
+
+        let out_a = mla.forward_sequence(&base, seq_len).expect("sequence forward");
+
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().take(hidden) {
+            *value += 1.0;
+        }
+        let out_b = mla.forward_sequence(&perturbed, seq_len).expect("sequence forward");
+
+        let last = (seq_len - 1) * hidden;
+        let diff = out_a[last..]
+            .iter()
+            .zip(out_b[last..].iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(
+            diff > 1e-6,
+            "the final token must attend to earlier tokens (diff {diff})"
+        );
+    }
+
+    /// Causality: a later token must not influence an earlier output.
+    #[test]
+    fn test_mla_is_causal() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        let seq_len = 3;
+        let hidden = cfg.hidden_size;
+        let base = lcg_vec(seq_len * hidden, 202);
+
+        let out_a = mla.forward_sequence(&base, seq_len).expect("forward");
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().skip((seq_len - 1) * hidden) {
+            *value += 2.0;
+        }
+        let out_b = mla.forward_sequence(&perturbed, seq_len).expect("forward");
+
+        for i in 0..(seq_len - 1) * hidden {
+            assert!(
+                (out_a[i] - out_b[i]).abs() < 1e-5,
+                "position {} must not see the future",
+                i / hidden
+            );
+        }
+    }
+
+    /// The scores must combine the content path *and* the decoupled RoPE path:
+    /// two identical tokens at different positions produce different attention.
+    #[test]
+    fn test_mla_decoupled_rope_makes_positions_distinguishable() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        assert!(mla.rope_head_dim() >= 2, "test config must exercise RoPE");
+
+        let hidden = cfg.hidden_size;
+        let token_a = lcg_vec(hidden, 303);
+        let token_b = lcg_vec(hidden, 404);
+
+        // Sequence [a, b] versus [b, a]: with a position-blind score the second
+        // output would be the same weighted mixture in both orders.
+        let mut ab = token_a.clone();
+        ab.extend_from_slice(&token_b);
+        let mut ba = token_b.clone();
+        ba.extend_from_slice(&token_a);
+
+        let out_ab = mla.forward_sequence(&ab, 2).expect("forward ab");
+        let out_ba = mla.forward_sequence(&ba, 2).expect("forward ba");
+        let diff = out_ab[hidden..]
+            .iter()
+            .zip(out_ba[hidden..].iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(diff > 1e-6, "positional information must reach the scores");
+    }
+
+    /// Reference math: a two-token sequence computed by hand from the module's
+    /// own projections must match `forward_sequence`.
+    #[test]
+    fn test_mla_matches_hand_computed_two_token_attention() {
+        let mut cfg = test_cfg();
+        cfg.rope_head_dim = 0; // isolate the content path for an exact reference
+        let mla = DeepSeekMlaAttention::new(&cfg);
+
+        let hidden = cfg.hidden_size;
+        let head_dim = cfg.head_dim();
+        let v_head_dim = cfg.v_head_dim;
+        let num_heads = cfg.num_attention_heads;
+        let x = lcg_vec(2 * hidden, 505);
+        let got = mla.forward_sequence(&x, 2).expect("forward");
+
+        // Reference: project both tokens, then attend for position 1.
+        let project = |token: &[f32]| {
+            let c_kv = matmul_vec(&mla.w_dkv, token);
+            (
+                matmul_vec(&mla.w_uk, &c_kv),
+                matmul_vec(&mla.w_uv, &c_kv),
+                matmul_vec(&mla.w_q, token),
+            )
+        };
+        let (k0, v0, _q0) = project(&x[..hidden]);
+        let (k1, v1, q1) = project(&x[hidden..]);
+
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut context = vec![0.0f32; num_heads * v_head_dim];
+        for head in 0..num_heads {
+            let dot = |k: &[f32]| {
+                (0..head_dim)
+                    .map(|d| q1[head * head_dim + d] * k[head * head_dim + d])
+                    .sum::<f32>()
+                    * scale
+            };
+            let s0 = dot(&k0);
+            let s1 = dot(&k1);
+            let max = s0.max(s1);
+            let e0 = (s0 - max).exp();
+            let e1 = (s1 - max).exp();
+            let sum = e0 + e1;
+            for d in 0..v_head_dim {
+                context[head * v_head_dim + d] =
+                    (e0 / sum) * v0[head * v_head_dim + d] + (e1 / sum) * v1[head * v_head_dim + d];
+            }
+        }
+        let expected = matmul_vec(&mla.w_o, &context);
+
+        for (i, (a, b)) in got[hidden..].iter().zip(expected.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-4, "element {i}: got {a}, expected {b}");
+        }
+    }
+
+    #[test]
+    fn test_mla_output_is_not_constant() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        let out_a = mla.forward_token(&lcg_vec(cfg.hidden_size, 606)).expect("forward a");
+        let out_b = mla.forward_token(&lcg_vec(cfg.hidden_size, 707)).expect("forward b");
+        let diff = out_a
+            .iter()
+            .zip(out_b.iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(
+            diff > 1e-6,
+            "zero-initialised projections would make every output identical"
+        );
+    }
+
+    #[test]
+    fn test_mla_weight_setters_validate_shapes() {
+        let cfg = test_cfg();
+        let mut mla = DeepSeekMlaAttention::new(&cfg);
+        let good = vec![vec![0.5f64; cfg.hidden_size]; cfg.kv_lora_rank];
+        assert!(mla.set_kv_down_proj(good).is_ok());
+        let bad = vec![vec![0.5f64; cfg.hidden_size]; cfg.kv_lora_rank + 1];
+        assert!(
+            mla.set_kv_down_proj(bad).is_err(),
+            "a mis-shaped weight must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_mla_forward_sequence_rejects_bad_length() {
+        let cfg = test_cfg();
+        let mla = DeepSeekMlaAttention::new(&cfg);
+        assert!(mla.forward_sequence(&[0.0; 3], 2).is_err());
+    }
+
+    #[test]
+    fn test_rms_norm_normalises_each_row() {
+        let norm = DeepSeekRmsNorm::new(4, 1e-6);
+        let input = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0, 50.0, 50.0, 50.0, 50.0], &[2, 4])
+            .expect("tensor");
+        let out = norm.forward(input).expect("forward").data().expect("data");
+        for value in out {
+            assert!(
+                (value - 1.0).abs() < 1e-3,
+                "each row must be normalised independently, got {value}"
+            );
+        }
     }
 
     #[test]

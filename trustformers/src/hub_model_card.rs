@@ -319,24 +319,24 @@ impl ModelCard {
                     }
                 }
 
-                // Use serde_yaml for a richer parse of the front matter
-                let parsed: serde_yaml::Value =
-                    serde_yaml::from_str(yaml_str).unwrap_or(serde_yaml::Value::Null);
+                // Use serde_yaml_ng for a richer parse of the front matter
+                let parsed: serde_yaml_ng::Value =
+                    serde_yaml_ng::from_str(yaml_str).unwrap_or(serde_yaml_ng::Value::Null);
 
-                if let serde_yaml::Value::Mapping(ref map) = parsed {
-                    if let Some(serde_yaml::Value::Sequence(seq)) = map.get("language") {
+                if let serde_yaml_ng::Value::Mapping(ref map) = parsed {
+                    if let Some(serde_yaml_ng::Value::Sequence(seq)) = map.get("language") {
                         metadata.language =
                             seq.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                     }
-                    if let Some(serde_yaml::Value::Sequence(seq)) = map.get("tags") {
+                    if let Some(serde_yaml_ng::Value::Sequence(seq)) = map.get("tags") {
                         metadata.tags =
                             seq.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                     }
-                    if let Some(serde_yaml::Value::Sequence(seq)) = map.get("datasets") {
+                    if let Some(serde_yaml_ng::Value::Sequence(seq)) = map.get("datasets") {
                         metadata.datasets =
                             seq.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                     }
-                    if let Some(serde_yaml::Value::Sequence(seq)) = map.get("metrics") {
+                    if let Some(serde_yaml_ng::Value::Sequence(seq)) = map.get("metrics") {
                         metadata.metrics =
                             seq.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                     }

@@ -96,8 +96,10 @@ impl ConversationAnalyzer {
         &self,
         state: &ConversationState,
     ) -> Result<HealthAssessment> {
-        let start_time = Instant::now();
-
+        // Unlike `analyze_turn`, `HealthAssessment` carries no processing-time
+        // field and `update_performance_metrics`'s `turns_analyzed` counter is
+        // specifically turn-scoped (see its regression tests), so there is
+        // nothing here for a wall-clock timer to feed.
         let mut assessment = HealthAssessment {
             overall_score: 0.75,
             component_scores: super::types::DetailedHealthMetrics {

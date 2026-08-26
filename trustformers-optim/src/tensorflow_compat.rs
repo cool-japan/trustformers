@@ -338,37 +338,42 @@ impl TensorFlowAdam {
         Ok(())
     }
 
-    /// Apply gradient clipping
+    /// Apply gradient clipping in place.
+    ///
+    /// Mirrors Keras semantics: `clipnorm` rescales each gradient whose own L2 norm
+    /// exceeds the threshold, `clipvalue` clamps every element, and `global_clipnorm`
+    /// rescales all gradients by one factor derived from the global L2 norm.
     fn clip_gradients(&self, gradients: &mut [Tensor]) -> Result<()> {
         if let Some(clipnorm) = self.config.clipnorm {
-            // Clip by norm
+            // Clip by norm (per-gradient)
             for grad in gradients.iter_mut() {
                 let norm = grad.norm()?;
-                if norm > clipnorm as f32 {
-                    grad.mul_scalar((clipnorm as f32) / norm)?;
+                if norm > clipnorm as f32 && norm > 0.0 {
+                    *grad = grad.mul_scalar((clipnorm as f32) / norm)?;
                 }
             }
         }
 
         if let Some(clipvalue) = self.config.clipvalue {
-            // Clip by value
+            // Clip by value (element-wise)
             for grad in gradients.iter_mut() {
-                grad.clamp(-clipvalue as f32, clipvalue as f32)?;
+                *grad = grad.clamp(-clipvalue as f32, clipvalue as f32)?;
             }
         }
 
         if let Some(global_clipnorm) = self.config.global_clipnorm {
-            // Global gradient clipping
-            let global_norm: f64 = gradients
-                .iter()
-                .map(|g| g.norm().unwrap_or(0.0).powi(2) as f64)
-                .sum::<f64>()
-                .sqrt();
+            // Global gradient clipping: a tensor error must not silently contribute 0.
+            let mut sum_sq = 0.0_f64;
+            for grad in gradients.iter() {
+                let norm = grad.norm()? as f64;
+                sum_sq += norm * norm;
+            }
+            let global_norm = sum_sq.sqrt();
 
-            if global_norm > global_clipnorm {
+            if global_norm > global_clipnorm && global_norm > 0.0 {
                 let scale = global_clipnorm / global_norm;
                 for grad in gradients.iter_mut() {
-                    grad.mul_scalar(scale as f32)?;
+                    *grad = grad.mul_scalar(scale as f32)?;
                 }
             }
         }
@@ -403,9 +408,10 @@ impl TensorFlowOptimizer for TensorFlowAdam {
                 "tensorflow optimizer variables mutex poisoned".to_string(),
             )
         })?;
-        for (grad, var_name) in grads_and_vars {
+        // Use the *clipped* gradients, not the caller's originals.
+        for (clipped_grad, (_, var_name)) in gradients.iter().zip(grads_and_vars.iter()) {
             if let Some(var) = variables.get_mut(var_name) {
-                self.inner.update(var, grad)?;
+                self.inner.update_named(var_name, var, clipped_grad)?;
             }
         }
         self.inner.step();
@@ -677,37 +683,42 @@ impl TensorFlowAdamW {
         Ok(())
     }
 
-    /// Apply gradient clipping
+    /// Apply gradient clipping in place.
+    ///
+    /// Mirrors Keras semantics: `clipnorm` rescales each gradient whose own L2 norm
+    /// exceeds the threshold, `clipvalue` clamps every element, and `global_clipnorm`
+    /// rescales all gradients by one factor derived from the global L2 norm.
     fn clip_gradients(&self, gradients: &mut [Tensor]) -> Result<()> {
         if let Some(clipnorm) = self.config.clipnorm {
-            // Clip by norm
+            // Clip by norm (per-gradient)
             for grad in gradients.iter_mut() {
                 let norm = grad.norm()?;
-                if norm > clipnorm as f32 {
-                    grad.mul_scalar((clipnorm as f32) / norm)?;
+                if norm > clipnorm as f32 && norm > 0.0 {
+                    *grad = grad.mul_scalar((clipnorm as f32) / norm)?;
                 }
             }
         }
 
         if let Some(clipvalue) = self.config.clipvalue {
-            // Clip by value
+            // Clip by value (element-wise)
             for grad in gradients.iter_mut() {
-                grad.clamp(-clipvalue as f32, clipvalue as f32)?;
+                *grad = grad.clamp(-clipvalue as f32, clipvalue as f32)?;
             }
         }
 
         if let Some(global_clipnorm) = self.config.global_clipnorm {
-            // Global gradient clipping
-            let global_norm: f64 = gradients
-                .iter()
-                .map(|g| g.norm().unwrap_or(0.0).powi(2) as f64)
-                .sum::<f64>()
-                .sqrt();
+            // Global gradient clipping: a tensor error must not silently contribute 0.
+            let mut sum_sq = 0.0_f64;
+            for grad in gradients.iter() {
+                let norm = grad.norm()? as f64;
+                sum_sq += norm * norm;
+            }
+            let global_norm = sum_sq.sqrt();
 
-            if global_norm > global_clipnorm {
+            if global_norm > global_clipnorm && global_norm > 0.0 {
                 let scale = global_clipnorm / global_norm;
                 for grad in gradients.iter_mut() {
-                    grad.mul_scalar(scale as f32)?;
+                    *grad = grad.mul_scalar(scale as f32)?;
                 }
             }
         }
@@ -742,9 +753,10 @@ impl TensorFlowOptimizer for TensorFlowAdamW {
                 "tensorflow optimizer variables mutex poisoned".to_string(),
             )
         })?;
-        for (grad, var_name) in grads_and_vars {
+        // Use the *clipped* gradients, not the caller's originals.
+        for (clipped_grad, (_, var_name)) in gradients.iter().zip(grads_and_vars.iter()) {
             if let Some(var) = variables.get_mut(var_name) {
-                self.inner.update(var, grad)?;
+                self.inner.update_named(var_name, var, clipped_grad)?;
             }
         }
         self.inner.step();

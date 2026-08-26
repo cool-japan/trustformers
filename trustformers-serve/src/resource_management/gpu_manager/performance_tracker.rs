@@ -50,7 +50,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use tracing::{info, instrument, warn};
 
 use super::types::*;
@@ -171,79 +170,39 @@ impl GpuPerformanceTracker {
         );
         let _start_time = Instant::now();
 
-        // Execute benchmark based on type with realistic performance simulation
-        // Use hash-based randomness (Send-safe)
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        device_id.hash(&mut hasher);
-        // Add benchmark type discriminant to hash
-        std::mem::discriminant(&benchmark_type).hash(&mut hasher);
-        let hash_value = hasher.finish();
-        // Convert hash to a value between -0.5 and 0.5
-        let random_factor = ((hash_value % 10000) as f64 / 10000.0) - 0.5;
+        // A benchmark score must come from a kernel that actually ran. There is
+        // no GPU compute backend wired into this crate, so rather than
+        // synthesizing a score from a hash of the device id, the tracker reports
+        // that the benchmark is unsupported and lets callers fall back to the
+        // device's static capabilities.
+        let devices = super::discover_gpu_devices().await?;
 
-        let (score, execution_time) = match benchmark_type {
-            GpuBenchmarkType::Compute => {
-                // Simulate compute-intensive benchmark (matrix multiplications, FFT, etc.)
-                sleep(Duration::from_millis(500 + device_id as u64 * 100)).await;
-                let base_score = 1000.0 + (device_id as f64 * 100.0);
-                let variance = random_factor * 200.0; // ±100 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(500 + device_id as u64 * 100))
-            },
-            GpuBenchmarkType::MemoryBandwidth => {
-                // Simulate memory bandwidth benchmark (large data transfers)
-                sleep(Duration::from_millis(300 + device_id as u64 * 50)).await;
-                let base_score = 500.0 + (device_id as f64 * 50.0);
-                let variance = random_factor * 100.0; // ±50 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(300 + device_id as u64 * 50))
-            },
-            GpuBenchmarkType::MatrixOperations => {
-                // Simulate matrix operation benchmark (GEMM, linear algebra)
-                sleep(Duration::from_millis(800 + device_id as u64 * 150)).await;
-                let base_score = 2000.0 + (device_id as f64 * 200.0);
-                let variance = random_factor * 400.0; // ±200 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(800 + device_id as u64 * 150))
-            },
-            GpuBenchmarkType::MLInference => {
-                // Simulate ML inference benchmark (neural network forward pass)
-                sleep(Duration::from_millis(400 + device_id as u64 * 75)).await;
-                let base_score = 800.0 + (device_id as f64 * 80.0);
-                let variance = random_factor * 160.0; // ±80 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(400 + device_id as u64 * 75))
-            },
-            GpuBenchmarkType::MLTraining => {
-                // Simulate ML training benchmark (neural network training step)
-                sleep(Duration::from_millis(1000 + device_id as u64 * 200)).await;
-                let base_score = 600.0 + (device_id as f64 * 60.0);
-                let variance = random_factor * 120.0; // ±60 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(1000 + device_id as u64 * 200))
-            },
-            GpuBenchmarkType::Custom(ref _name) => {
-                // Simulate custom benchmark with configurable parameters
-                sleep(Duration::from_millis(600 + device_id as u64 * 100)).await;
-                let base_score = 1000.0;
-                let variance = random_factor * 1000.0; // ±500 points variance
-                let score = base_score + variance;
-                (score, Duration::from_millis(600 + device_id as u64 * 100))
-            },
-        };
+        if !devices.iter().any(|d| d.device_id == device_id) {
+            return Err(GpuManagerError::DeviceNotFound { device_id });
+        }
 
-        // Create benchmark result with comprehensive metadata
-        let benchmark = GpuPerformanceBenchmark {
-            name: format!("{:?} Benchmark", benchmark_type),
-            device_id,
-            benchmark_type: benchmark_type.clone(),
-            score,
-            execution_time,
-            timestamp: Utc::now(),
-            parameters: HashMap::new(), // Could include benchmark-specific parameters
-        };
+        Err(GpuManagerError::MonitoringError {
+            source: anyhow::anyhow!(
+                "{:?} benchmarking is not implemented for GPU device {}: this build has no \
+                 GPU compute backend able to launch the kernel, and a score that was not \
+                 measured will not be reported",
+                benchmark_type,
+                device_id
+            ),
+        })
+    }
+
+    /// Record a benchmark result that a real backend produced.
+    ///
+    /// This is the ingestion point for genuine measurements: it stores the
+    /// result, trims the history and refreshes the baseline and regression
+    /// analysis. The tracker never manufactures a `GpuPerformanceBenchmark`
+    /// itself.
+    pub async fn record_benchmark(
+        &self,
+        benchmark: GpuPerformanceBenchmark,
+    ) -> GpuResult<GpuPerformanceBenchmark> {
+        let device_id = benchmark.device_id;
 
         // Store benchmark result with history management
         {
@@ -264,11 +223,11 @@ impl GpuPerformanceTracker {
         self.update_performance_history(device_id, &benchmark).await?;
 
         info!(
-            "Completed {:?} benchmark for device {}: score {:.2} ({}ms)",
-            benchmark_type,
+            "Recorded {:?} benchmark for device {}: score {:.2} ({}ms)",
+            benchmark.benchmark_type,
             device_id,
-            score,
-            execution_time.as_millis()
+            benchmark.score,
+            benchmark.execution_time.as_millis()
         );
 
         Ok(benchmark)
@@ -814,242 +773,4 @@ pub struct PerformanceSummary {
     pub total_regressions_detected: usize,
     pub average_baseline_confidence: f32,
     pub last_analysis_time: DateTime<Utc>,
-}
-
-// Simple random number generator for benchmark simulation
-// In production, this would be replaced with actual benchmark implementations
-mod rand {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    /// Generate a pseudo-random number for benchmark simulation
-    ///
-    /// This is a simple random number generator used for simulating
-    /// realistic benchmark score variations. In a production environment,
-    /// this would be replaced with actual GPU benchmark implementations.
-    ///
-    /// # Returns
-    ///
-    /// A pseudo-random f64 value between 0.0 and 1.0
-    pub fn random<T>() -> T
-    where
-        T: From<f64>,
-    {
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .hash(&mut hasher);
-        let raw = hasher.finish();
-        // Convert to f64 between 0.0 and 1.0
-        let normalized = (raw as f64) / (u64::MAX as f64);
-        T::from(normalized)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::time::timeout;
-
-    #[tokio::test]
-    async fn test_performance_tracker_creation() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Verify initial state
-        let analysis = tracker.get_analysis().await;
-        assert!(analysis.trends.is_empty());
-        assert!(analysis.regressions.is_empty());
-
-        let history = tracker.get_benchmark_history(0).await;
-        assert!(history.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_benchmark_execution() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Run various benchmark types
-        let compute_result = tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-        assert_eq!(compute_result.device_id, 0);
-        assert!(compute_result.score > 0.0);
-        assert!(compute_result.execution_time.as_millis() > 0);
-
-        let memory_result = tracker
-            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
-            .await
-            .expect("async operation should succeed in test");
-        assert_eq!(memory_result.device_id, 0);
-        assert!(memory_result.score > 0.0);
-
-        // Verify history is maintained
-        let history = tracker.get_benchmark_history(0).await;
-        assert_eq!(history.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_baseline_establishment() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Initially no baselines
-        let baseline = tracker.get_device_baseline(0).await;
-        assert!(baseline.is_none());
-
-        // Run benchmark to establish baseline
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-
-        // Verify baseline was established
-        let baseline = tracker.get_device_baseline(0).await;
-        assert!(baseline.is_some());
-
-        let baseline = baseline.expect("test operation should succeed");
-        assert_eq!(baseline.device_id, 0);
-        assert_eq!(baseline.sample_count, 1);
-        assert!(baseline.confidence_level > 0.0);
-        assert!(baseline.baseline_metrics.contains_key("Compute"));
-    }
-
-    #[tokio::test]
-    async fn test_performance_analysis() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Run multiple benchmarks to trigger analysis
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
-            .await
-            .expect("async operation should succeed in test");
-
-        // Get analysis results
-        let analysis = tracker.get_analysis().await;
-        assert!(analysis.trends.contains_key(&0));
-
-        // Verify trend data
-        let trend = &analysis.trends[&0];
-        assert!(trend.confidence > 0.0);
-        assert!(trend.period.as_secs() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_data_management() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Create some test data
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-        tracker
-            .run_benchmark(1, GpuBenchmarkType::MemoryBandwidth)
-            .await
-            .expect("async operation should succeed in test");
-
-        // Verify data exists
-        assert!(!tracker.get_benchmark_history(0).await.is_empty());
-        assert!(!tracker.get_benchmark_history(1).await.is_empty());
-        assert!(tracker.get_device_baseline(0).await.is_some());
-
-        // Clear device 0 data
-        tracker.clear_device_data(0).await;
-
-        // Verify device 0 data is cleared but device 1 remains
-        assert!(tracker.get_benchmark_history(0).await.is_empty());
-        assert!(!tracker.get_benchmark_history(1).await.is_empty());
-        assert!(tracker.get_device_baseline(0).await.is_none());
-        assert!(tracker.get_device_baseline(1).await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_performance_summary() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Run benchmarks on multiple devices
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::Compute)
-            .await
-            .expect("async operation should succeed in test");
-        tracker
-            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
-            .await
-            .expect("async operation should succeed in test");
-        tracker
-            .run_benchmark(1, GpuBenchmarkType::MLInference)
-            .await
-            .expect("async operation should succeed in test");
-
-        // Get performance summary
-        let summary = tracker.get_performance_summary().await;
-
-        assert_eq!(summary.total_devices_monitored, 2);
-        assert_eq!(summary.total_benchmarks_run, 3);
-        assert_eq!(summary.devices_with_baselines, 2);
-        assert!(summary.average_baseline_confidence > 0.0);
-        assert!(
-            summary.last_analysis_time
-                > DateTime::from_timestamp(0, 0).expect("test operation should succeed")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_benchmarking() {
-        let tracker = Arc::new(GpuPerformanceTracker::new());
-
-        // Spawn multiple concurrent benchmark tasks
-        let mut tasks = Vec::new();
-        for device_id in 0..3 {
-            let tracker_clone = tracker.clone();
-            let task = tokio::spawn(async move {
-                tracker_clone.run_benchmark(device_id, GpuBenchmarkType::Compute).await
-            });
-            tasks.push(task);
-        }
-
-        // Wait for all tasks to complete
-        let results: Vec<_> = futures::future::join_all(tasks).await;
-
-        // Verify all benchmarks completed successfully
-        for result in results {
-            assert!(result.is_ok());
-            assert!(result.expect("test operation should succeed").is_ok());
-        }
-
-        // Verify data was collected for all devices
-        for device_id in 0..3 {
-            let history = tracker.get_benchmark_history(device_id).await;
-            assert_eq!(history.len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_benchmark_timeout_handling() {
-        let tracker = GpuPerformanceTracker::new();
-
-        // Test that benchmarks complete within reasonable time
-        let result = timeout(
-            Duration::from_secs(5),
-            tracker.run_benchmark(0, GpuBenchmarkType::Compute),
-        )
-        .await;
-
-        assert!(result.is_ok(), "Benchmark should complete within timeout");
-        assert!(
-            result.expect("test operation should succeed").is_ok(),
-            "Benchmark should succeed"
-        );
-    }
 }

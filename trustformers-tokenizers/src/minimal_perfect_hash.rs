@@ -58,9 +58,12 @@ impl MinimalPerfectHash {
         let num_keys = keys.len();
         let target_size = (num_keys as f64 / config.load_factor).ceil() as usize;
         let table_size = Self::next_prime(target_size);
-        println!(
+        tracing::debug!(
             "MPH Debug: num_keys={}, target_load_factor={}, target_size={}, table_size={}",
-            num_keys, config.load_factor, target_size, table_size
+            num_keys,
+            config.load_factor,
+            target_size,
+            table_size
         );
 
         let mut mph = Self {

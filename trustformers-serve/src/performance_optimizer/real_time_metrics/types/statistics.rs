@@ -154,7 +154,10 @@ impl OptimizationContext {
 
     /// Check if context has conflicting objectives
     pub fn has_conflicting_objectives(&self) -> bool {
-        // Simplified conflict detection
+        // Objectives conflict when the context asks to minimise something and
+        // maximise something else at the same time. This is the whole rule --
+        // the "simplified" label this carried until 0.2.1 implied a fuller
+        // version was intended somewhere; there is none.
         let has_minimize = self.objectives.iter().any(|obj| {
             matches!(
                 obj.objective_type,

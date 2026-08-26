@@ -234,18 +234,12 @@ impl SemanticCache {
 
     /// Current statistics snapshot
     pub fn stats(&self) -> SemanticCacheStats {
-        self.stats
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.stats.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Number of live entries in the cache
     pub fn len(&self) -> usize {
-        self.entries
-            .read()
-            .map(|e| e.len())
-            .unwrap_or(0)
+        self.entries.read().map(|e| e.len()).unwrap_or(0)
     }
 
     /// Returns true if the cache has no entries
@@ -328,11 +322,13 @@ mod tests {
         let emb = unit_vec(vec![1.0, 0.0, 0.0, 0.0]);
         let value = serde_json::json!({"result": "hello"});
 
-        cache.insert("k1".into(), emb.clone(), value.clone()).expect("insert should succeed");
+        cache
+            .insert("k1".into(), emb.clone(), value.clone())
+            .expect("insert should succeed");
 
         let result = cache.get(&emb);
         assert!(result.is_some(), "Exact match should hit");
-        assert_eq!(result.unwrap(), value);
+        assert_eq!(result.expect("exact match hits"), value);
     }
 
     #[test]
@@ -343,9 +339,7 @@ mod tests {
         let emb_a = unit_vec(vec![1.0, 0.0, 0.0, 0.0]);
         let emb_b = unit_vec(vec![1.0, 1.0, 0.0, 0.0]);
 
-        cache
-            .insert("k1".into(), emb_a, serde_json::json!("A"))
-            .expect("insert");
+        cache.insert("k1".into(), emb_a, serde_json::json!("A")).expect("insert");
 
         let result = cache.get(&emb_b);
         assert!(result.is_none(), "Low similarity should miss");
@@ -361,13 +355,17 @@ mod tests {
         // Slightly perturbed (cos ≈ 0.9998)
         let query = unit_vec(vec![1.0, 0.01, 0.0, 0.0]);
 
-        cache
-            .insert("k1".into(), base, serde_json::json!("hit_value"))
-            .expect("insert");
+        cache.insert("k1".into(), base, serde_json::json!("hit_value")).expect("insert");
 
         let result = cache.get(&query);
-        assert!(result.is_some(), "Near-identical vectors should hit with threshold=0.90");
-        assert_eq!(result.unwrap(), serde_json::json!("hit_value"));
+        assert!(
+            result.is_some(),
+            "Near-identical vectors should hit with threshold=0.90"
+        );
+        assert_eq!(
+            result.expect("near-identical vectors hit"),
+            serde_json::json!("hit_value")
+        );
     }
 
     #[test]
@@ -378,23 +376,22 @@ mod tests {
         for i in 0..3_u32 {
             let mut emb = vec![0.0_f32; 4];
             emb[i as usize % 4] = 1.0;
-            cache
-                .insert(format!("k{i}"), emb, serde_json::json!(i))
-                .expect("insert");
+            cache.insert(format!("k{i}"), emb, serde_json::json!(i)).expect("insert");
         }
         assert_eq!(cache.len(), 3);
 
         // Insert a 4th entry — should evict oldest
         let new_emb = unit_vec(vec![0.3, 0.3, 0.3, 0.3]);
-        cache
-            .insert("k_new".into(), new_emb, serde_json::json!("new"))
-            .expect("insert");
+        cache.insert("k_new".into(), new_emb, serde_json::json!("new")).expect("insert");
 
         assert_eq!(cache.len(), 3, "Capacity must stay at max_entries");
 
         // Check eviction count
         let stats = cache.stats();
-        assert!(stats.evictions >= 1, "At least 1 eviction should have occurred");
+        assert!(
+            stats.evictions >= 1,
+            "At least 1 eviction should have occurred"
+        );
     }
 
     #[test]
@@ -404,9 +401,7 @@ mod tests {
         let cache = SemanticCache::new(make_config(0.99, 16, 0));
 
         let emb = unit_vec(vec![1.0, 0.0, 0.0, 0.0]);
-        cache
-            .insert("k1".into(), emb.clone(), serde_json::json!("v"))
-            .expect("insert");
+        cache.insert("k1".into(), emb.clone(), serde_json::json!("v")).expect("insert");
 
         // With ttl=0, entry should persist
         cache.evict_expired();
@@ -417,9 +412,7 @@ mod tests {
         // would have passed.  Since we cannot sleep in unit tests easily, we instead
         // verify that the evict_expired function itself doesn't panic when TTL is set.
         let cache2 = SemanticCache::new(make_config(0.99, 16, 1));
-        cache2
-            .insert("k1".into(), emb, serde_json::json!("v"))
-            .expect("insert");
+        cache2.insert("k1".into(), emb, serde_json::json!("v")).expect("insert");
         // Immediately calling evict should NOT evict (entry is fresh)
         cache2.evict_expired();
         assert_eq!(cache2.len(), 1, "Fresh entry should not be evicted");
@@ -431,9 +424,7 @@ mod tests {
         let emb = unit_vec(vec![1.0, 0.0, 0.0, 0.0]);
         let miss_emb = unit_vec(vec![0.0, 1.0, 0.0, 0.0]);
 
-        cache
-            .insert("k1".into(), emb.clone(), serde_json::json!("v"))
-            .expect("insert");
+        cache.insert("k1".into(), emb.clone(), serde_json::json!("v")).expect("insert");
 
         // One hit
         let _ = cache.get(&emb);
@@ -476,7 +467,10 @@ mod tests {
             h.join().expect("thread should not panic");
         }
 
-        assert!(cache.len() > 0, "Cache should have entries after concurrent inserts");
+        assert!(
+            cache.len() > 0,
+            "Cache should have entries after concurrent inserts"
+        );
     }
 
     #[test]
@@ -504,6 +498,10 @@ mod tests {
     #[test]
     fn test_stats_hit_rate_empty() {
         let stats = SemanticCacheStats::default();
-        assert_eq!(stats.hit_rate(), 0.0, "Hit rate of zero lookups should be 0.0");
+        assert_eq!(
+            stats.hit_rate(),
+            0.0,
+            "Hit rate of zero lookups should be 0.0"
+        );
     }
 }

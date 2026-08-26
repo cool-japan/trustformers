@@ -2,11 +2,11 @@
 //!
 //! # Modules
 //!
-//! - [`detector`] — Baseline-comparison regression detector operating on full
-//!   [`PerfMeasurement`] profiling records.
-//! - [`statistical`] — Streaming statistical detectors: z-score / relative-change
-//!   detector ([`StatRegressionDetector`]) and CUSUM change-point algorithm
-//!   ([`CusumDetector`]).
+//! - `detector` — Baseline-comparison regression detector operating on full
+//!   `PerfMeasurement` profiling records.
+//! - `statistical` — Streaming statistical detectors: z-score / relative-change
+//!   detector (`StatRegressionDetector`) and CUSUM change-point algorithm
+//!   (`CusumDetector`).
 
 pub mod detector;
 pub mod statistical;
@@ -16,13 +16,6 @@ pub use detector::{
     RegressionDetector, RegressionMetric, RegressionSeverity,
 };
 pub use statistical::{
-    ChangeDirection,
-    CusumAlert,
-    CusumDetector,
-    StatBaselineStats,
-    StatRegressionConfig,
-    StatRegressionDetector,
-    StatRegressionDirection,
-    StatRegressionEvent,
-    StatRegressionSeverity,
+    ChangeDirection, CusumAlert, CusumDetector, StatBaselineStats, StatRegressionConfig,
+    StatRegressionDetector, StatRegressionDirection, StatRegressionEvent, StatRegressionSeverity,
 };

@@ -10,6 +10,10 @@
 
 use std::fmt;
 
+use trustformers_core::tensor::Tensor;
+
+use crate::weight_loading::checkpoint::{to_f32_tensor, Checkpoint};
+
 // ─── Error type ──────────────────────────────────────────────────────────────
 
 /// Errors produced by GPT-2 task-specific operations.
@@ -27,6 +31,19 @@ pub enum Gpt2TaskError {
     InvalidConfig(String),
     /// Forward pass failed.
     ForwardError(String),
+    /// A checkpoint tensor this head needs is not in the checkpoint.
+    MissingWeight(String),
+    /// A supplied weight does not have the shape this head was built for.
+    ShapeMismatch {
+        /// Name of the offending parameter.
+        name: String,
+        /// Shape the head requires.
+        expected: Vec<usize>,
+        /// Shape that was supplied.
+        actual: Vec<usize>,
+    },
+    /// A checkpoint tensor could not be converted to `f32` values.
+    WeightConversion(String),
 }
 
 impl fmt::Display for Gpt2TaskError {
@@ -52,11 +69,107 @@ impl fmt::Display for Gpt2TaskError {
             Gpt2TaskError::ForwardError(msg) => {
                 write!(f, "GPT-2 task error: forward pass failed: {msg}")
             },
+            Gpt2TaskError::MissingWeight(name) => {
+                write!(
+                    f,
+                    "GPT-2 task error: the checkpoint has no tensor named {name}"
+                )
+            },
+            Gpt2TaskError::ShapeMismatch {
+                name,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "GPT-2 task error: parameter {name} must have shape {expected:?}, got {actual:?}"
+                )
+            },
+            Gpt2TaskError::WeightConversion(msg) => {
+                write!(f, "GPT-2 task error: weight conversion failed: {msg}")
+            },
         }
     }
 }
 
 impl std::error::Error for Gpt2TaskError {}
+
+// ─── Checkpoint helpers for the task heads ───────────────────────────────────
+
+/// Flatten a checkpoint tensor into row-major `f32` values.
+///
+/// # Errors
+///
+/// Fails when the tensor's element type is not a real-valued weight type.
+fn tensor_values(tensor: &Tensor, name: &str) -> Result<Vec<f32>, Gpt2TaskError> {
+    let converted = to_f32_tensor(tensor)
+        .map_err(|e| Gpt2TaskError::WeightConversion(format!("{name}: {e}")))?;
+    match converted {
+        Tensor::F32(arr) => Ok(arr.iter().copied().collect()),
+        other => Err(Gpt2TaskError::WeightConversion(format!(
+            "{name}: expected an F32 tensor after conversion, got {other:?}"
+        ))),
+    }
+}
+
+/// Read a `[rows, cols]` checkpoint tensor into a row-major matrix.
+///
+/// # Errors
+///
+/// Fails when the tensor has a different shape or cannot be converted.
+fn matrix_from_tensor(
+    tensor: &Tensor,
+    name: &str,
+    rows: usize,
+    cols: usize,
+) -> Result<Vec<Vec<f32>>, Gpt2TaskError> {
+    let shape = tensor.shape();
+    if shape != vec![rows, cols] {
+        return Err(Gpt2TaskError::ShapeMismatch {
+            name: name.to_string(),
+            expected: vec![rows, cols],
+            actual: shape,
+        });
+    }
+    let values = tensor_values(tensor, name)?;
+    Ok(values.chunks_exact(cols).map(<[f32]>::to_vec).collect())
+}
+
+/// Read a `[len]` checkpoint tensor into a vector.
+///
+/// # Errors
+///
+/// Fails when the tensor has a different shape or cannot be converted.
+fn vector_from_tensor(tensor: &Tensor, name: &str, len: usize) -> Result<Vec<f32>, Gpt2TaskError> {
+    let shape = tensor.shape();
+    if shape != vec![len] {
+        return Err(Gpt2TaskError::ShapeMismatch {
+            name: name.to_string(),
+            expected: vec![len],
+            actual: shape,
+        });
+    }
+    tensor_values(tensor, name)
+}
+
+/// Validate a caller-supplied `[rows, cols]` matrix.
+fn check_matrix(
+    weight: &[Vec<f32>],
+    name: &str,
+    rows: usize,
+    cols: usize,
+) -> Result<(), Gpt2TaskError> {
+    let actual_rows = weight.len();
+    let actual_cols = weight.first().map_or(0, Vec::len);
+    if actual_rows != rows || weight.iter().any(|row| row.len() != cols) {
+        return Err(Gpt2TaskError::ShapeMismatch {
+            name: name.to_string(),
+            expected: vec![rows, cols],
+            actual: vec![actual_rows, actual_cols],
+        });
+    }
+    Ok(())
+}
 
 // ─── GELU activation ─────────────────────────────────────────────────────────
 
@@ -231,8 +344,12 @@ pub fn sinusoidal_pos_embed(positions: &[usize], d_model: usize) -> Vec<Vec<f32>
 /// applies a single linear layer on the pooled representation (last token)
 /// to produce `[num_labels]` class logits.
 ///
-/// All weights are initialised to zero and biases to zero, matching the
-/// "dummy" forward-pass contract used in tests.
+/// [`Gpt2ForSequenceClassification::new`] starts from a zero weight and a zero
+/// bias, which makes every logit zero regardless of the input. That is a
+/// deliberately inert starting point, not a trained head: use
+/// [`Gpt2ForSequenceClassification::set_weights`] or
+/// [`Gpt2ForSequenceClassification::load_from_checkpoint`] before reading
+/// anything into the outputs.
 pub struct Gpt2ForSequenceClassification {
     /// Number of output classes.
     pub num_labels: usize,
@@ -263,6 +380,65 @@ impl Gpt2ForSequenceClassification {
             weight: vec![vec![0.0f32; hidden_size]; num_labels],
             bias: vec![0.0f32; num_labels],
         })
+    }
+
+    /// Install a trained weight matrix and bias.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` is not `[num_labels, hidden_size]` or `bias` is not
+    /// `[num_labels]`.
+    pub fn set_weights(
+        &mut self,
+        weight: Vec<Vec<f32>>,
+        bias: Vec<f32>,
+    ) -> Result<(), Gpt2TaskError> {
+        check_matrix(&weight, "score.weight", self.num_labels, self.hidden_size)?;
+        if bias.len() != self.num_labels {
+            return Err(Gpt2TaskError::ShapeMismatch {
+                name: "score.bias".to_string(),
+                expected: vec![self.num_labels],
+                actual: vec![bias.len()],
+            });
+        }
+        self.weight = weight;
+        self.bias = bias;
+        Ok(())
+    }
+
+    /// Bind this head from a parsed checkpoint.
+    ///
+    /// `prefix` names the head inside the checkpoint; HuggingFace's
+    /// `GPT2ForSequenceClassification` calls it `score`, and stores the weight as
+    /// `[num_labels, hidden_size]` with no bias term. A missing bias therefore
+    /// leaves the zero bias in place, while a missing weight is an error — the
+    /// alternative would be a head that silently classifies everything alike.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `{prefix}.weight` is absent, has the wrong shape, or cannot be
+    /// converted to `f32`.
+    pub fn load_from_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        prefix: &str,
+    ) -> Result<(), Gpt2TaskError> {
+        let weight_name = format!("{prefix}.weight");
+        let weight_tensor = checkpoint
+            .get(&weight_name)
+            .ok_or_else(|| Gpt2TaskError::MissingWeight(weight_name.clone()))?;
+        self.weight = matrix_from_tensor(
+            weight_tensor,
+            &weight_name,
+            self.num_labels,
+            self.hidden_size,
+        )?;
+
+        let bias_name = format!("{prefix}.bias");
+        if let Some(bias_tensor) = checkpoint.get(&bias_name) {
+            self.bias = vector_from_tensor(bias_tensor, &bias_name, self.num_labels)?;
+        }
+        Ok(())
     }
 
     /// Forward pass: pool last-token hidden state and project to class logits.
@@ -303,6 +479,11 @@ impl Gpt2ForSequenceClassification {
 /// A token-level classification head on top of GPT-2.
 ///
 /// Projects each token's hidden state to `[num_labels]` class logits.
+///
+/// As with [`Gpt2ForSequenceClassification`], [`Gpt2ForTokenClassification::new`]
+/// produces an inert zero head; install real parameters with
+/// [`Gpt2ForTokenClassification::set_weights`] or
+/// [`Gpt2ForTokenClassification::load_from_checkpoint`].
 pub struct Gpt2ForTokenClassification {
     /// Number of token-level output classes.
     pub num_labels: usize,
@@ -333,6 +514,71 @@ impl Gpt2ForTokenClassification {
             weight: vec![vec![0.0f32; hidden_size]; num_labels],
             bias: vec![0.0f32; num_labels],
         })
+    }
+
+    /// Install a trained weight matrix and bias.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` is not `[num_labels, hidden_size]` or `bias` is not
+    /// `[num_labels]`.
+    pub fn set_weights(
+        &mut self,
+        weight: Vec<Vec<f32>>,
+        bias: Vec<f32>,
+    ) -> Result<(), Gpt2TaskError> {
+        check_matrix(
+            &weight,
+            "classifier.weight",
+            self.num_labels,
+            self.hidden_size,
+        )?;
+        if bias.len() != self.num_labels {
+            return Err(Gpt2TaskError::ShapeMismatch {
+                name: "classifier.bias".to_string(),
+                expected: vec![self.num_labels],
+                actual: vec![bias.len()],
+            });
+        }
+        self.weight = weight;
+        self.bias = bias;
+        Ok(())
+    }
+
+    /// Bind this head from a parsed checkpoint.
+    ///
+    /// HuggingFace's `GPT2ForTokenClassification` names the head `classifier`
+    /// and does carry a bias, so both tensors are required here.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `{prefix}.weight` or `{prefix}.bias` is absent, has the wrong
+    /// shape, or cannot be converted to `f32`.
+    pub fn load_from_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        prefix: &str,
+    ) -> Result<(), Gpt2TaskError> {
+        let weight_name = format!("{prefix}.weight");
+        let weight_tensor = checkpoint
+            .get(&weight_name)
+            .ok_or_else(|| Gpt2TaskError::MissingWeight(weight_name.clone()))?;
+        let weight = matrix_from_tensor(
+            weight_tensor,
+            &weight_name,
+            self.num_labels,
+            self.hidden_size,
+        )?;
+
+        let bias_name = format!("{prefix}.bias");
+        let bias_tensor = checkpoint
+            .get(&bias_name)
+            .ok_or_else(|| Gpt2TaskError::MissingWeight(bias_name.clone()))?;
+        let bias = vector_from_tensor(bias_tensor, &bias_name, self.num_labels)?;
+
+        self.weight = weight;
+        self.bias = bias;
+        Ok(())
     }
 
     /// Forward pass: project every token's hidden state to class logits.
@@ -372,8 +618,11 @@ impl Gpt2ForTokenClassification {
 
 /// Causal LM head: wraps greedy and nucleus generation utilities for GPT-2.
 ///
-/// All weight tensors are zero-initialised for test use; in production the
-/// weights would be loaded from a checkpoint.
+/// [`Gpt2ForCausalLM::new`] starts from a zero projection, so every logit is
+/// zero and [`Gpt2ForCausalLM::forward_greedy`] always returns token 0. Install
+/// the real projection with [`Gpt2ForCausalLM::set_lm_weight`] or
+/// [`Gpt2ForCausalLM::load_from_checkpoint`] before treating its output as a
+/// prediction.
 pub struct Gpt2ForCausalLM {
     /// Vocabulary size.
     pub vocab_size: usize,
@@ -401,6 +650,42 @@ impl Gpt2ForCausalLM {
             hidden_size,
             lm_weight: vec![vec![0.0f32; hidden_size]; vocab_size],
         })
+    }
+
+    /// Install a trained `[vocab_size, hidden_size]` output projection.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have that shape.
+    pub fn set_lm_weight(&mut self, weight: Vec<Vec<f32>>) -> Result<(), Gpt2TaskError> {
+        check_matrix(&weight, "lm_head.weight", self.vocab_size, self.hidden_size)?;
+        self.lm_weight = weight;
+        Ok(())
+    }
+
+    /// Bind the output projection from a parsed checkpoint.
+    ///
+    /// GPT-2 ties its LM head to the input embedding table, so a checkpoint
+    /// exported without an explicit `lm_head.weight` still supplies the same
+    /// matrix under `transformer.wte.weight` / `wte.weight`. All three spellings
+    /// are tried, in that order, and the first one present is used.
+    ///
+    /// # Errors
+    ///
+    /// Fails when none of those tensors exists, when the one found has the wrong
+    /// shape, or when it cannot be converted to `f32`.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<(), Gpt2TaskError> {
+        const CANDIDATES: &[&str] = &["lm_head.weight", "transformer.wte.weight", "wte.weight"];
+        for name in CANDIDATES {
+            if let Some(tensor) = checkpoint.get(name) {
+                self.lm_weight =
+                    matrix_from_tensor(tensor, name, self.vocab_size, self.hidden_size)?;
+                return Ok(());
+            }
+        }
+        Err(Gpt2TaskError::MissingWeight(format!(
+            "none of {CANDIDATES:?} is present in the checkpoint"
+        )))
     }
 
     /// Compute next-token logits from the last hidden state.
@@ -803,5 +1088,174 @@ mod tests {
             let out = head.forward(&hidden).expect("forward");
             assert_eq!(out.len(), num_labels);
         }
+    }
+
+    // ── Real head weights ─────────────────────────────────────────────────
+
+    /// A freshly constructed head is inert; it must stay that way until real
+    /// parameters arrive, and it must be *possible* for them to arrive.
+    #[test]
+    fn sequence_classification_output_is_constant_until_weights_are_installed() {
+        let mut head = Gpt2ForSequenceClassification::new(3, 2).expect("head");
+        let a = head.forward(&[1.0, 2.0, 3.0]).expect("forward");
+        let b = head.forward(&[-4.0, 5.0, -6.0]).expect("forward");
+        assert_eq!(a, vec![0.0, 0.0]);
+        assert_eq!(a, b, "a zero head cannot discriminate between inputs");
+
+        head.set_weights(
+            vec![vec![1.0, 0.0, -1.0], vec![0.0, 2.0, 0.0]],
+            vec![0.5, -0.5],
+        )
+        .expect("weights must install");
+
+        // logits = W x + b, pooling the last (here only) token.
+        assert_eq!(
+            head.forward(&[1.0, 2.0, 3.0]).expect("forward"),
+            vec![
+                1.0 * 1.0 + 0.0 * 2.0 - 1.0 * 3.0 + 0.5,
+                0.0 * 1.0 + 2.0 * 2.0 + 0.0 * 3.0 - 0.5,
+            ]
+        );
+        assert_ne!(
+            head.forward(&[1.0, 2.0, 3.0]).expect("forward"),
+            head.forward(&[-4.0, 5.0, -6.0]).expect("forward"),
+            "a trained head must depend on its input"
+        );
+    }
+
+    #[test]
+    fn sequence_classification_rejects_a_wrongly_shaped_weight() {
+        let mut head = Gpt2ForSequenceClassification::new(3, 2).expect("head");
+        let err = head
+            .set_weights(vec![vec![1.0, 0.0]], vec![0.0, 0.0])
+            .expect_err("a [1, 2] weight must not be accepted for a [2, 3] head");
+        assert!(err.to_string().contains("[2, 3]"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn sequence_classification_loads_exact_values_from_a_checkpoint() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let bytes = build_safetensors(&[
+            F32Tensor::new(
+                "score.weight",
+                &[2, 3],
+                vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+            ),
+            F32Tensor::new("score.bias", &[2], vec![0.25, -0.25]),
+        ]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForSequenceClassification::new(3, 2).expect("head");
+        head.load_from_checkpoint(&checkpoint, "score").expect("head must load");
+
+        let logits = head.forward(&[1.0, 0.0, 0.0]).expect("forward");
+        assert_eq!(logits, vec![1.0 + 0.25, -1.0 - 0.25]);
+    }
+
+    #[test]
+    fn sequence_classification_load_errors_when_the_head_is_absent() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let bytes = build_safetensors(&[F32Tensor::new("wte.weight", &[2, 3], vec![0.0; 6])]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForSequenceClassification::new(3, 2).expect("head");
+        let err = head
+            .load_from_checkpoint(&checkpoint, "score")
+            .expect_err("a checkpoint without the head must not report success");
+        assert!(
+            err.to_string().contains("score.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn token_classification_loads_and_projects_every_token() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let bytes = build_safetensors(&[
+            F32Tensor::new("classifier.weight", &[2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+            F32Tensor::new("classifier.bias", &[2], vec![0.0, 1.0]),
+        ]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForTokenClassification::new(2, 2).expect("head");
+        head.load_from_checkpoint(&checkpoint, "classifier").expect("head must load");
+
+        // Identity projection plus a bias on the second class.
+        let out = head.forward(&[3.0, 4.0, -1.0, 2.0]).expect("forward");
+        assert_eq!(out, vec![vec![3.0, 5.0], vec![-1.0, 3.0]]);
+    }
+
+    #[test]
+    fn token_classification_load_requires_the_bias() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let bytes = build_safetensors(&[F32Tensor::new(
+            "classifier.weight",
+            &[2, 2],
+            vec![1.0, 0.0, 0.0, 1.0],
+        )]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForTokenClassification::new(2, 2).expect("head");
+        let err = head
+            .load_from_checkpoint(&checkpoint, "classifier")
+            .expect_err("a missing bias must be reported");
+        assert!(
+            err.to_string().contains("classifier.bias"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn causal_lm_head_falls_back_to_the_tied_embedding_table() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        // No `lm_head.weight`: GPT-2 ties the head to `wte`.
+        let bytes = build_safetensors(&[F32Tensor::new(
+            "transformer.wte.weight",
+            &[3, 2],
+            vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        )]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForCausalLM::new(2, 3).expect("head");
+        // Before loading, every logit is zero and greedy decoding is meaningless.
+        assert_eq!(
+            head.compute_logits(&[5.0, 1.0]).expect("logits"),
+            vec![0.0, 0.0, 0.0]
+        );
+
+        head.load_from_checkpoint(&checkpoint).expect("tied head must load");
+        assert_eq!(
+            head.compute_logits(&[5.0, 1.0]).expect("logits"),
+            vec![5.0, 1.0, 6.0]
+        );
+        assert_eq!(head.forward_greedy(&[5.0, 1.0]).expect("greedy"), 2);
+    }
+
+    #[test]
+    fn causal_lm_head_load_errors_when_no_projection_exists() {
+        use crate::weight_loading::checkpoint::Checkpoint;
+        use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+        let bytes = build_safetensors(&[F32Tensor::new("ln_f.weight", &[2], vec![1.0, 1.0])]);
+        let checkpoint = Checkpoint::from_bytes(&bytes).expect("checkpoint must parse");
+
+        let mut head = Gpt2ForCausalLM::new(2, 3).expect("head");
+        let err = head
+            .load_from_checkpoint(&checkpoint)
+            .expect_err("a checkpoint with no projection must not report success");
+        assert!(
+            err.to_string().contains("lm_head.weight"),
+            "unexpected: {err}"
+        );
     }
 }

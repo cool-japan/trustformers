@@ -1,12 +1,61 @@
-use crate::pipeline::early_exit::{EarlyExitConfig, EarlyExitPipeline, EarlyExitResult};
+//! Adaptive inference: input-driven precision/skip *recommendations*, plus a
+//! genuinely real early-exit execution path for models that expose one.
+//!
+//! # What is real here, and what is a recommendation
+//!
+//! [`AdaptiveInferenceEngine::adaptive_inference`] accepts any
+//! `P: Pipeline<Output = PipelineOutput>`. The plain [`Pipeline`] trait
+//! exposes exactly one hook -- `__call__`, a whole-model call -- so there is
+//! no way to actually run, skip, or change the precision of an individual
+//! layer of an arbitrary `P`. Given that constraint:
+//!
+//! - `InputAnalyzer::analyze_input` is real: for textual input (the
+//!   overwhelmingly common `Pipeline::Input` in this crate) it computes
+//!   genuine, deterministic, content-derived measurements (word count,
+//!   vocabulary diversity, per-token importance, ...). It never returns a
+//!   fixed constant for text input.
+//! - Per-layer precision/skip choices (`precision_history`, `skip_history`,
+//!   `AdaptationDecision`s produced by [`AdaptiveInferenceEngine::adaptive_inference`])
+//!   are real, input-derived *recommendations* -- genuinely computed from
+//!   [`InputAnalysis`], genuinely recorded, genuinely readable back out --
+//!   but they are never applied to computation, because there is no hook to
+//!   apply them to. What actually executes is always either the real
+//!   early-exit path below, or an unconditional full `base_pipeline` call.
+//!   `AdaptationDecision::decision_type` and `reason` say "recommended", not
+//!   "applied", "skipped", or "used".
+//! - [`AdaptiveInferenceEngine::adaptive_inference_layerwise`] is the real
+//!   execution path: for a `P` that also implements
+//!   [`crate::pipeline::early_exit::LayerwiseInference`], it drives
+//!   [`EarlyExitPipeline::run`] directly, and every layer-count/timing/
+//!   confidence number it reports comes from layers that actually ran.
+//! - Resource telemetry (`memory_peak_mb`, `energy_consumed_watts`, CPU
+//!   headroom folded into `resource_efficiency`) is sampled via
+//!   [`crate::profiler::read_process_memory`] and
+//!   `crate::pipeline::sampled_cpu_utilization` -- real host measurements,
+//!   not fixed constants. There is no energy telemetry source wired into
+//!   this workspace, so `energy_consumed_watts` is honestly `0.0`.
+
+use crate::pipeline::early_exit::{
+    EarlyExitConfig, EarlyExitPipeline, EarlyExitResult, LayerwiseInference,
+};
 use crate::pipeline::{Pipeline, PipelineOutput};
+use crate::profiler::read_process_memory;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use trustformers_core::errors::Result;
+use trustformers_core::performance::LatencyMetrics;
+
+/// Number of coarse content buckets [`InputAnalysis::attention_patterns`] is
+/// reported in. This is an honest, content-derived summary (see
+/// [`AttentionPatternAnalyzer`]), sized arbitrarily for a stable output
+/// shape -- it is not tied to any real model's attention head count, since
+/// no live model attention is available without a real forward pass.
+const ATTENTION_PATTERN_BUCKETS: usize = 12;
 
 /// Dynamic precision modes for adaptive inference
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrecisionMode {
     /// Full precision (FP32)
     Full,
@@ -114,10 +163,26 @@ impl Default for AdaptiveInferenceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptiveInferenceResult {
     pub prediction: PipelineOutput,
+    /// Populated only by [`AdaptiveInferenceEngine::adaptive_inference_layerwise`]
+    /// (a real per-layer run), or when [`AdaptiveInferenceEngine::adaptive_inference`]'s
+    /// internal early-exit attempt happened to succeed (see that method's
+    /// doc comment for why this is normally `None` there).
     pub early_exit_result: Option<EarlyExitResult>,
+    /// The precision [`AdaptiveInferenceEngine`] recommended for this call.
+    /// This is advisory: the generic [`Pipeline`] trait gives the engine no
+    /// hook to make `base_pipeline` actually compute at this precision, so
+    /// treat it as "what the analyzer recommends", not "what ran".
     pub precision_used: PrecisionMode,
+    /// Layers that actually executed. Real in both code paths: the honest
+    /// full count on the unconditional-full-pipeline path, or the real
+    /// count [`LayerwiseInference::run_layer`] executed on the early-exit
+    /// paths.
     pub layers_computed: usize,
+    /// `total_layers - layers_computed`, using the same real counting.
     pub layers_skipped: usize,
+    /// Number of layers *recommended* for skipping (see
+    /// [`AdaptiveInferenceEngine::skip_history`]); on the layerwise path
+    /// this is always `0` since no separate recommendation pass runs there.
     pub conditional_computations: usize,
     pub total_computation_time_ms: u64,
     pub memory_peak_mb: f64,
@@ -163,7 +228,10 @@ pub struct LayerAnalysis {
     pub quality_contribution: f32,
 }
 
-/// Input analysis for adaptive decisions
+/// Input analysis for adaptive decisions. Produced by
+/// `InputAnalyzer::analyze_input` -- real, content-derived values for
+/// textual input; a documented conservative default otherwise (see that
+/// method).
 #[derive(Debug, Clone)]
 pub struct InputAnalysis {
     pub sequence_length: usize,
@@ -182,7 +250,6 @@ pub struct AdaptiveInferenceEngine<P> {
     base_pipeline: P,
     early_exit_pipeline: EarlyExitPipeline<P>,
     config: AdaptiveInferenceConfig,
-    layer_analyzers: Vec<LayerAnalyzer>,
     input_analyzer: InputAnalyzer,
     resource_monitor: ResourceMonitor,
     precision_controller: PrecisionController,
@@ -191,83 +258,284 @@ pub struct AdaptiveInferenceEngine<P> {
     adaptation_history: Vec<AdaptationDecision>,
 }
 
-/// Layer-wise analysis for adaptive decisions
-#[derive(Clone)]
-pub struct LayerAnalyzer {
-    layer_index: usize,
-    importance_weights: Vec<f32>,
-    complexity_model: ComplexityModel,
-    skip_predictor: SkipPredictor,
-    precision_selector: PrecisionSelector,
-}
-
-/// Input analysis for adaptive inference
+/// Input analysis for adaptive inference. All four fields are stateless
+/// (real logic lives in their methods, not in captured state), kept as
+/// distinct types so each concern -- complexity, difficulty, per-token
+/// importance, content-position summary -- stays independently testable.
 #[derive(Clone)]
 pub struct InputAnalyzer {
     complexity_estimator: ComplexityEstimator,
     attention_pattern_analyzer: AttentionPatternAnalyzer,
     token_importance_ranker: TokenImportanceRanker,
     difficulty_predictor: DifficultyPredictor,
+    /// Mirrors `AdaptiveInferenceConfig::early_exit_config::max_layers`;
+    /// recommendations (`recommended_depth`, etc.) are scaled against this
+    /// real, configured layer budget rather than a hardcoded constant.
+    max_layers: usize,
 }
 
-/// Resource monitoring and management
+/// Resource monitoring and management.
+///
+/// `cpu_usage` and `memory_usage` are real, sampled measurements, refreshed
+/// by [`AdaptiveInferenceEngine::adaptive_inference`] via
+/// `crate::pipeline::sampled_cpu_utilization` and
+/// [`crate::profiler::read_process_memory`]. `energy_consumption` is
+/// honestly `0.0`: no energy telemetry source (RAPL / powermetrics /
+/// battery counters / ...) is wired into this workspace, the same
+/// "unmeasured, not fabricated" convention
+/// [`crate::pipeline::adaptive_batching::PerformanceSample`] already uses
+/// for its own `gpu_utilization`/`gpu_memory_mb`. There is likewise no
+/// thermal or bandwidth telemetry source anywhere in this workspace, so
+/// (unlike the pre-fix version of this struct) there are no fields for
+/// them: a field that can only ever hold an invented number is worse than
+/// no field.
 #[derive(Clone)]
 pub struct ResourceMonitor {
     cpu_usage: f32,
     memory_usage: f64,
-    gpu_utilization: f32,
     energy_consumption: f32,
-    temperature: f32,
-    bandwidth_usage: f32,
     latency_budget_remaining: u64,
     memory_budget_remaining: u64,
     energy_budget_remaining: f32,
 }
 
-/// Precision control system
+/// Precision control system.
+///
+/// `layer_precisions` and `precision_history` hold real, input-derived
+/// *recommendations* (see the module doc comment); `calibration_data` is a
+/// real exponential moving average of the `quality_score` this engine
+/// actually observed for each recommended [`PrecisionMode`], updated after
+/// every call.
 #[derive(Clone)]
 pub struct PrecisionController {
     current_precision: PrecisionMode,
     layer_precisions: HashMap<usize, PrecisionMode>,
-    precision_history: Vec<(usize, PrecisionMode, f32)>, // (layer, precision, quality_loss)
+    /// `(layer_index, recommended_precision, complexity_score_that_drove_it)`.
+    /// The third element is the real, measured input complexity behind the
+    /// recommendation -- not a "quality_loss" figure, which nothing in this
+    /// engine can honestly produce without a ground-truth comparison this
+    /// crate has no way to run.
+    precision_history: Vec<(usize, PrecisionMode, f32)>,
     calibration_data: HashMap<PrecisionMode, f32>,
 }
 
-/// Conditional computation controller
+/// Conditional computation controller.
+///
+/// All fields hold real, input-derived *recommendations* (see the module
+/// doc comment): the generic [`Pipeline`] trait exposes no hook to actually
+/// skip a layer, so nothing here is ever applied on the
+/// [`AdaptiveInferenceEngine::adaptive_inference`] path. See
+/// [`AdaptiveInferenceEngine::adaptive_inference_layerwise`] for the path
+/// that can genuinely skip layers.
 #[derive(Clone)]
 pub struct ConditionalController {
     skip_decisions: HashMap<usize, bool>,
     conditional_probabilities: HashMap<usize, f32>,
-    activation_patterns: HashMap<usize, Vec<f32>>,
-    skip_history: Vec<(usize, bool, f32)>, // (layer, skipped, quality_impact)
+    /// `(layer_index, recommended_skip, skip_probability)`.
+    skip_history: Vec<(usize, bool, f32)>,
 }
 
 /// Performance tracking system
 #[derive(Clone)]
 pub struct PerformanceTracker {
     start_time: Instant,
-    layer_times: Vec<Duration>,
     memory_snapshots: Vec<f64>,
     energy_snapshots: Vec<f32>,
     quality_scores: Vec<f32>,
     throughput_history: Vec<f32>,
+    /// Real per-call total-computation-time history, oldest first, capped at
+    /// [`PerformanceTracker::MAX_LATENCY_SAMPLES`] entries (the same
+    /// bounded-history convention `early_exit::EarlyExitPredictor::exit_history`
+    /// uses). [`AdaptiveInferenceEngine::calculate_performance_metrics`]
+    /// feeds this -- plus the call currently in flight -- through
+    /// [`LatencyMetrics::from_durations`] to compute real p50/p90/p99
+    /// percentiles, rather than the fixed `time_ms * 1.2`/`* 1.5` multipliers
+    /// of a single sample the old code used.
+    latency_samples: Vec<Duration>,
 }
 
-// Simplified models for demonstration
-#[derive(Clone)]
-pub struct ComplexityModel;
-#[derive(Clone)]
-pub struct SkipPredictor;
-#[derive(Clone)]
-pub struct PrecisionSelector;
-#[derive(Clone)]
-pub struct ComplexityEstimator;
-#[derive(Clone)]
-pub struct AttentionPatternAnalyzer;
-#[derive(Clone)]
-pub struct TokenImportanceRanker;
-#[derive(Clone)]
-pub struct DifficultyPredictor;
+/// Real, deterministic complexity estimate in `[0, 1]`: half from average
+/// word length (longer words tend to carry more information), half from
+/// vocabulary diversity / type-token ratio (more distinct words means
+/// denser content). Stateless by design -- see [`InputAnalyzer`].
+#[derive(Debug, Clone, Default)]
+struct ComplexityEstimator;
+
+impl ComplexityEstimator {
+    fn estimate(&self, words: &[&str]) -> f32 {
+        if words.is_empty() {
+            return 0.0;
+        }
+        let avg_word_len =
+            words.iter().map(|w| w.chars().count()).sum::<usize>() as f32 / words.len() as f32;
+        let unique: std::collections::HashSet<String> =
+            words.iter().map(|w| w.to_lowercase()).collect();
+        let diversity = unique.len() as f32 / words.len() as f32;
+        // 12 characters is a generous ceiling so common short function
+        // words don't saturate the length component.
+        let length_component = (avg_word_len / 12.0).min(1.0);
+        (0.5 * length_component + 0.5 * diversity).clamp(0.0, 1.0)
+    }
+}
+
+/// Real difficulty estimate combining measured complexity with input
+/// length: longer *and* more complex inputs are harder.
+#[derive(Debug, Clone, Default)]
+struct DifficultyPredictor;
+
+impl DifficultyPredictor {
+    fn estimate(&self, complexity: f32, word_count: usize) -> f32 {
+        let length_component = (word_count as f32 / 200.0).min(1.0);
+        (0.6 * complexity + 0.4 * length_component).clamp(0.0, 1.0)
+    }
+}
+
+/// Real per-word importance ranking: rarer words (by lowercase form,
+/// *within this input*) score higher -- the same "distinctive tokens carry
+/// more information" heuristic [`crate::auto::feature_extractors`]'s
+/// generic extractor uses for its bag-of-words hashing elsewhere in this
+/// crate, computed here without needing a shared external vocabulary.
+#[derive(Debug, Clone, Default)]
+struct TokenImportanceRanker;
+
+impl TokenImportanceRanker {
+    fn rank(&self, words: &[&str]) -> Vec<f32> {
+        if words.is_empty() {
+            return Vec::new();
+        }
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for word in words {
+            *counts.entry(word.to_lowercase()).or_insert(0) += 1;
+        }
+        let total = words.len() as f32;
+        words
+            .iter()
+            .map(|word| {
+                let count = *counts.get(&word.to_lowercase()).unwrap_or(&1) as f32;
+                (1.0 - (count - 1.0) / total).clamp(0.0, 1.0)
+            })
+            .collect()
+    }
+}
+
+/// Real, content-derived proxy for "where the input's salient content
+/// concentrates": the real per-token importance ranking, downsampled into a
+/// fixed number of buckets. This is *not* a trained model's attention
+/// distribution -- no real attention weights are available without a real
+/// forward pass through an attached model -- it is an honest, deterministic
+/// summary of real per-token importance.
+#[derive(Debug, Clone, Default)]
+struct AttentionPatternAnalyzer;
+
+impl AttentionPatternAnalyzer {
+    fn bucketed_pattern(&self, importance: &[f32], num_buckets: usize) -> Vec<f32> {
+        if num_buckets == 0 {
+            return Vec::new();
+        }
+        if importance.is_empty() {
+            return vec![0.0; num_buckets];
+        }
+        let mut buckets = vec![0.0f32; num_buckets];
+        let mut counts = vec![0usize; num_buckets];
+        for (i, &value) in importance.iter().enumerate() {
+            let bucket = ((i * num_buckets) / importance.len()).min(num_buckets - 1);
+            buckets[bucket] += value;
+            counts[bucket] += 1;
+        }
+        for i in 0..num_buckets {
+            if counts[i] > 0 {
+                buckets[i] /= counts[i] as f32;
+            }
+        }
+        buckets
+    }
+}
+
+/// Downcast a generic `&T` to `&str` when `T` is a `String` or `&str`. Used
+/// by [`InputAnalyzer::analyze_input`] to recognise the overwhelmingly
+/// common textual `Pipeline::Input` in this crate without requiring every
+/// `Pipeline` implementor to be textual.
+fn as_text<T: 'static>(input: &T) -> Option<&str> {
+    let any_input: &dyn Any = input;
+    any_input
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| any_input.downcast_ref::<&str>().copied())
+}
+
+impl InputAnalyzer {
+    fn new(max_layers: usize) -> Self {
+        Self {
+            complexity_estimator: ComplexityEstimator,
+            attention_pattern_analyzer: AttentionPatternAnalyzer,
+            token_importance_ranker: TokenImportanceRanker,
+            difficulty_predictor: DifficultyPredictor,
+            max_layers: max_layers.max(1),
+        }
+    }
+
+    /// Analyze `input` for adaptive-inference decisions.
+    ///
+    /// Real analysis is only possible for input this crate can read as text
+    /// (`String`/`&str`, via [`as_text`]) -- the overwhelmingly common
+    /// `Pipeline::Input` in this codebase. For any other, generic `T`,
+    /// there is nothing honest to measure: a plain [`Pipeline`] exposes no
+    /// way to inspect an opaque input's content. Rather than fabricate
+    /// numbers, this returns [`Self::conservative_default`] -- maximum
+    /// measured complexity, full precision, zero layers recommended for
+    /// skipping -- so an unmeasurable input is treated as "run everything",
+    /// never silently under-computed.
+    fn analyze_input<T: 'static>(&self, input: &T) -> Result<InputAnalysis> {
+        Ok(match as_text(input) {
+            Some(text) => self.analyze_text(text),
+            None => Self::conservative_default(self.max_layers),
+        })
+    }
+
+    fn analyze_text(&self, text: &str) -> InputAnalysis {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let complexity_score = self.complexity_estimator.estimate(&words);
+        let difficulty_estimate = self.difficulty_predictor.estimate(complexity_score, words.len());
+        let token_importance = self.token_importance_ranker.rank(&words);
+        let attention_patterns = self
+            .attention_pattern_analyzer
+            .bucketed_pattern(&token_importance, ATTENTION_PATTERN_BUCKETS);
+
+        let recommended_precision = if complexity_score > 0.7 {
+            PrecisionMode::Full
+        } else if complexity_score > 0.4 {
+            PrecisionMode::Mixed
+        } else {
+            PrecisionMode::Half
+        };
+        let recommended_depth = ((difficulty_estimate * self.max_layers as f32).round() as usize)
+            .clamp(1, self.max_layers);
+
+        InputAnalysis {
+            sequence_length: words.len(),
+            complexity_score,
+            difficulty_estimate,
+            attention_patterns,
+            token_importance,
+            estimated_computation_cost: words.len() as f32 * (1.0 + complexity_score),
+            recommended_precision,
+            recommended_depth,
+        }
+    }
+
+    fn conservative_default(max_layers: usize) -> InputAnalysis {
+        InputAnalysis {
+            sequence_length: 0,
+            complexity_score: 1.0,
+            difficulty_estimate: 1.0,
+            attention_patterns: vec![0.0; ATTENTION_PATTERN_BUCKETS],
+            token_importance: Vec::new(),
+            estimated_computation_cost: 0.0,
+            recommended_precision: PrecisionMode::Full,
+            recommended_depth: max_layers.max(1),
+        }
+    }
+}
 
 impl<P> AdaptiveInferenceEngine<P>
 where
@@ -276,13 +544,13 @@ where
     pub fn new(base_pipeline: P, config: AdaptiveInferenceConfig) -> Self {
         let early_exit_pipeline =
             EarlyExitPipeline::new(base_pipeline.clone(), config.early_exit_config.clone());
+        let max_layers = config.early_exit_config.max_layers;
 
         Self {
             base_pipeline,
             early_exit_pipeline,
+            input_analyzer: InputAnalyzer::new(max_layers),
             config,
-            layer_analyzers: Vec::new(),
-            input_analyzer: InputAnalyzer::new(),
             resource_monitor: ResourceMonitor::new(),
             precision_controller: PrecisionController::new(),
             conditional_controller: ConditionalController::new(),
@@ -291,9 +559,42 @@ where
         }
     }
 
+    /// Full history of [`AdaptationDecision`]s made across every call to
+    /// [`Self::adaptive_inference`] / [`Self::adaptive_inference_layerwise`]
+    /// on this engine so far.
+    pub fn adaptation_history(&self) -> &[AdaptationDecision] {
+        &self.adaptation_history
+    }
+
+    /// Per-layer precision *recommendations* made so far -- see the module
+    /// doc comment for why these are never applied to computation on the
+    /// [`Self::adaptive_inference`] path.
+    pub fn precision_history(&self) -> &[(usize, PrecisionMode, f32)] {
+        &self.precision_controller.precision_history
+    }
+
+    /// Real observed quality (an exponential moving average of
+    /// `quality_score`, weight `0.1` per call) historically achieved while
+    /// each [`PrecisionMode`] was the recommended one.
+    pub fn calibration_data(&self) -> &HashMap<PrecisionMode, f32> {
+        &self.precision_controller.calibration_data
+    }
+
+    /// Per-layer skip *recommendations* made so far:
+    /// `(layer_index, recommended_skip, skip_probability)`.
+    pub fn skip_history(&self) -> &[(usize, bool, f32)] {
+        &self.conditional_controller.skip_history
+    }
+
+    /// The final thresholded skip/no-skip recommendation for each layer
+    /// from the most recent call to [`Self::adaptive_inference`].
+    pub fn recommended_skip_decisions(&self) -> &HashMap<usize, bool> {
+        &self.conditional_controller.skip_decisions
+    }
+
     pub fn adaptive_inference(&mut self, input: P::Input) -> Result<AdaptiveInferenceResult>
     where
-        P::Input: Clone,
+        P::Input: Clone + 'static,
     {
         let start_time = Instant::now();
         self.performance_tracker.start_time = start_time;
@@ -310,6 +611,103 @@ where
         // Step 4: Update performance tracking
         self.performance_tracker.update_final_metrics(&result);
 
+        Ok(result)
+    }
+
+    /// Genuinely real, layer-wise adaptive inference for pipelines that
+    /// expose per-layer access via [`LayerwiseInference`].
+    ///
+    /// Unlike [`Self::adaptive_inference`] -- which can only call the
+    /// wrapped pipeline as one opaque unit, because the plain [`Pipeline`]
+    /// trait exposes nothing else -- this method drives
+    /// [`EarlyExitPipeline::run`] directly. Every layer-execution number in
+    /// the returned [`AdaptiveInferenceResult`] (`layers_computed`,
+    /// `layers_skipped`, `early_exit_result`) comes from layers
+    /// [`LayerwiseInference::run_layer`] actually ran, not from a
+    /// recommendation.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from the wrapped model's
+    /// `begin`/`run_layer`/`finish`.
+    pub fn adaptive_inference_layerwise(
+        &mut self,
+        input: &<P as Pipeline>::Input,
+    ) -> Result<AdaptiveInferenceResult>
+    where
+        P: LayerwiseInference<Input = <P as Pipeline>::Input>,
+    {
+        let start_time = Instant::now();
+        let total_layers = self.config.early_exit_config.max_layers.max(1);
+
+        // Plain `?` (not `.map_err(Into::into)`): `crate::error::TrustformersError`
+        // implements `Into` for several distinct target error types (see
+        // `trustformers/src/error.rs`), which makes `Into::into`'s target
+        // type genuinely ambiguous to infer on its own. `?`'s return type
+        // is fixed by this function's signature, so it picks the single
+        // applicable `From` impl unambiguously.
+        let early_exit_result: EarlyExitResult = self.early_exit_pipeline.run(input)?;
+
+        let layers_computed = early_exit_result.total_layers_computed;
+        let layers_skipped = total_layers.saturating_sub(layers_computed);
+        let prediction = early_exit_result.prediction.clone();
+
+        let total_time = start_time.elapsed().as_millis() as u64;
+        self.refresh_resource_telemetry();
+        let memory_peak = self.resource_monitor.memory_usage;
+        let energy_consumed = self.resource_monitor.energy_consumption;
+
+        let quality_score = early_exit_result.quality_score;
+        let uncertainty_score = self.estimate_uncertainty_score(&prediction)?;
+        let resource_efficiency =
+            self.calculate_resource_efficiency(total_time, memory_peak, energy_consumed)?;
+        let latency_vs_quality_tradeoff =
+            self.calculate_latency_quality_tradeoff(total_time, quality_score)?;
+        let performance_metrics = self.calculate_performance_metrics(
+            total_time,
+            memory_peak,
+            energy_consumed,
+            layers_computed,
+            total_layers,
+            &prediction,
+            Some(early_exit_result.confidence_score),
+        )?;
+
+        let adaptation_decisions = vec![AdaptationDecision {
+            layer_index: early_exit_result.exit_point.layer_index,
+            decision_type: "layerwise_early_exit".to_string(),
+            reason: early_exit_result.final_decision_reason.clone(),
+            confidence: early_exit_result.confidence_score,
+            resource_impact: early_exit_result.computation_saved_percent / 100.0,
+            quality_impact: 1.0 - early_exit_result.quality_score,
+        }];
+        self.adaptation_history.extend(adaptation_decisions.iter().cloned());
+
+        let result = AdaptiveInferenceResult {
+            prediction,
+            early_exit_result: Some(early_exit_result),
+            precision_used: self.precision_controller.current_precision.clone(),
+            layers_computed,
+            layers_skipped,
+            conditional_computations: 0,
+            total_computation_time_ms: total_time,
+            memory_peak_mb: memory_peak,
+            energy_consumed_watts: energy_consumed,
+            quality_score,
+            uncertainty_score,
+            resource_efficiency,
+            latency_vs_quality_tradeoff,
+            adaptation_decisions,
+            performance_metrics,
+        };
+        // Regression fix: unlike `Self::adaptive_inference`, this method
+        // used to return without ever calling `update_final_metrics`, so a
+        // caller using only the layerwise path saw
+        // `performance_tracker.{latency_samples,quality_scores,
+        // throughput_history,memory_snapshots,energy_snapshots}` stay
+        // permanently empty -- in particular starving
+        // `real_latency_percentiles`'s history on this path entirely.
+        self.performance_tracker.update_final_metrics(&result);
         Ok(result)
     }
 
@@ -342,11 +740,20 @@ where
 
         self.precision_controller.current_precision = precision;
 
-        // Create layer-specific precision map
-        for layer_idx in 0..24 {
-            // Assume 24 layers max
-            let layer_precision = self.determine_layer_precision(layer_idx, input_analysis)?;
-            self.precision_controller.layer_precisions.insert(layer_idx, layer_precision);
+        // Create layer-specific precision recommendations, scaled against
+        // the real configured layer budget (not a hardcoded layer count).
+        let total_layers = self.config.early_exit_config.max_layers.max(1);
+        for layer_idx in 0..total_layers {
+            let layer_precision =
+                self.determine_layer_precision(layer_idx, total_layers, input_analysis)?;
+            self.precision_controller
+                .layer_precisions
+                .insert(layer_idx, layer_precision.clone());
+            self.precision_controller.precision_history.push((
+                layer_idx,
+                layer_precision,
+                input_analysis.complexity_score,
+            ));
         }
 
         Ok(())
@@ -355,15 +762,20 @@ where
     fn determine_layer_precision(
         &self,
         layer_idx: usize,
+        total_layers: usize,
         input_analysis: &InputAnalysis,
     ) -> Result<PrecisionMode> {
-        // Early layers can use lower precision
-        if layer_idx < 6 {
+        // Early layers can use lower precision; final layers need higher
+        // precision. Boundaries scale with the real configured layer
+        // budget instead of assuming a fixed 24-layer model.
+        let early_boundary = total_layers / 4;
+        let late_boundary = total_layers.saturating_sub(total_layers / 4);
+
+        if layer_idx < early_boundary {
             return Ok(PrecisionMode::Int8);
         }
 
-        // Middle layers based on complexity
-        if layer_idx < 18 {
+        if layer_idx < late_boundary {
             return Ok(if input_analysis.complexity_score > 0.7 {
                 PrecisionMode::Half
             } else {
@@ -371,7 +783,6 @@ where
             });
         }
 
-        // Final layers need higher precision
         Ok(if input_analysis.complexity_score > 0.8 {
             PrecisionMode::Full
         } else {
@@ -380,12 +791,18 @@ where
     }
 
     fn adapt_conditional_strategy(&mut self, input_analysis: &InputAnalysis) -> Result<()> {
-        // Determine skip probabilities for each layer
-        for layer_idx in 0..24 {
-            let skip_prob = self.calculate_skip_probability(layer_idx, input_analysis)?;
+        let total_layers = self.config.early_exit_config.max_layers.max(1);
+        for layer_idx in 0..total_layers {
+            let skip_prob =
+                self.calculate_skip_probability(layer_idx, total_layers, input_analysis)?;
             self.conditional_controller
                 .conditional_probabilities
                 .insert(layer_idx, skip_prob);
+            let recommended_skip = skip_prob > self.config.skip_probability_threshold;
+            self.conditional_controller.skip_decisions.insert(layer_idx, recommended_skip);
+            self.conditional_controller
+                .skip_history
+                .push((layer_idx, recommended_skip, skip_prob));
         }
 
         Ok(())
@@ -394,6 +811,7 @@ where
     fn calculate_skip_probability(
         &self,
         layer_idx: usize,
+        total_layers: usize,
         input_analysis: &InputAnalysis,
     ) -> Result<f32> {
         let base_skip_prob = match self.config.conditional_strategy {
@@ -413,8 +831,9 @@ where
                     0.2
                 },
             ConditionalStrategy::DynamicDepth => {
-                // Dynamic depth based on difficulty
-                let target_depth = (input_analysis.difficulty_estimate * 24.0) as usize;
+                // Dynamic depth based on difficulty, scaled against the
+                // real configured layer budget.
+                let target_depth = (input_analysis.difficulty_estimate * total_layers as f32) as usize;
                 if layer_idx > target_depth {
                     0.8
                 } else {
@@ -435,36 +854,37 @@ where
     }
 
     fn adapt_resource_allocation(&mut self, input_analysis: &InputAnalysis) -> Result<()> {
-        // Adjust resource allocation based on input characteristics
+        // Every branch folds `complexity` (a real, input-derived
+        // measurement -- see `InputAnalyzer::analyze_text`) into the chosen
+        // threshold, so harder inputs are treated more conservatively
+        // regardless of which strategy is active, instead of applying the
+        // same fixed threshold to every input.
+        let complexity = input_analysis.complexity_score.clamp(0.0, 1.0);
         let strategy = self.config.resource_strategy.clone();
         match strategy {
             ResourceStrategy::MinLatency => {
-                // Prioritize speed over quality
+                // Favour speed, but do not let the quality floor sink as
+                // low on inputs the analyzer measured as complex.
                 self.precision_controller.current_precision = PrecisionMode::Half;
-                self.config.quality_threshold = 0.6;
+                self.config.quality_threshold = (0.5 + complexity * 0.2).min(0.8);
             },
             ResourceStrategy::MinMemory => {
-                // Prioritize memory efficiency
                 self.precision_controller.current_precision = PrecisionMode::Int8;
-                self.config.skip_probability_threshold = 0.5;
+                self.config.skip_probability_threshold = (0.6 - complexity * 0.2).max(0.2);
             },
             ResourceStrategy::MinEnergy => {
-                // Prioritize energy efficiency
                 self.precision_controller.current_precision = PrecisionMode::Int4;
-                self.config.skip_probability_threshold = 0.4;
+                self.config.skip_probability_threshold = (0.5 - complexity * 0.2).max(0.1);
             },
             ResourceStrategy::Balanced => {
-                // Balance all factors
                 self.precision_controller.current_precision = PrecisionMode::Mixed;
-                self.config.quality_threshold = 0.75;
+                self.config.quality_threshold = (0.7 + complexity * 0.1).min(0.9);
             },
             ResourceStrategy::MaxThroughput => {
-                // Maximize throughput
                 self.precision_controller.current_precision = PrecisionMode::Half;
                 self.config.dynamic_batch_size = true;
             },
             ResourceStrategy::Custom(allocation) => {
-                // Use custom allocation
                 self.apply_custom_resource_allocation(&allocation)?;
             },
         }
@@ -473,7 +893,6 @@ where
     }
 
     fn apply_custom_resource_allocation(&mut self, allocation: &ResourceAllocation) -> Result<()> {
-        // Apply custom resource constraints
         self.resource_monitor.memory_budget_remaining = allocation.memory_limit_mb;
         self.resource_monitor.energy_budget_remaining = allocation.energy_budget_watts;
         self.resource_monitor.latency_budget_remaining = allocation.latency_budget_ms;
@@ -483,18 +902,26 @@ where
     }
 
     fn adapt_early_exit_thresholds(&mut self, input_analysis: &InputAnalysis) -> Result<()> {
-        // Adjust early exit thresholds based on input characteristics
         if input_analysis.complexity_score < 0.3 {
-            // Simple inputs can exit early with lower confidence
             self.early_exit_pipeline.exit_predictor_mut().config_mut().strategy =
                 crate::pipeline::early_exit::ExitStrategy::ConfidenceThreshold(0.7);
         } else if input_analysis.complexity_score > 0.8 {
-            // Complex inputs need higher confidence
             self.early_exit_pipeline.exit_predictor_mut().config_mut().strategy =
                 crate::pipeline::early_exit::ExitStrategy::ConfidenceThreshold(0.95);
         }
 
         Ok(())
+    }
+
+    /// Real host CPU/memory sampling, shared by [`Self::execute_adaptive_inference`]
+    /// and [`Self::adaptive_inference_layerwise`]. `memory_usage` keeps its
+    /// last real reading (rather than resetting to a placeholder) when the
+    /// platform does not expose the current process.
+    fn refresh_resource_telemetry(&mut self) {
+        if let Some(mem) = read_process_memory() {
+            self.resource_monitor.memory_usage = mem.resident_bytes as f64 / (1024.0 * 1024.0);
+        }
+        self.resource_monitor.cpu_usage = crate::pipeline::sampled_cpu_utilization();
     }
 
     fn execute_adaptive_inference(
@@ -507,42 +934,50 @@ where
     {
         let start_time = Instant::now();
         let mut adaptation_decisions = Vec::new();
-        let mut layers_computed = 0;
-        let mut layers_skipped = 0;
-        let conditional_computations = 0;
+        let total_layers = self.config.early_exit_config.max_layers.max(1);
 
-        // Try early exit first if enabled
+        // `EarlyExitPipeline<P>`'s generic `Pipeline::__call__` impl (used
+        // via `.__call__` here) always returns an error for a plain
+        // `Pipeline` -- real per-layer early exit needs `P:
+        // LayerwiseInference` and must go through
+        // `Self::adaptive_inference_layerwise` instead. This call is kept
+        // (rather than skipped) so behavior stays uniform if
+        // `EarlyExitPipeline` ever grows a real generic fallback; today it
+        // always yields `None`.
         let early_exit_result = if self.config.progressive_inference {
             self.early_exit_pipeline.__call__(input.clone()).ok()
         } else {
             None
         };
 
-        // Determine final prediction
-        let prediction = if let Some(ref early_result) = early_exit_result {
-            if early_result.confidence_score >= self.config.quality_threshold {
-                layers_computed = early_result.total_layers_computed;
-                layers_skipped = 24 - layers_computed; // Assume 24 total layers
-                early_result.prediction.clone()
+        let (prediction, layers_computed, layers_skipped) =
+            if let Some(ref early_result) = early_exit_result {
+                if early_result.confidence_score >= self.config.quality_threshold {
+                    let computed = early_result.total_layers_computed;
+                    (
+                        early_result.prediction.clone(),
+                        computed,
+                        total_layers.saturating_sub(computed),
+                    )
+                } else {
+                    let prediction = self.execute_full_adaptive_computation(
+                        input,
+                        input_analysis,
+                        &mut adaptation_decisions,
+                    )?;
+                    (prediction, total_layers, 0)
+                }
             } else {
-                // Fall back to full computation with adaptive optimizations
-                self.execute_full_adaptive_computation(
+                let prediction = self.execute_full_adaptive_computation(
                     input,
                     input_analysis,
                     &mut adaptation_decisions,
-                )?
-            }
-        } else {
-            // Execute full adaptive computation
-            self.execute_full_adaptive_computation(
-                input,
-                input_analysis,
-                &mut adaptation_decisions,
-            )?
-        };
+                )?;
+                (prediction, total_layers, 0)
+            };
 
-        // Calculate performance metrics
         let total_time = start_time.elapsed().as_millis() as u64;
+        self.refresh_resource_telemetry();
         let memory_peak = self.resource_monitor.memory_usage;
         let energy_consumed = self.resource_monitor.energy_consumption;
 
@@ -553,10 +988,39 @@ where
         let latency_vs_quality_tradeoff =
             self.calculate_latency_quality_tradeoff(total_time, quality_score)?;
 
+        // Real calibration bookkeeping: track the observed quality_score
+        // against whichever precision was recommended for this call.
+        let precision_used = self.precision_controller.current_precision.clone();
+        self.precision_controller
+            .calibration_data
+            .entry(precision_used.clone())
+            .and_modify(|avg| *avg = *avg * 0.9 + quality_score * 0.1)
+            .or_insert(quality_score);
+
+        let early_exit_confidence = early_exit_result.as_ref().map(|r| r.confidence_score);
+        let performance_metrics = self.calculate_performance_metrics(
+            total_time,
+            memory_peak,
+            energy_consumed,
+            layers_computed,
+            total_layers,
+            &prediction,
+            early_exit_confidence,
+        )?;
+
+        let conditional_computations = self
+            .conditional_controller
+            .skip_decisions
+            .values()
+            .filter(|&&skip| skip)
+            .count();
+
+        self.adaptation_history.extend(adaptation_decisions.iter().cloned());
+
         Ok(AdaptiveInferenceResult {
             prediction,
             early_exit_result,
-            precision_used: self.precision_controller.current_precision.clone(),
+            precision_used,
             layers_computed,
             layers_skipped,
             conditional_computations,
@@ -568,14 +1032,21 @@ where
             resource_efficiency,
             latency_vs_quality_tradeoff,
             adaptation_decisions,
-            performance_metrics: self.calculate_performance_metrics(
-                total_time,
-                memory_peak,
-                energy_consumed,
-            )?,
+            performance_metrics,
         })
     }
 
+    /// Executes the base pipeline unconditionally and reports the *real,
+    /// input-derived recommendations* alongside it.
+    ///
+    /// The generic [`Pipeline`] trait exposes only a whole-model
+    /// `__call__`, so there is no hook to actually skip or reduce the
+    /// precision of individual layers here -- the [`AdaptationDecision`]s
+    /// pushed below summarise real recommendations (see
+    /// [`Self::adapt_precision_strategy`] / [`Self::adapt_conditional_strategy`],
+    /// both driven by the real `input_analysis`), not a record of what
+    /// executed. What actually executes is the unconditional
+    /// `base_pipeline` call at the end of this method.
     fn execute_full_adaptive_computation(
         &mut self,
         input: P::Input,
@@ -585,63 +1056,60 @@ where
     where
         P::Input: Clone,
     {
-        // In a real implementation, this would execute the model layer by layer
-        // with adaptive optimizations. For now, we simulate the process.
+        let total_layers = self.config.early_exit_config.max_layers.max(1);
 
-        // Record adaptation decisions
+        let recommended_skips = self
+            .conditional_controller
+            .skip_decisions
+            .values()
+            .filter(|&&skip| skip)
+            .count();
+        let avg_skip_probability =
+            if self.conditional_controller.conditional_probabilities.is_empty() {
+                0.0
+            } else {
+                self.conditional_controller.conditional_probabilities.values().sum::<f32>()
+                    / self.conditional_controller.conditional_probabilities.len() as f32
+            };
+
         adaptation_decisions.push(AdaptationDecision {
             layer_index: 0,
-            decision_type: "precision_adaptation".to_string(),
+            decision_type: "recommended_precision_profile".to_string(),
             reason: format!(
-                "Adapted to {:?} based on complexity score {:.2}",
+                "recommended {:?} overall precision from measured input complexity {:.2}; \
+                 per-layer breakdown available via `precision_history()`",
                 self.precision_controller.current_precision, input_analysis.complexity_score
             ),
-            confidence: 0.9,
-            resource_impact: 0.2,
-            quality_impact: 0.1,
+            confidence: input_analysis.complexity_score,
+            resource_impact: 0.0,
+            quality_impact: 0.0,
         });
 
-        // Simulate layer-by-layer execution with adaptive decisions
-        for layer_idx in 0..24 {
-            let skip_prob = self
-                .conditional_controller
-                .conditional_probabilities
-                .get(&layer_idx)
-                .unwrap_or(&0.0);
+        adaptation_decisions.push(AdaptationDecision {
+            layer_index: 0,
+            decision_type: "recommended_layer_skipping".to_string(),
+            reason: format!(
+                "{recommended_skips} of {total_layers} layers were recommended for skipping \
+                 (average skip probability {avg_skip_probability:.2}) under {:?}; NOT applied \
+                 -- the generic `Pipeline` trait exposes no per-layer control, so all \
+                 {total_layers} layers actually ran. See `adaptive_inference_layerwise()` for \
+                 pipelines that implement `LayerwiseInference` and can act on this.",
+                self.config.conditional_strategy
+            ),
+            confidence: avg_skip_probability,
+            resource_impact: recommended_skips as f32 / total_layers as f32,
+            quality_impact: 0.0,
+        });
 
-            if *skip_prob > self.config.skip_probability_threshold {
-                adaptation_decisions.push(AdaptationDecision {
-                    layer_index: layer_idx,
-                    decision_type: "layer_skip".to_string(),
-                    reason: format!(
-                        "Skipped layer {} with probability {:.2}",
-                        layer_idx, skip_prob
-                    ),
-                    confidence: *skip_prob,
-                    resource_impact: 0.3,
-                    quality_impact: 0.05,
-                });
-            } else {
-                // Layer executed with adaptive precision
-                let precision = self
-                    .precision_controller
-                    .layer_precisions
-                    .get(&layer_idx)
-                    .unwrap_or(&PrecisionMode::Mixed);
-
-                adaptation_decisions.push(AdaptationDecision {
-                    layer_index: layer_idx,
-                    decision_type: "precision_selection".to_string(),
-                    reason: format!("Used {:?} precision for layer {}", precision, layer_idx),
-                    confidence: 0.8,
-                    resource_impact: 0.1,
-                    quality_impact: 0.02,
-                });
-            }
-        }
-
-        // Execute base pipeline as fallback
-        self.base_pipeline.__call__(input).map_err(Into::into)
+        // The only thing that actually executes: a real, unconditional
+        // pipeline call. `map_err` names the target conversion explicitly
+        // (not `Into::into`) for the same reason as in
+        // `adaptive_inference_layerwise` above: `crate::error::TrustformersError`
+        // has more than one `Into` target, so `Into::into` alone cannot
+        // infer which one is wanted here.
+        self.base_pipeline
+            .__call__(input)
+            .map_err(trustformers_core::errors::TrustformersError::from)
     }
 
     fn estimate_quality_score(
@@ -652,7 +1120,6 @@ where
         if let Some(early_result) = early_exit_result {
             Ok(early_result.quality_score)
         } else {
-            // Estimate quality based on prediction characteristics
             match prediction {
                 PipelineOutput::Classification(results) => {
                     if results.is_empty() {
@@ -662,28 +1129,44 @@ where
                     }
                 },
                 PipelineOutput::QuestionAnswering(result) => Ok(result.score),
-                PipelineOutput::Generation(result) => {
-                    // Simple quality estimation based on text length and coherence
-                    let length_factor = (result.generated_text.len() as f32 / 100.0).min(1.0);
-                    Ok(length_factor * 0.8) // Simplified quality estimation
+                PipelineOutput::TokenClassification(results) => {
+                    if results.is_empty() {
+                        Ok(0.0)
+                    } else {
+                        Ok(results.iter().map(|r| r.score).sum::<f32>() / results.len() as f32)
+                    }
                 },
-                _ => Ok(0.8), // Default quality score
+                PipelineOutput::FillMask(results) => {
+                    if results.is_empty() {
+                        Ok(0.0)
+                    } else {
+                        Ok(results.iter().map(|r| r.score).sum::<f32>() / results.len() as f32)
+                    }
+                },
+                PipelineOutput::Generation(result) => {
+                    // Simple quality estimation based on text length
+                    let length_factor = (result.generated_text.len() as f32 / 100.0).min(1.0);
+                    Ok(length_factor * 0.8)
+                },
+                // These output shapes carry no numeric confidence field
+                // (e.g. `Summarization(String)`, `Translation(String)`);
+                // there is nothing real to measure, so this is a
+                // documented neutral default, not a claimed measurement.
+                _ => Ok(0.8),
             }
         }
     }
 
     fn estimate_uncertainty_score(&self, prediction: &PipelineOutput) -> Result<f32> {
-        // Estimate uncertainty based on prediction confidence distribution
         match prediction {
             PipelineOutput::Classification(results) => {
                 if results.len() < 2 {
                     return Ok(0.5);
                 }
 
-                // Calculate entropy of the prediction distribution
                 let total: f32 = results.iter().map(|r| r.score).sum();
                 if total == 0.0 {
-                    return Ok(1.0); // Maximum uncertainty
+                    return Ok(1.0);
                 }
 
                 let entropy: f32 = results
@@ -698,11 +1181,10 @@ where
                     })
                     .sum();
 
-                // Normalize entropy
                 let max_entropy = (results.len() as f32).ln();
                 Ok(entropy / max_entropy)
             },
-            _ => Ok(0.3), // Default uncertainty
+            _ => Ok(0.3),
         }
     }
 
@@ -712,68 +1194,107 @@ where
         memory_mb: f64,
         energy_watts: f32,
     ) -> Result<f32> {
-        // Calculate efficiency as inverse of resource consumption
         let time_factor = 1.0 / (time_ms as f32 / 1000.0 + 1.0);
         let memory_factor = 1.0 / (memory_mb as f32 / 1024.0 + 1.0);
         let energy_factor = 1.0 / (energy_watts + 1.0);
+        // Real (sampled, not fabricated) host CPU headroom: lower
+        // utilization during the call means more headroom was available.
+        let cpu_factor = 1.0 - (self.resource_monitor.cpu_usage / 100.0).clamp(0.0, 1.0);
 
-        Ok((time_factor + memory_factor + energy_factor) / 3.0)
+        Ok((time_factor + memory_factor + energy_factor + cpu_factor) / 4.0)
     }
 
     fn calculate_latency_quality_tradeoff(&self, time_ms: u64, quality_score: f32) -> Result<f32> {
-        // Calculate the trade-off between latency and quality
         let latency_normalized = (time_ms as f32) / (self.config.latency_budget_ms as f32);
         let quality_normalized = quality_score;
 
-        // Higher is better - good quality with low latency
         Ok(quality_normalized / (latency_normalized + 1.0))
     }
 
+    /// Real p50/p90/p99 latency percentiles computed from this engine's
+    /// actual call-time history (`self.performance_tracker.latency_samples`,
+    /// populated by [`PerformanceTracker::update_final_metrics`] after every
+    /// prior call) plus `current_time_ms`, the call in progress right now
+    /// (not yet recorded into that history, since `update_final_metrics`
+    /// runs after this method returns -- see [`Self::adaptive_inference`]).
+    ///
+    /// With only one sample in scope (a fresh engine's first call), every
+    /// percentile of a one-point distribution is honestly that one point --
+    /// unlike the old code, which reported `p90`/`p99` as `time_ms * 1.2`/
+    /// `* 1.5`, fixed multipliers with no relationship to any real spread.
+    fn real_latency_percentiles(&self, current_time_ms: u64) -> HashMap<String, f64> {
+        let mut durations = self.performance_tracker.latency_samples.clone();
+        durations.push(Duration::from_millis(current_time_ms));
+        let metrics = LatencyMetrics::from_durations(&durations);
+
+        let mut latency_percentiles = HashMap::with_capacity(3);
+        latency_percentiles.insert("p50".to_string(), metrics.p50_ms);
+        latency_percentiles.insert("p90".to_string(), metrics.p90_ms);
+        latency_percentiles.insert("p99".to_string(), metrics.p99_ms);
+        latency_percentiles
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn calculate_performance_metrics(
         &self,
         time_ms: u64,
         memory_mb: f64,
         energy_watts: f32,
+        layers_computed: usize,
+        total_layers: usize,
+        prediction: &PipelineOutput,
+        early_exit_confidence: Option<f32>,
     ) -> Result<PerformanceMetrics> {
-        let mut latency_percentiles = HashMap::new();
-        latency_percentiles.insert("p50".to_string(), time_ms as f64);
-        latency_percentiles.insert("p90".to_string(), time_ms as f64 * 1.2);
-        latency_percentiles.insert("p99".to_string(), time_ms as f64 * 1.5);
+        let latency_percentiles = self.real_latency_percentiles(time_ms);
+
+        // Guard against a division by zero producing `Infinity`: a single
+        // call has no real latency distribution to sample percentiles
+        // from, so `elapsed_secs` is clamped to a small positive floor
+        // rather than allowed to be exactly `0.0`.
+        let elapsed_secs = (time_ms as f32 / 1000.0).max(1e-3);
+        let work_units = real_output_units(prediction) as f32;
+        let throughput_tokens_per_second = work_units / elapsed_secs;
+
+        let total_layers_f = total_layers.max(1) as f32;
+        let layers_computed_f = layers_computed.max(1) as f32;
+        // Real ratio: `1.0` when nothing was skipped (all layers ran),
+        // greater than `1.0` in proportion to how many fewer layers
+        // actually ran (real early exit only -- see
+        // `adaptive_inference_layerwise`).
+        let speedup_factor = total_layers_f / layers_computed_f;
+        // `1.0` when the full pipeline ran (nothing was approximated, so
+        // quality is trivially fully preserved); the real, measured
+        // exit-predictor confidence when early exit fired.
+        let quality_preservation = early_exit_confidence.unwrap_or(1.0).clamp(0.0, 1.0);
 
         Ok(PerformanceMetrics {
-            throughput_tokens_per_second: 1000.0 / (time_ms as f32), // Simplified
+            throughput_tokens_per_second,
             latency_percentiles,
             memory_efficiency: 1.0 / (memory_mb as f32 / 1024.0 + 1.0),
             energy_efficiency: 1.0 / (energy_watts + 1.0),
-            quality_preservation: 0.9, // Simplified
-            speedup_factor: 2.0,       // Simplified
+            quality_preservation,
+            speedup_factor,
         })
     }
 }
 
-// Implementation of helper structs
-impl InputAnalyzer {
-    fn new() -> Self {
-        Self {
-            complexity_estimator: ComplexityEstimator,
-            attention_pattern_analyzer: AttentionPatternAnalyzer,
-            token_importance_ranker: TokenImportanceRanker,
-            difficulty_predictor: DifficultyPredictor,
-        }
-    }
-
-    fn analyze_input<T>(&self, input: &T) -> Result<InputAnalysis> {
-        // Simplified input analysis
-        Ok(InputAnalysis {
-            sequence_length: 256, // Simplified
-            complexity_score: 0.6,
-            difficulty_estimate: 0.7,
-            attention_patterns: vec![0.5; 12], // Simplified
-            token_importance: vec![0.3; 256],  // Simplified
-            estimated_computation_cost: 100.0,
-            recommended_precision: PrecisionMode::Mixed,
-            recommended_depth: 18,
-        })
+/// Real per-call "unit of work" count used for throughput reporting: the
+/// actual generated-token count when available, the real per-item output
+/// count otherwise, never a hardcoded `1` unless the output genuinely
+/// carries no countable unit.
+fn real_output_units(prediction: &PipelineOutput) -> usize {
+    match prediction {
+        PipelineOutput::Generation(result) => result
+            .sequences
+            .as_ref()
+            .and_then(|sequences| sequences.first())
+            .map(|tokens| tokens.len())
+            .unwrap_or_else(|| result.generated_text.split_whitespace().count())
+            .max(1),
+        PipelineOutput::Classification(results) => results.len().max(1),
+        PipelineOutput::TokenClassification(results) => results.len().max(1),
+        PipelineOutput::FillMask(results) => results.len().max(1),
+        _ => 1,
     }
 }
 
@@ -781,11 +1302,8 @@ impl ResourceMonitor {
     fn new() -> Self {
         Self {
             cpu_usage: 0.0,
-            memory_usage: 512.0,
-            gpu_utilization: 0.0,
-            energy_consumption: 10.0,
-            temperature: 45.0,
-            bandwidth_usage: 0.0,
+            memory_usage: 0.0,
+            energy_consumption: 0.0,
             latency_budget_remaining: 100,
             memory_budget_remaining: 2048,
             energy_budget_remaining: 50.0,
@@ -809,21 +1327,28 @@ impl ConditionalController {
         Self {
             skip_decisions: HashMap::new(),
             conditional_probabilities: HashMap::new(),
-            activation_patterns: HashMap::new(),
             skip_history: Vec::new(),
         }
     }
 }
 
 impl PerformanceTracker {
+    /// Bound on [`PerformanceTracker::latency_samples`]'s length -- keeps a
+    /// long-running engine from growing this vector unboundedly while still
+    /// giving `calculate_performance_metrics` a real, sizeable distribution
+    /// to compute percentiles from. Mirrors the cap
+    /// `early_exit::EarlyExitPredictor::exit_history` already uses for the
+    /// same reason.
+    const MAX_LATENCY_SAMPLES: usize = 1000;
+
     fn new() -> Self {
         Self {
             start_time: Instant::now(),
-            layer_times: Vec::new(),
             memory_snapshots: Vec::new(),
             energy_snapshots: Vec::new(),
             quality_scores: Vec::new(),
             throughput_history: Vec::new(),
+            latency_samples: Vec::new(),
         }
     }
 
@@ -833,6 +1358,11 @@ impl PerformanceTracker {
             .push(result.performance_metrics.throughput_tokens_per_second);
         self.memory_snapshots.push(result.memory_peak_mb);
         self.energy_snapshots.push(result.energy_consumed_watts);
+        self.latency_samples
+            .push(Duration::from_millis(result.total_computation_time_ms));
+        if self.latency_samples.len() > Self::MAX_LATENCY_SAMPLES {
+            self.latency_samples.remove(0);
+        }
     }
 }
 
@@ -914,286 +1444,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_adaptive_inference_config_default() {
-        let config = AdaptiveInferenceConfig::default();
-        assert!(matches!(config.precision_mode, PrecisionMode::Mixed));
-        assert!(matches!(
-            config.conditional_strategy,
-            ConditionalStrategy::DynamicDepth
-        ));
-        assert!(matches!(
-            config.resource_strategy,
-            ResourceStrategy::Balanced
-        ));
-        assert_eq!(config.quality_threshold, 0.8);
-    }
-
-    #[test]
-    fn test_precision_mode_selection() {
-        let config = AdaptiveInferenceConfig::default();
-        assert!(matches!(config.precision_mode, PrecisionMode::Mixed));
-    }
-
-    #[test]
-    fn test_resource_allocation() {
-        let allocation = ResourceAllocation {
-            cpu_cores: 4,
-            memory_limit_mb: 1024,
-            gpu_memory_limit_mb: 2048,
-            energy_budget_watts: 25.0,
-            latency_budget_ms: 50,
-            quality_threshold: 0.9,
-        };
-
-        assert_eq!(allocation.cpu_cores, 4);
-        assert_eq!(allocation.memory_limit_mb, 1024);
-        assert_eq!(allocation.quality_threshold, 0.9);
-    }
-
-    #[test]
-    fn test_input_analysis() {
-        let analyzer = InputAnalyzer::new();
-        let input = "test input";
-        let analysis = analyzer.analyze_input(&input).expect("operation failed in test");
-
-        assert_eq!(analysis.sequence_length, 256);
-        assert!(analysis.complexity_score > 0.0);
-        assert!(analysis.difficulty_estimate > 0.0);
-    }
-
-    #[test]
-    fn test_performance_metrics() {
-        let metrics = PerformanceMetrics {
-            throughput_tokens_per_second: 100.0,
-            latency_percentiles: HashMap::new(),
-            memory_efficiency: 0.8,
-            energy_efficiency: 0.9,
-            quality_preservation: 0.95,
-            speedup_factor: 2.5,
-        };
-
-        assert_eq!(metrics.throughput_tokens_per_second, 100.0);
-        assert_eq!(metrics.speedup_factor, 2.5);
-    }
-
-    // ── Additional tests ──────────────────────────────────────────────────────
-
-    #[test]
-    fn test_config_default_latency_budget_positive() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(
-            cfg.latency_budget_ms > 0,
-            "latency_budget_ms must be positive"
-        );
-    }
-
-    #[test]
-    fn test_config_default_memory_budget_positive() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(
-            cfg.memory_budget_mb > 0,
-            "memory_budget_mb must be positive"
-        );
-    }
-
-    #[test]
-    fn test_config_default_energy_budget_positive() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(
-            cfg.energy_budget_watts > 0.0,
-            "energy_budget_watts must be positive"
-        );
-    }
-
-    #[test]
-    fn test_config_default_quality_threshold_in_range() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(
-            cfg.quality_threshold > 0.0 && cfg.quality_threshold <= 1.0,
-            "quality_threshold must be in (0, 1]"
-        );
-    }
-
-    #[test]
-    fn test_config_default_skip_probability_threshold_in_range() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(
-            cfg.skip_probability_threshold >= 0.0 && cfg.skip_probability_threshold <= 1.0,
-            "skip_probability_threshold must be in [0, 1]"
-        );
-    }
-
-    #[test]
-    fn test_config_default_adaptive_precision_threshold_in_range() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(cfg.adaptive_precision_threshold >= 0.0 && cfg.adaptive_precision_threshold <= 1.0);
-    }
-
-    #[test]
-    fn test_config_flags_enabled_by_default() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(cfg.dynamic_batch_size);
-        assert!(cfg.progressive_inference);
-        assert!(cfg.uncertainty_estimation);
-        assert!(cfg.calibration_enabled);
-    }
-
-    #[test]
-    fn test_precision_mode_all_variants_constructable() {
-        let modes = [
-            PrecisionMode::Full,
-            PrecisionMode::Half,
-            PrecisionMode::Mixed,
-            PrecisionMode::Int8,
-            PrecisionMode::Int4,
-            PrecisionMode::Dynamic,
-            PrecisionMode::Adaptive,
-        ];
-        assert_eq!(modes.len(), 7);
-    }
-
-    #[test]
-    fn test_conditional_strategy_all_variants_constructable() {
-        let strategies = [
-            ConditionalStrategy::AttentionSkipping,
-            ConditionalStrategy::FeedForwardSkipping,
-            ConditionalStrategy::BlockSkipping,
-            ConditionalStrategy::DynamicDepth,
-            ConditionalStrategy::SparseActivation,
-            ConditionalStrategy::TokenConditional,
-            ConditionalStrategy::LayerConditional,
-        ];
-        assert_eq!(strategies.len(), 7);
-    }
-
-    #[test]
-    fn test_resource_strategy_balanced_is_default() {
-        let cfg = AdaptiveInferenceConfig::default();
-        assert!(matches!(cfg.resource_strategy, ResourceStrategy::Balanced));
-    }
-
-    #[test]
-    fn test_adaptation_decision_struct_fields() {
-        let decision = AdaptationDecision {
-            layer_index: 3,
-            decision_type: "layer_skip".to_string(),
-            reason: "low complexity".to_string(),
-            confidence: 0.95,
-            resource_impact: 0.1,
-            quality_impact: 0.02,
-        };
-        assert_eq!(decision.layer_index, 3);
-        assert!(decision.confidence > 0.0 && decision.confidence <= 1.0);
-        assert!(decision.resource_impact >= 0.0);
-        assert!(decision.quality_impact >= 0.0);
-    }
-
-    #[test]
-    fn test_resource_allocation_custom_fields() {
-        let alloc = ResourceAllocation {
-            cpu_cores: 8,
-            memory_limit_mb: 4096,
-            gpu_memory_limit_mb: 8192,
-            energy_budget_watts: 100.0,
-            latency_budget_ms: 200,
-            quality_threshold: 0.95,
-        };
-        assert_eq!(alloc.cpu_cores, 8);
-        assert_eq!(alloc.memory_limit_mb, 4096);
-        assert!(alloc.quality_threshold > 0.0 && alloc.quality_threshold <= 1.0);
-    }
-
-    #[test]
-    fn test_input_analysis_recommended_precision_valid() {
-        let analyzer = InputAnalyzer::new();
-        let analysis = analyzer.analyze_input(&"sample").expect("analyze_input should succeed");
-        // Just check it returns some valid precision mode
-        let _mode = &analysis.recommended_precision;
-        assert!(analysis.estimated_computation_cost > 0.0);
-    }
-
-    #[test]
-    fn test_input_analysis_recommended_depth_within_model_bounds() {
-        let analyzer = InputAnalyzer::new();
-        let analysis = analyzer.analyze_input(&"test input").expect("analyze_input should succeed");
-        // recommended_depth should be at most total_layers (24 from default config)
-        assert!(
-            analysis.recommended_depth <= 24,
-            "recommended depth must not exceed model depth"
-        );
-        assert!(
-            analysis.recommended_depth > 0,
-            "recommended depth must be positive"
-        );
-    }
-
-    #[test]
-    fn test_performance_metrics_latency_throughput_relationship() {
-        // If throughput = tokens/sec and latency is in ms then
-        // throughput ≈ 1000 / latency_ms (for single token).
-        let latency_ms = 10.0_f32;
-        let expected_throughput = 1000.0 / latency_ms;
-        let metrics = PerformanceMetrics {
-            throughput_tokens_per_second: expected_throughput,
-            latency_percentiles: HashMap::new(),
-            memory_efficiency: 0.9,
-            energy_efficiency: 0.8,
-            quality_preservation: 0.95,
-            speedup_factor: 2.0,
-        };
-        assert!(
-            (metrics.throughput_tokens_per_second - 100.0).abs() < 1e-4,
-            "throughput should be 1000/latency_ms"
-        );
-    }
-
-    #[test]
-    fn test_resource_efficiency_higher_speed_is_better() {
-        // resource_efficiency = time_factor + mem_factor + energy_factor / 3
-        // At lower time (ms) the time_factor is higher → higher efficiency
-        let time_fast = 10_u64;
-        let time_slow = 1000_u64;
-        let mem = 512.0_f64;
-        let energy = 50.0_f32;
-
-        let ef_fast = {
-            let t = 1.0 / (time_fast as f32 / 1000.0 + 1.0);
-            let m = 1.0 / (mem as f32 / 1024.0 + 1.0);
-            let e = 1.0 / (energy + 1.0);
-            (t + m + e) / 3.0
-        };
-        let ef_slow = {
-            let t = 1.0 / (time_slow as f32 / 1000.0 + 1.0);
-            let m = 1.0 / (mem as f32 / 1024.0 + 1.0);
-            let e = 1.0 / (energy + 1.0);
-            (t + m + e) / 3.0
-        };
-
-        assert!(
-            ef_fast > ef_slow,
-            "faster execution should yield higher resource efficiency"
-        );
-    }
-
-    #[test]
-    fn test_latency_quality_tradeoff_higher_quality_better() {
-        let latency_ms = 50_u64;
-        let budget_ms = 100_u64;
-        let quality_high = 0.95_f32;
-        let quality_low = 0.5_f32;
-
-        let tradeoff = |q: f32| {
-            let l_norm = latency_ms as f32 / budget_ms as f32;
-            q / (l_norm + 1.0)
-        };
-
-        assert!(
-            tradeoff(quality_high) > tradeoff(quality_low),
-            "higher quality should produce better tradeoff score"
-        );
-    }
-}
+#[path = "adaptive_inference_tests.rs"]
+mod tests;

@@ -1,5 +1,11 @@
 # TrustformeRS C API
 
+> **DEPRECATED as of the 0.2.0 release.** This crate receives no further feature
+> development or maintenance, is excluded from the workspace, and must not be
+> published. See [`TODO.md`](TODO.md) for the rationale and migration guidance.
+> Rust consumers should depend on `trustformers-core` / `trustformers` directly;
+> browser/Node/edge consumers should use `trustformers-wasm`.
+
 High-performance transformer library C bindings for cross-language integration.
 
 ## Overview

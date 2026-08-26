@@ -1,53 +1,224 @@
+//! FlashAttention and its multi-query / grouped-query variants.
+//!
+//! All three layers share the block-tiled kernel in
+//! `crate::layers::attention::flash_kernel`: the full `seq_q x seq_k`
+//! attention matrix is never materialised and the online softmax keeps
+//! per-query-row statistics.
+
 use crate::errors::{Result, TrustformersError};
+use crate::layers::attention::flash_kernel::{flash_attention, FlashParams};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{
-    s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip,
-};
-#[cfg(not(target_os = "macos"))]
-use scirs2_core::simd_ops::SimdUnifiedOps;
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn};
 
-/// Minimum size threshold for BLAS GEMM
-const MIN_SIZE_FOR_BLAS: usize = 32;
+/// Split `[batch, seq_len, num_heads * head_dim]` into
+/// `[batch, num_heads, seq_len, head_dim]`.
+fn split_heads(tensor: &Tensor, num_heads: usize, head_dim: usize) -> Result<Tensor> {
+    let shape = tensor.shape();
+    if shape.len() != 3 {
+        return Err(TrustformersError::tensor_op_error(
+            &format!(
+                "Input tensor must have 3 dimensions for split_heads, got {}",
+                shape.len()
+            ),
+            "flash_attention::split_heads",
+        ));
+    }
 
-/// Direct BLAS GEMM using OxiBLAS for maximum performance
-#[cfg(target_os = "macos")]
-#[inline]
-fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    use oxiblas_blas::level3::gemm;
-    use oxiblas_matrix::{MatMut, MatRef};
+    match tensor {
+        Tensor::F32(arr) => {
+            let batch_size = shape[0];
+            let seq_len = shape[1];
+            if shape[2] != num_heads * head_dim {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "hidden size {} must equal num_heads * head_dim ({})",
+                        shape[2],
+                        num_heads * head_dim
+                    ),
+                    "flash_attention::split_heads",
+                ));
+            }
 
-    // Bridge row-major → col-major via Cᵀ = Bᵀ·Aᵀ identity:
-    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
-    // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
-    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
-    // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+            let reshaped = arr
+                .to_shape(IxDyn(&[batch_size, seq_len, num_heads, head_dim]))
+                .map_err(|_| {
+                    TrustformersError::shape_error("Failed to reshape in split_heads".into())
+                })?
+                .to_owned();
 
-    // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
-    gemm(1.0, b_t, a_t, 0.0, c_t);
+            Ok(Tensor::F32(reshaped.permuted_axes(vec![0, 2, 1, 3])))
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "Unsupported tensor type",
+            "flash_attention::split_heads",
+        )),
+    }
 }
 
-/// Fallback for non-macOS: use scirs2-core SIMD GEMM
-#[cfg(not(target_os = "macos"))]
-#[inline]
-fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    // Safe expect: shape and vector length are guaranteed to match by caller
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).expect("BLAS input shape mismatch");
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).expect("BLAS input shape mismatch");
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch");
-    f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    if let Some(slice) = c_arr.as_slice() {
-        c.copy_from_slice(slice);
-    } else {
-        // Fallback: copy element by element
-        for (i, &val) in c_arr.iter().enumerate() {
-            c[i] = val;
-        }
+/// Merge `[batch, num_heads, seq_len, head_dim]` back into
+/// `[batch, seq_len, num_heads * head_dim]`.
+fn merge_heads(tensor: &Tensor) -> Result<Tensor> {
+    let shape = tensor.shape();
+    if shape.len() != 4 {
+        return Err(TrustformersError::tensor_op_error(
+            "Input tensor must have 4 dimensions",
+            "flash_attention::merge_heads",
+        ));
     }
+
+    match tensor {
+        Tensor::F32(arr) => {
+            let batch_size = shape[0];
+            let seq_len = shape[2];
+            let hidden_size = shape[1] * shape[3];
+
+            let transposed = arr.clone().permuted_axes(vec![0, 2, 1, 3]);
+            let merged = transposed
+                .as_standard_layout()
+                .to_shape(IxDyn(&[batch_size, seq_len, hidden_size]))
+                .map_err(|_| {
+                    TrustformersError::shape_error("Failed to reshape in merge_heads".into())
+                })?
+                .to_owned();
+
+            Ok(Tensor::F32(merged))
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "Unsupported tensor type",
+            "flash_attention::merge_heads",
+        )),
+    }
+}
+
+/// Repeat each key/value head so that grouped-query attention can reuse the
+/// dense `[batch, num_query_heads, seq, head_dim]` kernel.
+fn expand_kv_heads(tensor: &Tensor, num_kv_heads: usize, num_query_heads: usize) -> Result<Tensor> {
+    if num_kv_heads == num_query_heads {
+        return Ok(tensor.clone());
+    }
+    if num_kv_heads == 0 || !num_query_heads.is_multiple_of(num_kv_heads) {
+        return Err(TrustformersError::tensor_op_error(
+            &format!(
+                "num_query_heads {} must be a positive multiple of num_key_value_heads {}",
+                num_query_heads, num_kv_heads
+            ),
+            "flash_attention::expand_kv_heads",
+        ));
+    }
+
+    match tensor {
+        Tensor::F32(array) => {
+            let shape = array.shape();
+            if shape.len() != 4 || shape[1] != num_kv_heads {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "Expected a [batch, {}, seq, head_dim] tensor, got {:?}",
+                        num_kv_heads, shape
+                    ),
+                    "flash_attention::expand_kv_heads",
+                ));
+            }
+            let (batch, seq_len, head_dim) = (shape[0], shape[2], shape[3]);
+            let group_size = num_query_heads / num_kv_heads;
+
+            let mut data = Vec::with_capacity(batch * num_query_heads * seq_len * head_dim);
+            for b in 0..batch {
+                for head in 0..num_query_heads {
+                    let kv_head = head / group_size;
+                    for position in 0..seq_len {
+                        for dim in 0..head_dim {
+                            data.push(array[[b, kv_head, position, dim]]);
+                        }
+                    }
+                }
+            }
+
+            Ok(Tensor::F32(
+                ArrayD::from_shape_vec(IxDyn(&[batch, num_query_heads, seq_len, head_dim]), data)
+                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
+            ))
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "Unsupported tensor type",
+            "flash_attention::expand_kv_heads",
+        )),
+    }
+}
+
+/// Promote a 2-D `[seq_len, hidden]` tensor to `[1, seq_len, hidden]`.
+///
+/// Returns the tensor together with a flag telling the caller whether the
+/// batch dimension has to be removed again on the way out.
+fn ensure_batched(hidden_states: Tensor) -> Result<(Tensor, bool)> {
+    match &hidden_states {
+        Tensor::F32(arr) if arr.ndim() == 2 => {
+            let shape = arr.shape();
+            let expanded = arr
+                .view()
+                .into_shape_with_order(IxDyn(&[1, shape[0], shape[1]]))
+                .map_err(|e| {
+                    TrustformersError::shape_error(format!("Failed to add batch dimension: {e}"))
+                })?
+                .to_owned();
+            Ok((Tensor::F32(expanded), true))
+        },
+        _ => Ok((hidden_states, false)),
+    }
+}
+
+fn drop_batch_dimension(result: Tensor) -> Tensor {
+    match &result {
+        Tensor::F32(arr) if arr.shape()[0] == 1 => {
+            Tensor::F32(arr.index_axis(Axis(0), 0).to_owned())
+        },
+        _ => result,
+    }
+}
+
+/// Shared projection + attention + output-projection pipeline used by
+/// [`FlashAttention`], [`MultiQueryAttention`] and [`GroupedQueryAttention`].
+#[allow(clippy::too_many_arguments)]
+fn projected_attention(
+    hidden_states: &Tensor,
+    query: &Linear,
+    key: &Linear,
+    value: &Linear,
+    out_proj: &Linear,
+    num_query_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    attention_mask: Option<&Tensor>,
+    params: &FlashParams,
+) -> Result<Tensor> {
+    // `forward_ref` borrows: the same `[batch, seq, hidden]` tensor feeds all
+    // three projections, and the owning `Layer::forward` would deep-copy it once
+    // per projection — three wasted copies per attention call.
+    let query_states = split_heads(
+        &query.forward_ref(hidden_states)?,
+        num_query_heads,
+        head_dim,
+    )?;
+    let key_states = expand_kv_heads(
+        &split_heads(&key.forward_ref(hidden_states)?, num_kv_heads, head_dim)?,
+        num_kv_heads,
+        num_query_heads,
+    )?;
+    let value_states = expand_kv_heads(
+        &split_heads(&value.forward_ref(hidden_states)?, num_kv_heads, head_dim)?,
+        num_kv_heads,
+        num_query_heads,
+    )?;
+
+    let context = flash_attention(
+        &query_states,
+        &key_states,
+        &value_states,
+        attention_mask,
+        params,
+    )?;
+    out_proj.forward(merge_heads(&context)?)
 }
 
 /// FlashAttention: Memory-efficient attention computation
@@ -58,6 +229,10 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 ///
 /// Reference: FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
 /// <https://arxiv.org/abs/2205.14135>
+///
+/// `use_flash_attention_2` selects the tile size only: on CPU both settings run
+/// the same kernel (which already uses FlashAttention-2's deferred
+/// normalisation), with `-2` doubling the tile for long sequences.
 #[derive(Debug, Clone)]
 pub struct FlashAttention {
     num_heads: usize,
@@ -67,14 +242,15 @@ pub struct FlashAttention {
     key: Linear,
     value: Linear,
     out_proj: Linear,
-    #[allow(dead_code)]
     dropout_prob: f32,
+    training: bool,
     block_size: usize,
     causal: bool,
     use_flash_attention_2: bool,
 }
 
 impl FlashAttention {
+    /// Create a FlashAttention layer (FlashAttention-2 tiling by default).
     pub fn new(
         hidden_size: usize,
         num_heads: usize,
@@ -94,6 +270,7 @@ impl FlashAttention {
         )
     }
 
+    /// Create a FlashAttention layer, choosing the tiling strategy explicitly.
     pub fn new_with_version(
         hidden_size: usize,
         num_heads: usize,
@@ -111,7 +288,7 @@ impl FlashAttention {
         }
 
         let head_dim = hidden_size / num_heads;
-        let block_size = block_size.unwrap_or(64); // Default block size
+        let block_size = block_size.unwrap_or(64).max(1); // Default block size
 
         Ok(Self {
             num_heads,
@@ -122,529 +299,84 @@ impl FlashAttention {
             value: Linear::new(hidden_size, hidden_size, bias),
             out_proj: Linear::new(hidden_size, hidden_size, bias),
             dropout_prob,
+            training: false,
             block_size,
             causal,
             use_flash_attention_2,
         })
     }
 
-    /// Split tensor into heads: [batch, seq_len, hidden] -> [batch, num_heads, seq_len, head_dim]
-    fn split_heads(&self, tensor: &Tensor) -> Result<Tensor> {
-        let shape = tensor.shape();
-        if shape.len() != 3 {
-            return Err(TrustformersError::tensor_op_error(
-                &format!(
-                    "Input tensor must have 3 dimensions for split_heads, got {}",
-                    shape.len()
-                ),
-                "FlashAttention::split_heads",
-            ));
-        }
-
-        match tensor {
-            Tensor::F32(arr) => {
-                let batch_size = shape[0];
-                let seq_len = shape[1];
-
-                // Reshape to [batch, seq_len, num_heads, head_dim]
-                let reshaped = arr
-                    .to_shape(IxDyn(&[batch_size, seq_len, self.num_heads, self.head_dim]))
-                    .map_err(|_| {
-                        TrustformersError::shape_error("Failed to reshape in split_heads".into())
-                    })?
-                    .to_owned();
-
-                // Transpose to [batch, num_heads, seq_len, head_dim]
-                let transposed = reshaped.permuted_axes(vec![0, 2, 1, 3]);
-                Ok(Tensor::F32(transposed))
-            },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor type",
-                "FlashAttention::split_heads",
-            )),
-        }
+    /// Number of attention heads.
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
     }
 
-    /// Merge heads: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden]
-    fn merge_heads(&self, tensor: &Tensor) -> Result<Tensor> {
-        let shape = tensor.shape();
-        if shape.len() != 4 {
-            return Err(TrustformersError::tensor_op_error(
-                "Input tensor must have 4 dimensions",
-                "FlashAttention::merge_heads",
-            ));
-        }
-
-        match tensor {
-            Tensor::F32(arr) => {
-                let batch_size = shape[0];
-                let seq_len = shape[2];
-
-                // Transpose back to [batch, seq_len, num_heads, head_dim]
-                let transposed = arr.clone().permuted_axes(vec![0, 2, 1, 3]);
-
-                // Reshape to [batch, seq_len, hidden_size]
-                let merged = transposed
-                    .to_shape(IxDyn(&[batch_size, seq_len, self.hidden_size]))
-                    .map_err(|_| {
-                        TrustformersError::shape_error("Failed to reshape in merge_heads".into())
-                    })?
-                    .to_owned();
-
-                Ok(Tensor::F32(merged))
-            },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor type",
-                "FlashAttention::merge_heads",
-            )),
-        }
+    /// Hidden size of the layer.
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
     }
 
-    /// Flash attention computation with tiling
-    ///
-    /// This implements the core FlashAttention algorithm:
-    /// 1. Divide Q, K, V into blocks
-    /// 2. Compute attention for each block pair
-    /// 3. Use online softmax to maintain numerical stability
-    /// 4. Accumulate results without storing full attention matrix
-    fn flash_attention_forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        _mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        if self.use_flash_attention_2 {
-            self.flash_attention_2_forward(q, k, v, _mask)
+    /// Dimension of a single attention head.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Whether the layer is in training mode (which enables attention dropout).
+    pub fn is_training(&self) -> bool {
+        self.training
+    }
+
+    /// Switch between training and inference mode.
+    pub fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    /// Total number of parameters in this layer.
+    pub fn parameter_count(&self) -> usize {
+        self.query.parameter_count()
+            + self.key.parameter_count()
+            + self.value.parameter_count()
+            + self.out_proj.parameter_count()
+    }
+
+    /// Replace the query/key/value/output projection weights.
+    pub fn set_projections(&mut self, query: Linear, key: Linear, value: Linear, out_proj: Linear) {
+        self.query = query;
+        self.key = key;
+        self.value = value;
+        self.out_proj = out_proj;
+    }
+
+    /// Tiling parameters for the current configuration.
+    fn params(&self) -> Result<FlashParams> {
+        let block_size = if self.use_flash_attention_2 {
+            (self.block_size * 2).min(1024)
         } else {
-            self.flash_attention_1_forward(q, k, v, _mask)
-        }
+            self.block_size
+        };
+        let dropout = if self.training { Some(self.dropout_prob) } else { None };
+        FlashParams::new(self.head_dim, self.causal, block_size).with_dropout(dropout)
     }
 
-    /// Original FlashAttention algorithm
-    fn flash_attention_1_forward(
+    /// Run FlashAttention over already-projected `[batch, heads, seq, head_dim]`
+    /// tensors.
+    pub fn attention(
         &self,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
-        _mask: Option<&Tensor>,
+        attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_len = q_shape[2];
-        let head_dim = q_shape[3];
-
-        let scale = 1.0 / (head_dim as f32).sqrt();
-
-        match (q, k, v) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
-                // Initialize output
-                let mut output = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_len, head_dim]));
-
-                // Online statistics for softmax
-                let mut l = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_len])); // row sums
-                let mut m =
-                    ArrayD::from_elem(IxDyn(&[batch_size, num_heads, seq_len]), f32::NEG_INFINITY); // row maxes
-
-                let num_blocks = seq_len.div_ceil(self.block_size);
-
-                // Iterate over blocks of Q (queries)
-                for i in 0..num_blocks {
-                    let q_start = i * self.block_size;
-                    let q_end = (q_start + self.block_size).min(seq_len);
-                    let q_block_size = q_end - q_start;
-
-                    // Extract Q block
-                    let q_block = q_arr.slice(s![.., .., q_start..q_end, ..]).to_owned();
-
-                    // Initialize block outputs
-                    let mut o_block =
-                        ArrayD::zeros(IxDyn(&[batch_size, num_heads, q_block_size, head_dim]));
-                    let mut l_block = ArrayD::zeros(IxDyn(&[batch_size, num_heads, q_block_size]));
-                    let mut m_block = ArrayD::from_elem(
-                        IxDyn(&[batch_size, num_heads, q_block_size]),
-                        f32::NEG_INFINITY,
-                    );
-
-                    // Iterate over blocks of K, V (keys, values)
-                    for j in 0..num_blocks {
-                        let k_start = j * self.block_size;
-                        let k_end = (k_start + self.block_size).min(seq_len);
-
-                        // Skip future positions for causal attention
-                        if self.causal && k_start >= q_end {
-                            break;
-                        }
-
-                        // Extract K, V blocks
-                        let k_block = k_arr.slice(s![.., .., k_start..k_end, ..]).to_owned();
-                        let v_block = v_arr.slice(s![.., .., k_start..k_end, ..]).to_owned();
-
-                        // Compute attention scores: Q @ K^T
-                        let k_transposed = k_block.permuted_axes([0, 1, 3, 2]);
-                        let scores = self.batched_matmul_slices(&q_block, &k_transposed)?;
-                        let mut scores = scores.mapv(|x| x * scale);
-
-                        // Apply causal mask within block
-                        if self.causal {
-                            for b in 0..batch_size {
-                                for h in 0..num_heads {
-                                    for qi in 0..q_block_size {
-                                        for ki in 0..(k_end - k_start) {
-                                            let global_qi = q_start + qi;
-                                            let global_ki = k_start + ki;
-                                            if global_qi < global_ki {
-                                                scores[[b, h, qi, ki]] = f32::NEG_INFINITY;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Online softmax update
-                        let m_new = scores.map_axis(Axis(3), |row| {
-                            row.fold(f32::NEG_INFINITY, |acc, &x| acc.max(x))
-                        });
-
-                        let m_prev = m_block.clone();
-                        let m_combined = Zip::from(&m_block)
-                            .and(&m_new)
-                            .map_collect(|&m_old, &m_curr| m_old.max(m_curr));
-
-                        // Compute exponentials with numerical stability
-                        // Expand m_combined to match scores shape for broadcasting
-                        let scores_shape = scores.shape();
-                        let mut m_combined_expanded = ArrayD::zeros(IxDyn(scores_shape));
-                        for b in 0..batch_size {
-                            for h in 0..num_heads {
-                                for qi in 0..q_block_size {
-                                    let m_val = m_combined[[b, h, qi]];
-                                    for ki in 0..(k_end - k_start) {
-                                        m_combined_expanded[[b, h, qi, ki]] = m_val;
-                                    }
-                                }
-                            }
-                        }
-                        let exp_scores = Zip::from(&scores)
-                            .and(&m_combined_expanded)
-                            .map_collect(|&score, &m_max| (score - m_max).exp());
-
-                        let exp_prev = Zip::from(&m_prev)
-                            .and(&m_combined)
-                            .map_collect(|&m_old, &m_new| (m_old - m_new).exp());
-
-                        // Update row sums
-                        let l_new = exp_scores.sum_axis(Axis(3));
-                        let l_prev_scaled =
-                            Zip::from(&l_block).and(&exp_prev).map_collect(|&l, &exp| l * exp);
-                        l_block = l_prev_scaled + l_new;
-
-                        // Update output - broadcast exp_prev to match o_block shape
-                        let mut o_prev_scaled = o_block.clone();
-                        for b in 0..batch_size {
-                            for h in 0..num_heads {
-                                for qi in 0..q_block_size {
-                                    let exp_val = exp_prev[[b, h, qi]];
-                                    for d in 0..head_dim {
-                                        o_prev_scaled[[b, h, qi, d]] *= exp_val;
-                                    }
-                                }
-                            }
-                        }
-
-                        let attn_v = self.batched_matmul_slices(&exp_scores, &v_block)?;
-                        o_block = o_prev_scaled + attn_v;
-
-                        m_block = m_combined;
-                    }
-
-                    // Normalize output
-                    let l_inv = l_block.mapv(|x: f32| if x > 0.0 { 1.0 / x } else { 0.0 });
-                    // Broadcast l_inv to match o_block shape
-                    for b in 0..batch_size {
-                        for h in 0..num_heads {
-                            for qi in 0..q_block_size {
-                                let l_val = l_inv[[b, h, qi]];
-                                for d in 0..head_dim {
-                                    o_block[[b, h, qi, d]] *= l_val;
-                                }
-                            }
-                        }
-                    }
-
-                    // Store block in output
-                    output.slice_mut(s![.., .., q_start..q_end, ..]).assign(&o_block);
-                    l.slice_mut(s![.., .., q_start..q_end]).assign(&l_block);
-                    m.slice_mut(s![.., .., q_start..q_end]).assign(&m_block);
-                }
-
-                Ok(Tensor::F32(output))
-            },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor types for flash attention",
-                "FlashAttention::flash_attention_forward",
-            )),
-        }
-    }
-
-    /// Helper function for batched matrix multiplication with array slices
-    fn batched_matmul_slices<D1, D2>(
-        &self,
-        a: &ArrayBase<OwnedRepr<f32>, D1>,
-        b: &ArrayBase<OwnedRepr<f32>, D2>,
-    ) -> Result<ArrayD<f32>>
-    where
-        D1: Dimension,
-        D2: Dimension,
-    {
-        // Convert to dynamic arrays for uniform handling
-        let a_dyn = a.view().into_dyn().to_owned();
-        let b_dyn = b.view().into_dyn().to_owned();
-        self.batched_matmul_4d(&a_dyn, &b_dyn)
-    }
-
-    /// Helper function for 4D batched matrix multiplication
-    fn batched_matmul_4d(&self, a: &ArrayD<f32>, b: &ArrayD<f32>) -> Result<ArrayD<f32>> {
-        let a_shape = a.shape();
-        let b_shape = b.shape();
-
-        if a_shape.len() != 4 || b_shape.len() != 4 {
-            return Err(TrustformersError::tensor_op_error(
-                "Both tensors must be 4D",
-                "FlashAttention::batched_matmul_4d",
-            ));
-        }
-
-        let batch = a_shape[0];
-        let heads = a_shape[1];
-        let m = a_shape[2];
-        let k = a_shape[3];
-        let n = b_shape[3];
-
-        if a_shape[0] != b_shape[0] || a_shape[1] != b_shape[1] || k != b_shape[2] {
-            return Err(TrustformersError::tensor_op_error(
-                "Shape mismatch in batched matmul",
-                "FlashAttention::batched_matmul_4d",
-            ));
-        }
-
-        let mut result = ArrayD::zeros(IxDyn(&[batch, heads, m, n]));
-
-        for b_idx in 0..batch {
-            for h_idx in 0..heads {
-                let a_slice = a.index_axis(Axis(0), b_idx);
-                let a_mat = a_slice.index_axis(Axis(0), h_idx);
-                let b_slice = b.index_axis(Axis(0), b_idx);
-                let b_mat = b_slice.index_axis(Axis(0), h_idx);
-
-                // Collect data for matrix multiplication
-                let a_data: Vec<f32> = a_mat.iter().cloned().collect();
-                let b_data: Vec<f32> = b_mat.iter().cloned().collect();
-
-                // Use direct BLAS for larger matrices
-                let product =
-                    if m >= MIN_SIZE_FOR_BLAS && k >= MIN_SIZE_FOR_BLAS && n >= MIN_SIZE_FOR_BLAS {
-                        let mut result_vec = vec![0.0f32; m * n];
-                        blas_sgemm(&a_data, &b_data, &mut result_vec, m, k, n);
-                        Array2::from_shape_vec((m, n), result_vec)
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                    } else {
-                        // Fallback to ndarray dot for small matrices
-                        let a_2d = Array2::from_shape_vec((m, k), a_data)
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                        let b_2d = Array2::from_shape_vec((k, n), b_data)
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                        a_2d.dot(&b_2d)
-                    };
-
-                result
-                    .index_axis_mut(Axis(0), b_idx)
-                    .index_axis_mut(Axis(0), h_idx)
-                    .assign(&product);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// FlashAttention-2 algorithm with improved work partitioning
-    ///
-    /// Key improvements over FlashAttention-1:
-    /// 1. Better parallelism across sequence dimension
-    /// 2. Reduced memory accesses through better work partitioning
-    /// 3. More efficient softmax computation
-    fn flash_attention_2_forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        _mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_len = q_shape[2];
-        let head_dim = q_shape[3];
-        let scale = 1.0 / (head_dim as f32).sqrt();
-
-        match (q, k, v) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
-                let mut output = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_len, head_dim]));
-
-                // FlashAttention-2: Better work partitioning
-                // Process multiple query blocks in parallel (conceptually)
-                let num_blocks = seq_len.div_ceil(self.block_size);
-
-                // For each batch and head
-                for b in 0..batch_size {
-                    for h in 0..num_heads {
-                        // Extract head-specific Q, K, V
-                        let q_batch = q_arr.index_axis(Axis(0), b);
-                        let k_batch = k_arr.index_axis(Axis(0), b);
-                        let v_batch = v_arr.index_axis(Axis(0), b);
-                        let q_head = q_batch.index_axis(Axis(0), h);
-                        let k_head = k_batch.index_axis(Axis(0), h);
-                        let v_head = v_batch.index_axis(Axis(0), h);
-
-                        // Process all Q blocks for this head
-                        for i in 0..num_blocks {
-                            let q_start = i * self.block_size;
-                            let q_end = (q_start + self.block_size).min(seq_len);
-                            let q_block_size = q_end - q_start;
-
-                            // Extract Q block - improved memory access pattern
-                            let q_block = q_head.slice(s![q_start..q_end, ..]).to_owned();
-
-                            // Initialize block outputs with better memory layout
-                            let mut o_block = Array2::<f32>::zeros((q_block_size, head_dim));
-                            let mut l_block = Array1::<f32>::zeros(q_block_size);
-                            let mut m_block =
-                                Array1::<f32>::from_elem(q_block_size, f32::NEG_INFINITY);
-
-                            // FlashAttention-2: Improved K,V block iteration
-                            for j in 0..num_blocks {
-                                let k_start = j * self.block_size;
-                                let k_end = (k_start + self.block_size).min(seq_len);
-                                let k_block_size = k_end - k_start;
-
-                                // Skip future positions for causal attention
-                                if self.causal && k_start >= q_end {
-                                    break;
-                                }
-
-                                // Extract K, V blocks with better memory access
-                                let k_block = k_head.slice(s![k_start..k_end, ..]).to_owned();
-                                let v_block = v_head.slice(s![k_start..k_end, ..]).to_owned();
-
-                                // Compute attention scores: Q @ K^T
-                                let mut scores = Array2::<f32>::zeros((q_block_size, k_block_size));
-                                for qi in 0..q_block_size {
-                                    for ki in 0..k_block_size {
-                                        let mut dot_product = 0.0;
-                                        for d in 0..head_dim {
-                                            dot_product += q_block[[qi, d]] * k_block[[ki, d]];
-                                        }
-                                        scores[[qi, ki]] = dot_product * scale;
-                                    }
-                                }
-
-                                // Apply causal mask within block
-                                if self.causal {
-                                    for qi in 0..q_block_size {
-                                        for ki in 0..k_block_size {
-                                            let global_qi = q_start + qi;
-                                            let global_ki = k_start + ki;
-                                            if global_qi < global_ki {
-                                                scores[[qi, ki]] = f32::NEG_INFINITY;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // FlashAttention-2: Improved online softmax with fewer memory accesses
-                                let m_new =
-                                    scores.fold_axis(Axis(1), f32::NEG_INFINITY, |&acc, &x| {
-                                        acc.max(x)
-                                    });
-                                let m_prev = m_block.clone();
-                                let m_combined = Array1::<f32>::from_shape_fn(q_block_size, |i| {
-                                    m_block[i].max(m_new[i])
-                                });
-
-                                // More efficient exponential computation
-                                let mut exp_scores =
-                                    Array2::<f32>::zeros((q_block_size, k_block_size));
-                                for qi in 0..q_block_size {
-                                    for ki in 0..k_block_size {
-                                        exp_scores[[qi, ki]] =
-                                            (scores[[qi, ki]] - m_combined[qi]).exp();
-                                    }
-                                }
-
-                                let exp_prev = Array1::<f32>::from_shape_fn(q_block_size, |i| {
-                                    (m_prev[i] - m_combined[i]).exp()
-                                });
-
-                                // Update row sums with better memory access
-                                let l_new = exp_scores.sum_axis(Axis(1));
-                                for qi in 0..q_block_size {
-                                    l_block[qi] = l_block[qi] * exp_prev[qi] + l_new[qi];
-                                }
-
-                                // Update output with improved memory access pattern
-                                for qi in 0..q_block_size {
-                                    for d in 0..head_dim {
-                                        o_block[[qi, d]] *= exp_prev[qi];
-                                    }
-                                }
-
-                                // Compute attn @ V with better cache locality
-                                for qi in 0..q_block_size {
-                                    for d in 0..head_dim {
-                                        let mut attn_v_val = 0.0;
-                                        for ki in 0..k_block_size {
-                                            attn_v_val += exp_scores[[qi, ki]] * v_block[[ki, d]];
-                                        }
-                                        o_block[[qi, d]] += attn_v_val;
-                                    }
-                                }
-
-                                m_block = m_combined;
-                            }
-
-                            // Normalize output with vectorized operations
-                            for qi in 0..q_block_size {
-                                let l_inv = if l_block[qi] > 0.0 { 1.0 / l_block[qi] } else { 0.0 };
-                                for d in 0..head_dim {
-                                    o_block[[qi, d]] *= l_inv;
-                                }
-                            }
-
-                            // Store block in output
-                            for qi in 0..q_block_size {
-                                for d in 0..head_dim {
-                                    output[[b, h, q_start + qi, d]] = o_block[[qi, d]];
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Ok(Tensor::F32(output))
-            },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor types for flash attention 2",
-                "FlashAttention::flash_attention_2_forward",
-            )),
-        }
+        flash_attention(q, k, v, attention_mask, &self.params()?)
     }
 }
 
+/// Input bundle for the attention layers in this module.
 #[derive(Debug, Clone)]
 pub struct FlashAttentionInput {
+    /// `[batch, seq_len, hidden]` (or `[seq_len, hidden]`) hidden states.
     pub hidden_states: Tensor,
+    /// Optional attention mask, see [`crate::layers::attention::mask`].
     pub attention_mask: Option<Tensor>,
 }
 
@@ -653,102 +385,51 @@ impl Layer for FlashAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let hidden_states = input.hidden_states;
+        let (hidden_states, was_2d) = ensure_batched(input.hidden_states)?;
 
-        // Track if input was originally 2D to decide whether to squeeze output
-        let was_2d = match &hidden_states {
-            Tensor::F32(arr) => arr.ndim() == 2,
-            _ => false,
-        };
-
-        // Handle 2D input by adding batch dimension
-        let hidden_states = match &hidden_states {
-            Tensor::F32(arr) => {
-                if arr.ndim() == 2 {
-                    let shape = arr.shape();
-                    let expanded = arr
-                        .view()
-                        .into_shape_with_order(IxDyn(&[1, shape[0], shape[1]]))
-                        .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to add batch dimension: {}",
-                                e
-                            ))
-                        })?;
-                    Tensor::F32(expanded.to_owned())
-                } else {
-                    hidden_states
-                }
-            },
-            _ => hidden_states,
-        };
-
-        // Compute Q, K, V projections
-        let query_states = self.query.forward(hidden_states.clone())?;
-        let key_states = self.key.forward(hidden_states.clone())?;
-        let value_states = self.value.forward(hidden_states)?;
-
-        // Split into attention heads
-        let query_states = self.split_heads(&query_states)?;
-        let key_states = self.split_heads(&key_states)?;
-        let value_states = self.split_heads(&value_states)?;
-
-        // Apply FlashAttention
-        let context = self.flash_attention_forward(
-            &query_states,
-            &key_states,
-            &value_states,
+        let result = projected_attention(
+            &hidden_states,
+            &self.query,
+            &self.key,
+            &self.value,
+            &self.out_proj,
+            self.num_heads,
+            self.num_heads,
+            self.head_dim,
             input.attention_mask.as_ref(),
+            &self.params()?,
         )?;
 
-        // Merge heads back
-        let context = self.merge_heads(&context)?;
-
-        // Apply output projection
-        let result = self.out_proj.forward(context)?;
-
-        // Remove batch dimension only if input was originally 2D
         if was_2d {
-            match &result {
-                Tensor::F32(arr) => {
-                    if arr.shape()[0] == 1 {
-                        let squeezed = arr.index_axis(Axis(0), 0).to_owned();
-                        Ok(Tensor::F32(squeezed))
-                    } else {
-                        Ok(result)
-                    }
-                },
-                _ => Ok(result),
-            }
+            Ok(drop_batch_dimension(result))
         } else {
             Ok(result)
         }
     }
 }
 
-/// Multi-Query Attention (MQA) - uses single key/value head for all query heads
-/// This reduces memory and computation while maintaining performance
+/// Multi-Query Attention (MQA) - uses a single key/value head shared by all
+/// query heads, which shrinks the KV cache by `num_heads`.
+///
+/// Reference: *Fast Transformer Decoding: One Write-Head is All You Need*
+/// (<https://arxiv.org/abs/1911.02150>).
 #[derive(Debug, Clone)]
 pub struct MultiQueryAttention {
-    #[allow(dead_code)]
     num_heads: usize,
-    #[allow(dead_code)]
     hidden_size: usize,
-    #[allow(dead_code)]
     head_dim: usize,
-    #[allow(dead_code)]
     query: Linear,
-    #[allow(dead_code)]
     key: Linear,
-    #[allow(dead_code)]
     value: Linear,
-    #[allow(dead_code)]
     out_proj: Linear,
-    #[allow(dead_code)]
     dropout_prob: f32,
+    training: bool,
+    block_size: usize,
+    causal: bool,
 }
 
 impl MultiQueryAttention {
+    /// Create a multi-query attention layer.
     pub fn new(
         hidden_size: usize,
         num_heads: usize,
@@ -773,35 +454,120 @@ impl MultiQueryAttention {
             value: Linear::new(hidden_size, head_dim, bias), // Single head for value
             out_proj: Linear::new(hidden_size, hidden_size, bias),
             dropout_prob,
+            training: false,
+            block_size: 64,
+            causal: false,
         })
+    }
+
+    /// Number of query heads.
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    /// Hidden size of the layer.
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Dimension of a single attention head.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Enable or disable causal masking.
+    pub fn set_causal(&mut self, causal: bool) {
+        self.causal = causal;
+    }
+
+    /// Set the tile size used by the FlashAttention kernel.
+    pub fn set_block_size(&mut self, block_size: usize) {
+        self.block_size = block_size.max(1);
+    }
+
+    /// Switch between training and inference mode.
+    pub fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    /// Total number of parameters in this layer.
+    pub fn parameter_count(&self) -> usize {
+        self.query.parameter_count()
+            + self.key.parameter_count()
+            + self.value.parameter_count()
+            + self.out_proj.parameter_count()
+    }
+
+    /// Replace the query/key/value/output projections.
+    pub fn set_projections(&mut self, query: Linear, key: Linear, value: Linear, out_proj: Linear) {
+        self.query = query;
+        self.key = key;
+        self.value = value;
+        self.out_proj = out_proj;
+    }
+
+    /// Multi-query self-attention over `[batch, seq_len, hidden]` states.
+    pub fn forward_self_attention(
+        &self,
+        hidden_states: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let dropout = if self.training { Some(self.dropout_prob) } else { None };
+        let params =
+            FlashParams::new(self.head_dim, self.causal, self.block_size).with_dropout(dropout)?;
+        projected_attention(
+            hidden_states,
+            &self.query,
+            &self.key,
+            &self.value,
+            &self.out_proj,
+            self.num_heads,
+            1,
+            self.head_dim,
+            attention_mask,
+            &params,
+        )
     }
 }
 
-/// Grouped-Query Attention (GQA) - groups query heads to share key/value heads
-/// Balances between MHA and MQA - more efficient than MHA, better quality than MQA
+impl Layer for MultiQueryAttention {
+    type Input = FlashAttentionInput;
+    type Output = Tensor;
+
+    fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        let (hidden_states, was_2d) = ensure_batched(input.hidden_states)?;
+        let result = self.forward_self_attention(&hidden_states, input.attention_mask.as_ref())?;
+        if was_2d {
+            Ok(drop_batch_dimension(result))
+        } else {
+            Ok(result)
+        }
+    }
+}
+
+/// Grouped-Query Attention (GQA) - groups query heads so that each group shares
+/// one key/value head. Sits between MHA and MQA in both cost and quality.
+///
+/// Reference: *GQA: Training Generalized Multi-Query Transformer Models from
+/// Multi-Head Checkpoints* (<https://arxiv.org/abs/2305.13245>).
 #[derive(Debug, Clone)]
 pub struct GroupedQueryAttention {
-    #[allow(dead_code)]
     num_query_heads: usize,
-    #[allow(dead_code)]
     num_key_value_heads: usize,
-    #[allow(dead_code)]
     hidden_size: usize,
-    #[allow(dead_code)]
     head_dim: usize,
-    #[allow(dead_code)]
     query: Linear,
-    #[allow(dead_code)]
     key: Linear,
-    #[allow(dead_code)]
     value: Linear,
-    #[allow(dead_code)]
     out_proj: Linear,
-    #[allow(dead_code)]
     dropout_prob: f32,
+    training: bool,
+    block_size: usize,
+    causal: bool,
 }
 
 impl GroupedQueryAttention {
+    /// Create a grouped-query attention layer.
     pub fn new(
         hidden_size: usize,
         num_query_heads: usize,
@@ -816,7 +582,7 @@ impl GroupedQueryAttention {
             )));
         }
 
-        if !num_query_heads.is_multiple_of(num_key_value_heads) {
+        if num_key_value_heads == 0 || !num_query_heads.is_multiple_of(num_key_value_heads) {
             return Err(TrustformersError::invalid_config(format!(
                 "num_query_heads {} must be divisible by num_key_value_heads {}",
                 num_query_heads, num_key_value_heads
@@ -836,7 +602,99 @@ impl GroupedQueryAttention {
             value: Linear::new(hidden_size, kv_hidden_size, bias),
             out_proj: Linear::new(hidden_size, hidden_size, bias),
             dropout_prob,
+            training: false,
+            block_size: 64,
+            causal: false,
         })
+    }
+
+    /// Number of query heads.
+    pub fn num_query_heads(&self) -> usize {
+        self.num_query_heads
+    }
+
+    /// Number of key/value heads.
+    pub fn num_key_value_heads(&self) -> usize {
+        self.num_key_value_heads
+    }
+
+    /// Hidden size of the layer.
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Dimension of a single attention head.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Enable or disable causal masking.
+    pub fn set_causal(&mut self, causal: bool) {
+        self.causal = causal;
+    }
+
+    /// Set the tile size used by the FlashAttention kernel.
+    pub fn set_block_size(&mut self, block_size: usize) {
+        self.block_size = block_size.max(1);
+    }
+
+    /// Switch between training and inference mode.
+    pub fn set_training(&mut self, training: bool) {
+        self.training = training;
+    }
+
+    /// Total number of parameters in this layer.
+    pub fn parameter_count(&self) -> usize {
+        self.query.parameter_count()
+            + self.key.parameter_count()
+            + self.value.parameter_count()
+            + self.out_proj.parameter_count()
+    }
+
+    /// Replace the query/key/value/output projections.
+    pub fn set_projections(&mut self, query: Linear, key: Linear, value: Linear, out_proj: Linear) {
+        self.query = query;
+        self.key = key;
+        self.value = value;
+        self.out_proj = out_proj;
+    }
+
+    /// Grouped-query self-attention over `[batch, seq_len, hidden]` states.
+    pub fn forward_self_attention(
+        &self,
+        hidden_states: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let dropout = if self.training { Some(self.dropout_prob) } else { None };
+        let params =
+            FlashParams::new(self.head_dim, self.causal, self.block_size).with_dropout(dropout)?;
+        projected_attention(
+            hidden_states,
+            &self.query,
+            &self.key,
+            &self.value,
+            &self.out_proj,
+            self.num_query_heads,
+            self.num_key_value_heads,
+            self.head_dim,
+            attention_mask,
+            &params,
+        )
+    }
+}
+
+impl Layer for GroupedQueryAttention {
+    type Input = FlashAttentionInput;
+    type Output = Tensor;
+
+    fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        let (hidden_states, was_2d) = ensure_batched(input.hidden_states)?;
+        let result = self.forward_self_attention(&hidden_states, input.attention_mask.as_ref())?;
+        if was_2d {
+            Ok(drop_batch_dimension(result))
+        } else {
+            Ok(result)
+        }
     }
 }
 
@@ -845,15 +703,85 @@ mod tests {
     use super::*;
     use crate::tensor::Tensor;
 
+    /// Deterministic pseudo-random tensor so assertions are reproducible.
+    fn deterministic(shape: &[usize], seed: u32) -> Tensor {
+        let count: usize = shape.iter().product();
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity(count);
+        for _ in 0..count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            data.push(unit * 2.0 - 1.0);
+        }
+        Tensor::from_vec(data, shape).expect("test tensor shape must be valid")
+    }
+
+    fn max_abs_difference(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "output length mismatch");
+        a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()))
+    }
+
+    /// Linear layer with deterministic weights so two layers can be made
+    /// numerically identical.
+    fn linear(in_features: usize, out_features: usize, seed: u32) -> Linear {
+        let mut layer = Linear::new(in_features, out_features, true);
+        layer
+            .set_weight(deterministic(&[out_features, in_features], seed))
+            .expect("weight shape");
+        layer.set_bias(deterministic(&[out_features], seed + 1)).expect("bias shape");
+        layer
+    }
+
+    /// Naive `softmax(scale * Q K^T) V` over `[batch, heads, seq, head_dim]`.
+    fn naive_attention(q: &Tensor, k: &Tensor, v: &Tensor, causal: bool) -> Vec<f32> {
+        let (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) = (q, k, v) else {
+            panic!("reference implementation requires F32 tensors");
+        };
+        let batch = q_arr.shape()[0];
+        let heads = q_arr.shape()[1];
+        let seq_q = q_arr.shape()[2];
+        let head_dim = q_arr.shape()[3];
+        let seq_k = k_arr.shape()[2];
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let mut out = vec![0.0f32; batch * heads * seq_q * head_dim];
+        for b in 0..batch {
+            for h in 0..heads {
+                for i in 0..seq_q {
+                    let limit = if causal { i + 1 } else { seq_k };
+                    let mut scores = Vec::with_capacity(limit);
+                    for j in 0..limit {
+                        let mut dot = 0.0f32;
+                        for d in 0..head_dim {
+                            dot += q_arr[[b, h, i, d]] * k_arr[[b, h, j, d]];
+                        }
+                        scores.push(dot * scale);
+                    }
+                    let max = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                    let exponentials: Vec<f32> = scores.iter().map(|&s| (s - max).exp()).collect();
+                    let sum: f32 = exponentials.iter().sum();
+                    for d in 0..head_dim {
+                        let mut acc = 0.0f32;
+                        for (j, &weight) in exponentials.iter().enumerate() {
+                            acc += weight * v_arr[[b, h, j, d]];
+                        }
+                        out[((b * heads + h) * seq_q + i) * head_dim + d] = acc / sum;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_flash_attention_creation() {
         let flash_attn = FlashAttention::new(768, 12, 0.1, true, Some(64), false);
         assert!(flash_attn.is_ok());
 
         let flash_attn = flash_attn.expect("Failed to create FlashAttention");
-        assert_eq!(flash_attn.num_heads, 12);
-        assert_eq!(flash_attn.hidden_size, 768);
-        assert_eq!(flash_attn.head_dim, 64);
+        assert_eq!(flash_attn.num_heads(), 12);
+        assert_eq!(flash_attn.hidden_size(), 768);
+        assert_eq!(flash_attn.head_dim(), 64);
         assert_eq!(flash_attn.block_size, 64);
         assert!(!flash_attn.causal);
     }
@@ -863,18 +791,34 @@ mod tests {
         let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), false)
             .expect("Failed to create FlashAttention");
 
-        // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
+        let hidden_states = deterministic(&[2, 128, 256], 1);
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
         };
 
-        let output = flash_attn.forward(input);
-        assert!(output.is_ok());
-
-        let output = output.expect("Forward pass failed");
+        let output = flash_attn.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
+    }
+
+    #[test]
+    fn flash_attention_matches_naive_reference() {
+        for (causal, block_size) in [(false, 4usize), (true, 4), (false, 7), (true, 7)] {
+            let flash_attn = FlashAttention::new(32, 4, 0.0, false, Some(block_size), causal)
+                .expect("Failed to create FlashAttention");
+            let q = deterministic(&[2, 4, 13, 8], 2);
+            let k = deterministic(&[2, 4, 13, 8], 3);
+            let v = deterministic(&[2, 4, 13, 8], 4);
+
+            let actual = flash_attn.attention(&q, &k, &v, None).expect("attention must succeed");
+            let expected = naive_attention(&q, &k, &v, causal);
+            let difference = max_abs_difference(&actual.data().expect("data"), &expected);
+            assert!(
+                difference < 1e-4,
+                "FlashAttention deviates from the naive reference by {difference} \
+                 (causal={causal}, block={block_size})"
+            );
+        }
     }
 
     #[test]
@@ -883,9 +827,38 @@ mod tests {
         assert!(mqa.is_ok());
 
         let mqa = mqa.expect("Failed to create MultiQueryAttention");
-        assert_eq!(mqa.num_heads, 12);
-        assert_eq!(mqa.hidden_size, 768);
-        assert_eq!(mqa.head_dim, 64);
+        assert_eq!(mqa.num_heads(), 12);
+        assert_eq!(mqa.hidden_size(), 768);
+        assert_eq!(mqa.head_dim(), 64);
+    }
+
+    #[test]
+    fn multi_query_attention_forward_shares_one_kv_head() {
+        let hidden_size = 32;
+        let num_heads = 4;
+        let head_dim = hidden_size / num_heads;
+        let mut mqa = MultiQueryAttention::new(hidden_size, num_heads, 0.0, true)
+            .expect("construction failed");
+        mqa.set_block_size(3);
+        mqa.set_projections(
+            linear(hidden_size, hidden_size, 10),
+            linear(hidden_size, head_dim, 12),
+            linear(hidden_size, head_dim, 14),
+            linear(hidden_size, hidden_size, 16),
+        );
+
+        let hidden_states = deterministic(&[1, 9, hidden_size], 5);
+        let output = mqa.forward_self_attention(&hidden_states, None).expect("MQA forward failed");
+        assert_eq!(output.shape(), vec![1, 9, hidden_size]);
+
+        // The output must actually depend on the input.
+        let other = mqa
+            .forward_self_attention(&deterministic(&[1, 9, hidden_size], 6), None)
+            .expect("MQA forward failed");
+        assert!(
+            max_abs_difference(&output.data().expect("data"), &other.data().expect("data")) > 1e-3,
+            "MQA output must depend on its input"
+        );
     }
 
     #[test]
@@ -894,10 +867,85 @@ mod tests {
         assert!(gqa.is_ok());
 
         let gqa = gqa.expect("Failed to create GroupedQueryAttention");
-        assert_eq!(gqa.num_query_heads, 12);
-        assert_eq!(gqa.num_key_value_heads, 4);
-        assert_eq!(gqa.hidden_size, 768);
-        assert_eq!(gqa.head_dim, 64);
+        assert_eq!(gqa.num_query_heads(), 12);
+        assert_eq!(gqa.num_key_value_heads(), 4);
+        assert_eq!(gqa.hidden_size(), 768);
+        assert_eq!(gqa.head_dim(), 64);
+    }
+
+    #[test]
+    fn grouped_query_attention_degenerates_to_flash_attention() {
+        // With one KV head per query head, GQA must reproduce plain
+        // FlashAttention exactly.
+        let hidden_size = 32;
+        let num_heads = 4;
+        let mut gqa = GroupedQueryAttention::new(hidden_size, num_heads, num_heads, 0.0, true)
+            .expect("gqa construction failed");
+        let mut flash = FlashAttention::new_with_version(
+            hidden_size,
+            num_heads,
+            0.0,
+            true,
+            Some(64),
+            false,
+            false,
+        )
+        .expect("flash construction failed");
+
+        let projections = || {
+            (
+                linear(hidden_size, hidden_size, 20),
+                linear(hidden_size, hidden_size, 22),
+                linear(hidden_size, hidden_size, 24),
+                linear(hidden_size, hidden_size, 26),
+            )
+        };
+        let (q, k, v, o) = projections();
+        gqa.set_projections(q, k, v, o);
+        let (q, k, v, o) = projections();
+        flash.set_projections(q, k, v, o);
+
+        let hidden_states = deterministic(&[1, 11, hidden_size], 7);
+        let gqa_output =
+            gqa.forward_self_attention(&hidden_states, None).expect("gqa forward failed");
+        let flash_output = flash
+            .forward(FlashAttentionInput {
+                hidden_states,
+                attention_mask: None,
+            })
+            .expect("flash forward failed");
+
+        let difference = max_abs_difference(
+            &gqa_output.data().expect("gqa data"),
+            &flash_output.data().expect("flash data"),
+        );
+        assert!(
+            difference < 1e-5,
+            "GQA with one KV head per query head must match FlashAttention, got {difference}"
+        );
+    }
+
+    #[test]
+    fn grouped_query_attention_repeats_kv_heads() {
+        let kv = deterministic(&[1, 2, 3, 2], 8);
+        let expanded = expand_kv_heads(&kv, 2, 6).expect("expansion must succeed");
+        assert_eq!(expanded.shape(), vec![1, 6, 3, 2]);
+
+        let (Tensor::F32(source), Tensor::F32(target)) = (&kv, &expanded) else {
+            panic!("expected F32 tensors");
+        };
+        for head in 0..6 {
+            for position in 0..3 {
+                for dim in 0..2 {
+                    assert_eq!(
+                        target[[0, head, position, dim]],
+                        source[[0, head / 3, position, dim]],
+                        "head {head} must mirror kv head {}",
+                        head / 3
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -905,16 +953,13 @@ mod tests {
         let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), true)
             .expect("Failed to create FlashAttention");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
+        let hidden_states = deterministic(&[1, 64, 256], 9);
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
         };
 
-        let output = flash_attn.forward(input);
-        assert!(output.is_ok());
-
-        let output = output.expect("Forward pass failed");
+        let output = flash_attn.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 
@@ -932,13 +977,12 @@ mod tests {
         let output1 = flash_attn.forward(input.clone()).expect("Forward pass failed");
         let output2 = flash_attn.forward(input).expect("Forward pass failed");
 
-        // With same input and no dropout, outputs should be identical
         let data1 = output1.data().expect("Failed to get data");
         let data2 = output2.data().expect("Failed to get data");
-
-        for (a, b) in data1.iter().zip(data2.iter()) {
-            assert!((a - b).abs() < 1e-6, "Outputs should be deterministic");
-        }
+        assert!(
+            max_abs_difference(&data1, &data2) < 1e-6,
+            "Outputs should be deterministic"
+        );
     }
 
     #[test]
@@ -948,9 +992,9 @@ mod tests {
         assert!(flash_attn_2.is_ok());
 
         let flash_attn_2 = flash_attn_2.expect("Failed to create FlashAttention-2");
-        assert_eq!(flash_attn_2.num_heads, 12);
-        assert_eq!(flash_attn_2.hidden_size, 768);
-        assert_eq!(flash_attn_2.head_dim, 64);
+        assert_eq!(flash_attn_2.num_heads(), 12);
+        assert_eq!(flash_attn_2.hidden_size(), 768);
+        assert_eq!(flash_attn_2.head_dim(), 64);
         assert_eq!(flash_attn_2.block_size, 64);
         assert!(!flash_attn_2.causal);
         assert!(flash_attn_2.use_flash_attention_2);
@@ -962,55 +1006,68 @@ mod tests {
             FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), false, true)
                 .expect("Failed to create FlashAttention-2");
 
-        // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
+        let hidden_states = deterministic(&[2, 128, 256], 10);
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
         };
 
-        let output = flash_attn_2.forward(input);
-        assert!(output.is_ok());
-
-        let output = output.expect("Forward pass failed");
+        let output = flash_attn_2.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
     }
 
     #[test]
     fn test_flash_attention_2_vs_1_consistency() {
-        // Test that FlashAttention-2 produces similar results to FlashAttention-1
-        let flash_attn_1 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, false)
-                .expect("Failed to create FlashAttention-1");
-        let flash_attn_2 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, true)
-                .expect("Failed to create FlashAttention-2");
+        // Both versions run the same exact kernel with different tile sizes, so
+        // they must agree to within floating-point noise.
+        for causal in [false, true] {
+            let hidden_size = 128;
+            let mut flash_attn_1 = FlashAttention::new_with_version(
+                hidden_size,
+                4,
+                0.0,
+                true,
+                Some(16),
+                causal,
+                false,
+            )
+            .expect("Failed to create FlashAttention-1");
+            let mut flash_attn_2 =
+                FlashAttention::new_with_version(hidden_size, 4, 0.0, true, Some(16), causal, true)
+                    .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::ones(&[1, 32, 128]).expect("Failed to create ones tensor");
-        let input = FlashAttentionInput {
-            hidden_states: hidden_states.clone(),
-            attention_mask: None,
-        };
+            let projections = || {
+                (
+                    linear(hidden_size, hidden_size, 30),
+                    linear(hidden_size, hidden_size, 32),
+                    linear(hidden_size, hidden_size, 34),
+                    linear(hidden_size, hidden_size, 36),
+                )
+            };
+            let (q, k, v, o) = projections();
+            flash_attn_1.set_projections(q, k, v, o);
+            let (q, k, v, o) = projections();
+            flash_attn_2.set_projections(q, k, v, o);
 
-        let output1 = flash_attn_1.forward(input.clone()).expect("Forward pass failed");
-        let output2 = flash_attn_2.forward(input).expect("Forward pass failed");
+            let hidden_states = deterministic(&[1, 37, hidden_size], 11);
+            let input = FlashAttentionInput {
+                hidden_states,
+                attention_mask: None,
+            };
 
-        // Results should be very close (allowing for small numerical differences)
-        let data1 = output1.data().expect("Failed to get data");
-        let data2 = output2.data().expect("Failed to get data");
+            let output1 = flash_attn_1.forward(input.clone()).expect("Forward pass failed");
+            let output2 = flash_attn_2.forward(input).expect("Forward pass failed");
 
-        let mut max_diff: f32 = 0.0;
-        for (a, b) in data1.iter().zip(data2.iter()) {
-            max_diff = max_diff.max((a - b).abs());
+            let max_diff = max_abs_difference(
+                &output1.data().expect("Failed to get data"),
+                &output2.data().expect("Failed to get data"),
+            );
+            assert!(
+                max_diff < 1e-4,
+                "FlashAttention-2 output differs from FlashAttention-1: max_diff = {max_diff} \
+                 (causal={causal})"
+            );
         }
-
-        // Allow for larger numerical differences due to different computation order and optimization strategies
-        // FlashAttention-2 uses different tiling and memory access patterns which can lead to acceptable numerical differences
-        assert!(
-            max_diff < 1000.0,
-            "FlashAttention-2 output differs too much from FlashAttention-1: max_diff = {}",
-            max_diff
-        );
     }
 
     #[test]
@@ -1019,16 +1076,190 @@ mod tests {
             FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), true, true)
                 .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
+        let hidden_states = deterministic(&[1, 64, 256], 12);
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
         };
 
-        let output = flash_attn_2.forward(input);
-        assert!(output.is_ok());
-
-        let output = output.expect("Forward pass failed");
+        let output = flash_attn_2.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
+    }
+
+    #[test]
+    fn attention_mask_is_actually_applied() {
+        // Regression test: the mask argument used to be ignored outright.
+        let hidden_size = 32;
+        let seq_len = 10;
+        let mut flash = FlashAttention::new(hidden_size, 4, 0.0, true, Some(4), false)
+            .expect("construction failed");
+        flash.set_projections(
+            linear(hidden_size, hidden_size, 40),
+            linear(hidden_size, hidden_size, 42),
+            linear(hidden_size, hidden_size, 44),
+            linear(hidden_size, hidden_size, 46),
+        );
+
+        let hidden_states = deterministic(&[1, seq_len, hidden_size], 13);
+        let mut keep = vec![1.0f32; seq_len];
+        keep[3] = 0.0;
+        keep[8] = 0.0;
+        let mask = Tensor::from_vec(keep, &[1, 1, 1, seq_len]).expect("mask shape");
+
+        let unmasked = flash
+            .forward(FlashAttentionInput {
+                hidden_states: hidden_states.clone(),
+                attention_mask: None,
+            })
+            .expect("unmasked forward failed");
+        let masked = flash
+            .forward(FlashAttentionInput {
+                hidden_states,
+                attention_mask: Some(mask),
+            })
+            .expect("masked forward failed");
+
+        assert!(
+            max_abs_difference(
+                &unmasked.data().expect("data"),
+                &masked.data().expect("data")
+            ) > 1e-3,
+            "the attention mask must change the result"
+        );
+    }
+
+    #[test]
+    fn training_mode_enables_attention_dropout() {
+        let hidden_size = 32;
+        let mut flash = FlashAttention::new(hidden_size, 4, 0.5, true, Some(8), false)
+            .expect("construction failed");
+        let hidden_states = deterministic(&[1, 16, hidden_size], 14);
+        let input = FlashAttentionInput {
+            hidden_states,
+            attention_mask: None,
+        };
+
+        assert!(!flash.is_training());
+        let inference = flash.forward(input.clone()).expect("inference forward failed");
+        let inference_again = flash.forward(input.clone()).expect("inference forward failed");
+        assert!(
+            max_abs_difference(
+                &inference.data().expect("data"),
+                &inference_again.data().expect("data")
+            ) < 1e-6,
+            "inference must be deterministic"
+        );
+
+        flash.set_training(true);
+        let training = flash.forward(input).expect("training forward failed");
+        assert!(
+            max_abs_difference(
+                &inference.data().expect("data"),
+                &training.data().expect("data")
+            ) > 1e-4,
+            "training mode must apply attention dropout"
+        );
+    }
+
+    /// The shared projection pipeline feeds its hidden states to the three
+    /// projections through [`Layer::forward_ref`] instead of handing each one a
+    /// deep copy.
+    ///
+    /// The previous revision spelled this as three `forward(hidden_states.clone())`
+    /// calls, so the numbers must be *bit-identical* — this test pins that
+    /// equivalence. A `forward_ref` that ever diverged from `forward` would
+    /// silently change the output of every model built on `FlashAttention`,
+    /// `MultiQueryAttention` or `GroupedQueryAttention`, and only this assertion
+    /// would notice.
+    #[test]
+    fn projected_attention_borrows_without_changing_its_result() {
+        let (batch, seq, heads, head_dim) = (2usize, 6usize, 2usize, 4usize);
+        let hidden = heads * head_dim;
+        let query = linear(hidden, hidden, 11);
+        let key = linear(hidden, hidden, 21);
+        let value = linear(hidden, hidden, 31);
+        let out_proj = linear(hidden, hidden, 41);
+        let hidden_states = deterministic(&[batch, seq, hidden], 7);
+        let params = FlashParams::new(head_dim, false, 4);
+
+        let produced = projected_attention(
+            &hidden_states,
+            &query,
+            &key,
+            &value,
+            &out_proj,
+            heads,
+            heads,
+            head_dim,
+            None,
+            &params,
+        )
+        .expect("the borrowing pipeline must run");
+
+        // The pre-refactor pipeline, spelled out with the owning `forward`.
+        let reference = {
+            let q = split_heads(
+                &query.forward(hidden_states.clone()).expect("query projection"),
+                heads,
+                head_dim,
+            )
+            .expect("split query heads");
+            let k = expand_kv_heads(
+                &split_heads(
+                    &key.forward(hidden_states.clone()).expect("key projection"),
+                    heads,
+                    head_dim,
+                )
+                .expect("split key heads"),
+                heads,
+                heads,
+            )
+            .expect("expand key heads");
+            let v = expand_kv_heads(
+                &split_heads(
+                    &value.forward(hidden_states.clone()).expect("value projection"),
+                    heads,
+                    head_dim,
+                )
+                .expect("split value heads"),
+                heads,
+                heads,
+            )
+            .expect("expand value heads");
+            let context = flash_attention(&q, &k, &v, None, &params).expect("attention");
+            out_proj
+                .forward(merge_heads(&context).expect("merge heads"))
+                .expect("output projection")
+        };
+
+        assert_eq!(
+            max_abs_difference(
+                &produced.to_vec_f32().expect("f32"),
+                &reference.to_vec_f32().expect("f32")
+            ),
+            0.0,
+            "borrowing the hidden states must be bit-identical to cloning them"
+        );
+
+        // The caller still owns an untouched tensor.
+        assert_eq!(
+            hidden_states.to_vec_f32().expect("f32"),
+            deterministic(&[batch, seq, hidden], 7).to_vec_f32().expect("f32"),
+            "forward_ref must not mutate the caller's tensor"
+        );
+    }
+
+    #[test]
+    fn two_dimensional_input_keeps_its_rank() {
+        let flash_attn =
+            FlashAttention::new(32, 4, 0.0, true, Some(8), false).expect("construction failed");
+        let hidden_states = deterministic(&[6, 32], 15);
+        let output = flash_attn
+            .forward(FlashAttentionInput {
+                hidden_states,
+                attention_mask: None,
+            })
+            .expect("forward failed");
+        assert_eq!(output.shape(), vec![6, 32]);
     }
 }

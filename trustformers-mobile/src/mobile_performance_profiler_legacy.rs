@@ -81,7 +81,6 @@ pub use mobile_performance_profiler::{
     SystemHealth,
     TrendDirection,
     TrendingMetrics,
-    VisualizationEngine,
 };
 
 // Legacy compatibility types (maintain exact same interface as before)
@@ -179,10 +178,14 @@ pub fn validate_mobile_profiler_system(
     let health = profiler.health_check()?;
     let modern_capabilities = profiler.get_capabilities()?;
 
-    let validation_passed = matches!(
-        health.status,
-        HealthStatus::Excellent | HealthStatus::Good | HealthStatus::Healthy
-    ) && modern_capabilities.real_time_monitoring;
+    // Validation asks whether the profiler is functional, not whether the
+    // machine it is running on happens to be idle: a busy or hot device is a
+    // correct measurement, not a validation failure. It passes when the
+    // profiler produced an assessment from at least one real measurement and
+    // reports real-time monitoring support. (It previously required a
+    // Good-or-better status, which the old implementation always satisfied
+    // because the status came from hardcoded component scores.)
+    let validation_passed = health.is_some() && modern_capabilities.real_time_monitoring;
 
     // Convert modern capabilities to legacy format
     let legacy_capabilities = ProfilerCapabilities {
@@ -217,12 +220,20 @@ pub fn validate_mobile_profiler_system(
         ],
     };
 
+    let (profiler_health, recommendations) = match health {
+        Some(assessment) => (Some(assessment.status), assessment.recommendations),
+        None => (
+            None,
+            vec!["No metric family was measurable on this device".to_string()],
+        ),
+    };
+
     Ok(ProfilerValidationReport {
         validation_passed,
-        profiler_health: health.status,
+        profiler_health,
         capabilities: legacy_capabilities,
         validation_errors: vec![],
-        recommendations: health.recommendations,
+        recommendations,
     })
 }
 
@@ -230,7 +241,8 @@ pub fn validate_mobile_profiler_system(
 #[derive(Debug, Clone)]
 pub struct ProfilerValidationReport {
     pub validation_passed: bool,
-    pub profiler_health: HealthStatus,
+    /// Health classification, or `None` when nothing was measurable.
+    pub profiler_health: Option<HealthStatus>,
     pub capabilities: ProfilerCapabilities,
     pub validation_errors: Vec<String>,
     pub recommendations: Vec<String>,
@@ -291,9 +303,9 @@ pub fn get_mobile_profiler_capabilities() -> ProfilerCapabilities {
 /// Utility functions for common profiling patterns
 
 /// Quick performance assessment for immediate decision making
-pub fn quick_performance_assessment() -> Result<SystemHealth, Box<dyn std::error::Error>> {
+pub fn quick_performance_assessment() -> Result<Option<SystemHealth>, Box<dyn std::error::Error>> {
     let profiler = create_default_mobile_profiler()?;
-    let snapshot = profiler.take_snapshot()?;
+    let _snapshot = profiler.take_snapshot()?;
     Ok(profiler.assess_system_health()?)
 }
 
@@ -403,17 +415,16 @@ mod tests {
         let snapshot = profiler.take_snapshot();
         assert!(snapshot.is_ok());
 
-        let health = profiler.health_check();
-        let health_unwrapped = health.expect("Operation failed");
-        // Health should be Good or better (Excellent, Good, or Healthy are all acceptable)
-        assert!(
-            matches!(
-                health_unwrapped.status,
-                HealthStatus::Excellent | HealthStatus::Good | HealthStatus::Healthy
-            ),
-            "Expected healthy status, got: {:?}",
-            health_unwrapped.status
-        );
+        // CPU usage is measured on every supported target, so an assessment
+        // is always produced. Its *status* is a function of how loaded the
+        // machine happens to be, so asserting "Good or better" would test the
+        // test runner's load rather than this code; assert the score is a real
+        // percentage and that it came from a measured component instead.
+        let health = profiler.health_check().expect("health check");
+        let assessment = health.expect("cpu is always measurable");
+        assert!(assessment.overall_score >= 0.0 && assessment.overall_score <= 100.0);
+        assert!(assessment.component_scores.contains_key("cpu"));
+        assert!(!assessment.recommendations.is_empty());
     }
 
     #[test]
@@ -491,23 +502,18 @@ mod tests {
             export_formats: vec!["json".to_string(), "csv".to_string()],
         };
 
+        let assessment = health_unwrapped.expect("cpu is always measurable");
         let report = ProfilerValidationReport {
             validation_passed: true,
-            profiler_health: health_unwrapped.status,
+            profiler_health: Some(assessment.status),
             capabilities: legacy_capabilities,
             validation_errors: vec![],
-            recommendations: health_unwrapped.recommendations,
+            recommendations: assessment.recommendations,
         };
 
         assert!(report.validation_passed);
-        // Health should be Good or better (Excellent, Good, or Healthy are all acceptable)
-        assert!(
-            matches!(
-                report.profiler_health,
-                HealthStatus::Excellent | HealthStatus::Good | HealthStatus::Healthy
-            ),
-            "Expected healthy status, got: {:?}",
-            report.profiler_health
-        );
+        // The status reflects live machine load, so assert only that a real
+        // classification was produced.
+        assert!(report.profiler_health.is_some());
     }
 }

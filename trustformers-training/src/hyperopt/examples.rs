@@ -48,7 +48,12 @@ impl HyperparameterOptimizer {
                     "sgd".to_string(),
                 ],
             )
-            .build();
+            .build()
+            // reason: every bound above is a literal constant that satisfies the
+            // ContinuousParameter/DiscreteParameter/LogParameter invariants (finite, low <=
+            // high, positive log bounds), so this cannot fail. Use `SearchSpaceBuilder`
+            // directly when the bounds come from a config file.
+            .expect("built-in search space definition is valid by construction");
 
         let config = TunerConfig::new(study_name)
             .direction(OptimizationDirection::Maximize)
@@ -82,7 +87,12 @@ impl HyperparameterOptimizer {
             .continuous("mixup_alpha", 0.0, 1.0)
             .continuous("cutmix_alpha", 0.0, 1.0)
             .discrete("image_size", 224, 512, 32)
-            .build();
+            .build()
+            // reason: every bound above is a literal constant that satisfies the
+            // ContinuousParameter/DiscreteParameter/LogParameter invariants (finite, low <=
+            // high, positive log bounds), so this cannot fail. Use `SearchSpaceBuilder`
+            // directly when the bounds come from a config file.
+            .expect("built-in search space definition is valid by construction");
 
         let config = TunerConfig::new(study_name)
             .direction(OptimizationDirection::Maximize)
@@ -316,7 +326,7 @@ pub fn params_to_training_args(
             },
             _ => {
                 // Log unknown parameters
-                eprintln!("Unknown hyperparameter: {}", name);
+                tracing::warn!("Unknown hyperparameter: {}", name);
             },
         }
     }

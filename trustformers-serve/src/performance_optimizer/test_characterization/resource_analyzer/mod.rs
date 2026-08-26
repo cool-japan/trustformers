@@ -20,3 +20,6 @@ pub mod weightedintensityalgorithm_traits;
 // Re-export all types
 pub use functions::*;
 pub use types::*;
+
+#[cfg(test)]
+mod types_tests;

@@ -44,7 +44,9 @@ impl fmt::Display for PpoError {
                 "Length mismatch: {} steps but {} advantages/value_targets",
                 steps, advantages
             ),
-            PpoError::NumericalError(msg) => write!(f, "Numerical error in PPO computation: {}", msg),
+            PpoError::NumericalError(msg) => {
+                write!(f, "Numerical error in PPO computation: {}", msg)
+            },
         }
     }
 }
@@ -249,11 +251,7 @@ pub fn compute_ppo_loss(
     // ── 1. Optionally normalise advantages ────────────────────────────────
     let norm_advantages: Vec<f32> = if config.normalize_advantages {
         let mean = advantages.iter().sum::<f32>() / n as f32;
-        let var = advantages
-            .iter()
-            .map(|a| (a - mean).powi(2))
-            .sum::<f32>()
-            / n as f32;
+        let var = advantages.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / n as f32;
         let std = (var + 1e-8).sqrt();
         advantages.iter().map(|a| (a - mean) / std).collect()
     } else {
@@ -373,8 +371,7 @@ impl PpoTrainer {
         last_value: f32,
     ) -> Result<PpoLossResult, PpoError> {
         let gae = compute_gae(steps, last_value, &self.config);
-        let loss =
-            compute_ppo_loss(steps, &gae.advantages, &gae.value_targets, &self.config)?;
+        let loss = compute_ppo_loss(steps, &gae.advantages, &gae.value_targets, &self.config)?;
         self.history.push(loss.clone());
         self.total_steps += steps.len();
         Ok(loss)
@@ -416,10 +413,7 @@ impl PpoTrainer {
     ///
     /// Returns `true` if the most recent update's `approx_kl` exceeds `kl_threshold`.
     pub fn should_early_stop(&self, kl_threshold: f32) -> bool {
-        self.history
-            .last()
-            .map(|r| r.approx_kl > kl_threshold)
-            .unwrap_or(false)
+        self.history.last().map(|r| r.approx_kl > kl_threshold).unwrap_or(false)
     }
 }
 
@@ -433,8 +427,20 @@ mod tests {
 
     // ── Helper constructors ──────────────────────────────────────────────
 
-    fn make_step(log_prob: f32, old_log_prob: f32, value: f32, reward: f32, is_terminal: bool) -> PpoStep {
-        PpoStep { log_prob, old_log_prob, value, reward, is_terminal }
+    fn make_step(
+        log_prob: f32,
+        old_log_prob: f32,
+        value: f32,
+        reward: f32,
+        is_terminal: bool,
+    ) -> PpoStep {
+        PpoStep {
+            log_prob,
+            old_log_prob,
+            value,
+            reward,
+            is_terminal,
+        }
     }
 
     fn no_norm_config() -> PpoConfig {
@@ -451,7 +457,11 @@ mod tests {
         // Same log_prob → ratio = 1
         let step = make_step(-1.0, -1.0, 0.5, 1.0, false);
         let ratio = step.ratio();
-        assert!((ratio - 1.0).abs() < 1e-6, "expected ratio ≈ 1, got {}", ratio);
+        assert!(
+            (ratio - 1.0).abs() < 1e-6,
+            "expected ratio ≈ 1, got {}",
+            ratio
+        );
     }
 
     #[test]
@@ -461,7 +471,12 @@ mod tests {
         let ratio = step.ratio();
         // exp(-0.5 - (-1.5)) = exp(1.0) ≈ 2.718
         let expected = (1.0_f32).exp();
-        assert!((ratio - expected).abs() < 1e-5, "expected ratio ≈ {}, got {}", expected, ratio);
+        assert!(
+            (ratio - expected).abs() < 1e-5,
+            "expected ratio ≈ {}, got {}",
+            expected,
+            ratio
+        );
     }
 
     // ── PpoConfig tests ──────────────────────────────────────────────────
@@ -521,7 +536,11 @@ mod tests {
         // δ_0 = 1 + 1*0 - 0 = 1   => GAE_0 = 1 + 1*1*2 = 3
         let steps: Vec<PpoStep> = (0..3).map(|_| make_step(0.0, 0.0, 0.0, 1.0, false)).collect();
         let res = compute_gae(&steps, 0.0, &cfg);
-        assert!((res.advantages[0] - 3.0).abs() < 1e-4, "advantages[0]={}", res.advantages[0]);
+        assert!(
+            (res.advantages[0] - 3.0).abs() < 1e-4,
+            "advantages[0]={}",
+            res.advantages[0]
+        );
         assert!((res.advantages[1] - 2.0).abs() < 1e-4);
         assert!((res.advantages[2] - 1.0).abs() < 1e-4);
     }
@@ -595,13 +614,16 @@ mod tests {
     fn test_ppo_loss_no_clipping() {
         // ratio = 1 for all steps (same policy): clip should not activate
         let cfg = no_norm_config();
-        let steps: Vec<PpoStep> = (0..4)
-            .map(|i| make_step(-1.0, -1.0, 0.5, i as f32, false))
-            .collect();
+        let steps: Vec<PpoStep> =
+            (0..4).map(|i| make_step(-1.0, -1.0, 0.5, i as f32, false)).collect();
         let adv = vec![1.0f32; 4];
         let vt = vec![1.0f32; 4];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ppo loss failed");
-        assert!((res.clip_fraction).abs() < 1e-8, "no clips expected, got {}", res.clip_fraction);
+        assert!(
+            (res.clip_fraction).abs() < 1e-8,
+            "no clips expected, got {}",
+            res.clip_fraction
+        );
         assert!((res.mean_ratio - 1.0).abs() < 1e-5);
     }
 
@@ -627,24 +649,29 @@ mod tests {
         // 2 out of 4 steps are clipped
         let cfg = no_norm_config();
         let steps = vec![
-            make_step(0.0, -2.0, 0.5, 1.0, false),   // ratio ≈ 7.39, clipped
-            make_step(-2.0, 0.0, 0.5, 1.0, false),   // ratio ≈ 0.135, clipped
-            make_step(-1.0, -1.0, 0.5, 1.0, false),  // ratio = 1, not clipped
-            make_step(-1.1, -1.0, 0.5, 1.0, false),  // ratio ≈ 0.905, not clipped (|r-1|=0.095 < 0.2)
+            make_step(0.0, -2.0, 0.5, 1.0, false),  // ratio ≈ 7.39, clipped
+            make_step(-2.0, 0.0, 0.5, 1.0, false),  // ratio ≈ 0.135, clipped
+            make_step(-1.0, -1.0, 0.5, 1.0, false), // ratio = 1, not clipped
+            make_step(-1.1, -1.0, 0.5, 1.0, false), // ratio ≈ 0.905, not clipped (|r-1|=0.095 < 0.2)
         ];
         let adv = vec![1.0f32; 4];
         let vt = vec![1.0f32; 4];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ppo loss failed");
-        assert!((res.clip_fraction - 0.5).abs() < 1e-5, "expected 0.5, got {}", res.clip_fraction);
+        assert!(
+            (res.clip_fraction - 0.5).abs() < 1e-5,
+            "expected 0.5, got {}",
+            res.clip_fraction
+        );
     }
 
     #[test]
     fn test_ppo_loss_normalize_advantages() {
         // When normalize_advantages=true the mean_advantage should be near 0
-        let cfg = PpoConfig { normalize_advantages: true, ..Default::default() };
-        let steps: Vec<PpoStep> = (0..5)
-            .map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false))
-            .collect();
+        let cfg = PpoConfig {
+            normalize_advantages: true,
+            ..Default::default()
+        };
+        let steps: Vec<PpoStep> = (0..5).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false)).collect();
         // Non-trivial advantages
         let adv = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let vt = vec![0.5f32; 5];
@@ -662,24 +689,27 @@ mod tests {
         // approx_kl = mean(old_log_prob - log_prob)
         let cfg = no_norm_config();
         // log_prob = -1.0, old_log_prob = -0.5 → kl = -0.5 - (-1.0) = 0.5
-        let steps: Vec<PpoStep> = (0..3)
-            .map(|_| make_step(-1.0, -0.5, 0.5, 1.0, false))
-            .collect();
+        let steps: Vec<PpoStep> = (0..3).map(|_| make_step(-1.0, -0.5, 0.5, 1.0, false)).collect();
         let adv = vec![1.0f32; 3];
         let vt = vec![1.0f32; 3];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ppo loss failed");
-        assert!((res.approx_kl - 0.5).abs() < 1e-5, "expected 0.5, got {}", res.approx_kl);
+        assert!(
+            (res.approx_kl - 0.5).abs() < 1e-5,
+            "expected 0.5, got {}",
+            res.approx_kl
+        );
     }
 
     // ── PpoTrainer tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_ppo_trainer_update() {
-        let cfg = PpoConfig { normalize_advantages: false, ..Default::default() };
+        let cfg = PpoConfig {
+            normalize_advantages: false,
+            ..Default::default()
+        };
         let mut trainer = PpoTrainer::new(cfg);
-        let steps: Vec<PpoStep> = (0..4)
-            .map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false))
-            .collect();
+        let steps: Vec<PpoStep> = (0..4).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false)).collect();
         let result = trainer.update(&steps, 0.5).expect("update failed");
         assert!(result.total_loss.is_finite());
         assert_eq!(trainer.total_steps(), 4);
@@ -689,9 +719,7 @@ mod tests {
     fn test_ppo_trainer_history() {
         let cfg = no_norm_config();
         let mut trainer = PpoTrainer::new(cfg);
-        let steps: Vec<PpoStep> = (0..2)
-            .map(|_| make_step(-1.0, -1.0, 0.5, 1.0, true))
-            .collect();
+        let steps: Vec<PpoStep> = (0..2).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, true)).collect();
         trainer.update(&steps, 0.0).expect("update 1 failed");
         trainer.update(&steps, 0.0).expect("update 2 failed");
         assert_eq!(trainer.history().len(), 2);
@@ -706,13 +734,17 @@ mod tests {
         assert!(!trainer.should_early_stop(0.01));
 
         // Create steps where old_log_prob >> log_prob → large KL
-        let steps: Vec<PpoStep> = (0..3)
-            .map(|_| make_step(-5.0, -0.1, 0.5, 1.0, false))
-            .collect();
+        let steps: Vec<PpoStep> = (0..3).map(|_| make_step(-5.0, -0.1, 0.5, 1.0, false)).collect();
         trainer.update(&steps, 0.0).expect("update failed");
         // approx_kl = mean(old_log_prob - log_prob) = -0.1 - (-5.0) = 4.9
-        assert!(trainer.should_early_stop(0.01), "expected early stop with high KL");
-        assert!(!trainer.should_early_stop(10.0), "should not stop with very high threshold");
+        assert!(
+            trainer.should_early_stop(0.01),
+            "expected early stop with high KL"
+        );
+        assert!(
+            !trainer.should_early_stop(10.0),
+            "should not stop with very high threshold"
+        );
     }
 
     // ── Error handling tests ─────────────────────────────────────────────
@@ -722,7 +754,10 @@ mod tests {
         let e1 = PpoError::EmptyBatch;
         assert!(e1.to_string().contains("empty"));
 
-        let e2 = PpoError::LengthMismatch { steps: 5, advantages: 3 };
+        let e2 = PpoError::LengthMismatch {
+            steps: 5,
+            advantages: 3,
+        };
         let s = e2.to_string();
         assert!(s.contains("5") && s.contains("3"), "got: {}", s);
 
@@ -764,9 +799,21 @@ mod tests {
             make_step(0.0, 0.0, 0.0, 5.0, false),
         ];
         let res = compute_gae(&steps, 0.0, &cfg);
-        assert!((res.advantages[0] - 10.0).abs() < 1e-4, "GAE_0={}", res.advantages[0]);
-        assert!((res.advantages[1] - 8.0).abs() < 1e-4, "GAE_1={}", res.advantages[1]);
-        assert!((res.advantages[2] - 5.0).abs() < 1e-4, "GAE_2={}", res.advantages[2]);
+        assert!(
+            (res.advantages[0] - 10.0).abs() < 1e-4,
+            "GAE_0={}",
+            res.advantages[0]
+        );
+        assert!(
+            (res.advantages[1] - 8.0).abs() < 1e-4,
+            "GAE_1={}",
+            res.advantages[1]
+        );
+        assert!(
+            (res.advantages[2] - 5.0).abs() < 1e-4,
+            "GAE_2={}",
+            res.advantages[2]
+        );
     }
 
     #[test]
@@ -789,8 +836,18 @@ mod tests {
         let res = compute_gae(&steps, 4.0, &cfg);
         let expected_1 = 1.0 + 0.99 * 4.0 - 3.0;
         let expected_0 = 1.0 + 0.99 * 3.0 - 2.0;
-        assert!((res.advantages[1] - expected_1).abs() < 1e-4, "GAE_1={} expected={}", res.advantages[1], expected_1);
-        assert!((res.advantages[0] - expected_0).abs() < 1e-4, "GAE_0={} expected={}", res.advantages[0], expected_0);
+        assert!(
+            (res.advantages[1] - expected_1).abs() < 1e-4,
+            "GAE_1={} expected={}",
+            res.advantages[1],
+            expected_1
+        );
+        assert!(
+            (res.advantages[0] - expected_0).abs() < 1e-4,
+            "GAE_0={} expected={}",
+            res.advantages[0],
+            expected_0
+        );
     }
 
     #[test]
@@ -814,8 +871,16 @@ mod tests {
         let res = compute_gae(&steps, 3.0, &cfg);
         let expected_1 = 2.0 + 0.9 * 3.0 - 2.0;
         let expected_0 = 1.0 + 0.9 * 2.0 - 1.0 + 0.9 * 0.8 * expected_1;
-        assert!((res.advantages[1] - expected_1).abs() < 1e-4, "got {}", res.advantages[1]);
-        assert!((res.advantages[0] - expected_0).abs() < 1e-4, "got {}", res.advantages[0]);
+        assert!(
+            (res.advantages[1] - expected_1).abs() < 1e-4,
+            "got {}",
+            res.advantages[1]
+        );
+        assert!(
+            (res.advantages[0] - expected_0).abs() < 1e-4,
+            "got {}",
+            res.advantages[0]
+        );
     }
 
     // ── Additional clipped-surrogate tests ──────────────────────────────
@@ -837,7 +902,12 @@ mod tests {
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
         // -min(ratio*1, 0.8*1) = -ratio = -exp(-3) ≈ -0.04979
         let expected_ratio = (-3.0_f32).exp();
-        assert!((res.policy_loss - (-expected_ratio)).abs() < 1e-5, "policy_loss={} expected={}", res.policy_loss, -expected_ratio);
+        assert!(
+            (res.policy_loss - (-expected_ratio)).abs() < 1e-5,
+            "policy_loss={} expected={}",
+            res.policy_loss,
+            -expected_ratio
+        );
         // The step IS clipped (|ratio-1| = |0.0498-1| = 0.95 > 0.2)
         assert_eq!(res.clip_fraction, 1.0, "should be clipped");
     }
@@ -857,7 +927,11 @@ mod tests {
         let vt = vec![1.0_f32];
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
         // -min(20.09*1, 1.2*1) = -1.2
-        assert!((res.policy_loss - (-1.2)).abs() < 1e-4, "policy_loss={}", res.policy_loss);
+        assert!(
+            (res.policy_loss - (-1.2)).abs() < 1e-4,
+            "policy_loss={}",
+            res.policy_loss
+        );
     }
 
     #[test]
@@ -876,7 +950,12 @@ mod tests {
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
         let expected_ratio = (0.1_f32).exp();
         let expected_policy = -(expected_ratio * 1.0);
-        assert!((res.policy_loss - expected_policy).abs() < 1e-4, "policy_loss={} expected={}", res.policy_loss, expected_policy);
+        assert!(
+            (res.policy_loss - expected_policy).abs() < 1e-4,
+            "policy_loss={} expected={}",
+            res.policy_loss,
+            expected_policy
+        );
     }
 
     // ── Value loss tests ─────────────────────────────────────────────────
@@ -895,7 +974,11 @@ mod tests {
         let adv = vec![0.0_f32];
         let vt = vec![3.0_f32];
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
-        assert!((res.value_loss - 2.0).abs() < 1e-5, "value_loss={}", res.value_loss);
+        assert!(
+            (res.value_loss - 2.0).abs() < 1e-5,
+            "value_loss={}",
+            res.value_loss
+        );
     }
 
     #[test]
@@ -909,7 +992,11 @@ mod tests {
         let adv = vec![0.0_f32];
         let vt = vec![2.5_f32];
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
-        assert!((res.value_loss).abs() < 1e-6, "value_loss should be 0, got {}", res.value_loss);
+        assert!(
+            (res.value_loss).abs() < 1e-6,
+            "value_loss should be 0, got {}",
+            res.value_loss
+        );
     }
 
     // ── Entropy bonus tests ──────────────────────────────────────────────
@@ -930,7 +1017,11 @@ mod tests {
         let adv = vec![0.0_f32; 2];
         let vt = vec![0.5_f32; 2];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ok");
-        assert!((res.entropy_loss - 1.5).abs() < 1e-5, "entropy_loss={}", res.entropy_loss);
+        assert!(
+            (res.entropy_loss - 1.5).abs() < 1e-5,
+            "entropy_loss={}",
+            res.entropy_loss
+        );
     }
 
     #[test]
@@ -944,12 +1035,18 @@ mod tests {
             entropy_coeff: 1.0,
             ..Default::default()
         };
-        let steps: Vec<PpoStep> = (0..n).map(|_| make_step(log_prob, log_prob, 0.5, 0.0, false)).collect();
+        let steps: Vec<PpoStep> =
+            (0..n).map(|_| make_step(log_prob, log_prob, 0.5, 0.0, false)).collect();
         let adv = vec![0.0_f32; n];
         let vt = vec![0.5_f32; n];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ok");
         let expected = (n as f32).ln();
-        assert!((res.entropy_loss - expected).abs() < 1e-4, "entropy_loss={} expected ln({n})={}", res.entropy_loss, expected);
+        assert!(
+            (res.entropy_loss - expected).abs() < 1e-4,
+            "entropy_loss={} expected ln({n})={}",
+            res.entropy_loss,
+            expected
+        );
     }
 
     // ── KL divergence tests ──────────────────────────────────────────────
@@ -965,7 +1062,11 @@ mod tests {
         let adv = vec![1.0_f32; 3];
         let vt = vec![1.0_f32; 3];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ok");
-        assert!((res.approx_kl).abs() < 1e-6, "kl should be 0, got {}", res.approx_kl);
+        assert!(
+            (res.approx_kl).abs() < 1e-6,
+            "kl should be 0, got {}",
+            res.approx_kl
+        );
     }
 
     #[test]
@@ -1000,9 +1101,17 @@ mod tests {
         let pos_res = compute_ppo_loss(&steps, &pos_adv, &vt, &cfg).expect("ok");
         let neg_res = compute_ppo_loss(&steps, &neg_adv, &vt, &cfg).expect("ok");
         // Positive advantage → negative policy loss (gradient goes up)
-        assert!(pos_res.policy_loss < 0.0, "policy_loss should be negative for positive advantage, got {}", pos_res.policy_loss);
+        assert!(
+            pos_res.policy_loss < 0.0,
+            "policy_loss should be negative for positive advantage, got {}",
+            pos_res.policy_loss
+        );
         // Negative advantage → positive policy loss
-        assert!(neg_res.policy_loss > 0.0, "policy_loss should be positive for negative advantage, got {}", neg_res.policy_loss);
+        assert!(
+            neg_res.policy_loss > 0.0,
+            "policy_loss should be positive for negative advantage, got {}",
+            neg_res.policy_loss
+        );
     }
 
     // ── Trainer accumulation tests ───────────────────────────────────────
@@ -1014,7 +1123,8 @@ mod tests {
             ..Default::default()
         };
         let mut trainer = PpoTrainer::new(cfg);
-        let steps_a: Vec<PpoStep> = (0..3).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false)).collect();
+        let steps_a: Vec<PpoStep> =
+            (0..3).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, false)).collect();
         let steps_b: Vec<PpoStep> = (0..5).map(|_| make_step(-1.0, -1.0, 0.5, 1.0, true)).collect();
         trainer.update(&steps_a, 0.5).expect("update a");
         trainer.update(&steps_b, 0.0).expect("update b");
@@ -1025,7 +1135,10 @@ mod tests {
     #[test]
     fn test_ppo_trainer_mean_policy_loss_empty() {
         let trainer = PpoTrainer::new(PpoConfig::default());
-        assert!((trainer.mean_policy_loss()).abs() < 1e-8, "empty should return 0");
+        assert!(
+            (trainer.mean_policy_loss()).abs() < 1e-8,
+            "empty should return 0"
+        );
     }
 
     #[test]
@@ -1039,7 +1152,10 @@ mod tests {
         let r1 = trainer.update(&steps, 0.0).expect("update 1");
         let r2 = trainer.update(&steps, 0.0).expect("update 2");
         let expected = (r1.policy_loss + r2.policy_loss) / 2.0;
-        assert!((trainer.mean_policy_loss() - expected).abs() < 1e-5, "mean policy loss mismatch");
+        assert!(
+            (trainer.mean_policy_loss() - expected).abs() < 1e-5,
+            "mean policy loss mismatch"
+        );
     }
 
     // ── Edge case tests ──────────────────────────────────────────────────
@@ -1056,7 +1172,11 @@ mod tests {
         let adv = vec![0.0_f32; 4];
         let vt = vec![0.5_f32; 4];
         let res = compute_ppo_loss(&steps, &adv, &vt, &cfg).expect("ok");
-        assert!((res.policy_loss).abs() < 1e-6, "policy_loss should be 0, got {}", res.policy_loss);
+        assert!(
+            (res.policy_loss).abs() < 1e-6,
+            "policy_loss should be 0, got {}",
+            res.policy_loss
+        );
     }
 
     #[test]
@@ -1089,7 +1209,11 @@ mod tests {
         let vt = vec![0.5_f32];
         let res = compute_ppo_loss(&[step], &adv, &vt, &cfg).expect("ok");
         // -min(exp(100), 1.2) * 1.0 = -1.2
-        assert!((res.policy_loss - (-1.2)).abs() < 1e-4, "policy_loss={}", res.policy_loss);
+        assert!(
+            (res.policy_loss - (-1.2)).abs() < 1e-4,
+            "policy_loss={}",
+            res.policy_loss
+        );
         assert_eq!(res.clip_fraction, 1.0);
     }
 

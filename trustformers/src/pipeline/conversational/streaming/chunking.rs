@@ -177,6 +177,10 @@ impl ResponseChunker {
 
     /// Semantic chunking based on meaning and structure
     fn chunk_semantic(&self, text: &str, metadata: &ConversationMetadata) -> Vec<StreamChunk> {
+        // Same complexity analysis `chunk_adaptive` uses, so semantic chunks
+        // get delivery timing that reflects real content/metadata instead of
+        // a fixed default.
+        let complexity = self.analyze_content_complexity(text, metadata);
         // Split by paragraphs first for basic semantic structure
         let paragraphs: Vec<&str> = text.split("\n\n").collect();
         let mut chunks = Vec::new();
@@ -199,7 +203,7 @@ impl ResponseChunker {
                                 content: current_chunk.trim().to_string(),
                                 index: chunk_index,
                                 chunk_type: ChunkType::Semantic,
-                                timing: ChunkTiming::default(),
+                                timing: ChunkTiming::adaptive(complexity),
                                 metadata: ChunkMetadata::semantic(),
                             });
                             chunk_index += 1;
@@ -215,7 +219,7 @@ impl ResponseChunker {
                         content: current_chunk.trim().to_string(),
                         index: chunk_index,
                         chunk_type: ChunkType::Semantic,
-                        timing: ChunkTiming::default(),
+                        timing: ChunkTiming::adaptive(complexity),
                         metadata: ChunkMetadata::semantic(),
                     });
                     chunk_index += 1;
@@ -225,7 +229,7 @@ impl ResponseChunker {
                     content: paragraph.trim().to_string(),
                     index: chunk_index,
                     chunk_type: ChunkType::Semantic,
-                    timing: ChunkTiming::default(),
+                    timing: ChunkTiming::adaptive(complexity),
                     metadata: ChunkMetadata::semantic(),
                 });
                 chunk_index += 1;
@@ -299,94 +303,6 @@ impl ResponseChunker {
         }
 
         complexity.min(1.0)
-    }
-
-    /// Detect code blocks and handle them specially
-    fn detect_code_blocks(&self, text: &str) -> Vec<CodeBlock> {
-        let mut code_blocks = Vec::new();
-        let lines: Vec<&str> = text.lines().collect();
-        let mut in_code_block = false;
-        let mut code_start = 0;
-        let mut code_end = 0;
-
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim().starts_with("```") {
-                if in_code_block {
-                    code_end = i;
-                    code_blocks.push(CodeBlock {
-                        start_line: code_start,
-                        end_line: code_end,
-                        language: detect_language(lines[code_start]),
-                        content: lines[code_start..=code_end].join("\n"),
-                    });
-                    in_code_block = false;
-                } else {
-                    code_start = i;
-                    in_code_block = true;
-                }
-            }
-        }
-
-        code_blocks
-    }
-
-    /// Handle structured data differently from prose
-    fn detect_structured_data(&self, text: &str) -> Vec<StructuredBlock> {
-        let mut structured_blocks = Vec::new();
-
-        // Detect lists
-        if self.is_list(text) {
-            structured_blocks.push(StructuredBlock {
-                block_type: StructuredType::List,
-                content: text.to_string(),
-                should_chunk_items: true,
-            });
-        }
-
-        // Detect tables (simple markdown tables)
-        if text.contains('|') && text.matches('|').count() > 2 {
-            structured_blocks.push(StructuredBlock {
-                block_type: StructuredType::Table,
-                content: text.to_string(),
-                should_chunk_items: false, // Keep tables intact
-            });
-        }
-
-        structured_blocks
-    }
-
-    /// Check if text represents a list
-    fn is_list(&self, text: &str) -> bool {
-        let lines: Vec<&str> = text.lines().collect();
-        if lines.len() < 2 {
-            return false;
-        }
-
-        let list_indicators = ["-", "*", "+"];
-
-        lines.iter().take(3).all(|line| {
-            let trimmed = line.trim();
-            list_indicators.iter().any(|&indicator| trimmed.starts_with(indicator))
-                || self.is_numbered_list_item(trimmed)
-        })
-    }
-
-    /// Check if a line is a numbered list item (e.g., "1.", "2.", etc.)
-    fn is_numbered_list_item(&self, line: &str) -> bool {
-        let chars: Vec<char> = line.chars().collect();
-        if chars.len() < 2 {
-            return false;
-        }
-
-        let mut digit_count = 0;
-        for &ch in &chars {
-            if ch.is_ascii_digit() {
-                digit_count += 1;
-            } else {
-                return ch == '.' && digit_count > 0;
-            }
-        }
-        false
     }
 
     /// Get access to quality analyzer for external use
@@ -636,50 +552,6 @@ impl QualityAnalyzer {
 }
 
 // ================================================================================================
-// HELPER TYPES AND FUNCTIONS
-// ================================================================================================
-
-/// Code block information for special handling
-#[derive(Debug, Clone)]
-pub struct CodeBlock {
-    pub start_line: usize,
-    pub end_line: usize,
-    pub language: String,
-    pub content: String,
-}
-
-/// Structured data block for special chunking
-#[derive(Debug, Clone)]
-pub struct StructuredBlock {
-    pub block_type: StructuredType,
-    pub content: String,
-    pub should_chunk_items: bool,
-}
-
-/// Types of structured content
-#[derive(Debug, Clone, PartialEq)]
-pub enum StructuredType {
-    List,
-    Table,
-    CodeBlock,
-    Quote,
-}
-
-/// Detect programming language from code block header
-fn detect_language(line: &str) -> String {
-    if line.starts_with("```") {
-        let lang = line.trim_start_matches("```").trim();
-        if lang.is_empty() {
-            "text".to_string()
-        } else {
-            lang.to_string()
-        }
-    } else {
-        "text".to_string()
-    }
-}
-
-// ================================================================================================
 // TESTS
 // ================================================================================================
 
@@ -687,7 +559,6 @@ fn detect_language(line: &str) -> String {
 mod tests {
     use super::*;
     use crate::pipeline::conversational::types::{ConversationMetadata, EngagementLevel};
-    use chrono::Utc;
 
     #[test]
     fn test_fixed_size_chunking() {

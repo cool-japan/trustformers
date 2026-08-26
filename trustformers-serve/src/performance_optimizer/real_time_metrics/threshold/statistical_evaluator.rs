@@ -69,7 +69,10 @@ pub struct StatisticalDataPoint {
     pub timestamp: DateTime<Utc>,
 
     /// Quality score
-    pub quality: f32,
+    /// Quality of the sample, when the caller knows it. `None` means the
+    /// sample arrived with no quality signal -- which is the case for every
+    /// sample the threshold evaluator sees.
+    pub quality: Option<f32>,
 }
 
 impl Default for StatisticalThresholdEvaluator {
@@ -103,7 +106,7 @@ impl StatisticalThresholdEvaluator {
     }
 
     /// Add data point to history
-    pub fn add_data_point(&self, value: f64, quality: f32) {
+    pub fn add_data_point(&self, value: f64, quality: Option<f32>) {
         let mut history = self.history.lock().unwrap_or_else(|p| p.into_inner());
 
         let data_point = StatisticalDataPoint {
@@ -278,7 +281,10 @@ impl ThresholdEvaluator for StatisticalThresholdEvaluator {
         let start_time = Instant::now();
 
         // Add current value to history for future analysis
-        self.add_data_point(value, 1.0); // Assume perfect quality for now
+        // `evaluate` is handed a bare `f64`; nothing tells it how good the
+        // sample is. Until 0.2.1 this recorded quality 1.0 -- "assume perfect
+        // quality for now" -- on every sample.
+        self.add_data_point(value, None);
 
         // Enhanced statistical evaluation with confidence scoring
         let violated = match config.direction {

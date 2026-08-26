@@ -1,4 +1,11 @@
-version: '3.8'
+# Runs the gRPC server built from `examples/grpc-server/Dockerfile`.
+#
+# There is no Prometheus/Grafana stack here: the server has no HTTP metrics
+# endpoint to scrape, so the `monitoring` profile that used to sit in this file
+# pointed a scraper at a URL that does not exist and mounted a `prometheus.yml`
+# and a `grafana/` directory that were never part of the repository.
+# Per-response latency and throughput are returned inline on the
+# `PredictMetrics` / `BatchMetrics` messages instead.
 
 services:
   grpc-server:
@@ -9,56 +16,26 @@ services:
       - "50051:50051"
     environment:
       - RUST_LOG=info,trustformers_grpc_server=debug
+      # Read by src/main.rs; see the table at the top of that file.
       - GRPC_PORT=50051
       - MAX_MODELS=10
       - DEFAULT_DEVICE=cpu
     volumes:
-      # Mount local model cache
+      # Mount local model cache. Paths passed as `LoadModelRequest.model_path`
+      # are resolved inside the container, so point them at /models.
       - ./models:/models
-      # Mount for development (optional)
-      # - ./src:/app/examples/grpc-server/src:ro
     healthcheck:
+      # A TCP liveness probe, not a gRPC health check: it proves the listener is
+      # up, not that a model is loaded. The server does implement
+      # `grpc.health.v1.Health`, which `grpc_health_probe` or grpcurl can query.
       test: ["CMD", "nc", "-z", "localhost", "50051"]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 10s
     restart: unless-stopped
-    
-  # Optional: Prometheus for metrics
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    depends_on:
-      - grpc-server
-    profiles:
-      - monitoring
-    
-  # Optional: Grafana for visualization
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
-    depends_on:
-      - prometheus
-    profiles:
-      - monitoring
 
-  # Optional: grpcui for debugging
+  # Interactive gRPC browser, off unless `--profile debug` is passed.
   grpcui:
     image: fullstorydev/grpcui:latest
     ports:
@@ -68,7 +45,3 @@ services:
       - grpc-server
     profiles:
       - debug
-
-volumes:
-  prometheus-data:
-  grafana-data:

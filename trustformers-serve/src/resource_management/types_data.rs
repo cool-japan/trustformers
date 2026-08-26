@@ -455,6 +455,28 @@ pub struct GpuRealTimeMetrics {
 
     /// Fan speeds (percentage for each fan)
     pub fan_speeds: Vec<f32>,
+
+    /// Total VRAM on the device, in MB, as the driver reports it.
+    ///
+    /// `None` when the producer could not read it. Consumers that want a
+    /// memory *percentage* need this; see
+    /// [`crate::resource_management::gpu_manager::types::GpuRealTimeMetrics::memory_usage_percent`]
+    /// for why a hardcoded card size is not an acceptable substitute.
+    pub total_memory_mb: Option<u64>,
+}
+
+impl GpuRealTimeMetrics {
+    /// Memory usage as a percentage of the device's real VRAM.
+    ///
+    /// `None` when [`Self::total_memory_mb`] is absent or zero: the percentage
+    /// is genuinely unknown, and a consumer must skip its threshold rather than
+    /// compare against a guess.
+    pub fn memory_usage_percent(&self) -> Option<f32> {
+        match self.total_memory_mb {
+            Some(total) if total > 0 => Some((self.memory_usage_mb as f32 / total as f32) * 100.0),
+            _ => None,
+        }
+    }
 }
 
 /// GPU clock speed information
@@ -791,38 +813,37 @@ pub struct GpuUsageStatistics {
     pub performance_index: f32,
 }
 
-/// Statistics for database usage
+/// Statistics for database slot usage.
+///
+/// 0.2.1: this struct used to carry two parallel sets of the same five
+/// counters (`total_allocated`/`total_connections`,
+/// `currently_active`/`active_connections`, `peak_usage`/`peak_connections`,
+/// `average_lifetime`/`average_duration`) of which only the second set was ever
+/// written, plus `pool_efficiency` and `query_throughput` that nothing anywhere
+/// computed -- so a report reading them printed `0.00 queries/sec` as though it
+/// had been measured. The duplicates and the two unmeasurable fields are gone;
+/// every field below is written by
+/// [`DatabaseSlotAllocator`](crate::resource_management::DatabaseSlotAllocator)
+/// from real allocations and real hold times.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DatabaseUsageStatistics {
-    /// Total number of connections allocated
+    /// Total number of slots handed out over this allocator's lifetime
     pub total_allocated: u64,
 
-    /// Number of currently active connections
+    /// Number of slots currently held
     pub currently_active: usize,
 
-    /// Peak number of connections used simultaneously
+    /// Highest number of slots held simultaneously
     pub peak_usage: usize,
 
-    /// Average lifetime of connections
+    /// Number of slots released so far, the denominator of the mean below
+    pub released_count: u64,
+
+    /// Summed hold time of every released slot
+    pub total_held_time: Duration,
+
+    /// Mean hold time across released slots
     pub average_lifetime: Duration,
-
-    /// Connection pool efficiency percentage
-    pub pool_efficiency: f32,
-
-    /// Total connections established
-    pub total_connections: u64,
-
-    /// Number of active connections
-    pub active_connections: usize,
-
-    /// Peak connections reached
-    pub peak_connections: usize,
-
-    /// Average connection duration
-    pub average_duration: Duration,
-
-    /// Query throughput (queries per second)
-    pub query_throughput: f64,
 }
 
 /// Overall system resource statistics

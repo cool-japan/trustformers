@@ -3,6 +3,7 @@
 //! Provides a production-quality pipeline for code generation tasks including
 //! standard generation, fill-in-the-middle (FIM) completion, and instruction-to-code.
 
+use crate::AutoModel;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -169,6 +170,8 @@ pub enum CodeGenerationError {
     InvalidLanguage(String),
     /// The generation step itself failed
     GenerationFailed(String),
+    /// No generation backend was attached to the pipeline.
+    NoBackend,
 }
 
 impl fmt::Display for CodeGenerationError {
@@ -181,6 +184,12 @@ impl fmt::Display for CodeGenerationError {
             CodeGenerationError::GenerationFailed(msg) => {
                 write!(f, "code generation failed: {}", msg)
             },
+            CodeGenerationError::NoBackend => write!(
+                f,
+                "no code-generation backend is attached: call \
+                 `CodeGenerationPipeline::with_model` with a generative checkpoint, or \
+                 `with_template_stub` to opt into the language-template stand-in"
+            ),
         }
     }
 }
@@ -198,16 +207,76 @@ impl std::error::Error for CodeGenerationError {}
 ///
 /// The pipeline implements all supporting algorithms (FIM prompt construction,
 /// markdown fence extraction, stop-sequence application, language detection,
-/// token estimation) in pure Rust. The actual generation step uses an extractive
-/// placeholder that mimics the output contract of a real LLM backend.
+/// token estimation) in pure Rust. The generation step itself runs a real
+/// generative model attached with [`CodeGenerationPipeline::with_model`]; a
+/// pipeline with no backend refuses to generate rather than emitting a
+/// template.
 pub struct CodeGenerationPipeline {
     config: CodeGenerationConfig,
+    backend: CodeGenerationBackend,
+}
+
+/// What performs the generation step.
+pub enum CodeGenerationBackend {
+    /// A real generative checkpoint.
+    Model(Box<AutoModel>),
+    /// Language-appropriate template text, requested explicitly.
+    ///
+    /// The output is a stub function derived from the prompt — useful for
+    /// exercising the surrounding extraction/stop-sequence machinery, never a
+    /// model prediction.
+    TemplateStub,
+    /// Nothing is attached; [`CodeGenerationPipeline::generate`] errors.
+    Unavailable,
+}
+
+impl std::fmt::Debug for CodeGenerationBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CodeGenerationBackend::Model(_) => write!(f, "CodeGenerationBackend::Model"),
+            CodeGenerationBackend::TemplateStub => {
+                write!(f, "CodeGenerationBackend::TemplateStub")
+            },
+            CodeGenerationBackend::Unavailable => {
+                write!(f, "CodeGenerationBackend::Unavailable")
+            },
+        }
+    }
 }
 
 impl CodeGenerationPipeline {
-    /// Create a new pipeline with the given configuration.
+    /// Create a new pipeline with the given configuration and no backend.
+    ///
+    /// Attach one with [`CodeGenerationPipeline::with_model`] before calling
+    /// [`CodeGenerationPipeline::generate`].
     pub fn new(config: CodeGenerationConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            backend: CodeGenerationBackend::Unavailable,
+        }
+    }
+
+    /// Attach a real generative checkpoint.
+    ///
+    /// The model must carry a language-modelling head and a tokenizer; see
+    /// [`AutoModel::from_pretrained`].
+    pub fn with_model(mut self, model: AutoModel) -> Self {
+        self.backend = CodeGenerationBackend::Model(Box::new(model));
+        self
+    }
+
+    /// Opt into the language-template stand-in.
+    ///
+    /// Its output is a stub function, not a prediction. This exists so the
+    /// stand-in can only be reached deliberately.
+    pub fn with_template_stub(mut self) -> Self {
+        self.backend = CodeGenerationBackend::TemplateStub;
+        self
+    }
+
+    /// Which backend will perform the generation step.
+    pub fn backend(&self) -> &CodeGenerationBackend {
+        &self.backend
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -227,8 +296,15 @@ impl CodeGenerationPipeline {
         // Build the raw prompt text from the input variant
         let raw_prompt = self.build_prompt(&input)?;
 
-        // Simulate generation (extractive placeholder)
-        let raw_output = self.simulate_generation(&raw_prompt, &input);
+        // Generation step: a real model when one is attached, the explicitly
+        // requested template otherwise, and an error when neither.
+        let raw_output = match &self.backend {
+            CodeGenerationBackend::Model(model) => self.run_model(model, &raw_prompt)?,
+            CodeGenerationBackend::TemplateStub => self.template_stub(&input),
+            CodeGenerationBackend::Unavailable => {
+                return Err(CodeGenerationError::NoBackend);
+            },
+        };
 
         // Apply stop sequences
         let (trimmed, stop_reason) =
@@ -512,10 +588,49 @@ impl CodeGenerationPipeline {
         }
     }
 
-    /// Simulate code generation (extractive placeholder that respects the pipeline contract).
+    /// Run the attached model over `prompt` and return its raw completion.
+    fn run_model(&self, model: &AutoModel, prompt: &str) -> Result<String, CodeGenerationError> {
+        let gen_config = trustformers_models::common_patterns::GenerationConfig {
+            max_new_tokens: self.config.max_new_tokens,
+            max_length: None,
+            temperature: self.config.temperature,
+            top_p: self.config.top_p,
+            top_k: if self.config.top_k == 0 { None } else { Some(self.config.top_k) },
+            repetition_penalty: 1.0,
+            length_penalty: 1.0,
+            do_sample: self.config.temperature > 0.0,
+            early_stopping: false,
+            num_beams: Some(1),
+            num_return_sequences: 1,
+            pad_token_id: None,
+            eos_token_id: None,
+            use_cache: true,
+            stream: false,
+        };
+        let generated = trustformers_models::common_patterns::GenerativeModel::generate(
+            model,
+            prompt,
+            &gen_config,
+        )
+        .map_err(|e| CodeGenerationError::GenerationFailed(e.to_string()))?;
+        // Decoder-only models echo the prompt; keep only the completion.
+        Ok(generated.strip_prefix(prompt).unwrap_or(&generated).to_string())
+    }
+
+    /// Language-appropriate template text for the explicit stub backend.
     ///
-    /// In a real deployment this would call the underlying LLM backend.
-    fn simulate_generation(&self, prompt: &str, input: &CodeGenerationInput) -> String {
+    /// This is not a prediction; it exists to exercise the extraction and
+    /// stop-sequence machinery without a checkpoint.
+    fn template_stub(&self, input: &CodeGenerationInput) -> String {
+        self.render_template(input)
+    }
+
+    /// Render the language template for `input`.
+    ///
+    /// `input` alone is sufficient: each `CodeGenerationInput` variant already
+    /// carries its own prompt/task/prefix text, so this takes no separate raw
+    /// prompt string.
+    fn render_template(&self, input: &CodeGenerationInput) -> String {
         let lang = self.config.language.as_deref().unwrap_or("python");
         let indent = match &self.config.indent_style {
             IndentStyle::Spaces(n) => " ".repeat(*n),
@@ -789,7 +904,8 @@ mod tests {
 
     #[test]
     fn test_generate_prompt_input() {
-        let pipeline = CodeGenerationPipeline::new(CodeGenerationConfig::default());
+        let pipeline =
+            CodeGenerationPipeline::new(CodeGenerationConfig::default()).with_template_stub();
         let result = pipeline.generate(CodeGenerationInput::Prompt(
             "Write a function to add two numbers".to_string(),
         ));
@@ -801,7 +917,8 @@ mod tests {
 
     #[test]
     fn test_generate_fim_input() {
-        let pipeline = CodeGenerationPipeline::new(CodeGenerationConfig::default());
+        let pipeline =
+            CodeGenerationPipeline::new(CodeGenerationConfig::default()).with_template_stub();
         let result = pipeline.generate(CodeGenerationInput::FillInMiddle {
             prefix: "def add(a, b):\n    ".to_string(),
             suffix: "\n    return result\n".to_string(),
@@ -811,7 +928,8 @@ mod tests {
 
     #[test]
     fn test_generate_instruction_input() {
-        let pipeline = CodeGenerationPipeline::new(CodeGenerationConfig::default());
+        let pipeline =
+            CodeGenerationPipeline::new(CodeGenerationConfig::default()).with_template_stub();
         let result = pipeline.generate(CodeGenerationInput::Instruction {
             task: "Sort a list of integers in ascending order".to_string(),
             context: Some("import sys".to_string()),
@@ -821,7 +939,8 @@ mod tests {
 
     #[test]
     fn test_generate_empty_prompt_errors() {
-        let pipeline = CodeGenerationPipeline::new(CodeGenerationConfig::default());
+        let pipeline =
+            CodeGenerationPipeline::new(CodeGenerationConfig::default()).with_template_stub();
         let result = pipeline.generate(CodeGenerationInput::Prompt("   ".to_string()));
         assert!(matches!(result, Err(CodeGenerationError::EmptyInput)));
     }
@@ -830,7 +949,7 @@ mod tests {
     fn test_generate_with_language_hint() {
         let mut cfg = CodeGenerationConfig::default();
         cfg.language = Some("rust".to_string());
-        let pipeline = CodeGenerationPipeline::new(cfg);
+        let pipeline = CodeGenerationPipeline::new(cfg).with_template_stub();
         let result =
             pipeline.generate(CodeGenerationInput::Prompt("compute fibonacci".to_string()));
         assert!(result.is_ok());
@@ -857,5 +976,40 @@ mod tests {
         assert!(CodeGenerationError::GenerationFailed("oops".to_string())
             .to_string()
             .contains("oops"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: the pipeline used to emit a stub for every prompt with no
+    // model involved at all. A backend-less pipeline must now refuse.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_without_a_backend_is_refused() {
+        let pipeline = CodeGenerationPipeline::new(CodeGenerationConfig::default());
+        let result = pipeline.generate(CodeGenerationInput::Prompt(
+            "Write a function to add two numbers".to_string(),
+        ));
+        assert!(
+            matches!(result, Err(CodeGenerationError::NoBackend)),
+            "a pipeline with no model must not emit `def generated_function(): pass`"
+        );
+        assert_eq!(
+            format!("{:?}", pipeline.backend()),
+            "CodeGenerationBackend::Unavailable"
+        );
+    }
+
+    #[test]
+    fn template_stub_backend_is_explicit() {
+        let pipeline =
+            CodeGenerationPipeline::new(CodeGenerationConfig::default()).with_template_stub();
+        let out = pipeline
+            .generate(CodeGenerationInput::Prompt("add two numbers".to_string()))
+            .expect("the explicitly requested template must still work");
+        assert!(!out.generated_code.is_empty());
+        assert_eq!(
+            format!("{:?}", pipeline.backend()),
+            "CodeGenerationBackend::TemplateStub"
+        );
     }
 }

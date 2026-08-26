@@ -21,8 +21,9 @@ pub use zero_stage1::ZeROStage1;
 pub use zero_stage2::ZeROStage2;
 pub use zero_stage3::ZeROStage3;
 pub use zero_utils::{
-    all_gather_gradients, gather_parameters, partition_gradients, partition_parameters,
-    reduce_scatter_gradients, GradientBuffer, ParameterGroup, ParameterPartition, ZeROState,
+    all_gather_gradients, gather_parameters, gather_shards, partition_gradients,
+    partition_parameters, reduce_scatter_gradients, shard_range, slice_flat, GradientBuffer,
+    ParameterGroup, ParameterPartition, ZeROState,
 };
 
 /// ZeRO optimization stages

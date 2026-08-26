@@ -472,13 +472,11 @@ impl AdvancedAnalytics {
         // Calculate overall stability score
         let stability_score = self.calculate_stability_score(hidden_states)?;
 
-        // Calculate variance across batches (simulated)
         let variance_across_batches = self.calculate_batch_variance(hidden_states)?;
 
         // Calculate consistency measure
         let consistency_measure = self.calculate_consistency_measure(hidden_states)?;
 
-        // Assess robustness to noise (simulated)
         let robustness_to_noise = self.assess_noise_robustness(hidden_states)?;
 
         Ok(RepresentationStability {
@@ -635,18 +633,23 @@ impl AdvancedAnalytics {
         // Calculate correlation matrix
         let correlation_matrix = self.calculate_correlation_matrix()?;
 
-        // Placeholder for principal components and explained variance
-        let principal_components = vec![vec![1.0; means.len()]; means.len()];
-        let explained_variance_ratios = vec![1.0 / means.len() as f64; means.len()];
+        // REAL principal components: the eigen-decomposition of the
+        // correlation matrix (PCA on standardised variables), largest
+        // eigenvalue first. `principal_components[k]` is the k-th loading
+        // vector and `explained_variance_ratios[k]` its share of the total
+        // variance.
+        //
+        // These used to be an all-ones matrix and a flat `1/n` vector, i.e.
+        // "every variable loads equally on every component and each component
+        // explains the same share", published as a PCA result.
+        let (principal_components, explained_variance_ratios) =
+            Self::principal_components_of(&correlation_matrix);
 
-        // Placeholder for significance tests
-        let significance_tests = vec![SignificanceTest {
-            test_name: "Sample t-test".to_string(),
-            statistic: 1.0,
-            p_value: 0.05,
-            degrees_of_freedom: Some(means.len() - 1),
-            confidence_interval: Some((0.0, 1.0)),
-        }];
+        // Hypothesis tests need a stated null and paired samples to test it
+        // against; `perform_statistical_analysis` receives neither. This used
+        // to carry one "Sample t-test" with statistic 1.0, p-value 0.05 and a
+        // (0.0, 1.0) confidence interval -- constants regardless of the data.
+        let significance_tests = Vec::new();
 
         Ok(StatisticalAnalysis {
             means,
@@ -656,6 +659,46 @@ impl AdvancedAnalytics {
             explained_variance_ratios,
             significance_tests,
         })
+    }
+
+    /// Eigen-decompose a symmetric correlation matrix into principal
+    /// components and explained-variance ratios, largest first.
+    ///
+    /// Returns empty vectors for an empty or non-square input.
+    fn principal_components_of(correlation_matrix: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let n = correlation_matrix.len();
+        if n == 0 || correlation_matrix.iter().any(|row| row.len() != n) {
+            return (Vec::new(), Vec::new());
+        }
+        if correlation_matrix.iter().flatten().any(|v| !v.is_finite()) {
+            return (Vec::new(), Vec::new());
+        }
+
+        let matrix = nalgebra::DMatrix::<f64>::from_fn(n, n, |i, j| correlation_matrix[i][j]);
+        // The correlation matrix is symmetric by construction, so the
+        // symmetric (Jacobi) eigensolver applies and returns real eigenvalues.
+        let eigen = nalgebra::linalg::SymmetricEigen::new(matrix);
+
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            eigen.eigenvalues[b]
+                .partial_cmp(&eigen.eigenvalues[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Negative eigenvalues can only appear as round-off on a
+        // positive-semidefinite correlation matrix; clamp them at zero.
+        let total: f64 = eigen.eigenvalues.iter().map(|v| v.max(0.0)).sum();
+        let components: Vec<Vec<f64>> = order
+            .iter()
+            .map(|&k| eigen.eigenvectors.column(k).iter().copied().collect())
+            .collect();
+        let ratios: Vec<f64> = order
+            .iter()
+            .map(|&k| if total > 0.0 { eigen.eigenvalues[k].max(0.0) / total } else { 0.0 })
+            .collect();
+
+        (components, ratios)
     }
 
     /// Generate comprehensive analytics report.
@@ -721,10 +764,13 @@ impl AdvancedAnalytics {
         let mut centers = Vec::new();
         let _dimensions = data[0].len();
 
-        // Choose first center randomly (simplified - just use first point)
+        // Deterministic seeding: take the first point rather than a random
+        // one, so repeated runs over the same data cluster identically. (This
+        // is the only departure from textbook k-means++, which samples the
+        // first centre uniformly at random.)
         centers.push(data[0].clone());
 
-        // Choose remaining centers using k-means++ logic (simplified)
+        // Remaining centres by the k-means++ D^2 rule.
         for _ in 1..num_clusters {
             if centers.len() >= data.len() {
                 break;
@@ -1166,7 +1212,7 @@ impl AdvancedAnalytics {
         })
     }
 
-    /// Calculate variance across batches (simulated).
+    /// Mean per-dimension sample variance across the supplied hidden states.
     fn calculate_batch_variance(&self, hidden_states: &[Vec<f64>]) -> Result<f64> {
         if hidden_states.is_empty() {
             return Ok(0.0);
@@ -1216,9 +1262,15 @@ impl AdvancedAnalytics {
         })
     }
 
-    /// Assess robustness to noise (simulated).
+    /// Variance-derived noise-robustness PROXY, `1 / (1 + variance)`, in
+    /// `(0, 1]`.
+    ///
+    /// It is a monotone transform of the real
+    /// [`Self::calculate_batch_variance`], not a measurement of robustness:
+    /// nothing is perturbed and the model is never re-evaluated. Tightly
+    /// clustered representations score near 1 and widely spread ones near 0,
+    /// which is a heuristic for -- not evidence of -- noise robustness.
     fn assess_noise_robustness(&self, hidden_states: &[Vec<f64>]) -> Result<f64> {
-        // Simplified robustness assessment based on state variance
         self.calculate_batch_variance(hidden_states).map(|variance| {
             // High variance might indicate low robustness to noise
             1.0 / (1.0 + variance)
@@ -1349,6 +1401,72 @@ impl Default for AdvancedAnalytics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2: real PCA ----------------------------------
+
+    #[test]
+    fn principal_components_of_the_identity_are_unit_and_equally_weighted() {
+        let identity = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let (components, ratios) = AdvancedAnalytics::principal_components_of(&identity);
+        assert_eq!(components.len(), 2);
+        // Uncorrelated unit-variance variables split the variance evenly.
+        for ratio in &ratios {
+            assert!((ratio - 0.5).abs() < 1e-9, "expected 0.5, got {ratio}");
+        }
+    }
+
+    #[test]
+    fn principal_components_of_perfectly_correlated_variables_collapse_to_one() {
+        // Two perfectly correlated variables: PC1 explains everything.
+        let correlated = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+        let (components, ratios) = AdvancedAnalytics::principal_components_of(&correlated);
+        assert_eq!(components.len(), 2);
+        assert!(
+            (ratios[0] - 1.0).abs() < 1e-9,
+            "PC1 must explain all the variance, got {}",
+            ratios[0]
+        );
+        assert!(
+            ratios[1].abs() < 1e-9,
+            "PC2 must explain none, got {}",
+            ratios[1]
+        );
+        // The old placeholder returned a flat 1/n for every component, so this
+        // pair would both have been 0.5.
+        assert!(
+            (ratios[0] - ratios[1]).abs() > 0.5,
+            "the ratios must actually differ"
+        );
+    }
+
+    #[test]
+    fn principal_components_are_ordered_by_explained_variance() {
+        let matrix = vec![vec![1.0, 0.8], vec![0.8, 1.0]];
+        let (_, ratios) = AdvancedAnalytics::principal_components_of(&matrix);
+        assert!(
+            ratios[0] >= ratios[1],
+            "components must be sorted descending: {ratios:?}"
+        );
+        assert!(
+            (ratios.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            "ratios must sum to 1"
+        );
+        // Eigenvalues of [[1,0.8],[0.8,1]] are 1.8 and 0.2 => 0.9 / 0.1.
+        assert!((ratios[0] - 0.9).abs() < 1e-9, "{ratios:?}");
+    }
+
+    #[test]
+    fn principal_components_reject_a_malformed_matrix() {
+        assert_eq!(
+            AdvancedAnalytics::principal_components_of(&[]),
+            (Vec::new(), Vec::new())
+        );
+        let ragged = vec![vec![1.0, 0.0], vec![0.0]];
+        assert_eq!(
+            AdvancedAnalytics::principal_components_of(&ragged),
+            (Vec::new(), Vec::new())
+        );
+    }
 
     #[test]
     fn test_advanced_analytics_creation() {

@@ -14,7 +14,10 @@ use trustformers_core::{
 };
 
 use super::config::DeepSeekV2Config;
+use super::loading::bind_lm_head;
 use super::model::DeepSeekV2Model;
+use crate::weight_loading::binding::BoundNamespaces;
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -189,8 +192,13 @@ impl Model for DeepSeekV2ForCausalLM {
         self.lm_head.forward(hidden)
     }
 
+    /// Load the backbone and, when the checkpoint carries one, the LM head.
+    ///
+    /// # Errors
+    ///
+    /// See [`DeepSeekV2ForCausalLM::load_pretrained_report`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> CoreResult<()> {
-        self.model.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -198,8 +206,46 @@ impl Model for DeepSeekV2ForCausalLM {
     }
 
     fn num_parameters(&self) -> usize {
-        let head_params = self.model.config().hidden_size * self.model.config().vocab_size;
-        self.model.num_parameters() + head_params
+        self.model.num_parameters() + self.lm_head.parameter_count()
+    }
+}
+
+impl DeepSeekV2ForCausalLM {
+    /// The checkpoint namespace this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`]: the backbone deliberately tolerates `lm_head.`
+    /// so a bare-backbone load of a causal-LM export does not fail, but this
+    /// wrapper *binds* that namespace, so an unrecognised name inside it is a
+    /// misspelling rather than an absent head.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["lm_head."]);
+
+    /// Load the backbone and the language-modelling head, reporting what was
+    /// bound.
+    ///
+    /// A checkpoint carrying no `lm_head.weight` — a bare backbone export — is
+    /// still accepted; the head is recorded in [`LoadReport::missing`] so the
+    /// caller can see it kept its constructor initialisation instead of being
+    /// told everything loaded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed, when a backbone parameter is
+    /// missing, when a tensor has the wrong shape, or when the checkpoint holds
+    /// a tensor this architecture does not recognise.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> CoreResult<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.model.load_from_checkpoint(&checkpoint)?;
+        let config = self.model.config().clone();
+        bind_lm_head(
+            &checkpoint,
+            &mut report,
+            config.vocab_size,
+            config.hidden_size,
+            &mut self.lm_head,
+        )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
     }
 }
 

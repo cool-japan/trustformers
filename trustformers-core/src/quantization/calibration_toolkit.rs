@@ -8,13 +8,20 @@
 //! - Cross-quantization method calibration comparison
 //! - Comprehensive calibration workflow management
 
-#![allow(unused_variables)] // Calibration toolkit
-
-use crate::errors::{file_not_found, invalid_input, runtime_error, TrustformersError};
+use super::calibration_stats;
+use crate::errors::{
+    file_not_found, invalid_input, not_implemented, runtime_error, TrustformersError,
+};
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Bit width used when a calibration config does not specify one.
+const DEFAULT_CALIBRATION_BITS: u32 = 8;
+
+/// Upper percentile used by percentile calibration when unspecified.
+const DEFAULT_CALIBRATION_PERCENTILE: f32 = 99.99;
 
 /// Unified calibration dataset manager
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,19 +253,24 @@ pub struct CalibrationParameters {
 }
 
 /// Quality metrics for calibration assessment
+///
+/// Fields typed `Option<f32>` are quantities that **cannot** be derived from a
+/// calibration dataset alone: they need a model plus an evaluation or benchmark
+/// harness. They are `None` when the toolkit measured a calibration but had no
+/// way to observe them; they are never filled with a plausible-looking guess.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityMetrics {
-    /// Accuracy retention (0.0-1.0)
-    pub accuracy_retention: f32,
-    /// Signal-to-quantization-noise ratio (dB)
+    /// Accuracy retention (0.0-1.0), `None` unless measured against a task metric
+    pub accuracy_retention: Option<f32>,
+    /// Signal-to-quantization-noise ratio (dB), measured on the calibration data
     pub sqnr_db: f32,
-    /// KL divergence from original distribution
+    /// KL divergence between the original and reconstructed value histograms
     pub kl_divergence: f32,
-    /// Compression ratio achieved
+    /// Compression ratio achieved (source bits / quantized bits)
     pub compression_ratio: f32,
-    /// Inference speedup factor
-    pub speedup_factor: f32,
-    /// Memory usage reduction (0.0-1.0)
+    /// Inference speedup factor, `None` unless measured on real hardware
+    pub speedup_factor: Option<f32>,
+    /// Memory usage reduction (0.0-1.0), derived from the bit widths
     pub memory_reduction: f32,
     /// Per-layer quality breakdown
     pub layer_metrics: HashMap<String, LayerQualityMetrics>,
@@ -271,13 +283,13 @@ pub struct LayerQualityMetrics {
     pub layer_name: String,
     /// Layer type
     pub layer_type: String,
-    /// Quantization error (MSE)
+    /// Quantization error (MSE) between the layer values and their round trip
     pub quantization_error: f32,
-    /// Output distribution similarity
+    /// Output distribution similarity, `1 / (1 + KL divergence)` in `(0, 1]`
     pub distribution_similarity: f32,
-    /// Gradient flow preservation
-    pub gradient_preservation: f32,
-    /// Activation pattern preservation
+    /// Gradient flow preservation, `None` unless gradients were observed
+    pub gradient_preservation: Option<f32>,
+    /// Activation pattern preservation (Pearson correlation, `-1..=1`)
     pub activation_preservation: f32,
 }
 
@@ -561,13 +573,17 @@ impl CalibrationToolkit {
     ) -> Vec<CalibrationRecommendation> {
         let mut recommendations = Vec::new();
 
-        // Check accuracy retention
-        if result.quality_metrics.accuracy_retention < thresholds.min_accuracy_retention {
+        // Check accuracy retention (only when it was actually measured)
+        if result
+            .quality_metrics
+            .accuracy_retention
+            .is_some_and(|retention| retention < thresholds.min_accuracy_retention)
+        {
             recommendations.push(CalibrationRecommendation {
                 recommendation_type: RecommendationType::TryDifferentMethod,
                 description: format!(
                     "Accuracy retention {:.3} is below threshold {:.3}. Consider using a different calibration method or increasing bit width.",
-                    result.quality_metrics.accuracy_retention,
+                    result.quality_metrics.accuracy_retention.unwrap_or_default(),
                     thresholds.min_accuracy_retention
                 ),
                 expected_improvement: 0.1,
@@ -664,55 +680,18 @@ impl CalibrationToolkit {
         Ok(())
     }
 
+    /// Measure the statistical properties of a calibration dataset.
+    ///
+    /// Every reported quantity is computed from `samples` by
+    /// [`calibration_stats::dataset_statistics`]: per-channel mean / std / min /
+    /// max / percentiles / skewness / kurtosis, the measured dynamic range and
+    /// outlier ratio, and a histogram-based distribution analysis (Shannon
+    /// entropy in bits, Jarque-Bera normality p-value, mode detection).
     fn calculate_dataset_statistics(
         &self,
         samples: &[Tensor],
     ) -> Result<DatasetStatistics, TrustformersError> {
-        if samples.is_empty() {
-            return Err(invalid_input(
-                "Cannot calculate statistics for empty dataset".to_string(),
-            ));
-        }
-
-        let sample_count = samples.len();
-        let input_shapes = vec![samples[0].shape().to_vec()];
-
-        // Calculate basic statistics (placeholder implementation)
-        let dim_count = samples[0].len();
-        let statistics = TensorStatistics {
-            mean: vec![0.0; dim_count],
-            std: vec![1.0; dim_count],
-            min: vec![-1.0; dim_count],
-            max: vec![1.0; dim_count],
-            percentiles: vec![vec![0.0; 5]; dim_count],
-            skewness: vec![0.0; dim_count],
-            kurtosis: vec![3.0; dim_count],
-        };
-
-        let dynamic_range = DynamicRange {
-            overall_range: 2.0,
-            channel_ranges: vec![2.0; dim_count],
-            outlier_ratio: 0.05,
-            suggested_clip_min: -1.0,
-            suggested_clip_max: 1.0,
-        };
-
-        let distribution = DistributionAnalysis {
-            distribution_type: DistributionType::Normal,
-            normality_p_value: 0.5,
-            entropy: 3.0,
-            concentration: 0.5,
-            is_multimodal: false,
-            mode_count: Some(1),
-        };
-
-        Ok(DatasetStatistics {
-            sample_count,
-            input_shapes,
-            statistics,
-            dynamic_range,
-            distribution,
-        })
+        calibration_stats::dataset_statistics(samples)
     }
 
     fn generate_cache_key(&self, dataset_name: &str, config: &CalibrationConfig) -> String {
@@ -720,39 +699,241 @@ impl CalibrationToolkit {
         format!("{}_{:?}", dataset_name, config.method)
     }
 
+    /// Run the configured calibration method against a dataset.
+    ///
+    /// The primary method is attempted first; if it is not supported by this
+    /// toolkit the configured fallbacks are tried in order and
+    /// [`CalibrationResult::primary_success`] is set to `false`. When no method
+    /// succeeds the error of the primary method is returned rather than a
+    /// fabricated success.
     fn run_calibration(
         &self,
         dataset: &CalibrationDataset,
         config: &CalibrationConfig,
     ) -> Result<CalibrationResult, TrustformersError> {
-        // Placeholder implementation - would integrate with specific calibration methods
-        let parameters = CalibrationParameters {
-            scales: HashMap::new(),
-            zero_points: HashMap::new(),
-            clip_ranges: HashMap::new(),
-            bit_allocations: HashMap::new(),
-            extra_params: HashMap::new(),
-        };
-
-        let quality_metrics = QualityMetrics {
-            accuracy_retention: 0.95,
-            sqnr_db: 40.0,
-            kl_divergence: 0.01,
-            compression_ratio: 4.0,
-            speedup_factor: 2.0,
-            memory_reduction: 0.75,
-            layer_metrics: HashMap::new(),
+        let primary = self.calibrate_with_method(dataset, config, config.method);
+        let (method, primary_success, parameters, quality_metrics) = match primary {
+            Ok((parameters, metrics)) => (config.method, true, parameters, metrics),
+            Err(primary_error) => {
+                let mut fallback_outcome = None;
+                for &fallback in &config.fallback_methods {
+                    if let Ok((parameters, metrics)) =
+                        self.calibrate_with_method(dataset, config, fallback)
+                    {
+                        fallback_outcome = Some((fallback, false, parameters, metrics));
+                        break;
+                    }
+                }
+                match fallback_outcome {
+                    Some(outcome) => outcome,
+                    None => return Err(primary_error),
+                }
+            },
         };
 
         Ok(CalibrationResult {
-            method: config.method,
-            primary_success: true,
+            method,
+            primary_success,
             parameters,
             quality_metrics,
             cross_validation: None,
             method_comparison: None,
             recommendations: Vec::new(),
         })
+    }
+
+    /// Calibrate a dataset with one specific method.
+    ///
+    /// Supported methods derive their clipping range from the calibration data:
+    ///
+    /// | Method | Range selection |
+    /// |---|---|
+    /// | [`CalibrationMethod::Percentile`] | the `percentile` parameter (default 99.99) |
+    /// | [`CalibrationMethod::MSE`] | search minimizing round-trip MSE |
+    /// | [`CalibrationMethod::SQNR`] | search maximizing round-trip SQNR |
+    /// | [`CalibrationMethod::Entropy`] | search minimizing histogram KL divergence |
+    ///
+    /// Methods that require information a calibration dataset does not carry
+    /// (a Hessian, per-channel activation scales from a live model, gradients,
+    /// or a trainable quantizer) return [`TrustformersError`] `NotImplemented`
+    /// instead of a plausible-looking answer.
+    fn calibrate_with_method(
+        &self,
+        dataset: &CalibrationDataset,
+        config: &CalibrationConfig,
+        method: CalibrationMethod,
+    ) -> Result<(CalibrationParameters, QualityMetrics), TrustformersError> {
+        let pooled = calibration_stats::pool_samples(&dataset.samples)?;
+
+        let bits = match config.parameters.get("bits") {
+            Some(CalibrationParameter::Int(value)) if (1..=16).contains(value) => *value as u32,
+            Some(CalibrationParameter::Int(value)) => {
+                return Err(invalid_input(format!(
+                    "Calibration bit width must be in 1..=16, got {}",
+                    value
+                )));
+            },
+            _ => DEFAULT_CALIBRATION_BITS,
+        };
+        let symmetric = match config.parameters.get("symmetric") {
+            Some(CalibrationParameter::Bool(value)) => *value,
+            _ => true,
+        };
+
+        let (quantization, clip_min, clip_max) = match method {
+            CalibrationMethod::Percentile => {
+                let percentile = match config.parameters.get("percentile") {
+                    Some(CalibrationParameter::Float(value)) => *value,
+                    _ => DEFAULT_CALIBRATION_PERCENTILE,
+                };
+                let (low, high) =
+                    calibration_stats::percentile_clip_range(&pooled.all, percentile)?;
+                (
+                    calibration_stats::AffineQuantization::from_range(low, high, bits, symmetric)?,
+                    low,
+                    high,
+                )
+            },
+            CalibrationMethod::MSE => calibration_stats::search_clip_range(
+                &pooled.all,
+                bits,
+                symmetric,
+                calibration_stats::ClipObjective::MinimizeMse,
+            )?,
+            CalibrationMethod::SQNR => calibration_stats::search_clip_range(
+                &pooled.all,
+                bits,
+                symmetric,
+                calibration_stats::ClipObjective::MaximizeSqnr,
+            )?,
+            CalibrationMethod::Entropy => calibration_stats::search_clip_range(
+                &pooled.all,
+                bits,
+                symmetric,
+                calibration_stats::ClipObjective::MinimizeKlDivergence,
+            )?,
+            unsupported => {
+                return Err(not_implemented(format!(
+                    "Calibration method {:?} needs model-side information (Hessian, live \
+                     activation scales, gradients or a trainable quantizer) that a calibration \
+                     dataset does not carry; use Percentile, MSE, SQNR or Entropy, or call the \
+                     dedicated quantizer for {:?}",
+                    unsupported, unsupported
+                )));
+            },
+        };
+
+        // --- Per-channel parameters (same objective, per channel) ---
+        let mut channel_scales = Vec::with_capacity(pooled.per_channel.len());
+        let mut channel_zero_points = Vec::with_capacity(pooled.per_channel.len());
+        for channel_values in &pooled.per_channel {
+            let channel_min = channel_values.iter().copied().fold(f32::INFINITY, f32::min);
+            let channel_max = channel_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let channel_quantization = calibration_stats::AffineQuantization::from_range(
+                channel_min.min(channel_max),
+                channel_max.max(channel_min),
+                bits,
+                symmetric,
+            )?;
+            channel_scales.push(channel_quantization.scale);
+            channel_zero_points.push(channel_quantization.zero_point);
+        }
+
+        let per_tensor_key = format!("{}::per_tensor", dataset.name);
+        let per_channel_key = format!("{}::per_channel", dataset.name);
+
+        let mut scales = HashMap::new();
+        scales.insert(per_tensor_key.clone(), vec![quantization.scale]);
+        scales.insert(per_channel_key.clone(), channel_scales);
+
+        let mut zero_points = HashMap::new();
+        zero_points.insert(per_tensor_key.clone(), vec![quantization.zero_point]);
+        zero_points.insert(per_channel_key, channel_zero_points);
+
+        let mut clip_ranges = HashMap::new();
+        clip_ranges.insert(per_tensor_key.clone(), (clip_min, clip_max));
+
+        let mut bit_allocations = HashMap::new();
+        bit_allocations.insert(per_tensor_key.clone(), vec![bits as u8]);
+
+        let mut extra_params = HashMap::new();
+        extra_params.insert("bits".to_string(), CalibrationParameter::Int(bits as i32));
+        extra_params.insert(
+            "symmetric".to_string(),
+            CalibrationParameter::Bool(symmetric),
+        );
+        extra_params.insert(
+            "q_min".to_string(),
+            CalibrationParameter::Int(quantization.q_min),
+        );
+        extra_params.insert(
+            "q_max".to_string(),
+            CalibrationParameter::Int(quantization.q_max),
+        );
+
+        let parameters = CalibrationParameters {
+            scales,
+            zero_points,
+            clip_ranges,
+            bit_allocations,
+            extra_params,
+        };
+
+        // --- Measured quality metrics ---
+        let reconstructed = quantization.round_trip(&pooled.all);
+        let observed_min = pooled.all.iter().copied().fold(f32::INFINITY, f32::min);
+        let observed_max = pooled.all.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let original_hist = calibration_stats::histogram(
+            &pooled.all,
+            observed_min,
+            observed_max,
+            calibration_stats::HISTOGRAM_BINS,
+        );
+        let reconstructed_hist = calibration_stats::histogram(
+            &reconstructed,
+            observed_min,
+            observed_max,
+            calibration_stats::HISTOGRAM_BINS,
+        );
+
+        let mut layer_metrics = HashMap::new();
+        layer_metrics.insert(
+            per_tensor_key.clone(),
+            LayerQualityMetrics {
+                layer_name: per_tensor_key,
+                layer_type: "calibration_activations".to_string(),
+                quantization_error: calibration_stats::mean_squared_error(
+                    &pooled.all,
+                    &reconstructed,
+                ),
+                distribution_similarity: 1.0
+                    / (1.0
+                        + calibration_stats::histogram_kl_divergence(
+                            &original_hist,
+                            &reconstructed_hist,
+                        )),
+                gradient_preservation: None,
+                activation_preservation: calibration_stats::pearson_correlation(
+                    &pooled.all,
+                    &reconstructed,
+                ),
+            },
+        );
+
+        let quality_metrics = QualityMetrics {
+            accuracy_retention: None,
+            sqnr_db: calibration_stats::sqnr_db(&pooled.all, &reconstructed),
+            kl_divergence: calibration_stats::histogram_kl_divergence(
+                &original_hist,
+                &reconstructed_hist,
+            ),
+            compression_ratio: 32.0 / bits as f32,
+            speedup_factor: None,
+            memory_reduction: 1.0 - (bits as f32 / 32.0),
+            layer_metrics,
+        };
+
+        Ok((parameters, quality_metrics))
     }
 
     fn get_default_parameters(
@@ -792,13 +973,40 @@ impl CalibrationToolkit {
         params
     }
 
+    /// Weighted quality score over the metrics that were actually measured.
+    ///
+    /// Unmeasured metrics (`None`) are dropped from both the numerator and the
+    /// weight normalisation, so a method is never rewarded or penalised for a
+    /// number nobody observed.
     fn calculate_overall_score(&self, metrics: &QualityMetrics) -> f32 {
-        // Weighted combination of different metrics
-        0.4 * metrics.accuracy_retention
-            + 0.2 * (metrics.sqnr_db / 50.0).min(1.0)
-            + 0.2 * (metrics.compression_ratio / 8.0).min(1.0)
-            + 0.1 * metrics.speedup_factor / 4.0
-            + 0.1 * metrics.memory_reduction
+        let mut score = 0.0f32;
+        let mut weight = 0.0f32;
+
+        let mut add = |component: f32, component_weight: f32| {
+            score += component_weight * component.clamp(0.0, 1.0);
+            weight += component_weight;
+        };
+
+        if let Some(accuracy) = metrics.accuracy_retention {
+            add(accuracy, 0.4);
+        }
+        if metrics.sqnr_db.is_finite() {
+            add((metrics.sqnr_db / 50.0).min(1.0), 0.2);
+        } else if metrics.sqnr_db.is_sign_positive() {
+            // Exact reconstruction: perfect on this axis.
+            add(1.0, 0.2);
+        }
+        add((metrics.compression_ratio / 8.0).min(1.0), 0.2);
+        if let Some(speedup) = metrics.speedup_factor {
+            add(speedup / 4.0, 0.1);
+        }
+        add(metrics.memory_reduction, 0.1);
+
+        if weight > 0.0 {
+            score / weight
+        } else {
+            0.0
+        }
     }
 
     fn analyze_trade_offs(
@@ -806,11 +1014,19 @@ impl CalibrationToolkit {
         method: CalibrationMethod,
         metrics: &QualityMetrics,
     ) -> TradeOffAnalysis {
+        // Trade-offs that need accuracy or speedup are reported as 0.0 when the
+        // underlying metric was never measured (see `QualityMetrics`).
+        let accuracy = metrics.accuracy_retention.unwrap_or(0.0);
+        let speedup = metrics.speedup_factor.unwrap_or(0.0);
         TradeOffAnalysis {
             method,
-            accuracy_compression: metrics.accuracy_retention / (metrics.compression_ratio / 4.0),
-            speed_quality: metrics.speedup_factor / 4.0 * metrics.accuracy_retention,
-            memory_accuracy: metrics.memory_reduction * metrics.accuracy_retention,
+            accuracy_compression: if metrics.compression_ratio > 0.0 {
+                accuracy / (metrics.compression_ratio / 4.0)
+            } else {
+                0.0
+            },
+            speed_quality: speedup / 4.0 * accuracy,
+            memory_accuracy: metrics.memory_reduction * accuracy,
             balance_score: self.calculate_overall_score(metrics),
         }
     }
@@ -1215,16 +1431,16 @@ mod tests {
     #[test]
     fn test_quality_metrics_clone() {
         let metrics = QualityMetrics {
-            accuracy_retention: 0.98,
+            accuracy_retention: Some(0.98),
             sqnr_db: 30.0,
             kl_divergence: 0.01,
             compression_ratio: 4.0,
-            speedup_factor: 2.0,
+            speedup_factor: Some(2.0),
             memory_reduction: 0.75,
             layer_metrics: HashMap::new(),
         };
         let cloned = metrics.clone();
-        assert!((cloned.accuracy_retention - 0.98).abs() < 1e-6);
+        assert!((cloned.accuracy_retention.unwrap_or_default() - 0.98).abs() < 1e-6);
         assert!((cloned.compression_ratio - 4.0).abs() < 1e-6);
     }
 
@@ -1237,7 +1453,7 @@ mod tests {
             layer_type: "Linear".to_string(),
             quantization_error: 0.001,
             distribution_similarity: 0.99,
-            gradient_preservation: 0.95,
+            gradient_preservation: Some(0.95),
             activation_preservation: 0.98,
         };
         let cloned = metrics.clone();
@@ -1296,11 +1512,11 @@ mod tests {
                 extra_params: HashMap::new(),
             },
             quality_metrics: QualityMetrics {
-                accuracy_retention: 0.99,
+                accuracy_retention: Some(0.99),
                 sqnr_db: 35.0,
                 kl_divergence: 0.001,
                 compression_ratio: 4.0,
-                speedup_factor: 2.5,
+                speedup_factor: Some(2.5),
                 memory_reduction: 0.75,
                 layer_metrics: HashMap::new(),
             },

@@ -92,7 +92,7 @@ fn test_pytorch_api() -> Result<(), TrustformersError> {
     );
 
     // Test state dict functionality
-    let state_dict = pytorch_adam.state_dict();
+    let state_dict = pytorch_adam.state_dict()?;
     println!(
         "   📊 State dict: {} param groups, {} state entries",
         state_dict.param_groups.len(),

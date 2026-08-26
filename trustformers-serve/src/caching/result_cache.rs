@@ -6,6 +6,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -153,9 +154,17 @@ pub enum CacheMiss {
 /// Result cache service
 pub struct ResultCacheService {
     cache: Arc<RwLock<HashMap<CacheKey, CacheEntry>>>,
-    config: TierConfig,
+    /// Live configuration.
+    ///
+    /// Behind a lock because [`ResultCacheService::update_config`] genuinely
+    /// replaces it: TTL, eviction policy and size ceiling all take effect for
+    /// subsequent operations. It used to be a plain field that no code path
+    /// could change, and `update_config` accordingly did nothing at all.
+    config: Arc<RwLock<TierConfig>>,
     metrics: Arc<CacheStatsCollector>,
-    max_size_bytes: usize,
+    /// Size ceiling in bytes, mirrored out of [`Self::config`] so the hot
+    /// insert path can read it without taking the config lock.
+    max_size_bytes: Arc<AtomicUsize>,
     current_size_bytes: Arc<RwLock<usize>>,
 }
 
@@ -163,11 +172,21 @@ impl ResultCacheService {
     pub fn new(config: TierConfig, metrics: Arc<CacheStatsCollector>) -> Self {
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
-            max_size_bytes: config.max_size_bytes,
-            config,
+            max_size_bytes: Arc::new(AtomicUsize::new(config.max_size_bytes)),
+            config: Arc::new(RwLock::new(config)),
             metrics,
             current_size_bytes: Arc::new(RwLock::new(0)),
         }
+    }
+
+    /// The size ceiling currently in force, in bytes.
+    pub fn max_size_bytes(&self) -> usize {
+        self.max_size_bytes.load(AtomicOrdering::Relaxed)
+    }
+
+    /// A snapshot of the configuration currently in force.
+    pub async fn config(&self) -> TierConfig {
+        self.config.read().await.clone()
     }
 
     /// Get cached result
@@ -211,12 +230,14 @@ impl ResultCacheService {
 
     /// Store result in cache
     pub async fn put(&self, key: CacheKey, result: CacheResult) -> Result<()> {
-        let ttl_seconds = self.config.default_ttl.as_secs();
+        // Read the TTL currently in force, so an entry stored after an
+        // `update_config` uses the new lifetime rather than the original one.
+        let ttl_seconds = self.config.read().await.default_ttl.as_secs();
         let entry = CacheEntry::new(result, ttl_seconds);
 
         // Check if we need to evict entries
         let new_size = *self.current_size_bytes.read().await + entry.size_bytes;
-        if new_size > self.max_size_bytes {
+        if new_size > self.max_size_bytes() {
             self.evict_entries(entry.size_bytes).await?;
         }
 
@@ -273,9 +294,47 @@ impl ResultCacheService {
         Ok(())
     }
 
-    /// Update cache configuration
-    pub async fn update_config(&self, _config: TierConfig) -> Result<()> {
-        // Implement config update logic\n        // Note: Since config is not mutable, we apply changes to cache behavior\n        \n        // If max size decreased, trigger eviction to fit new limits\n        let new_max_size = _config.max_size_bytes;\n        if new_max_size < self.max_size_bytes {\n            let current_size = *self.current_size_bytes.read().await;\n            if current_size > new_max_size {\n                let bytes_to_evict = current_size - new_max_size;\n                self.evict_entries(bytes_to_evict).await?;\n            }\n        }\n        \n        // Apply new eviction policy effects immediately\n        match &config.eviction_policy {\n            EvictionPolicy::Ttl => {\n                // Clean up any expired entries with potentially new TTL settings\n                self.cleanup_expired_entries().await?;\n            },\n            EvictionPolicy::Lru => {\n                // LRU policy will be applied during next eviction\n                tracing::info!(\"Switched to LRU eviction policy\");\n            },\n            EvictionPolicy::Lfu => {\n                // LFU policy will be applied during next eviction  \n                tracing::info!(\"Switched to LFU eviction policy\");\n            },\n            EvictionPolicy::Priority => {\n                // Update priorities based on new configuration\n                self.update_priorities().await?;\n                tracing::info!(\"Switched to Priority-based eviction policy\");\n            },\n        }\n        \n        // Log configuration update\n        tracing::info!(\n            \"Result cache configuration updated: max_size={} bytes, eviction_policy={:?}\",\n            new_max_size,\n            config.eviction_policy\n        );
+    /// Replace the cache's configuration, applying it immediately.
+    ///
+    /// The new TTL, eviction policy and size ceiling govern every subsequent
+    /// operation, and a *lowered* ceiling is enforced right away by evicting
+    /// down to it rather than waiting for the next insert to notice.
+    ///
+    /// This method previously consisted entirely of a comment: its body was a
+    /// single `//` line into which the intended implementation had been folded
+    /// with literal `\n` escapes, so it parsed as one comment, the argument was
+    /// bound as `_config`, and nothing whatsoever changed. `CachingService::update_config`
+    /// calls straight into it, so a caller reconfiguring the cache was told the
+    /// change had been applied when it had not.
+    pub async fn update_config(&self, config: TierConfig) -> Result<()> {
+        let new_max_size = config.max_size_bytes;
+        let policy = config.eviction_policy;
+
+        // Publish the new configuration before enforcing it, so the eviction
+        // below already sorts by the newly selected policy.
+        {
+            let mut current = self.config.write().await;
+            *current = config;
+        }
+        self.max_size_bytes.store(new_max_size, AtomicOrdering::Relaxed);
+
+        // A lowered ceiling must bite now, not at the next insert.
+        let current_size = *self.current_size_bytes.read().await;
+        if current_size > new_max_size {
+            self.evict_entries(current_size - new_max_size).await?;
+        }
+
+        // A TTL-based policy may make already-stored entries expired under the
+        // new setting; drop them rather than serving them until touched.
+        if matches!(policy, EvictionPolicy::TTL) {
+            self.cleanup_expired_entries().await?;
+        }
+
+        tracing::info!(
+            "result cache reconfigured: max_size={} bytes, eviction_policy={:?}",
+            new_max_size,
+            policy
+        );
         Ok(())
     }
 
@@ -302,6 +361,10 @@ impl ResultCacheService {
 
     // Private methods
     async fn evict_entries(&self, needed_space: usize) -> Result<()> {
+        // Read the live policy once, before taking the cache locks, so eviction
+        // follows the most recently configured policy.
+        let policy = self.config.read().await.eviction_policy;
+
         let mut cache = self.cache.write().await;
         let mut current_size = self.current_size_bytes.write().await;
 
@@ -309,7 +372,7 @@ impl ResultCacheService {
         let mut entries_to_evict: Vec<_> = cache
             .iter()
             .map(|(key, entry)| {
-                let sort_key = match self.config.eviction_policy {
+                let sort_key = match policy {
                     EvictionPolicy::LRU => entry.last_accessed,
                     EvictionPolicy::LFU => entry.access_count,
                     EvictionPolicy::TTL => entry.created_at + entry.ttl_seconds,
@@ -330,7 +393,7 @@ impl ResultCacheService {
 
         // Evict entries until we have enough space
         let mut freed_space = 0;
-        let target_space = needed_space + (self.max_size_bytes / 10); // 10% buffer
+        let target_space = needed_space + (self.max_size_bytes() / 10); // 10% buffer
 
         for (key, _, size) in entries_to_evict {
             if freed_space >= target_space {
@@ -635,5 +698,101 @@ mod tests {
             .expect("put should succeed");
         let stats = service.get_stats().await;
         assert!(stats.total_size_bytes > 0);
+    }
+
+    // ── Regression tests: update_config used to be a no-op ──
+
+    /// Regression: the whole body of `update_config` was a single comment line
+    /// (the intended code had been folded into it with literal `\n` escapes),
+    /// so the argument was bound as `_config` and *nothing* changed — while the
+    /// method still returned `Ok(())`. `CachingService::update_config` calls
+    /// straight into this, so a caller reconfiguring the cache was told the
+    /// change had been applied when it had not.
+    #[tokio::test]
+    async fn update_config_actually_replaces_the_configuration() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+        assert_eq!(service.max_size_bytes(), 10 * 1024 * 1024);
+        assert_eq!(service.config().await.eviction_policy, EvictionPolicy::LRU);
+
+        let updated = TierConfig {
+            max_size_bytes: 4096,
+            default_ttl: Duration::from_secs(30),
+            eviction_policy: EvictionPolicy::LFU,
+            ..make_tier_config()
+        };
+        service.update_config(updated).await.expect("reconfiguration succeeds");
+
+        let live = service.config().await;
+        assert_eq!(
+            service.max_size_bytes(),
+            4096,
+            "the size ceiling must actually change"
+        );
+        assert_eq!(live.eviction_policy, EvictionPolicy::LFU);
+        assert_eq!(live.default_ttl, Duration::from_secs(30));
+    }
+
+    /// A lowered ceiling is enforced immediately, not at the next insert.
+    #[tokio::test]
+    async fn lowering_the_size_ceiling_evicts_down_to_it() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+
+        for i in 0..8 {
+            service
+                .put(
+                    make_key("m", &format!("entry-{i}")),
+                    make_result(&"x".repeat(256), "m"),
+                )
+                .await
+                .expect("put should succeed");
+        }
+        let before = service.get_stats().await;
+        assert!(before.entry_count > 0);
+
+        // Squeeze the cache to a ceiling far below what it currently holds.
+        let tightened = TierConfig {
+            max_size_bytes: 64,
+            ..make_tier_config()
+        };
+        service.update_config(tightened).await.expect("reconfiguration succeeds");
+
+        let after = service.get_stats().await;
+        assert!(
+            after.entry_count < before.entry_count,
+            "a lowered ceiling must evict now: {} entries before, {} after",
+            before.entry_count,
+            after.entry_count
+        );
+    }
+
+    /// A newly configured TTL governs entries stored afterwards.
+    #[tokio::test]
+    async fn a_reconfigured_ttl_applies_to_subsequent_entries() {
+        let metrics = Arc::new(CacheStatsCollector::new());
+        let service = ResultCacheService::new(make_tier_config(), metrics);
+
+        // A zero TTL means an entry is expired as soon as a second elapses; the
+        // observable consequence is that the new value is what `put` stores.
+        let expiring = TierConfig {
+            default_ttl: Duration::from_secs(0),
+            ..make_tier_config()
+        };
+        service.update_config(expiring).await.expect("reconfiguration succeeds");
+        assert_eq!(service.config().await.default_ttl, Duration::from_secs(0));
+
+        service
+            .put(make_key("m", "ttl_test"), make_result("out", "m"))
+            .await
+            .expect("put should succeed");
+
+        // The stored entry carries the reconfigured TTL, not the original hour.
+        let cache = service.cache.read().await;
+        let entry = cache.values().next().expect("one entry stored");
+        assert_eq!(
+            entry.ttl_seconds, 0,
+            "the entry must carry the reconfigured TTL, not the original 3600s"
+        );
     }
 }

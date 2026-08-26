@@ -609,7 +609,7 @@ impl AutomatedHyperparameterTuner {
             + Sync
             + Clone,
     {
-        println!(
+        tracing::info!(
             "Starting hyperparameter optimization with {} max trials",
             self.config.max_trials
         );
@@ -621,7 +621,7 @@ impl AutomatedHyperparameterTuner {
             // Check time limit
             if let Some(max_duration) = self.config.max_duration {
                 if self.start_time.elapsed() > max_duration {
-                    println!("Reached maximum duration, stopping optimization");
+                    tracing::info!("Reached maximum duration, stopping optimization");
                     break;
                 }
             }
@@ -633,7 +633,7 @@ impl AutomatedHyperparameterTuner {
 
             // Check early stopping
             if self.tuner.should_stop(&results_snapshot, &self.config) {
-                println!("Early stopping triggered after {} trials", iteration);
+                tracing::info!("Early stopping triggered after {} trials", iteration);
                 break;
             }
 
@@ -641,7 +641,7 @@ impl AutomatedHyperparameterTuner {
             let remaining_trials = self.config.max_trials - iteration;
             let parallel_trials = self.config.parallel_trials.min(remaining_trials);
 
-            println!(
+            tracing::info!(
                 "Starting batch of {} parallel trials (iteration {})",
                 parallel_trials,
                 iteration + 1
@@ -663,7 +663,7 @@ impl AutomatedHyperparameterTuner {
                     let trial_start = Instant::now();
                     let trial_id = format!("trial_{}", iteration + i);
 
-                    println!("Executing {}", trial_id);
+                    tracing::debug!("Executing {}", trial_id);
 
                     match objective_fn_clone(&config) {
                         Ok(metrics) => {
@@ -689,7 +689,7 @@ impl AutomatedHyperparameterTuner {
             for result in trial_results {
                 match result {
                     Ok(trial_result) => {
-                        println!(
+                        tracing::info!(
                             "Trial {} completed: {} = {:.4} (took {:?})",
                             trial_result.trial_id,
                             self.config.primary_metric,
@@ -728,7 +728,7 @@ impl AutomatedHyperparameterTuner {
                         if is_improvement {
                             batch_improved = true;
                             _trials_without_improvement = 0;
-                            println!("🎉 New best result found!");
+                            tracing::info!("🎉 New best result found!");
                         }
 
                         self.tuner.update_with_result(&trial_result)?;
@@ -741,7 +741,7 @@ impl AutomatedHyperparameterTuner {
                         }
                     },
                     Err(e) => {
-                        println!("Trial failed: {}", e);
+                        tracing::warn!("Trial failed: {}", e);
                     },
                 }
             }
@@ -793,7 +793,7 @@ impl AutomatedHyperparameterTuner {
             results.iter().map(|r| r.primary_metric).sum::<f64>() / results.len() as f64;
         let elapsed = self.start_time.elapsed();
 
-        println!(
+        tracing::info!(
             "Progress: {}/{} trials completed ({:.1}%) | Best {}: {:.4} | Avg: {:.4} | Elapsed: {:?}",
             completed_trials,
             self.config.max_trials,

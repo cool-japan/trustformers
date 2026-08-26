@@ -2,6 +2,7 @@
 name = "trustformers-wasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,17 +25,36 @@ wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
-serde-wasm-bindgen = "0.6.5"
-getrandom = { version = "0.4.3", features = ["wasm_js"] }
-console_error_panic_hook = { version = "0.1.7", optional = true }
-dlmalloc = { version = "0.2.14", features = ["global"], optional = true }
+serde-wasm-bindgen = { workspace = true }
+# `wasm_js` selects the `wasm32-unknown-unknown` backend (Web Crypto via
+# `js-sys`); the workspace-level entry carries no backend feature because the
+# native crates get theirs from the target OS.
+getrandom = { workspace = true, features = ["wasm_js"] }
+console_error_panic_hook = { workspace = true, optional = true }
+dlmalloc = { workspace = true, features = ["global"], optional = true }
 bytemuck = { workspace = true }
+# Pure-Rust F16/BF16 <-> F32 conversion for SafeTensors weight loading.
+half = { workspace = true }
+# Real SHA-256 plugin-bytes integrity checksums (see plugin_framework.rs);
+# RustCrypto, pure Rust, COOLJAPAN policy compliant.
+sha2 = { workspace = true }
+# Pure-Rust DEFLATE (RFC 1951) for real cache/chunk compression (COOLJAPAN
+# policy forbids flate2/zstd/lz4/etc. directly; oxiarc-* is the substitute).
+oxiarc-deflate = { workspace = true }
+# `futures::future::select_all` for real concurrent-chunk streaming loads
+# (racing several in-flight `JsFuture`s instead of only ever popping the
+# most-recently-started one). Uses the workspace-wide `futures` dependency
+# as-is (default features) - not narrowed to `alloc`-only here, since the
+# workspace-root `futures` entry does not declare `default-features`, and
+# overriding it per-member is rejected by Cargo; changing the shared
+# workspace-level default would risk affecting sibling crates.
+futures = { workspace = true }
 
 # Core web-sys features for essential functionality (full union defined in workspace root Cargo.toml)
 web-sys = { workspace = true }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.76"
+wasm-bindgen-test = { workspace = true }
 
 [features]
 default = ["console_panic", "dlmalloc-alloc"]
@@ -47,9 +67,16 @@ shared-memory = []
 kernel-fusion = []
 async-executor = []
 indexeddb = []
-memory64 = []
-streaming-loader = []
-model-splitting = []
+# `storage/{memory64,streaming_loader,model_splitting}` are mounted at
+# `lib.rs` under `#[cfg(feature = "indexeddb")] pub mod storage;` (the
+# parent module lives in the `indexeddb` submodule tree, see
+# `storage/mod.rs`), so each of these three needs `indexeddb` reachable
+# or `pub use storage::*` fails to resolve `storage` at all when built
+# alone -- this is not "storage requires IndexedDB" in a design sense,
+# it is a real module-tree dependency that must be explicit.
+memory64 = ["indexeddb"]
+streaming-loader = ["indexeddb"]
+model-splitting = ["indexeddb"]
 react-components = []
 vue-components = []
 angular-components = []

@@ -246,16 +246,33 @@ pub struct AggMo {
 
 impl AggMo {
     /// Create a new AggMo optimizer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `momentum_coefficients` is empty. Use [`AggMo::try_new`] for a
+    /// configuration that comes from a file.
     pub fn new(config: AggMoConfig) -> Self {
-        assert!(
-            !config.momentum_coefficients.is_empty(),
-            "Must provide at least one momentum coefficient"
-        );
-        Self {
+        match Self::try_new(config) {
+            Ok(optimizer) => optimizer,
+            Err(error) => panic!("invalid AggMo configuration: {error}"),
+        }
+    }
+
+    /// Fallible constructor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `momentum_coefficients` is empty: AggMo aggregates over
+    /// those buffers, so there is nothing to aggregate.
+    pub fn try_new(config: AggMoConfig) -> Result<Self> {
+        if config.momentum_coefficients.is_empty() {
+            return Err(anyhow!("AggMo needs at least one momentum coefficient"));
+        }
+        Ok(Self {
             config,
             momentum_buffers: HashMap::new(),
             current_step: 0,
-        }
+        })
     }
 
     /// Create AggMo with default configuration.

@@ -1,15 +1,19 @@
 # TrustformeRS Python
 
-High-performance transformer library for Python, written in Rust. Drop-in replacement for Hugging Face Transformers with significant performance improvements.
+Python bindings (PyO3) for TrustformeRS, a transformer library written in Rust. This page describes only what the compiled `trustformers` Python extension actually exposes today — verified 2026-08-24 by reading `trustformers-py/src/` directly, not by describing the aspirational HF-Transformers-compatible surface the crate is working toward.
 
-## Features
+> **Honesty note**: the previous version of this file (dated 2026-03-21, five months stale as of this rewrite) described a fabricated benchmark table, PyTorch interop methods that don't exist, and a `pipeline()` task list that included three tasks this crate has never implemented. Those are all corrected below.
 
-- 🚀 **10-100x faster** than pure Python implementations
-- 🔄 **Drop-in replacement** for Hugging Face Transformers
-- 🦀 **Written in Rust** for memory safety and performance
-- 🔧 **Zero-copy tensor operations** with NumPy
-- 🤝 **PyTorch interoperability** (optional)
-- 📦 **No external dependencies** for core functionality
+## What's real here
+
+- Real PyO3 bindings around this workspace's Rust models — no reimplementation, no simulation layer.
+- `AutoModel`/`AutoTokenizer`/`pipeline()` load from a **local** checkpoint path. **This crate has no Hugging Face Hub downloader.** Passing a bare name like `"bert-base-uncased"` only resolves if a matching local checkpoint already exists at the path this crate probes — it will not fetch anything from the network. Fetch checkpoints yourself first.
+- `.numpy()` / `.numpy_view()` NumPy interoperability. There is **no** `Tensor.from_torch()` / `.to_torch()` — PyTorch interop does not exist in this crate despite an earlier version of this page showing it.
+- Eight model families get a real, concrete Python class today: **BERT, GPT-2, T5, LLaMA, RWKV, Mamba** (plus `BertForSequenceClassification`, `BertForTokenClassification`, `BertForQuestionAnswering`, and `GPT2LMHeadModel` for their respective task heads). The underlying Rust crate supports 49+ architectures, but most of them have no PyO3 binding yet — if you need one that's missing here, use the Rust API directly (`trustformers-models`) instead.
+- Four pipeline tasks run real inference end to end, verified 2026-08-24: `text-generation`, `text-classification`/`sentiment-analysis`, `token-classification`/`ner`, and `question-answering`. The two span pipelines used to always refuse construction (this crate's tokenizers set `offset_mapping` to `None` unconditionally); now that `WordPieceTokenizer`/`BPETokenizer` populate a real one, `TokenClassificationPipeline` wraps a real `BertForTokenClassification` forward pass with `aggregation_strategy='simple'` aggregation, and `QuestionAnsweringPipeline` wraps a real `BertForQuestionAnswering` forward pass with real joint-argmax extraction. Both report HuggingFace's `start`/`end` keys as Unicode **character** offsets — converted, once, from this crate's native **byte** offsets at the pipeline's Python boundary (`trustformers_tokenizers::byte_offsets_to_char_offsets`); nothing converts silently. `QuestionAnsweringPipeline` additionally requires a `WordPieceTokenizer`: `BPETokenizer.encode_pair` joins question+context into one string with no separator token, so there is no reliable per-sequence context boundary to find. `BertForTokenClassification`/`BertForQuestionAnswering` remain callable directly for raw per-token/per-position logits without a pipeline. `fill-mask`, `summarization`, and `translation` are **not implemented at all** — `pipeline()` raises `ValueError: Unknown task` for any of them.
+- `AutoModelForSequenceClassification`/`ForTokenClassification`/`ForQuestionAnswering` now construct the matching real task-head class above for BERT-family checkpoints (bert/roberta/distilbert/deberta), and raise `NotImplementedError` for anything else — verified 2026-08-24. They used to silently delegate to `AutoModel`, handing back a bare, headless encoder relabelled as a task model for *any* checkpoint name, non-BERT ones included.
+- `batch_encode_plus`'s (`WordPieceTokenizer`) and `encode(text, text_pair=...)`'s (`BPETokenizer`) sequence-pair handling now produces a real pair encoding instead of concatenating two independent single-sequence encodings — verified 2026-08-24. WordPiece: BERT's `[CLS] A [SEP] B [SEP]` with 0/1 `token_type_ids`. BPE: the RoBERTa/GPT-2-family `<bos> A <eos> <eos> B <eos>` convention, using the tokenizer's own configured `bos_token`/`eos_token`, with all-zero `token_type_ids` (BPE-family pairs use no segment ids).
+- `Trainer`/`TrainingArguments` exist as real, constructible Python classes, but **`train()`/`evaluate()`/`predict()`/`push_to_hub()` all raise `NotImplementedError`** — verified 2026-08-24, replacing four separate fabrications (`train()` used to always return `{"train_loss": 0.5, "epoch": <your config>, "total_steps": 1000}`; `evaluate()` always returned `{"eval_loss": 0.45, "eval_accuracy": 0.92, "eval_samples": 100}`; `predict()` always returned fixed `predictions`/`label_ids` arrays; `push_to_hub()` always returned a `https://huggingface.co/...` URL without uploading anything). `train()`'s refusal names its exact cause: this crate has real forward passes and real loss functions, but no backpropagation/optimizer-step path from a loss back to a model's own parameters exists anywhere in this workspace (checked directly: zero `impl ParameterAccess` sites in `trustformers-core`/`trustformers-models`/`trustformers-training`, and `trustformers-core`'s separate autodiff `Variable`/`ComputationGraph` system is never constructed by any model's `forward()`). `save_model()` is the one real `Trainer` method: it delegates to the wrapped model's own real `save_pretrained()`.
 
 ## Installation
 
@@ -33,110 +37,118 @@ maturin develop --release
 
 ## Quick Start
 
-### Basic Usage
+### Pipelines
 
 ```python
-from trustformers import AutoModel, AutoTokenizer, pipeline
+from trustformers import pipeline, WordPieceTokenizer, BertForTokenClassification, BertForQuestionAnswering
 
-# Load model and tokenizer
-model = AutoModel.from_pretrained("bert-base-uncased")
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+# Loads BertForSequenceClassification from a *local* checkpoint path — see
+# the Hub-downloader note above. Point `model=`/`tokenizer=` at your own
+# local path if the default resolution doesn't find one.
+classifier = pipeline("sentiment-analysis")
+result = classifier("I love writing Rust code!")
 
-# Create a pipeline
-classifier = pipeline("text-classification", model=model, tokenizer=tokenizer)
+generator = pipeline("text-generation")
+result = generator("Once upon a time")
 
-# Run inference
-results = classifier("This is a great library!")
-print(results)
+# NER: real per-token forward pass, aggregation_strategy='simple' merging.
+# `tokenizer` may be a WordPieceTokenizer or a BPETokenizer.
+tagger = BertForTokenClassification.from_pretrained(model_path, num_labels=9)
+tokenizer = WordPieceTokenizer.from_pretrained(model_path)
+ner = pipeline("token-classification", model=tagger, tokenizer=tokenizer)
+entities = ner("My name is Sarah and I live in London")
+# [{"entity_group": ..., "score": ..., "word": ..., "start": ..., "end": ...}, ...]
+# start/end are Unicode character offsets, so text[start:end] is correct.
+
+# QA: real joint-argmax span extraction over the context. `tokenizer` must be
+# a WordPieceTokenizer specifically (see the note above).
+answerer = BertForQuestionAnswering.from_pretrained(model_path)
+qa = pipeline("question-answering", model=answerer, tokenizer=tokenizer)
+result = qa(question="Where do I live?", context="My name is Sarah and I live in London")
+# {"score": ..., "start": ..., "end": ..., "answer": "London"}
+
+# Real per-token / per-position inference without the pipeline wrapper (raw
+# logits, no aggregation, no offset conversion):
+outputs = tagger(input_ids, attention_mask)   # outputs["logits"]: [1, seq_len, 9]
+outputs = answerer(input_ids, attention_mask)  # outputs["start_logits"], outputs["end_logits"]
 ```
 
-### Direct Model Usage
+### AutoModel / AutoTokenizer
+
+```python
+from trustformers import AutoModel, AutoTokenizer
+
+# `model_path` must resolve to a real local checkpoint directory/file this
+# crate can find — there is no Hub download behind this call.
+model = AutoModel.from_pretrained(model_path)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+```
+
+### Direct model usage
 
 ```python
 import numpy as np
 from trustformers import BertModel, Tensor
 
-# Create model
-model = BertModel.from_pretrained("bert-base-uncased")
+model = BertModel.from_pretrained(model_path)
 
-# Create input tensors
 input_ids = Tensor(np.array([[101, 2023, 2003, 1037, 2742, 102]]))
 attention_mask = Tensor(np.ones((1, 6)))
 
-# Forward pass
 outputs = model(input_ids, attention_mask)
-print(outputs["last_hidden_state"].shape)
 ```
 
-### NumPy Integration
+### NumPy interoperability
 
 ```python
 import numpy as np
 from trustformers import Tensor
 
-# Create tensor from NumPy array
 np_array = np.random.randn(2, 3, 4).astype(np.float32)
 tensor = Tensor(np_array)
 
-# Convert back to NumPy
-np_array_back = tensor.numpy()
+back_to_numpy = tensor.numpy()        # copy
+view = tensor.numpy_view()            # borrowed view
 
-# Tensor operations
 result = tensor.matmul(tensor.transpose())
 ```
 
-### PyTorch Interoperability
+## Supported Python classes
 
-```python
-import torch
-from trustformers import Tensor
+Models: `BertModel`, `BertForSequenceClassification`, `BertForTokenClassification`, `BertForQuestionAnswering`, `GPT2Model`, `GPT2LMHeadModel`, `T5Model`, `LlamaModel`, `RwkvModel`, `MambaModel` (all extend `PreTrainedModel`).
 
-# Convert from PyTorch
-torch_tensor = torch.randn(2, 3, 4)
-trust_tensor = Tensor.from_torch(torch_tensor)
+Tokenizers: `WordPieceTokenizer`, `BPETokenizer` (both extend `PreTrainedTokenizer`; both support a real `text_pair` sequence-pair encoding, see above).
 
-# Convert to PyTorch
-torch_tensor_back = trust_tensor.to_torch()
-```
+Auto classes: `AutoModel`, `AutoTokenizer`, `AutoModelForSequenceClassification`, `AutoModelForTokenClassification`, `AutoModelForQuestionAnswering` (these three: real task-head classes for BERT-family checkpoints, `NotImplementedError` otherwise — see above), `AutoModelForCausalLM`, `AutoModelForMaskedLM`.
 
-## Supported Models
+Pipelines: `Pipeline` (base), `TextGenerationPipeline`, `TextClassificationPipeline`, `TokenClassificationPipeline`, `QuestionAnsweringPipeline` (requires a `WordPieceTokenizer` — see above). All four run real inference.
 
-- **BERT** and variants (RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa)
-- **GPT-2** and variants (GPT-Neo, GPT-J)
-- **T5** (encoder-decoder)
-- **LLaMA** and **Mistral**
-- **Vision Transformer (ViT)**
-- **CLIP** (multimodal)
+Tensors: `Tensor`, `TensorOptimized`, `AdvancedActivations`.
+
+Training: `Trainer`, `TrainingArguments` (see the honesty note above — `train()`/`evaluate()`/`predict()`/`push_to_hub()` all raise `NotImplementedError`; `save_model()` is real).
+
+Utility functions: `get_device()`, `set_seed()`, `enable_grad()`, `no_grad()`.
 
 ## API Compatibility
 
-TrustformeRS provides a compatible API with Hugging Face Transformers:
+Imports are HuggingFace-`transformers`-shaped by design:
 
 ```python
 # Hugging Face Transformers
 from transformers import AutoModel, AutoTokenizer
 
-# TrustformeRS (drop-in replacement)
+# TrustformeRS (same import shape — behavior differs on the points above,
+# especially checkpoint resolution: local paths only, no Hub download)
 from trustformers import AutoModel, AutoTokenizer
 ```
 
-Most code written for Hugging Face Transformers will work with minimal changes.
+This is a naming convenience, not a compatibility guarantee — expect to adjust checkpoint paths and any pipeline task you rely on beyond the four listed above.
 
 ## Performance
 
-Benchmarks on common tasks:
+No benchmark harness in this repository has produced a number comparing this crate to Python HuggingFace Transformers — an earlier version of this page carried a specific-looking table (`52ms`/`3.2ms`/`16.3x` and similar figures, attributed to "Apple M1 Pro") that no automated benchmark here ever measured. It has been removed rather than re-guessed. `trustformers-py`'s own Rust-side benchmarks, and the workspace-level `benches/`, are the place to produce a real number if you need one.
 
-| Task | Model | HF Transformers | TrustformeRS | Speedup |
-|------|-------|-----------------|--------------|---------|
-| Text Classification | BERT-base | 52 ms | 3.2 ms | 16.3x |
-| Text Generation | GPT-2 | 124 ms | 8.7 ms | 14.3x |
-| Question Answering | BERT-large | 89 ms | 5.4 ms | 16.5x |
-
-*Benchmarks run on Apple M1 Pro, batch size 1, sequence length 512*
-
-## Advanced Features
-
-### Custom Models
+## Advanced: Custom Models
 
 ```python
 from trustformers import PreTrainedModel, Tensor
@@ -146,33 +158,13 @@ class CustomModel(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         # Define your model architecture
-    
+
     def forward(self, input_ids, attention_mask=None):
         # Implement forward pass
         pass
 ```
 
-### Training (Coming Soon)
-
-```python
-from trustformers import Trainer, TrainingArguments
-
-training_args = TrainingArguments(
-    output_dir="./results",
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    learning_rate=5e-5,
-)
-
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-)
-
-trainer.train()
-```
+`PreTrainedModel` is registered as a Python-subclassable base class (`#[pyclass(subclass)]`); this pattern is untested by this documentation pass beyond confirming the class itself is subclassable — verify your own override actually gets called before relying on it.
 
 ## Development
 
@@ -193,16 +185,35 @@ isort .
 ruff check .
 ```
 
+### Running the Rust test suite
+
+`pytest` above exercises the built Python package; this crate's own `cargo
+test` suite (pure-Rust unit tests, no Python interpreter needed to *run* them)
+needs `extension-module` — on by default, so this crate builds as a real
+Python extension module — turned **off**, because a `cdylib`-only extension
+module doesn't link a plain test binary against libpython:
+
+```bash
+cd trustformers-py
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo test --lib --no-default-features --features python-gc
+```
+
+A bare `cargo test` (default features) is expected to fail to link with
+undefined Python C-API symbols — that's `extension-module` doing its job
+correctly for a real build, not a bug.
+
 ### Architecture
 
 The library is organized into several components:
 
-- `tensor.rs` - Tensor operations and NumPy integration
-- `models.rs` - Model implementations (BERT, GPT-2, etc.)
-- `tokenizers.rs` - Tokenizer implementations
-- `pipelines.rs` - High-level pipeline API
-- `auto.rs` - Auto classes for model/tokenizer loading
-- `training.rs` - Training utilities (WIP)
+- `tensor.rs` — Tensor operations and NumPy integration
+- `models/` — Model implementations, one file per architecture (`bert.rs`, `gpt2.rs`, `t5.rs`, `llama.rs`, `rwkv.rs`, `mamba.rs`; `base.rs` for the shared `PreTrainedModel` base class, `tasks.rs` for the BERT task heads `BertForSequenceClassification`/`BertForTokenClassification`/`BertForQuestionAnswering`, `helpers.rs` for cross-architecture PyO3-boundary helpers — split from a single 2096-line `mod.rs` on 2026-08-24 to keep every file under this repository's 2000-line policy; every class keeps its original `trustformers.models::PyXxx` path via `pub use` re-exports) and `models/losses.rs` (real classification/LM/question-answering cross-entropy loss)
+- `tokenizers.rs` — Tokenizer implementations, including real WordPiece/BPE sequence-pair encoding (see above)
+- `pipelines/` — Pipeline API (`mod.rs` for the four `#[pyclass]` pipelines and the `pipeline()` task routing; `scoring.rs` for the real text-classification softmax; `span.rs` for the real NER aggregation / QA extraction math both span pipelines are built on, including the byte-offset extraction itself — the byte->character conversion for Python happens in `mod.rs`; not a single `pipelines.rs` file as of a previous wave's restructuring)
+- `auto.rs` — Auto classes for model/tokenizer loading, and the `pipeline()` factory function
+- `training.rs` — Training utilities (`Trainer`/`TrainingArguments` — real classes; `train`/`evaluate`/`predict`/`push_to_hub` all honestly refuse, see above; `save_model` is real)
 
 ## License
 
@@ -217,9 +228,10 @@ Contributions are welcome! Please read our [Contributing Guide](../CONTRIBUTING.
 If you use TrustformeRS in your research, please cite:
 
 ```bibtex
-@software{trustformers2024,
-  title = {TrustformeRS: High-Performance Transformers in Rust},
-  year = {2024},
+@software{trustformers,
+  title = {TrustformeRS: A Rust Implementation of Transformers},
+  author = {{COOLJAPAN OU (Team KitaSan)}},
+  year = {2025--2026},
   url = {https://github.com/cool-japan/trustformers}
 }
 ```

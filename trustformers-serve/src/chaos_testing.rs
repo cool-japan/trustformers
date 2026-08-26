@@ -1,6 +1,3 @@
-// Allow dead code for chaos testing infrastructure under development
-#![allow(dead_code)]
-
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use scirs2_core::random::*; // Replaces rand - SciRS2 Integration Policy
@@ -256,31 +253,29 @@ pub struct ChaosTestingFramework {
     active_experiments: Arc<RwLock<HashMap<Uuid, ExperimentHandle>>>,
     experiment_history: Arc<RwLock<Vec<ExperimentResults>>>,
     safety_monitor: Arc<RwLock<SafetyMonitor>>,
-    metrics_collector: Arc<RwLock<MetricsCollector>>,
+    // 0.2.1: a `metrics_collector: Arc<RwLock<MetricsCollector>>` lived here,
+    // holding an empty `HashMap<String, Vec<MetricPoint>>` and a
+    // `collection_interval` that nothing ticked -- `start_metrics_collection`
+    // was `Ok(())` with its argument discarded, so no experiment ever produced
+    // a single point. Nothing in this crate samples an experiment's metrics, so
+    // the collector, its `MetricPoint` type and the no-op starter are gone
+    // rather than kept as a container that can only ever report "no data".
 }
 
 struct ExperimentHandle {
-    experiment_id: Uuid,
+    // 0.2.1: an `experiment_id: Uuid` field lived here and was never read --
+    // `active_experiments` is keyed by exactly that id.
     cancel_token: tokio_util::sync::CancellationToken,
     safety_handle: tokio::task::JoinHandle<()>,
 }
 
 struct SafetyMonitor {
     active_checks: HashMap<Uuid, Vec<SafetyCheck>>,
-    monitoring_interval: StdDuration,
+    // 0.2.1: a `monitoring_interval: StdDuration` field lived here and was
+    // never read. `monitor_safety` ticks on the *experiment's*
+    // `safety_config.health_check_interval_seconds`, which is the interval that
+    // actually governs the loop; a second, unused one could only mislead.
     emergency_stop_triggered: bool,
-}
-
-struct MetricsCollector {
-    metrics: HashMap<String, Vec<MetricPoint>>,
-    collection_interval: StdDuration,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MetricPoint {
-    timestamp: DateTime<Utc>,
-    value: f64,
-    tags: HashMap<String, String>,
 }
 
 impl ChaosTestingFramework {
@@ -291,12 +286,7 @@ impl ChaosTestingFramework {
             experiment_history: Arc::new(RwLock::new(Vec::new())),
             safety_monitor: Arc::new(RwLock::new(SafetyMonitor {
                 active_checks: HashMap::new(),
-                monitoring_interval: StdDuration::from_secs(5),
                 emergency_stop_triggered: false,
-            })),
-            metrics_collector: Arc::new(RwLock::new(MetricsCollector {
-                metrics: HashMap::new(),
-                collection_interval: StdDuration::from_secs(1),
             })),
         }
     }
@@ -335,9 +325,6 @@ impl ChaosTestingFramework {
         // Set up safety monitoring
         self.setup_safety_monitoring(experiment_id, &experiment.safety_config).await?;
 
-        // Start metrics collection
-        self.start_metrics_collection(experiment_id).await?;
-
         // Execute experiment
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let framework_clone = self.clone();
@@ -367,7 +354,6 @@ impl ChaosTestingFramework {
             active.insert(
                 experiment_id,
                 ExperimentHandle {
-                    experiment_id,
                     cancel_token,
                     safety_handle,
                 },
@@ -902,11 +888,6 @@ impl ChaosTestingFramework {
         Ok(())
     }
 
-    async fn start_metrics_collection(&self, _experiment_id: Uuid) -> Result<()> {
-        // Start collecting metrics for the experiment
-        Ok(())
-    }
-
     async fn rollback_experiment(&self, _experiment_id: Uuid) -> Result<()> {
         // Perform experiment rollback
         tracing::info!("Rolling back experiment");
@@ -1050,7 +1031,6 @@ impl Clone for ChaosTestingFramework {
             active_experiments: Arc::clone(&self.active_experiments),
             experiment_history: Arc::clone(&self.experiment_history),
             safety_monitor: Arc::clone(&self.safety_monitor),
-            metrics_collector: Arc::clone(&self.metrics_collector),
         }
     }
 }

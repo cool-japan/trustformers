@@ -1,5 +1,3 @@
-#![allow(unused_variables)] // Placeholder implementation with reserved parameters
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -25,7 +23,12 @@ pub struct VulkanKernel {
     devices: Vec<VulkanDevice>,
     /// Memory pools for different devices
     memory_pools: HashMap<usize, Arc<Mutex<VulkanMemoryPool>>>,
-    /// Shader cache for compiled compute shaders
+    /// Shader cache for compiled compute shaders. Always empty: this module
+    /// has no real compute pipeline wired up (see `matmul`'s docs above),
+    /// so nothing ever compiles a shader to cache. Kept, like
+    /// `CompiledShader` itself, as part of the shape a future real backend
+    /// would populate.
+    #[allow(dead_code)]
     shader_cache: HashMap<String, CompiledShader>,
     /// Command pools for different devices
     command_pools: HashMap<usize, VulkanCommandPool>,
@@ -65,6 +68,7 @@ pub enum VulkanDeviceType {
 /// Vulkan instance wrapper
 #[derive(Debug)]
 pub struct VulkanInstance {
+    #[allow(dead_code)]
     device_id: usize,
     #[allow(dead_code)]
     logical_device: VulkanLogicalDevice,
@@ -423,96 +427,73 @@ impl VulkanKernel {
                                     _ => 32,      // Default
                                 };
 
+                                // `subgroup_size`/`supports_fp16`/`supports_int8` are queried
+                                // from the real physical device rather than guessed from the
+                                // PCI vendor ID or hardcoded `true`: a vendor ID only says who
+                                // made the GPU, not what this specific model supports, and
+                                // Vulkan 1.1 core already exposes the real values through
+                                // `properties.subgroup_size` and `supported_features()`
+                                // (`buffer_device_address` two lines below already did this
+                                // correctly - the others should too).
+                                let supported_features = physical_device.supported_features();
+
                                 devices.push(VulkanDevice {
                                     id: idx,
                                     name: properties.device_name.clone(),
                                     vendor_id: properties.vendor_id,
                                     device_type,
                                     memory_total: total_memory,
-                                    memory_free: total_memory * 9 / 10, // Estimate 90% free
+                                    // vulkano's base API (no VK_EXT_memory_budget) cannot
+                                    // report live free memory; report the real total and
+                                    // leave `memory_free` at the same value rather than a
+                                    // fabricated "90% free" guess.
+                                    memory_free: total_memory,
                                     compute_queue_family,
                                     max_workgroup_size: limits.max_compute_work_group_size,
                                     max_workgroup_count: limits.max_compute_work_group_count,
                                     max_workgroup_invocations: limits
                                         .max_compute_work_group_invocations,
-                                    subgroup_size,
-                                    supports_subgroup_ops: true,
-                                    supports_fp16: true,
-                                    supports_int8: true,
+                                    subgroup_size: properties
+                                        .subgroup_size
+                                        .unwrap_or(subgroup_size),
+                                    supports_subgroup_ops: properties.subgroup_size.is_some(),
+                                    supports_fp16: supported_features.shader_float16,
+                                    supports_int8: supported_features.shader_int8,
                                     max_memory_allocation_size: limits
                                         .max_memory_allocation_size
                                         .unwrap_or(u64::MAX),
-                                    buffer_device_address: physical_device
-                                        .supported_features()
-                                        .buffer_device_address,
+                                    buffer_device_address: supported_features.buffer_device_address,
                                 });
                             }
                         },
-                        Err(_) => {
-                            // Fall back to mock device if Vulkan instance creation fails
-                            log::warn!("Failed to create Vulkan instance, using mock device");
+                        Err(e) => {
+                            log::warn!("Failed to create Vulkan instance: {e}");
                         },
                     }
                 },
-                Err(_) => {
-                    // Fall back to mock device if Vulkan library loading fails
-                    log::warn!("Failed to load Vulkan library, using mock device");
+                Err(e) => {
+                    log::warn!("Failed to load Vulkan library: {e}");
                 },
             }
         }
 
-        // Fallback: If no devices were detected (Vulkan not available or feature disabled),
-        // provide mock devices for testing purposes
-        if devices.is_empty() {
-            log::info!("No Vulkan devices detected at runtime, using mock devices for testing");
-
-            // Add mock NVIDIA device
-            devices.push(VulkanDevice {
-                id: 0,
-                name: "Mock NVIDIA Device".to_string(),
-                vendor_id: 0x10de,
-                device_type: VulkanDeviceType::DiscreteGpu,
-                memory_total: 8 * 1024 * 1024 * 1024,
-                memory_free: 7 * 1024 * 1024 * 1024,
-                compute_queue_family: 0,
-                max_workgroup_size: [1024, 1024, 64],
-                max_workgroup_count: [65535, 65535, 65535],
-                max_workgroup_invocations: 1024,
-                subgroup_size: 32,
-                supports_subgroup_ops: true,
-                supports_fp16: true,
-                supports_int8: true,
-                max_memory_allocation_size: 4 * 1024 * 1024 * 1024,
-                buffer_device_address: true,
-            });
-        }
-
-        // Mobile GPU devices (ARM Mali, Qualcomm Adreno, etc.)
-        if cfg!(target_os = "android") || cfg!(target_os = "ios") {
-            devices.push(VulkanDevice {
-                id: 4,
-                name: "ARM Mali-G78 MP24".to_string(),
-                vendor_id: 0x13b5, // ARM
-                device_type: VulkanDeviceType::IntegratedGpu,
-                memory_total: 4 * 1024 * 1024 * 1024, // 4GB shared
-                memory_free: 3 * 1024 * 1024 * 1024,  // 3GB shared
-                compute_queue_family: 0,
-                max_workgroup_size: [256, 256, 64],
-                max_workgroup_count: [65535, 65535, 65535],
-                max_workgroup_invocations: 256,
-                subgroup_size: 4, // ARM Mali subgroup size
-                supports_subgroup_ops: false,
-                supports_fp16: true,
-                supports_int8: false,
-                max_memory_allocation_size: 512 * 1024 * 1024, // 512MB
-                buffer_device_address: false,
-            });
-        }
-
+        // No mock/fabricated devices: if no real Vulkan device was found
+        // (or the `vulkan` feature is off), honestly report zero devices
+        // rather than inventing an NVIDIA GPU or (on Android/iOS) an ARM
+        // Mali GPU that may not be the actual hardware present.
         Ok(devices)
     }
 
-    /// Matrix multiplication using Vulkan compute shaders
+    /// Matrix multiplication.
+    ///
+    /// No real Vulkan compute pipeline is wired up in this module (see the
+    /// module docs: `kernels/vulkan_impl.rs` has a working vulkano matmul
+    /// shader). Every helper this used to call - `allocate_buffer`,
+    /// `copy_to_buffer`/`copy_from_buffer`, `dispatch` - was a stub that
+    /// returned `Ok(())` without touching real GPU memory, so this
+    /// structurally looked like a complete GPU pipeline while never
+    /// actually writing `result`. Returns a structured "not implemented"
+    /// error instead.
     pub fn matmul(
         &mut self,
         a: &Tensor,
@@ -520,7 +501,7 @@ impl VulkanKernel {
         result: &mut Tensor,
         config: Option<VulkanKernelConfig>,
     ) -> Result<()> {
-        let config = config.unwrap_or_default();
+        let _ = config.unwrap_or_default();
 
         let a_shape = a.shape();
         let b_shape = b.shape();
@@ -539,85 +520,32 @@ impl VulkanKernel {
             ));
         }
 
-        // Get or compile matmul shader
-        let shader_name = format!("matmul_{}x{}x{}", a_shape[0], a_shape[1], b_shape[1]);
-
-        if !self.shader_cache.contains_key(&shader_name) {
-            let shader = self.compile_matmul_shader(&a_shape, &b_shape)?;
-            self.shader_cache.insert(shader_name.clone(), shader);
+        let expected_result_shape = [a_shape[0], b_shape[1]];
+        if result.shape() != expected_result_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "result shape {:?} must be {expected_result_shape:?}",
+                    result.shape()
+                ),
+                "VulkanKernels::gemm",
+            ));
         }
 
-        // Allocate GPU buffers
-        let instance = self.instance.as_ref().ok_or_else(|| {
+        self.instance.as_ref().ok_or_else(|| {
             TrustformersError::tensor_op_error("Vulkan not initialized", "VulkanKernels::gemm")
         })?;
 
-        let device_id = instance.device_id;
-        let a_data = a.data()?;
-        let b_data = b.data()?;
-        let result_data = result.data()?;
-
-        let a_buffer = self.allocate_buffer(
-            device_id,
-            a_data.len() * 4,
-            VulkanBufferUsage {
-                storage: true,
-                transfer_dst: true,
-                ..Default::default()
-            },
-        )?;
-
-        let b_buffer = self.allocate_buffer(
-            device_id,
-            b_data.len() * 4,
-            VulkanBufferUsage {
-                storage: true,
-                transfer_dst: true,
-                ..Default::default()
-            },
-        )?;
-
-        let result_buffer = self.allocate_buffer(
-            device_id,
-            result_data.len() * 4,
-            VulkanBufferUsage {
-                storage: true,
-                transfer_src: true,
-                ..Default::default()
-            },
-        )?;
-
-        // Copy data to GPU
-        self.copy_to_buffer(&a_buffer, &a_data)?;
-        self.copy_to_buffer(&b_buffer, &b_data)?;
-
-        // Record and execute compute commands
-        let command_buffer = self.create_command_buffer(device_id)?;
-        self.begin_command_buffer(&command_buffer)?;
-
-        // Bind compute pipeline and descriptor sets
-        let shader = &self.shader_cache[&shader_name];
-        self.bind_compute_pipeline(&command_buffer, shader)?;
-        self.bind_descriptor_sets(&command_buffer, &[&a_buffer, &b_buffer, &result_buffer])?;
-
-        // Dispatch compute work
-        let workgroup_count = [
-            b_shape[1].div_ceil(config.workgroup_size[0] as usize) as u32,
-            a_shape[0].div_ceil(config.workgroup_size[1] as usize) as u32,
-            1,
-        ];
-
-        self.dispatch(&command_buffer, workgroup_count)?;
-        self.end_command_buffer(&command_buffer)?;
-        self.submit_command_buffer(&command_buffer)?;
-
-        // Copy result back to CPU
-        self.copy_from_buffer(&result_buffer, result)?;
-
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "VulkanKernel::matmul: no real compute pipeline is wired up in this module - use \
+             kernels::vulkan_impl::VulkanImpl::matmul, which dispatches a real vulkano GLSL/ \
+             SPIR-V shader"
+                .to_string(),
+        ))
     }
 
-    /// Flash attention using Vulkan compute shaders
+    /// Flash attention. No real compute pipeline is wired up (see `matmul`
+    /// docs); returns a structured "not implemented" error instead of
+    /// `Ok(())` with `output` left untouched.
     pub fn flash_attention(
         &mut self,
         query: &Tensor,
@@ -626,7 +554,7 @@ impl VulkanKernel {
         output: &mut Tensor,
         config: Option<VulkanKernelConfig>,
     ) -> Result<()> {
-        let config = config.unwrap_or_default();
+        let _ = config.unwrap_or_default();
 
         let q_shape = query.shape();
         if q_shape.len() != 3 {
@@ -635,26 +563,27 @@ impl VulkanKernel {
                 "VulkanKernels::flash_attention",
             ));
         }
-
-        let batch_size = q_shape[0];
-        let seq_len = q_shape[1];
-        let hidden_dim = q_shape[2];
-
-        // Get or compile flash attention shader
-        let shader_name = format!("flash_attention_{}x{}x{}", batch_size, seq_len, hidden_dim);
-
-        if !self.shader_cache.contains_key(&shader_name) {
-            let shader = self.compile_flash_attention_shader(&q_shape)?;
-            self.shader_cache.insert(shader_name.clone(), shader);
+        for (name, tensor) in [("key", key), ("value", value), ("output", &*output)] {
+            if tensor.shape() != q_shape {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "{name} shape {:?} must match query shape {q_shape:?}",
+                        tensor.shape()
+                    ),
+                    "VulkanKernels::flash_attention",
+                ));
+            }
         }
 
-        // Implementation details similar to matmul but with attention-specific optimizations
-        // This would include tiling strategies for memory efficiency
-
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "VulkanKernel::flash_attention: no real compute pipeline is wired up in this module"
+                .to_string(),
+        ))
     }
 
-    /// Layer normalization using Vulkan compute shaders
+    /// Layer normalization. No real compute pipeline is wired up (see
+    /// `matmul` docs); returns a structured "not implemented" error
+    /// instead of `Ok(())` with `output` left untouched.
     pub fn layer_norm(
         &mut self,
         input: &Tensor,
@@ -662,55 +591,88 @@ impl VulkanKernel {
         beta: Option<&Tensor>,
         output: &mut Tensor,
         epsilon: f32,
-        precision: VulkanPrecision,
+        // Reserved for the real backend's shader-variant selection. There is
+        // no invariant to check without conflating precision (a compute
+        // mode) with dtype (the tensor's storage format) - INT8 precision
+        // computed from an F32-stored tensor is quantization, a legitimate,
+        // common call, not a mismatch.
+        _precision: VulkanPrecision,
     ) -> Result<()> {
+        if epsilon <= 0.0 || !epsilon.is_finite() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!("epsilon {epsilon} must be a finite positive number"),
+                "VulkanKernels::layer_norm",
+            ));
+        }
         let input_shape = input.shape();
-        let last_dim = input_shape[input_shape.len() - 1];
-
-        // Get or compile layer norm shader
-        let shader_name = format!(
-            "layer_norm_{}_dim{}",
-            match precision {
-                VulkanPrecision::FP32 => "fp32",
-                VulkanPrecision::FP16 => "fp16",
-                VulkanPrecision::BF16 => "bf16",
-                VulkanPrecision::INT8 => "int8",
-                VulkanPrecision::INT4 => "int4",
-            },
-            last_dim
-        );
-
-        if !self.shader_cache.contains_key(&shader_name) {
-            let shader = self.compile_layer_norm_shader(&input_shape, precision)?;
-            self.shader_cache.insert(shader_name.clone(), shader);
+        if output.shape() != input_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {input_shape:?}",
+                    output.shape()
+                ),
+                "VulkanKernels::layer_norm",
+            ));
+        }
+        let Some(&feature_dim) = input_shape.last() else {
+            return Err(TrustformersError::tensor_op_error(
+                "input must have at least one dimension",
+                "VulkanKernels::layer_norm",
+            ));
+        };
+        let mut affine_params = vec![("gamma", gamma)];
+        if let Some(beta) = beta {
+            affine_params.push(("beta", beta));
+        }
+        for (name, tensor) in affine_params {
+            if tensor.shape() != [feature_dim] {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "{name} shape {:?} must be a 1-D tensor of length {feature_dim} \
+                         (input's last dimension)",
+                        tensor.shape()
+                    ),
+                    "VulkanKernels::layer_norm",
+                ));
+            }
         }
 
-        // Implementation details for layer norm compute shader
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "VulkanKernel::layer_norm: no real compute pipeline is wired up in this module"
+                .to_string(),
+        ))
     }
 
-    /// GELU activation using Vulkan compute shaders
+    /// GELU activation. No real compute pipeline is wired up (see `matmul`
+    /// docs); returns a structured "not implemented" error instead of
+    /// `Ok(())` with `output` left untouched.
     pub fn gelu(
         &mut self,
         input: &Tensor,
         output: &mut Tensor,
         config: Option<VulkanKernelConfig>,
     ) -> Result<()> {
-        let config = config.unwrap_or_default();
+        let _ = config.unwrap_or_default();
 
-        // Get or compile GELU shader
-        let shader_name = "gelu_activation";
-
-        if !self.shader_cache.contains_key(shader_name) {
-            let shader = self.compile_gelu_shader()?;
-            self.shader_cache.insert(shader_name.to_string(), shader);
+        if output.shape() != input.shape() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {:?}",
+                    output.shape(),
+                    input.shape()
+                ),
+                "VulkanKernels::gelu",
+            ));
         }
 
-        // Implementation details for GELU activation
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "VulkanKernel::gelu: no real compute pipeline is wired up in this module".to_string(),
+        ))
     }
 
-    /// Reduce sum using Vulkan compute shaders with subgroup operations
+    /// Reduce sum. No real compute pipeline is wired up (see `matmul`
+    /// docs); returns a structured "not implemented" error instead of
+    /// `Ok(())` with `output` left untouched.
     pub fn reduce_sum(
         &mut self,
         input: &Tensor,
@@ -718,7 +680,7 @@ impl VulkanKernel {
         dim: usize,
         config: Option<VulkanKernelConfig>,
     ) -> Result<()> {
-        let config = config.unwrap_or_default();
+        let _ = config.unwrap_or_default();
 
         let input_shape = input.shape();
         if dim >= input_shape.len() {
@@ -727,29 +689,31 @@ impl VulkanKernel {
                 "VulkanKernels::reduce",
             ));
         }
+        let expected_shape: Vec<usize> = input_shape
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| *axis != dim)
+            .map(|(_, &size)| size)
+            .collect();
+        if output.shape() != expected_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must be {expected_shape:?} (input {input_shape:?} with \
+                     dim {dim} reduced away)",
+                    output.shape()
+                ),
+                "VulkanKernels::reduce",
+            ));
+        }
 
-        // Get device info for subgroup optimization
-        let instance = self.instance.as_ref().ok_or_else(|| {
+        self.instance.as_ref().ok_or_else(|| {
             TrustformersError::tensor_op_error("Vulkan not initialized", "VulkanKernels::reduce")
         })?;
 
-        let device = &self.devices[instance.device_id];
-
-        // Use subgroup operations if available for better performance
-        let shader_name = if device.supports_subgroup_ops {
-            format!("reduce_sum_subgroup_dim{}", dim)
-        } else {
-            format!("reduce_sum_workgroup_dim{}", dim)
-        };
-
-        if !self.shader_cache.contains_key(&shader_name) {
-            let shader =
-                self.compile_reduce_sum_shader(&input_shape, dim, device.supports_subgroup_ops)?;
-            self.shader_cache.insert(shader_name.clone(), shader);
-        }
-
-        // Implementation details for reduction
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "VulkanKernel::reduce_sum: no real compute pipeline is wired up in this module"
+                .to_string(),
+        ))
     }
 
     /// Get memory statistics
@@ -761,221 +725,6 @@ impl VulkanKernel {
         } else {
             Ok((0, 0, 0))
         }
-    }
-
-    // Helper methods for shader compilation
-    fn compile_matmul_shader(
-        &self,
-        a_shape: &[usize],
-        b_shape: &[usize],
-    ) -> Result<CompiledShader> {
-        // In a real implementation, this would generate SPIR-V code
-        // Here we create a placeholder compiled shader
-        Ok(CompiledShader {
-            name: "matmul".to_string(),
-            spirv_code: vec![0; 1024], // Placeholder SPIR-V bytecode
-            entry_point: "main".to_string(),
-            workgroup_size: [16, 16, 1], // Optimized for matrix multiplication
-            push_constant_size: 16,      // For dimensions
-            descriptor_set_layouts: vec![
-                VulkanDescriptorSetLayout {
-                    binding: 0,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 1,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 2,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-            ],
-        })
-    }
-
-    fn compile_flash_attention_shader(&self, shape: &[usize]) -> Result<CompiledShader> {
-        // Flash attention specific shader compilation
-        Ok(CompiledShader {
-            name: "flash_attention".to_string(),
-            spirv_code: vec![0; 2048], // Larger shader for attention
-            entry_point: "main".to_string(),
-            workgroup_size: [32, 1, 1], // Optimized for attention patterns
-            push_constant_size: 32,     // For attention parameters
-            descriptor_set_layouts: vec![
-                VulkanDescriptorSetLayout {
-                    binding: 0,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 1,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 2,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 3,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-            ],
-        })
-    }
-
-    fn compile_layer_norm_shader(
-        &self,
-        shape: &[usize],
-        precision: VulkanPrecision,
-    ) -> Result<CompiledShader> {
-        Ok(CompiledShader {
-            name: "layer_norm".to_string(),
-            spirv_code: vec![0; 1024],
-            entry_point: "main".to_string(),
-            workgroup_size: [256, 1, 1],
-            push_constant_size: 8, // epsilon + dimensions
-            descriptor_set_layouts: vec![
-                VulkanDescriptorSetLayout {
-                    binding: 0,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 1,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 2,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 3,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-            ],
-        })
-    }
-
-    fn compile_gelu_shader(&self) -> Result<CompiledShader> {
-        Ok(CompiledShader {
-            name: "gelu".to_string(),
-            spirv_code: vec![0; 512],
-            entry_point: "main".to_string(),
-            workgroup_size: [256, 1, 1],
-            push_constant_size: 0,
-            descriptor_set_layouts: vec![
-                VulkanDescriptorSetLayout {
-                    binding: 0,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 1,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-            ],
-        })
-    }
-
-    fn compile_reduce_sum_shader(
-        &self,
-        shape: &[usize],
-        dim: usize,
-        use_subgroups: bool,
-    ) -> Result<CompiledShader> {
-        Ok(CompiledShader {
-            name: "reduce_sum".to_string(),
-            spirv_code: vec![0; 1024],
-            entry_point: "main".to_string(),
-            workgroup_size: if use_subgroups { [64, 1, 1] } else { [256, 1, 1] },
-            push_constant_size: 4, // dimension
-            descriptor_set_layouts: vec![
-                VulkanDescriptorSetLayout {
-                    binding: 0,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-                VulkanDescriptorSetLayout {
-                    binding: 1,
-                    descriptor_type: VulkanDescriptorType::StorageBuffer,
-                    stage_flags: VulkanShaderStage::Compute,
-                },
-            ],
-        })
-    }
-
-    // Helper methods for buffer and command management
-    fn allocate_buffer(
-        &mut self,
-        device_id: usize,
-        size: usize,
-        usage: VulkanBufferUsage,
-    ) -> Result<VulkanBuffer> {
-        Ok(VulkanBuffer {
-            id: 0, // Placeholder
-            size: size as u64,
-            usage,
-        })
-    }
-
-    fn copy_to_buffer(&self, buffer: &VulkanBuffer, data: &[f32]) -> Result<()> {
-        // Implementation would copy data to GPU buffer
-        Ok(())
-    }
-
-    fn copy_from_buffer(&self, buffer: &VulkanBuffer, result: &mut Tensor) -> Result<()> {
-        // Implementation would copy data from GPU buffer to tensor
-        Ok(())
-    }
-
-    fn create_command_buffer(&mut self, device_id: usize) -> Result<VulkanCommandBuffer> {
-        Ok(VulkanCommandBuffer {
-            id: 0,
-            recording: false,
-        })
-    }
-
-    fn begin_command_buffer(&self, cmd: &VulkanCommandBuffer) -> Result<()> {
-        Ok(())
-    }
-
-    fn bind_compute_pipeline(
-        &self,
-        cmd: &VulkanCommandBuffer,
-        shader: &CompiledShader,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn bind_descriptor_sets(
-        &self,
-        cmd: &VulkanCommandBuffer,
-        buffers: &[&VulkanBuffer],
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    fn dispatch(&self, cmd: &VulkanCommandBuffer, workgroup_count: [u32; 3]) -> Result<()> {
-        Ok(())
-    }
-
-    fn end_command_buffer(&self, cmd: &VulkanCommandBuffer) -> Result<()> {
-        Ok(())
-    }
-
-    fn submit_command_buffer(&self, cmd: &VulkanCommandBuffer) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -989,21 +738,30 @@ mod tests {
         assert!(kernel.is_ok());
     }
 
+    /// Regression test: `detect_devices` used to fabricate a fixed
+    /// NVIDIA/ARM Mali device regardless of what hardware (if any) was
+    /// actually attached. There is no real Vulkan device on this CI/dev
+    /// host (and, without the `vulkan` feature, no runtime probe even
+    /// runs), so honest enumeration must report zero - never a phantom
+    /// device asserted as always present.
     #[test]
-    fn test_device_enumeration() {
+    fn test_device_enumeration_reports_no_phantom_devices_without_real_hardware() {
         let kernel = VulkanKernel::new().expect("operation failed in test");
         let devices = kernel.enumerate_devices().expect("operation failed in test");
-        assert!(!devices.is_empty());
 
-        // Should have at least one device
-        assert!(!devices.is_empty());
-
-        // Check device properties
-        for device in devices {
+        // Whatever is reported must be real: every entry must carry
+        // plausible (non-fabricated-placeholder) properties.
+        for device in &devices {
             assert!(!device.name.is_empty());
             assert!(device.max_workgroup_size[0] > 0);
-            assert!(device.memory_total > 0);
         }
+
+        #[cfg(not(feature = "vulkan"))]
+        assert!(
+            devices.is_empty(),
+            "without the vulkan feature there is no real probe, so this must be empty, not a \
+             fabricated device"
+        );
     }
 
     #[test]
@@ -1013,17 +771,31 @@ mod tests {
         assert_eq!(config.workgroup_count, [1, 1, 1]);
     }
 
+    /// Regression test: before this fix, `matmul` (and
+    /// flash_attention/layer_norm/gelu/reduce_sum) drove an entirely fake
+    /// pipeline - `compile_matmul_shader` returned 1024 zero bytes as
+    /// "SPIR-V", `allocate_buffer`/`copy_to_buffer`/`copy_from_buffer`/
+    /// `dispatch` were all no-op `Ok(())` stubs - and reported success
+    /// while never writing `result`. That fake-pipeline machinery
+    /// (`compile_matmul_shader` et al.) no longer exists; every op must
+    /// error honestly instead.
     #[test]
-    fn test_shader_compilation() {
-        let kernel = VulkanKernel::new().expect("operation failed in test");
+    fn test_matmul_errors_instead_of_faking_a_pipeline() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let a = Tensor::ones(&[2, 3]).expect("tensor creation failed");
+        let b = Tensor::ones(&[3, 4]).expect("tensor creation failed");
+        let mut result = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
 
-        let shader = kernel.compile_matmul_shader(&[128, 256], &[256, 512]);
-        assert!(shader.is_ok());
-
-        let compiled = shader.expect("operation failed in test");
-        assert_eq!(compiled.name, "matmul");
-        assert!(!compiled.spirv_code.is_empty());
-        assert_eq!(compiled.entry_point, "main");
+        // `matmul` requires `initialize()` to have been called first (it
+        // checks `self.instance`); with no real Vulkan device to
+        // initialize against, or with the compute pipeline itself
+        // unimplemented, this must error either way - never silently
+        // leave `result` untouched while returning `Ok`.
+        let result_status = kernel.matmul(&a, &b, &mut result, None);
+        assert!(
+            result_status.is_err(),
+            "matmul must error rather than fabricate a completed GPU pipeline"
+        );
     }
 
     #[test]
@@ -1047,10 +819,17 @@ mod tests {
         let stats = kernel.get_memory_stats(0);
         assert!(stats.is_ok());
 
+        // No pool is ever registered for a device without a real backing
+        // Vulkan device, so the honest answer is all-zero stats, not a
+        // fabricated nonzero pool. `total`/`peak`/`free` are `u64`, so the
+        // commented-out `>= 0` checks this replaces were always vacuously
+        // true and asserted nothing.
         let (total, peak, free) = stats.expect("operation failed in test");
-        // assert!(total >= 0);
-        // assert!(peak >= 0);
-        // assert!(free >= 0);
+        assert_eq!(
+            (total, peak, free),
+            (0, 0, 0),
+            "no memory pool was ever registered for device 0 on this host"
+        );
     }
 
     #[test]
@@ -1081,5 +860,139 @@ mod tests {
         assert!(features.shader_float16);
         assert!(features.subgroup_vote);
         assert!(!features.storage_buffer_8bit_access);
+    }
+
+    /// Regression test: `matmul`'s new `result` shape check used to be an
+    /// unread `result` parameter under the file's blanket
+    /// `#![allow(unused_variables)]`. A wrong-shaped `result` must be
+    /// rejected with a message naming the shape mismatch, distinct from
+    /// both the pre-existing dimension checks and the generic "not
+    /// initialized"/"not implemented" errors that follow it.
+    #[test]
+    fn matmul_rejects_a_wrong_result_shape() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let a = Tensor::ones(&[2, 3]).expect("tensor creation failed");
+        let b = Tensor::ones(&[3, 4]).expect("tensor creation failed");
+        // Correct product shape is [2, 4]; this is deliberately wrong.
+        let mut wrong_result = Tensor::zeros(&[2, 5]).expect("tensor creation failed");
+
+        let err = kernel
+            .matmul(&a, &b, &mut wrong_result, None)
+            .expect_err("a mismatched result shape must be rejected");
+        assert!(
+            err.to_string().contains("result shape"),
+            "error should name the result shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `flash_attention`'s `key`/`value`/`output` shape
+    /// check used to be dead code - the parameters were threaded in and
+    /// never read before falling straight through to the unconditional
+    /// "not implemented" error. A shape mismatch must now be rejected with
+    /// its own message rather than being silently accepted only to hit the
+    /// same generic error a well-formed call would also hit.
+    #[test]
+    fn flash_attention_distinguishes_shape_errors_from_not_implemented() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let query = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let mismatched_key = Tensor::ones(&[1, 3, 4]).expect("tensor creation failed");
+        let value = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[1, 2, 4]).expect("tensor creation failed");
+
+        let shape_err = kernel
+            .flash_attention(&query, &mismatched_key, &value, &mut output, None)
+            .expect_err("a mismatched key shape must be rejected");
+        assert!(
+            shape_err.to_string().contains("key shape"),
+            "error should name key's shape as the cause, got: {shape_err}"
+        );
+
+        // A well-formed call has nothing left to reject except the honestly
+        // unimplemented compute pipeline.
+        let matching_key = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let not_implemented_err = kernel
+            .flash_attention(&query, &matching_key, &value, &mut output, None)
+            .expect_err("no compute pipeline is wired up yet");
+        assert!(
+            not_implemented_err.to_string().contains("wired up"),
+            "a shape-correct call should fail on the unimplemented pipeline, not a shape check, \
+             got: {not_implemented_err}"
+        );
+    }
+
+    /// Regression test: `layer_norm`'s `epsilon`/`gamma`/`output` checks
+    /// used to be dead code for the same reason as `flash_attention`
+    /// above.
+    #[test]
+    fn layer_norm_rejects_bad_epsilon_and_gamma_shape() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let gamma = Tensor::ones(&[8]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[2, 8]).expect("tensor creation failed");
+
+        let eps_err = kernel
+            .layer_norm(
+                &input,
+                &gamma,
+                None,
+                &mut output,
+                0.0,
+                VulkanPrecision::FP32,
+            )
+            .expect_err("a zero epsilon must be rejected");
+        assert!(
+            eps_err.to_string().contains("epsilon"),
+            "error should name epsilon as the cause, got: {eps_err}"
+        );
+
+        let wrong_gamma = Tensor::ones(&[4]).expect("tensor creation failed"); // should be [8]
+        let gamma_err = kernel
+            .layer_norm(
+                &input,
+                &wrong_gamma,
+                None,
+                &mut output,
+                1e-5,
+                VulkanPrecision::FP32,
+            )
+            .expect_err("a mismatched gamma shape must be rejected");
+        assert!(
+            gamma_err.to_string().contains("gamma"),
+            "error should name gamma as the cause, got: {gamma_err}"
+        );
+    }
+
+    /// Regression test: `gelu`'s `output` shape check used to be dead code
+    /// for the same reason as `flash_attention` above.
+    #[test]
+    fn gelu_rejects_an_output_shape_mismatch() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut wrong_output = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+
+        let err = kernel
+            .gelu(&input, &mut wrong_output, None)
+            .expect_err("a mismatched output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `reduce_sum`'s `output` shape check used to be dead
+    /// code for the same reason as `flash_attention` above.
+    #[test]
+    fn reduce_sum_rejects_an_output_shape_mismatch() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut wrong_output = Tensor::zeros(&[8]).expect("tensor creation failed"); // should be [2]
+
+        let err = kernel
+            .reduce_sum(&input, &mut wrong_output, 1, None)
+            .expect_err("a mismatched output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
     }
 }

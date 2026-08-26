@@ -214,6 +214,7 @@ impl AdvancedRAGPipeline {
         let mut all_documents = Vec::new();
         let mut current_query = query.to_string();
         let mut knowledge_graph_paths = Vec::new();
+        let mut self_reflection_results = Vec::new();
 
         for hop in 0..self.config.max_hops {
             // Retrieve documents for current query
@@ -227,7 +228,23 @@ impl AdvancedRAGPipeline {
                 .await?;
 
             let retrieved_docs = retrieval_result.documents;
-            all_documents.extend(retrieved_docs.clone());
+            // Deduplicate against documents already accumulated in this
+            // reasoning chain: the retriever's `context` hint is advisory
+            // only, so a retriever (the mock included) may legitimately
+            // return the same document id again on a later hop. Re-adding it
+            // to `all_documents` would double-count it in
+            // `total_documents_used` and duplicate it in the self-reflection
+            // evidence passed to `SelfReflector::reflect_on_answer`.
+            let mut newly_seen_docs = Vec::with_capacity(retrieved_docs.len());
+            {
+                let mut cache = self.document_cache.write().await;
+                for doc in &retrieved_docs {
+                    if cache.insert(doc.id.clone(), doc.clone()).is_none() {
+                        newly_seen_docs.push(doc.clone());
+                    }
+                }
+            }
+            all_documents.extend(newly_seen_docs);
 
             // Retrieve knowledge graph nodes if enabled
             if self.config.enable_graph_rag {
@@ -278,24 +295,32 @@ impl AdvancedRAGPipeline {
             reasoning_chain.push(reasoning_step);
 
             // Check if we need another hop
-            if confidence > self.config.uncertainty_threshold || hop == self.config.max_hops - 1 {
-                // Perform self-reflection if enabled
-                let mut self_reflection_results = Vec::new();
+            let is_last_hop = hop == self.config.max_hops - 1;
+            if confidence > self.config.uncertainty_threshold || is_last_hop {
+                // Perform self-reflection if enabled. A reflection that asks
+                // for more retrieval (`should_retrieve_more == true`) can
+                // send the loop into another hop even though the
+                // confidence/last-hop gate above would otherwise have ended
+                // it, as long as hop budget remains -- without this, a
+                // reflector's request for more evidence could never
+                // actually trigger another hop and the multi-hop mechanism
+                // was dead code.
+                let mut retrieve_more_via_reflection = false;
                 if self.config.enable_self_reflection {
                     if let Some(reflector) = &self.self_reflector {
                         let reflection = reflector
                             .reflect_on_answer(query, &intermediate_answer, &all_documents)
                             .await?;
 
-                        if !reflection.should_retrieve_more {
-                            self_reflection_results.push(reflection);
-                            break;
-                        }
+                        retrieve_more_via_reflection = reflection.should_retrieve_more;
                         self_reflection_results.push(reflection);
                     }
                 }
 
-                break;
+                let continue_for_another_hop = retrieve_more_via_reflection && !is_last_hop;
+                if !continue_for_another_hop {
+                    break;
+                }
             }
 
             // Prepare next hop query based on gaps in current answer
@@ -315,7 +340,7 @@ impl AdvancedRAGPipeline {
             reasoning_chain,
             total_documents_used: all_documents.len(),
             retrieval_iterations,
-            self_reflection_results: Vec::new(), // Populated above if enabled
+            self_reflection_results,
             knowledge_graph_paths,
         })
     }
@@ -764,23 +789,6 @@ mod tests {
     use super::*;
     use crate::Result;
 
-    // Simple LCG for deterministic pseudo-random values
-    struct Lcg {
-        state: u64,
-    }
-
-    impl Lcg {
-        fn new(seed: u64) -> Self {
-            Self { state: seed }
-        }
-
-        fn next_f32(&mut self) -> f32 {
-            self.state =
-                self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((self.state >> 33) as f32) / (u32::MAX as f32)
-        }
-    }
-
     // Mock generation pipeline for testing
     struct MockGenerationPipeline;
 
@@ -1184,6 +1192,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_hop_reasoning_dedupes_repeated_documents() {
+        // `MockAdvancedRetriever` always returns the same two documents
+        // (doc1, doc2) regardless of query or prior-context hint, which is
+        // exactly what a real vector-index retriever can do too when a
+        // reformulated query still ranks the same top-k highest. Force two
+        // hops (a high `uncertainty_threshold` stops the loop from exiting
+        // after hop 0's default 0.8 confidence) and assert the repeated
+        // documents are not double-counted.
+        let config = AdvancedRAGConfig {
+            max_hops: 2,
+            uncertainty_threshold: 0.95,
+            ..Default::default()
+        };
+        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
+        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
+        let input = PipelineInput::Text("What is climate change?".to_string());
+        let result = rag_pipeline.__call__(input).expect("pipeline call should succeed");
+        let PipelineOutput::AdvancedRAG(rag_output) = result else {
+            panic!("expected AdvancedRAG output");
+        };
+        assert_eq!(
+            rag_output.retrieval_iterations, 2,
+            "both hops should run given the forced uncertainty threshold"
+        );
+        assert_eq!(
+            rag_output.total_documents_used, 2,
+            "a document id retrieved again on a later hop must be deduplicated via the \
+             document cache, not double-counted in total_documents_used"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_full_rag_pipeline_with_reflection() {
         let config = AdvancedRAGConfig {
             enable_self_reflection: true,
@@ -1195,6 +1235,113 @@ mod tests {
         let input = PipelineInput::Text("Tell me about renewable energy.".to_string());
         let result = pipeline.__call__(input);
         assert!(result.is_ok(), "full pipeline should succeed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_self_reflection_results_propagate_to_output() {
+        // Regression test: `AdvancedRAGOutput.self_reflection_results` used to
+        // be hardcoded to `Vec::new()` at the return site even though a local
+        // Vec of the same name was built and populated during the loop above
+        // it -- that local Vec was silently discarded. With self-reflection
+        // enabled and a real reflector wired in, the returned output must
+        // actually carry the reflection(s) produced during the run.
+        let config = AdvancedRAGConfig {
+            enable_self_reflection: true,
+            max_hops: 1,
+            ..Default::default()
+        };
+        let generation_pipeline = Arc::new(MockGenerationPipeline);
+        let pipeline = create_full_advanced_rag_pipeline(config, generation_pipeline);
+        let input = PipelineInput::Text("What is climate change?".to_string());
+        let result = pipeline.__call__(input).expect("pipeline call should succeed");
+        let PipelineOutput::AdvancedRAG(rag_output) = result else {
+            panic!("expected AdvancedRAG output");
+        };
+        assert_eq!(
+            rag_output.self_reflection_results.len(),
+            1,
+            "the self-reflection result computed during the hop must propagate to the \
+             output, not be discarded"
+        );
+    }
+
+    /// A reflector whose first call demands another retrieval hop and whose
+    /// second call reports satisfaction, so the loop terminates predictably.
+    struct DemandsOneMoreHopReflector {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl DemandsOneMoreHopReflector {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SelfReflector for DemandsOneMoreHopReflector {
+        async fn reflect_on_answer(
+            &self,
+            _query: &str,
+            _answer: &str,
+            _evidence: &[MultiModalDocument],
+        ) -> Result<SelfReflectionResult> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(SelfReflectionResult {
+                answer_confidence: 0.9,
+                evidence_quality: 0.9,
+                consistency_score: 0.9,
+                should_retrieve_more: call == 0,
+                identified_gaps: if call == 0 {
+                    vec!["needs a second hop".to_string()]
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_reflector_demanding_more_retrieval_triggers_another_hop() {
+        // Regression test for the unconditional `break` bug: a reflection
+        // with `should_retrieve_more == true` must actually cause another
+        // retrieval hop when hop budget remains, not be silently ignored by
+        // an unconditional break right after it was recorded.
+        let config = AdvancedRAGConfig {
+            enable_self_reflection: true,
+            max_hops: 3,
+            // Low threshold: the confidence gate alone is already satisfied
+            // on hop 0 (default confidence 0.8, since no uncertainty
+            // estimator is attached here), so without the fix the loop would
+            // stop after hop 0 regardless of what the reflector says.
+            uncertainty_threshold: 0.5,
+            ..Default::default()
+        };
+        let generation_pipeline: Arc<dyn Pipeline<Input = String, Output = PipelineOutput>> =
+            Arc::new(MockGenerationPipeline);
+        let retriever = Arc::new(MockAdvancedRetriever::new());
+        let reflector = Arc::new(DemandsOneMoreHopReflector::new());
+        let pipeline = AdvancedRAGPipeline::new(config, retriever, generation_pipeline)
+            .with_self_reflector(reflector);
+
+        let input = PipelineInput::Text("What is climate change?".to_string());
+        let result = pipeline.__call__(input).expect("pipeline call should succeed");
+        let PipelineOutput::AdvancedRAG(rag_output) = result else {
+            panic!("expected AdvancedRAG output");
+        };
+
+        assert_eq!(
+            rag_output.retrieval_iterations, 2,
+            "reflection asking for more retrieval on hop 0 must cause a second hop; the \
+             old unconditional `break` made this impossible"
+        );
+        assert_eq!(
+            rag_output.self_reflection_results.len(),
+            2,
+            "one reflection result should be recorded per hop that reached the \
+             reflection step"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

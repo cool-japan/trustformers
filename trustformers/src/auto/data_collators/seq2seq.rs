@@ -291,8 +291,6 @@ impl DataCollator for Seq2SeqDataCollator {
             ));
         }
 
-        let batch_size = examples.len();
-
         // Determine maximum lengths for encoder and decoder
         let max_encoder_len = match self.config.padding {
             PaddingStrategy::Longest => examples
@@ -346,6 +344,20 @@ impl DataCollator for Seq2SeqDataCollator {
         // Process target sequences for decoder
         let (processed_labels, decoder_attention_masks) =
             self.process_target_sequences(examples, max_decoder_len)?;
+
+        // Right-shifted decoder inputs for teacher forcing, one per example.
+        // `pad_token_id` doubles as the decoder start token when no
+        // dedicated one is configured, matching T5-family models' default
+        // (`decoder_start_token_id` falls back to `pad_token_id`).
+        let decoder_input_ids: Vec<Vec<u32>> = processed_labels
+            .iter()
+            .map(|labels| self.prepare_decoder_inputs(labels, Some(self.config.pad_token_id)))
+            .collect();
+        batch.metadata.insert(
+            "decoder_input_ids".to_string(),
+            serde_json::to_value(decoder_input_ids)
+                .map_err(|e| TrustformersError::runtime_error(e.to_string()))?,
+        );
 
         // Store processed labels
         batch.labels = Some(processed_labels);

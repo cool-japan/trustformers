@@ -2,7 +2,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::*;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -163,12 +162,15 @@ impl TypingSimulator {
     ///
     /// Vector of typing events representing natural typing flow
     pub fn generate_typing_burst(&self, chunk: &StreamChunk) -> Vec<TypingEvent> {
+        let generation_start = Instant::now();
         let mut events = Vec::new();
         let content = &chunk.content;
         if content.is_empty() {
             return events;
         }
+        let analysis_start = Instant::now();
         let analysis = self.patterns.analyze_content(content);
+        self.performance_tracker.record_analysis_time(analysis_start.elapsed());
         let segments = self.split_into_typing_segments(content, &analysis);
         let mut char_index = 0;
         for (i, segment) in segments.iter().enumerate() {
@@ -212,6 +214,8 @@ impl TypingSimulator {
             }
         }
         self.performance_tracker.record_burst_generation(events.len(), content.len());
+        self.performance_tracker
+            .record_burst_generation_time(generation_start.elapsed());
         events
     }
     /// Split content into natural typing segments
@@ -371,7 +375,10 @@ impl TypingSimulator {
         let random_val = (*rng_state as f32) / (u64::MAX as f32);
         let base_probability = 0.02 * self.personality.correction_frequency;
         let length_factor = (segment.len() as f32 / 20.0).min(0.1);
-        let total_probability = (base_probability + length_factor).min(0.1);
+        // Harder-to-type segments are more error-prone, mirroring the
+        // complexity boost `should_add_hesitation` applies.
+        let complexity_factor = analysis.complexity_score * 0.05;
+        let total_probability = (base_probability + length_factor + complexity_factor).min(0.15);
         random_val < total_probability && segment.len() > 5
     }
     /// Simple pseudo-random number generator (Linear Congruential Generator)

@@ -26,8 +26,6 @@ pub struct TempDirectoryManager {
     config: Arc<RwLock<TempDirPoolConfig>>,
     /// Base directory for temporary files
     base_directory: PathBuf,
-    /// Available directory pool
-    available_directories: Arc<Mutex<Vec<TempDirectoryInfo>>>,
     /// Allocated directories
     allocated_directories: Arc<Mutex<HashMap<PathBuf, TempDirectoryAllocation>>>,
     /// Directory cleanup scheduler
@@ -38,8 +36,6 @@ pub struct TempDirectoryManager {
 
 /// Directory usage tracking system
 pub struct DirectoryUsageTracking {
-    /// Usage history
-    usage_history: Vec<(DateTime<Utc>, DirectoryUsageInfo)>,
     /// Total files created
     total_files_created: u64,
     /// Total bytes written
@@ -56,8 +52,6 @@ pub struct DirectoryCleanupScheduler {
     cleanup_history: Arc<Mutex<Vec<CleanupEvent>>>,
     /// Cleanup statistics
     cleanup_stats: Arc<Mutex<CleanupStatistics>>,
-    /// Automatic cleanup enabled
-    auto_cleanup_enabled: bool,
 }
 
 impl TempDirectoryManager {
@@ -73,9 +67,6 @@ impl TempDirectoryManager {
             info!("Created base directory: {:?}", base_directory);
         }
 
-        // Initialize available directories pool
-        let available_directories = Vec::new();
-
         info!(
             "Initialized temporary directory manager with base directory: {:?}",
             base_directory
@@ -84,7 +75,6 @@ impl TempDirectoryManager {
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             base_directory,
-            available_directories: Arc::new(Mutex::new(available_directories)),
             allocated_directories: Arc::new(Mutex::new(HashMap::new())),
             cleanup_scheduler: Arc::new(DirectoryCleanupScheduler::new()),
             usage_stats: Arc::new(Mutex::new(DirectoryUsageStatistics::default())),
@@ -542,7 +532,6 @@ impl DirectoryCleanupScheduler {
             scheduled_tasks: Arc::new(Mutex::new(Vec::new())),
             cleanup_history: Arc::new(Mutex::new(Vec::new())),
             cleanup_stats: Arc::new(Mutex::new(CleanupStatistics::default())),
-            auto_cleanup_enabled: true,
         }
     }
 
@@ -827,7 +816,6 @@ impl DirectoryUsageTracking {
     /// Create new directory usage tracking
     pub fn new() -> Self {
         Self {
-            usage_history: Vec::new(),
             total_files_created: 0,
             total_bytes_written: 0,
             access_patterns: HashMap::new(),

@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    architecture_analysis::ArchitectureAnalysisReport,
     gradient_debugger::GradientDebugReport,
     profiler::ProfilerReport,
     visualization::{DebugVisualizer, PlotData, VisualizationConfig},
@@ -36,6 +37,38 @@ pub enum ReportFormat {
     Excel,
     /// PowerPoint format
     PowerPoint,
+}
+
+impl ReportFormat {
+    /// Whether [`ReportGenerator::export_report`] has a real writer for this
+    /// format. `Pdf` / `Excel` / `PowerPoint` are listed variants of this
+    /// enum (kept for API/config-schema stability -- external configs may
+    /// already reference them) but have no generation library backing them
+    /// in this crate; selecting one is rejected up front by
+    /// [`ReportGenerator::new`] rather than only failing after a caller has
+    /// already paid for the (potentially expensive) analysis and section
+    /// generation that happens before `export_report` is ever called.
+    pub fn is_implemented(&self) -> bool {
+        !matches!(
+            self,
+            ReportFormat::Pdf | ReportFormat::Excel | ReportFormat::PowerPoint
+        )
+    }
+
+    /// Human-readable name used in [`ReportError::UnsupportedFormat`]
+    /// messages.
+    fn label(&self) -> &'static str {
+        match self {
+            ReportFormat::Pdf => "PDF",
+            ReportFormat::Markdown => "Markdown",
+            ReportFormat::Html => "HTML",
+            ReportFormat::Json => "JSON",
+            ReportFormat::Jupyter => "Jupyter",
+            ReportFormat::Latex => "LaTeX",
+            ReportFormat::Excel => "Excel",
+            ReportFormat::PowerPoint => "PowerPoint",
+        }
+    }
 }
 
 /// Report type categories
@@ -182,19 +215,39 @@ pub struct ReportGenerator {
     debug_data: Option<GradientDebugReport>,
     /// Profiling data
     profiling_data: Option<ProfilerReport>,
+    /// Model architecture data (parameter counts, layer shapes, ...), used by
+    /// [`Self::generate_architecture_section`] to fill in real per-layer
+    /// parameter counts instead of the honest-but-permanent "N/A" that is
+    /// used when this is absent.
+    architecture_data: Option<ArchitectureAnalysisReport>,
     /// Visualizer
     visualizer: DebugVisualizer,
 }
 
 impl ReportGenerator {
-    /// Create a new report generator
-    pub fn new(config: ReportConfig) -> Self {
-        Self {
+    /// Create a new report generator.
+    ///
+    /// Rejects `config.format` immediately (before any analysis or section
+    /// generation runs) when it names a format this crate cannot write --
+    /// see [`ReportFormat::is_implemented`]. The old behavior accepted any
+    /// format at construction and only discovered the mismatch inside
+    /// `export_report`, after a caller had already paid for the full report
+    /// generation.
+    pub fn new(config: ReportConfig) -> Result<Self, ReportError> {
+        if !config.format.is_implemented() {
+            return Err(ReportError::UnsupportedFormat(format!(
+                "{} export is not implemented; choose one of Markdown, Html, Json, Jupyter, or \
+                 Latex",
+                config.format.label()
+            )));
+        }
+        Ok(Self {
             config,
             debug_data: None,
             profiling_data: None,
+            architecture_data: None,
             visualizer: DebugVisualizer::new(VisualizationConfig::default()),
-        }
+        })
     }
 
     /// Add gradient debug data
@@ -206,6 +259,15 @@ impl ReportGenerator {
     /// Add profiling data
     pub fn with_profiling_data(mut self, data: ProfilerReport) -> Self {
         self.profiling_data = Some(data);
+        self
+    }
+
+    /// Add model architecture data (real per-layer parameter counts, shapes,
+    /// ...). Without this, `Self::generate_architecture_section` reports
+    /// each layer's parameter count as `N/A` -- an honest absence, not a
+    /// fabricated number -- rather than guessing.
+    pub fn with_architecture_data(mut self, data: ArchitectureAnalysisReport) -> Self {
+        self.architecture_data = Some(data);
         self
     }
 
@@ -444,6 +506,17 @@ impl ReportGenerator {
         content.push_str("## Model Architecture Analysis\n\n");
         content.push_str("This section provides detailed analysis of the model architecture.\n\n");
 
+        // Real per-layer parameter counts, keyed by layer name, from
+        // whatever architecture data was attached via
+        // `with_architecture_data`. Absent (rather than guessed) when no
+        // architecture data was provided, or when a given gradient-flow
+        // layer name has no matching entry there.
+        let parameter_counts: HashMap<&str, usize> = self
+            .architecture_data
+            .as_ref()
+            .map(|arch| arch.layers.iter().map(|l| (l.name.as_str(), l.parameters)).collect())
+            .unwrap_or_default();
+
         // Add architecture details if available
         content.push_str("### Layer Structure\n\n");
         if let Some(debug_data) = &self.debug_data {
@@ -460,12 +533,13 @@ impl ReportGenerator {
                 } else {
                     "Healthy"
                 };
+                let parameters = parameter_counts
+                    .get(layer_name.as_str())
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
                 content.push_str(&format!(
                     "| {} | {} | {} | {} |\n",
-                    i,
-                    layer_name,
-                    "N/A", // In a real implementation, get parameter count
-                    health
+                    i, layer_name, parameters, health
                 ));
             }
         } else {
@@ -740,21 +814,39 @@ impl ReportGenerator {
         })
     }
 
-    /// Generate visualizations
+    /// Generate visualizations.
+    ///
+    /// The performance chart plots `profiling_data.slowest_layers` -- a real
+    /// ranked list of `(layer_name, Duration)` produced by the profiler --
+    /// rather than the fixed `[1,2,3]`/`[10,15,12]` points the old
+    /// implementation emitted regardless of what was actually profiled.
+    /// Omitted entirely (never fabricated) when there is no profiling data,
+    /// or it recorded no layer timings.
     fn generate_visualizations(&self) -> Result<HashMap<String, PlotData>, ReportError> {
         let mut visualizations = HashMap::new();
 
-        // Generate performance chart
-        if self.profiling_data.is_some() {
-            let plot_data = PlotData {
-                x_values: vec![1.0, 2.0, 3.0],    // Placeholder data
-                y_values: vec![10.0, 15.0, 12.0], // Placeholder performance data
-                labels: vec!["A".to_string(), "B".to_string(), "C".to_string()],
-                title: "Performance Chart".to_string(),
-                x_label: "Time".to_string(),
-                y_label: "Performance".to_string(),
-            };
-            visualizations.insert("performance_chart".to_string(), plot_data);
+        if let Some(profiling_data) = &self.profiling_data {
+            if !profiling_data.slowest_layers.is_empty() {
+                let x_values: Vec<f64> =
+                    (0..profiling_data.slowest_layers.len()).map(|i| i as f64).collect();
+                let y_values: Vec<f64> = profiling_data
+                    .slowest_layers
+                    .iter()
+                    .map(|(_, duration)| duration.as_secs_f64() * 1000.0)
+                    .collect();
+                let labels: Vec<String> =
+                    profiling_data.slowest_layers.iter().map(|(name, _)| name.clone()).collect();
+
+                let plot_data = PlotData {
+                    x_values,
+                    y_values,
+                    labels,
+                    title: "Performance Chart".to_string(),
+                    x_label: "Layer Rank (slowest first)".to_string(),
+                    y_label: "Duration (ms)".to_string(),
+                };
+                visualizations.insert("performance_chart".to_string(), plot_data);
+            }
         }
 
         Ok(visualizations)
@@ -860,11 +952,16 @@ impl ReportGenerator {
         Ok(())
     }
 
-    /// Export to PDF format (placeholder implementation)
+    /// PDF export: **not implemented**, returns a structured error.
+    ///
+    /// No PDF writer is linked into `trustformers-debug`. Use
+    /// [`ReportFormat::Html`] or [`ReportFormat::LaTeX`] and convert
+    /// externally.
     fn export_pdf(&self, _report: &Report) -> Result<(), ReportError> {
-        // In a real implementation, this would use a PDF generation library
         Err(ReportError::UnsupportedFormat(
-            "PDF export not implemented".to_string(),
+            "PDF export not implemented: trustformers-debug links no PDF writer. Export HTML \
+             or LaTeX and convert externally."
+                .to_string(),
         ))
     }
 
@@ -926,13 +1023,7 @@ impl ReportGenerator {
         latex.push_str("\\maketitle\n\n");
 
         for section in &report.sections {
-            // Convert markdown to LaTeX (simplified)
-            let latex_content = section
-                .content
-                .replace("##", "\\section{")
-                .replace("###", "\\subsection{")
-                .replace("#", "\\section{");
-            latex.push_str(&latex_content);
+            latex.push_str(&markdown_headings_to_latex(&section.content));
         }
 
         latex.push_str("\\end{document}\n");
@@ -943,19 +1034,81 @@ impl ReportGenerator {
         Ok(())
     }
 
-    /// Export to Excel format (placeholder)
+    /// Excel export: **not implemented**, returns a structured error.
+    ///
+    /// (`crate::data_export` does emit a real `.xlsx` for tabular exports; a
+    /// narrative `Report` has no single sheet shape to map onto.)
     fn export_excel(&self, _report: &Report) -> Result<(), ReportError> {
         Err(ReportError::UnsupportedFormat(
-            "Excel export not implemented".to_string(),
+            "Excel export not implemented for narrative reports; see crate::data_export for \
+             real .xlsx output of tabular data."
+                .to_string(),
         ))
     }
 
-    /// Export to PowerPoint format (placeholder)
+    /// PowerPoint export: **not implemented**, returns a structured error.
     fn export_powerpoint(&self, _report: &Report) -> Result<(), ReportError> {
         Err(ReportError::UnsupportedFormat(
-            "PowerPoint export not implemented".to_string(),
+            "PowerPoint export not implemented: trustformers-debug links no OOXML presentation \
+             writer."
+                .to_string(),
         ))
     }
+}
+
+/// Convert the ATX-style markdown headings in `content` into LaTeX sectioning
+/// commands, escaping the LaTeX specials in the rest of the text.
+///
+/// Handles `#`, `##` and `###` as `\section`, `\subsection` and
+/// `\subsubsection`, each with a CLOSED brace.
+///
+/// The previous version chained
+/// `.replace("##", "\\section{").replace("###", ...).replace("#", ...)`, which
+/// (a) never emitted a closing `}` so every document failed to compile,
+/// (b) could not reach the `###` arm at all because the `##` replacement had
+/// already consumed the first two hashes, turning `### Title` into
+/// `\section{\section{ Title`, and (c) rewrote `#` anywhere in the body, not
+/// just at the start of a line.
+fn markdown_headings_to_latex(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 32);
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=3).contains(&level) && trimmed.chars().nth(level) == Some(' ') {
+            let command = match level {
+                1 => "section",
+                2 => "subsection",
+                _ => "subsubsection",
+            };
+            let title = escape_latex(trimmed[level + 1..].trim());
+            out.push_str(&format!("\\{}{{{}}}\n", command, title));
+        } else {
+            out.push_str(&escape_latex(line));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Escape the characters LaTeX treats specially so report prose cannot break
+/// (or inject into) the generated document.
+fn escape_latex(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '$' | '&' | '%' | '#' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            },
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Report generation errors
@@ -992,6 +1145,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn markdown_headings_become_closed_latex_sections() {
+        let latex = markdown_headings_to_latex("# One\n## Two\n### Three\nbody\n");
+        assert!(latex.contains("\\section{One}"), "{latex}");
+        assert!(latex.contains("\\subsection{Two}"), "{latex}");
+        assert!(latex.contains("\\subsubsection{Three}"), "{latex}");
+        // The old chained-replace produced `\section{\section{ Three` and never
+        // closed a single brace.
+        assert_eq!(
+            latex.matches('{').count(),
+            latex.matches('}').count(),
+            "every brace must be closed:\n{latex}"
+        );
+        assert!(latex.contains("body"));
+    }
+
+    #[test]
+    fn latex_specials_in_body_text_are_escaped() {
+        let latex = markdown_headings_to_latex("100% of $x_1 & y#2");
+        assert!(latex.contains("100\\%"), "{latex}");
+        assert!(latex.contains("\\$x\\_1"), "{latex}");
+        assert!(latex.contains("\\&"), "{latex}");
+        assert!(latex.contains("y\\#2"), "{latex}");
+        // A lone '#' inside a line must NOT be turned into a section command.
+        assert!(!latex.contains("\\section"), "{latex}");
+    }
+
+    #[test]
+    fn unimplemented_exports_name_what_is_missing() {
+        let generator =
+            ReportGenerator::new(ReportConfig::default()).expect("generator construction");
+        let report = Report {
+            metadata: ReportMetadata {
+                title: "t".to_string(),
+                subtitle: None,
+                author: "a".to_string(),
+                organization: None,
+                version: "1".to_string(),
+                generation_time_ms: 0.0,
+                additional_metadata: HashMap::new(),
+            },
+            sections: Vec::new(),
+            visualizations: HashMap::new(),
+            raw_data: HashMap::new(),
+            generated_at: chrono::Utc::now(),
+        };
+        let pdf = generator.export_pdf(&report).expect_err("pdf must be refused");
+        assert!(format!("{pdf:?}").contains("PDF writer"), "{pdf:?}");
+        let xls = generator.export_excel(&report).expect_err("excel must be refused");
+        assert!(format!("{xls:?}").contains("data_export"), "{xls:?}");
+        let ppt = generator.export_powerpoint(&report).expect_err("pptx must be refused");
+        assert!(format!("{ppt:?}").contains("OOXML"), "{ppt:?}");
+    }
+    use crate::DebugConfig;
+
+    #[test]
     fn test_report_config_default() {
         let config = ReportConfig::default();
         assert_eq!(config.title, "TrustformeRS Debug Report");
@@ -1006,9 +1214,70 @@ mod tests {
     #[test]
     fn test_report_generator_creation() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         assert!(generator.debug_data.is_none());
         assert!(generator.profiling_data.is_none());
+    }
+
+    /// Regression test: PDF used to be a silently-accepted `ReportConfig`
+    /// value that only failed inside `export_report`, after a caller had
+    /// already generated the full report. `ReportGenerator::new` must now
+    /// reject it immediately with a clear message.
+    #[test]
+    fn test_new_rejects_pdf_format_immediately_instead_of_at_export_time() {
+        let config = ReportConfig {
+            format: ReportFormat::Pdf,
+            ..Default::default()
+        };
+
+        let err = ReportGenerator::new(config)
+            .expect_err("PDF must be rejected at construction, not accepted and failed later");
+        let message = err.to_string();
+        assert!(
+            message.contains("PDF"),
+            "error should name the rejected format: {message}"
+        );
+    }
+
+    /// Companion: Excel and PowerPoint are the other two `ReportFormat`
+    /// variants with no real writer behind them; both must be rejected the
+    /// same way as PDF, not just PDF alone.
+    #[test]
+    fn test_new_rejects_excel_and_powerpoint_formats() {
+        for format in [ReportFormat::Excel, ReportFormat::PowerPoint] {
+            let config = ReportConfig {
+                format,
+                ..Default::default()
+            };
+            assert!(
+                ReportGenerator::new(config).is_err(),
+                "unimplemented export formats must be rejected at construction"
+            );
+        }
+    }
+
+    /// Companion: formats that *do* have a real writer (see `export_html`,
+    /// `export_markdown`, `export_json`, `export_jupyter`, `export_latex`)
+    /// must still construct successfully -- the fix must not become an
+    /// overly broad rejection of every format.
+    #[test]
+    fn test_new_accepts_every_implemented_format() {
+        for format in [
+            ReportFormat::Markdown,
+            ReportFormat::Html,
+            ReportFormat::Json,
+            ReportFormat::Jupyter,
+            ReportFormat::Latex,
+        ] {
+            let config = ReportConfig {
+                format,
+                ..Default::default()
+            };
+            assert!(
+                ReportGenerator::new(config).is_ok(),
+                "implemented export formats must not be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1020,7 +1289,7 @@ mod tests {
             ..Default::default()
         };
 
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.metadata.title, "Test Report");
@@ -1030,7 +1299,7 @@ mod tests {
     #[test]
     fn test_section_generation() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
 
         let summary = generator.generate_summary_section().expect("operation failed in test");
         assert!(matches!(summary.section_type, ReportSection::Summary));
@@ -1048,7 +1317,7 @@ mod tests {
             ..Default::default()
         };
 
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.sections.len(), 2);
@@ -1065,7 +1334,7 @@ mod tests {
     #[test]
     fn test_report_serialization() {
         let config = ReportConfig::default();
-        let generator = ReportGenerator::new(config);
+        let generator = ReportGenerator::new(config).expect("format should be implemented");
         let report = generator.generate().expect("operation failed in test");
 
         let json = serde_json::to_string(&report).expect("JSON serialization failed");
@@ -1074,5 +1343,150 @@ mod tests {
 
         assert_eq!(report.metadata.title, deserialized.metadata.title);
         assert_eq!(report.sections.len(), deserialized.sections.len());
+    }
+
+    /// Regression test: the old `generate_architecture_section` printed the
+    /// literal string `"N/A"` for every layer's parameter count
+    /// unconditionally, regardless of whether any architecture data was
+    /// ever provided. With real architecture data attached via
+    /// `with_architecture_data`, a layer that has a matching entry there
+    /// must show its real parameter count.
+    #[tokio::test]
+    async fn test_architecture_section_uses_real_parameter_counts_not_na() {
+        use crate::architecture_analysis::{
+            ArchitectureAnalysisConfig, ArchitectureAnalyzer, LayerInfo, LayerType,
+        };
+        use crate::gradient_debugger::debugger::{FlowAnalysis, LayerFlowAnalysis};
+        use crate::gradient_debugger::GradientDebugger;
+
+        let debugger = GradientDebugger::new(DebugConfig::default());
+        let mut gradient_report =
+            debugger.generate_report().await.expect("gradient report should generate");
+        let mut layer_analyses = HashMap::new();
+        layer_analyses.insert(
+            "encoder.layer0".to_string(),
+            LayerFlowAnalysis {
+                layer_name: "encoder.layer0".to_string(),
+                is_vanishing: false,
+                is_exploding: false,
+                gradient_norm: 0.5,
+                flow_consistency: 0.9,
+            },
+        );
+        gradient_report.flow_analysis = FlowAnalysis { layer_analyses };
+
+        let mut analyzer = ArchitectureAnalyzer::new(ArchitectureAnalysisConfig::default());
+        analyzer.register_layer(LayerInfo {
+            id: "0".to_string(),
+            name: "encoder.layer0".to_string(),
+            layer_type: LayerType::Linear,
+            input_shape: vec![768],
+            output_shape: vec![768],
+            parameters: 590_592,
+            trainable_parameters: 590_592,
+            memory_usage: 0,
+            flops: 0,
+            receptive_field: None,
+        });
+        let architecture_report =
+            analyzer.analyze().await.expect("architecture analysis should succeed");
+
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
+            .with_debug_data(gradient_report)
+            .with_architecture_data(architecture_report);
+
+        let section = generator
+            .generate_architecture_section()
+            .expect("architecture section generation should succeed");
+
+        assert!(
+            section.content.contains("590592"),
+            "must show the real parameter count from architecture data, not N/A: {}",
+            section.content
+        );
+    }
+
+    /// Companion to the above: without `with_architecture_data`, the column
+    /// must still honestly say `N/A` -- this is the absence path, distinct
+    /// from the bug (a permanent, unconditional `N/A` even when real data
+    /// was available).
+    #[tokio::test]
+    async fn test_architecture_section_reports_na_without_architecture_data() {
+        use crate::gradient_debugger::debugger::{FlowAnalysis, LayerFlowAnalysis};
+        use crate::gradient_debugger::GradientDebugger;
+
+        let debugger = GradientDebugger::new(DebugConfig::default());
+        let mut gradient_report =
+            debugger.generate_report().await.expect("gradient report should generate");
+        let mut layer_analyses = HashMap::new();
+        layer_analyses.insert(
+            "encoder.layer0".to_string(),
+            LayerFlowAnalysis {
+                layer_name: "encoder.layer0".to_string(),
+                is_vanishing: false,
+                is_exploding: false,
+                gradient_norm: 0.5,
+                flow_consistency: 0.9,
+            },
+        );
+        gradient_report.flow_analysis = FlowAnalysis { layer_analyses };
+
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
+            .with_debug_data(gradient_report);
+        let section = generator
+            .generate_architecture_section()
+            .expect("architecture section generation should succeed");
+
+        assert!(section.content.contains("N/A"));
+    }
+
+    /// Regression test: the old `generate_visualizations` always emitted the
+    /// fixed points `[1,2,3]`/`[10,15,12]` for the performance chart
+    /// whenever any profiling data was attached, regardless of its content.
+    /// The chart must instead reflect the real `slowest_layers` list.
+    #[test]
+    fn test_visualizations_reflect_real_slowest_layers_not_fixed_points() {
+        use crate::profiler::{MemoryEfficiencyAnalysis, ProfilerReport};
+        use std::time::Duration;
+
+        let profiling_data = ProfilerReport {
+            total_events: 2,
+            total_runtime: Duration::from_millis(42),
+            statistics: HashMap::new(),
+            bottlenecks: Vec::new(),
+            slowest_layers: vec![
+                ("attention.0".to_string(), Duration::from_millis(30)),
+                ("mlp.0".to_string(), Duration::from_millis(12)),
+            ],
+            memory_efficiency: MemoryEfficiencyAnalysis::default(),
+            recommendations: Vec::new(),
+        };
+
+        let generator = ReportGenerator::new(ReportConfig::default())
+            .expect("Html is implemented")
+            .with_profiling_data(profiling_data);
+        let visualizations = generator
+            .generate_visualizations()
+            .expect("visualization generation should succeed");
+
+        let chart = visualizations
+            .get("performance_chart")
+            .expect("a performance chart should be produced from real slowest_layers data");
+        assert_eq!(
+            chart.y_values,
+            vec![30.0, 12.0],
+            "must reflect real layer durations in ms"
+        );
+        assert_ne!(
+            chart.y_values,
+            vec![10.0, 15.0, 12.0],
+            "must not be the old fabricated placeholder points"
+        );
+        assert_eq!(
+            chart.labels,
+            vec!["attention.0".to_string(), "mlp.0".to_string()]
+        );
     }
 }

@@ -14,6 +14,12 @@ pub struct MetalBackend {
     pub(super) device: MetalDevice,
     pub(super) command_queue: CommandQueue,
     pub(super) buffer_cache: Arc<std::sync::Mutex<BufferCache>>,
+    /// Command buffers committed asynchronously and not yet waited on.
+    ///
+    /// Kernel wrappers commit without blocking so the GPU can pipeline; anything
+    /// that reads results on the CPU or hands buffers to oxicuda-metal's separate
+    /// `MTLCommandQueue` calls [`MetalBackend::flush`], which drains this list.
+    pub(super) pending_command_buffers: Arc<std::sync::Mutex<Vec<metal::CommandBuffer>>>,
     pub(super) matmul_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) gelu_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) matmul_gelu_pipeline: Arc<metal::ComputePipelineState>,
@@ -35,6 +41,7 @@ pub struct MetalBackend {
     pub(super) batched_matmul_scaled_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_scaled_matmul_softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_scaled_matmul_softmax_gen_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) batched_scaled_matmul_softmax_gen_causal_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) concat_seq_dim_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) flash_attention_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) mps_ops: Arc<Option<oxicuda_metal::MetalBackend>>,

@@ -69,7 +69,8 @@ pub use streaming::{
     StreamingManager, StreamingMetrics, TypingSimulator,
 };
 pub use summarization::{
-    ContextSummarizer, SummarizationEngine, SummarizationMetadata, SummarizationResult,
+    ContextSummarizer, ImportanceWeights, QualityThresholds, SummarizationEngine,
+    SummarizationMetadata, SummarizationResult,
 };
 pub use utils::{
     ConversationFormatter, ConversationHealthTracker, ConversationSerializer,
@@ -99,8 +100,8 @@ pub fn init_conversational_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     ConversationalPipeline::new(model, tokenizer)
 }
@@ -112,8 +113,8 @@ pub fn init_conversational_pipeline_with_config<M, T>(
     config: ConversationalConfig,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
 }
@@ -126,8 +127,8 @@ pub fn validate_conversational_config(config: &ConversationalConfig) -> Result<(
 /// Create a conversational pipeline optimized for chat
 pub fn create_chat_pipeline<M, T>(model: M, tokenizer: T) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::chat_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -139,8 +140,8 @@ pub fn create_assistant_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::assistant_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -152,8 +153,8 @@ pub fn create_educational_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::educational_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -166,8 +167,8 @@ pub fn create_persona_pipeline<M, T>(
     persona: PersonaConfig,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let mut config = ConversationalConfig::default();
     config.conversation_mode = ConversationMode::RolePlay;
@@ -181,8 +182,8 @@ pub fn create_streaming_pipeline<M, T>(
     tokenizer: T,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = config::ConfigurationPresets::streaming_optimized_config();
     Ok(ConversationalPipeline::new(model, tokenizer)?.with_config(config))
@@ -267,8 +268,8 @@ pub async fn start_smart_conversation<M, T>(
     mode: ConversationMode,
 ) -> Result<ConversationalPipeline<M, T>>
 where
-    M: Model + Send + Sync + GenerativeModel + 'static,
-    T: Tokenizer + Send + Sync + 'static,
+    M: Model + Send + Sync + GenerativeModel,
+    T: Tokenizer + Send + Sync,
 {
     let config = match mode {
         ConversationMode::Chat => config::ConfigurationPresets::chat_config(),
@@ -383,18 +384,11 @@ mod tests {
 
     #[test]
     fn test_module_integration() {
-        // Test that all modules can be imported
-        use super::analysis::*;
-        use super::config::*;
-        use super::generation::*;
-        use super::memory::*;
-        use super::safety::*;
-        use super::streaming::*;
-        use super::summarization::*;
-        use super::types::*;
-        use super::utils::*;
-
-        // Basic integration test
+        // Every submodule's public API is already re-exported through
+        // `use super::*` above (see the `pub use` block at the top of this
+        // file), which is what actually exercises "all modules can be
+        // imported" here: if any submodule failed to compile or its
+        // re-export path broke, this whole test module would fail to build.
         let config = ConversationalConfig::default();
         assert_eq!(config.conversation_mode, ConversationMode::Chat);
     }

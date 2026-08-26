@@ -2,8 +2,6 @@
 //!
 //! Train smaller student models from larger teacher models
 
-#![allow(unused_variables)] // Distillation implementation with reserved parameters
-
 use crate::tensor::Tensor;
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
@@ -81,7 +79,7 @@ impl Clone for DistillationLoss {
             Self::Custom(_) => {
                 // Custom loss functions cannot be cloned due to closure limitations
                 // Return a sensible default (KL divergence is most common for distillation)
-                eprintln!(
+                tracing::warn!(
                     "Warning: Custom loss function cannot be cloned, falling back to KL divergence"
                 );
                 Self::KLDivergence
@@ -177,7 +175,8 @@ impl KnowledgeDistiller {
         self
     }
 
-    fn softmax_with_temperature(&self, logits: &Tensor) -> Result<Tensor> {
+    /// Temperature-softened softmax over a logits tensor.
+    pub fn softmax_with_temperature(&self, logits: &Tensor) -> Result<Tensor> {
         let data = logits.data()?;
         let scaled: Vec<f32> = data.iter().map(|&x| x / self.temperature).collect();
 
@@ -190,7 +189,9 @@ impl KnowledgeDistiller {
         Ok(Tensor::from_vec(softmax, &logits.shape())?)
     }
 
-    fn compute_distillation_loss(
+    /// Distillation loss between student and teacher logits, using the
+    /// configured loss function and the distiller's temperature.
+    pub fn compute_distillation_loss(
         &self,
         student_logits: &Tensor,
         teacher_logits: &Tensor,
@@ -206,7 +207,8 @@ impl KnowledgeDistiller {
         }
     }
 
-    fn kl_divergence(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
+    /// Kullback-Leibler divergence between two probability tensors.
+    pub fn kl_divergence(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
         let s_data = student.data()?;
         let t_data = teacher.data()?;
 
@@ -233,7 +235,8 @@ impl KnowledgeDistiller {
         Ok(kl)
     }
 
-    fn mse_loss(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
+    /// Mean squared error between two tensors.
+    pub fn mse_loss(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
         let s_data = student.data()?;
         let t_data = teacher.data()?;
 
@@ -247,7 +250,8 @@ impl KnowledgeDistiller {
         Ok(mse)
     }
 
-    fn cross_entropy(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
+    /// Cross entropy between a teacher distribution and student log-scores.
+    pub fn cross_entropy(&self, student: &Tensor, teacher: &Tensor) -> Result<f32> {
         let s_data = student.data()?;
         let t_data = teacher.data()?;
 
@@ -263,238 +267,114 @@ impl KnowledgeDistiller {
 
         Ok(ce)
     }
-
-    /// Simulate gradient computation for training loop
-    /// In a real implementation, this would compute actual gradients using autodiff
-    fn simulate_gradient_computation(
-        &self,
-        student_logits: &Tensor,
-        teacher_logits: &Tensor,
-        config: &DistillationConfig,
-    ) -> Result<f32> {
-        // Simulate gradient computation by computing magnitude of difference
-        let student_data = student_logits.data()?;
-        let teacher_data = teacher_logits.data()?;
-
-        if student_data.len() != teacher_data.len() {
-            return Err(anyhow!("Student and teacher logits must have same size"));
-        }
-
-        // Compute L2 norm of difference as proxy for gradient magnitude
-        let diff_squared_sum: f32 = student_data
-            .iter()
-            .zip(teacher_data.iter())
-            .map(|(&s, &t)| (s - t).powi(2))
-            .sum();
-
-        let gradient_norm = (diff_squared_sum / student_data.len() as f32).sqrt();
-
-        // Scale by temperature and learning rate factors
-        Ok(gradient_norm * self.temperature * config.alpha)
-    }
-
-    /// Compute feature-based distillation loss
-    /// This simulates matching intermediate representations between teacher and student
-    fn compute_feature_distillation_loss(
-        &self,
-        teacher_logits: &Tensor,
-        student_logits: &Tensor,
-        config: &DistillationConfig,
-    ) -> Result<f32> {
-        // In a real implementation, this would work with actual intermediate features
-        // For simulation, we use the logits as proxy features
-
-        let teacher_data = teacher_logits.data()?;
-        let student_data = student_logits.data()?;
-
-        if teacher_data.len() != student_data.len() {
-            return Err(anyhow!("Teacher and student features must have same size"));
-        }
-
-        // Compute MSE between "features" (logits in this simulation)
-        let mse: f32 = teacher_data
-            .iter()
-            .zip(student_data.iter())
-            .map(|(&t, &s)| (t - s).powi(2))
-            .sum::<f32>()
-            / teacher_data.len() as f32;
-
-        // Apply feature weight scaling
-        Ok(mse * config.feature_weight)
-    }
 }
 
 #[async_trait]
 impl Distiller for KnowledgeDistiller {
+    /// Train a student model from a teacher.
+    ///
+    /// Not implemented: distillation requires back-propagating the distillation
+    /// loss into the student's parameters, and `trustformers-core` exposes no
+    /// autodiff path over an arbitrary `Model` (`named_tensors_mut` gives write
+    /// access to the weights, but no gradients). Rather than run a loop over
+    /// random tensors and report a decaying loss that has nothing to do with
+    /// either model, this reports that the capability is missing.
+    ///
+    /// The pieces that *are* implementable without gradients are available and
+    /// real: [`KnowledgeDistiller::compute_distillation_loss`] on actual logits,
+    /// and [`KnowledgeDistiller::evaluate_on`], which runs both models over a
+    /// validation set and measures their agreement.
     async fn distill<T, S>(
         &self,
-        teacher: &T,
-        student: &S,
-        config: &DistillationConfig,
+        _teacher: &T,
+        _student: &S,
+        _config: &DistillationConfig,
     ) -> Result<S>
     where
         T: crate::traits::Model + Sync,
         S: crate::traits::Model + Send,
     {
-        use crate::tensor::Tensor;
-
-        println!("Starting knowledge distillation...");
-        println!("Temperature: {}", self.temperature);
-        println!("Alpha: {}", config.alpha);
-        println!("Epochs: {}", config.epochs);
-
-        // Simplified distillation demonstration
-        // This performs the core distillation computations without full training
-
-        // Step 1: Create dummy input data for demonstration
-        let dummy_input = match Tensor::zeros(&[config.batch_size, 768]) {
-            Ok(tensor) => tensor,
-            Err(_) => {
-                return Err(crate::errors::TrustformersError::tensor_op_error(
-                    "Failed to create dummy input tensor",
-                    "zeros",
-                )
-                .into())
-            },
-        };
-
-        // Step 2: Simulate teacher forward pass
-        println!("Computing teacher predictions...");
-        // In real implementation: teacher_logits = teacher.forward(&dummy_input)?
-        let teacher_logits = match Tensor::randn(&[config.batch_size, 1000]) {
-            Ok(tensor) => tensor,
-            Err(_) => {
-                return Err(crate::errors::TrustformersError::tensor_op_error(
-                    "Failed to create teacher logits",
-                    "randn",
-                )
-                .into())
-            },
-        };
-
-        // Step 3: Simulate student forward pass
-        println!("Computing student predictions...");
-        // In real implementation: student_logits = student.forward(&dummy_input)?
-        let student_logits = match Tensor::randn(&[config.batch_size, 1000]) {
-            Ok(tensor) => tensor,
-            Err(_) => {
-                return Err(crate::errors::TrustformersError::tensor_op_error(
-                    "Failed to create student logits",
-                    "randn",
-                )
-                .into())
-            },
-        };
-
-        // Step 4: Compute distillation loss
-        println!("Computing distillation loss...");
-        let distillation_loss =
-            match self.compute_distillation_loss(&student_logits, &teacher_logits) {
-                Ok(loss) => loss,
-                Err(e) => return Err(e),
-            };
-
-        println!("Distillation loss computed: {:.4}", distillation_loss);
-
-        // Implement full training loop
-        println!("Starting training loop for {} epochs...", config.epochs);
-        let mut current_loss = distillation_loss;
-        let mut best_loss = distillation_loss;
-
-        // Simulate training iterations
-        for epoch in 0..config.epochs {
-            println!("Epoch {}/{}", epoch + 1, config.epochs);
-
-            // Step 1: Forward pass with current batch
-            let teacher_logits = match Tensor::randn(&[config.batch_size, 1000]) {
-                Ok(tensor) => tensor,
-                Err(_) => {
-                    return Err(crate::errors::TrustformersError::tensor_op_error(
-                        "Failed to create teacher logits",
-                        "randn",
-                    )
-                    .into())
-                },
-            };
-
-            let student_logits = match Tensor::randn(&[config.batch_size, 1000]) {
-                Ok(tensor) => tensor,
-                Err(_) => {
-                    return Err(crate::errors::TrustformersError::tensor_op_error(
-                        "Failed to create student logits",
-                        "randn",
-                    )
-                    .into())
-                },
-            };
-
-            // Step 2: Compute distillation loss for this epoch
-            current_loss = match self.compute_distillation_loss(&student_logits, &teacher_logits) {
-                Ok(loss) => loss,
-                Err(e) => return Err(e),
-            };
-
-            // Step 3: Compute gradients (simulation - in real implementation would use autodiff)
-            let gradient_norm =
-                self.simulate_gradient_computation(&student_logits, &teacher_logits, config)?;
-
-            // Step 4: Simulate parameter updates using learning rate
-            let learning_step_improvement = config.learning_rate * gradient_norm;
-            current_loss = (current_loss * (1.0 - learning_step_improvement)).max(0.001);
-
-            // Step 5: Track best loss for early stopping
-            if current_loss < best_loss {
-                best_loss = current_loss;
-            }
-
-            // Step 6: Feature distillation (if enabled)
-            if config.use_feature_distillation {
-                let feature_loss = self.compute_feature_distillation_loss(
-                    &teacher_logits,
-                    &student_logits,
-                    config,
-                )?;
-                current_loss = current_loss * (1.0 - config.feature_weight)
-                    + feature_loss * config.feature_weight;
-            }
-
-            println!(
-                "  Loss: {:.6}, Gradient norm: {:.6}",
-                current_loss, gradient_norm
-            );
-
-            // Early stopping check
-            if current_loss < 0.01 {
-                println!("Early stopping: loss below threshold");
-                break;
-            }
-        }
-
-        println!("Training completed!");
-        println!("Final loss: {:.6}", current_loss);
-        println!("Best loss: {:.6}", best_loss);
-
-        // Return the student model (in a real implementation, this would be the updated student model)
-        // For now, we need to create a proper response. Since we can't easily clone the student model
-        // without knowing its specific type, we'll indicate success but note this is a demonstration
-        println!("Knowledge distillation training loop completed successfully");
-
-        // This is a placeholder return - in a real implementation, we would:
-        // 1. Clone the student model properly
-        // 2. Apply parameter updates based on computed gradients
-        // 3. Return the updated model
-        // For demonstration purposes, we'll return an error indicating this limitation
-        Err(anyhow!("Training loop completed successfully, but cannot return modified student model due to generic constraints. In a real implementation, the student model would be properly updated and returned."))
+        Err(anyhow!(
+            "knowledge distillation training is not implemented: updating the student requires \
+             gradients of the distillation loss with respect to its parameters, and no autodiff \
+             path exists over the generic `Model` trait. Use `compute_distillation_loss` for the \
+             loss and `evaluate_on` to measure teacher/student agreement."
+        ))
     }
 
-    fn evaluate<T, S>(&self, teacher: &T, student: &S) -> Result<f32>
+    /// Measure teacher/student agreement.
+    ///
+    /// Not implemented in this form: agreement can only be measured by running
+    /// both models over data, and this signature carries none. Use
+    /// [`KnowledgeDistiller::evaluate_on`].
+    fn evaluate<T, S>(&self, _teacher: &T, _student: &S) -> Result<f32>
     where
         T: crate::traits::Model,
         S: crate::traits::Model,
     {
-        // Evaluate how well student matches teacher
-        // This would compare outputs on validation set
-        Ok(0.95) // Placeholder
+        Err(anyhow!(
+            "evaluate() cannot measure agreement without data; call \
+             evaluate_on(teacher, student, validation_inputs) instead"
+        ))
+    }
+}
+
+impl KnowledgeDistiller {
+    /// Measure how closely the student reproduces the teacher on real data.
+    ///
+    /// Both models are run over every validation input and their outputs are
+    /// compared after temperature-softened softmax. The returned agreement is
+    /// `1 - mean total-variation distance` between the two distributions,
+    /// averaged over the batch, so it is 1.0 for identical outputs and 0.0 for
+    /// disjoint ones.
+    ///
+    /// Errors when `validation_inputs` is empty (there is nothing to measure)
+    /// or when the two models produce differently shaped outputs.
+    pub fn evaluate_on<T, S>(
+        &self,
+        teacher: &T,
+        student: &S,
+        validation_inputs: &[Tensor],
+    ) -> Result<f32>
+    where
+        T: crate::traits::Model<Input = Tensor, Output = Tensor>,
+        S: crate::traits::Model<Input = Tensor, Output = Tensor>,
+    {
+        if validation_inputs.is_empty() {
+            return Err(anyhow!(
+                "cannot evaluate teacher/student agreement without validation inputs"
+            ));
+        }
+
+        let mut agreement_sum = 0.0f64;
+
+        for (index, input) in validation_inputs.iter().enumerate() {
+            let teacher_logits = teacher.forward(input.clone())?;
+            let student_logits = student.forward(input.clone())?;
+
+            if teacher_logits.shape() != student_logits.shape() {
+                return Err(anyhow!(
+                    "validation input {}: teacher output shape {:?} does not match student \
+                     output shape {:?}",
+                    index,
+                    teacher_logits.shape(),
+                    student_logits.shape()
+                ));
+            }
+
+            let teacher_probs = self.softmax_with_temperature(&teacher_logits)?;
+            let student_probs = self.softmax_with_temperature(&student_logits)?;
+            let teacher_data = teacher_probs.data()?;
+            let student_data = student_probs.data()?;
+
+            // Total variation distance = 0.5 * L1 distance between distributions.
+            let l1: f32 =
+                teacher_data.iter().zip(student_data.iter()).map(|(t, s)| (t - s).abs()).sum();
+            let total_variation = (0.5 * l1).clamp(0.0, 1.0);
+            agreement_sum += (1.0 - total_variation) as f64;
+        }
+
+        Ok((agreement_sum / validation_inputs.len() as f64) as f32)
     }
 }
 
@@ -602,58 +482,128 @@ mod tests {
         }
     }
 
+    // A student whose logits are strongly peaked, so its softened distribution
+    // is measurably different from a uniform teacher.
+    #[derive(Debug, Clone)]
+    struct DivergentStudentModel {
+        config: MockConfig,
+    }
+
+    impl DivergentStudentModel {
+        fn new() -> Self {
+            Self {
+                config: MockConfig::new(),
+            }
+        }
+    }
+
+    impl Model for DivergentStudentModel {
+        type Config = MockConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, _input: Self::Input) -> Result<Self::Output> {
+            let mut logits = vec![0.0f32; 10];
+            logits[0] = 20.0;
+            Tensor::from_vec(logits, &[1, 10])
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            1000
+        }
+    }
+
+    /// Regression test: `distill` used to run a loop over `Tensor::randn`
+    /// tensors, print a convincing decaying loss, and only then return an
+    /// error claiming the "training loop completed successfully". It must now
+    /// refuse up front and say why.
     #[tokio::test]
-    async fn test_knowledge_distillation_training_loop() {
+    async fn test_distill_reports_missing_autodiff_instead_of_faking_training() {
         let distiller = KnowledgeDistiller::new(3.0);
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
         let config = DistillationConfig {
-            epochs: 3, // Small number for testing
+            epochs: 3,
             batch_size: 4,
             learning_rate: 0.01,
             ..Default::default()
         };
 
-        // Test that the training loop executes the training process
-        let result = distiller.distill(&teacher, &student, &config).await;
-
-        // The training loop should complete, but return an error indicating the demonstration limitation
-        assert!(result.is_err(), "Training loop should complete but indicate it cannot return the modified student model");
-
-        // Verify the error message indicates successful training completion
-        let error_msg = result.unwrap_err().to_string();
+        let error = distiller
+            .distill(&teacher, &student, &config)
+            .await
+            .expect_err("no training can happen without gradients");
+        let message = error.to_string();
         assert!(
-            error_msg.contains("Training loop completed successfully"),
-            "Error should indicate training completed successfully"
+            message.contains("not implemented"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("completed successfully"),
+            "the error must not claim that training succeeded: {message}"
         );
     }
 
-    #[tokio::test]
-    async fn test_knowledge_distillation_with_feature_distillation() {
-        let distiller = KnowledgeDistiller::new(4.0);
+    /// Regression test: `evaluate` returned a hardcoded 0.95 agreement without
+    /// touching either model.
+    #[test]
+    fn test_evaluate_without_data_is_refused() {
+        let distiller = KnowledgeDistiller::new(3.0);
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
-        let config = DistillationConfig {
-            epochs: 2,
-            batch_size: 4,
-            use_feature_distillation: true,
-            feature_weight: 0.1,
-            ..Default::default()
-        };
+        let error = distiller
+            .evaluate(&teacher, &student)
+            .expect_err("agreement cannot be measured without data");
+        assert!(error.to_string().contains("evaluate_on"));
+    }
 
-        // Test with feature distillation enabled
-        let result = distiller.distill(&teacher, &student, &config).await;
+    /// `evaluate_on` must run both models and report a measured agreement.
+    #[test]
+    fn test_evaluate_on_measures_real_agreement() {
+        let distiller = KnowledgeDistiller::new(1.0);
+        let teacher = MockTeacherModel::new("teacher");
+        let student = MockStudentModel::new("student");
+        let inputs = vec![
+            Tensor::zeros(&[1, 10]).expect("zeros failed"),
+            Tensor::ones(&[1, 10]).expect("ones failed"),
+        ];
 
-        // Should complete training but indicate the demonstration limitation
-        assert!(result.is_err(), "Feature distillation should complete but indicate it cannot return the modified student model");
-
-        let error_msg = result.unwrap_err().to_string();
+        // The mocks emit constant logits (ones vs zeros); after softmax both
+        // are the uniform distribution, so the agreement is exactly 1.0.
+        let agreement =
+            distiller.evaluate_on(&teacher, &student, &inputs).expect("evaluation failed");
         assert!(
-            error_msg.contains("Training loop completed successfully"),
-            "Error should indicate training completed successfully"
+            (agreement - 1.0).abs() < 1e-5,
+            "uniform-vs-uniform agreement should be 1.0, got {agreement}"
         );
+        assert_ne!(agreement, 0.95, "the old hardcoded value must not survive");
+
+        // A student whose outputs really differ must score lower.
+        let divergent = DivergentStudentModel::new();
+        let divergent_agreement =
+            distiller.evaluate_on(&teacher, &divergent, &inputs).expect("evaluation failed");
+        assert!(
+            divergent_agreement < 0.9,
+            "a peaked student vs a uniform teacher must disagree, got {divergent_agreement}"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_on_requires_inputs() {
+        let distiller = KnowledgeDistiller::new(3.0);
+        let teacher = MockTeacherModel::new("teacher");
+        let student = MockStudentModel::new("student");
+        assert!(distiller.evaluate_on(&teacher, &student, &[]).is_err());
     }
 
     #[test]
@@ -670,24 +620,6 @@ mod tests {
 
         let loss_value = loss.expect("operation failed in test");
         assert!(loss_value >= 0.0, "Loss should be non-negative");
-    }
-
-    #[test]
-    fn test_gradient_simulation() {
-        let distiller = KnowledgeDistiller::new(3.0);
-        let config = DistillationConfig::default();
-
-        let student_logits =
-            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
-        let teacher_logits =
-            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
-
-        let grad_norm =
-            distiller.simulate_gradient_computation(&student_logits, &teacher_logits, &config);
-        assert!(grad_norm.is_ok(), "Gradient simulation should succeed");
-
-        let grad_value = grad_norm.expect("operation failed in test");
-        assert!(grad_value >= 0.0, "Gradient norm should be non-negative");
     }
 
     // ── DistillationConfig tests ──
@@ -906,57 +838,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_feature_distillation_loss() {
-        let distiller = KnowledgeDistiller::new(3.0);
-        let config = DistillationConfig {
-            feature_weight: 0.5,
-            ..DistillationConfig::default()
-        };
-
-        let teacher =
-            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
-        let student =
-            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
-
-        let loss = distiller
-            .compute_feature_distillation_loss(&teacher, &student, &config)
-            .expect("feature distillation loss failed");
-        assert!(loss >= 0.0);
-        // MSE of [0.5, 0.5, 0.5] = 0.25, scaled by feature_weight=0.5 => 0.125
-        assert!((loss - 0.125).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_gradient_simulation_scales_with_alpha() {
-        let distiller = KnowledgeDistiller::new(1.0);
-        let config_low = DistillationConfig {
-            alpha: 0.1,
-            ..DistillationConfig::default()
-        };
-        let config_high = DistillationConfig {
-            alpha: 0.9,
-            ..DistillationConfig::default()
-        };
-
-        let student =
-            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
-        let teacher =
-            Tensor::from_vec(vec![4.0, 5.0, 6.0], &[1, 3]).expect("Tensor from_vec failed");
-
-        let grad_low = distiller
-            .simulate_gradient_computation(&student, &teacher, &config_low)
-            .expect("gradient computation failed");
-        let grad_high = distiller
-            .simulate_gradient_computation(&student, &teacher, &config_high)
-            .expect("gradient computation failed");
-
-        assert!(
-            grad_high > grad_low,
-            "Higher alpha should produce larger gradient"
-        );
-    }
-
     // ── DistillationStrategy tests ──
 
     #[test]
@@ -1005,13 +886,16 @@ mod tests {
         let _distiller = super::HiddenStateDistiller::new(768, 384);
     }
 
+    /// Regression test: this used to assert the hardcoded 0.95 agreement.
     #[test]
-    fn test_evaluate_mock() {
+    fn test_evaluate_no_longer_returns_a_constant() {
         let distiller = KnowledgeDistiller::new(3.0);
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
-        let accuracy = distiller.evaluate(&teacher, &student).expect("evaluation failed");
-        assert!((accuracy - 0.95).abs() < 1e-6);
+        assert!(
+            distiller.evaluate(&teacher, &student).is_err(),
+            "no agreement figure may be produced without data"
+        );
     }
 }
 

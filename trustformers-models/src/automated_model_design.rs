@@ -944,12 +944,31 @@ impl ArchitectureTemplate {
         flops / 1e12 * 1000.0
     }
 
-    pub fn estimate_accuracy(&self) -> f32 {
-        let params = self.estimate_parameters() as f32;
-        let complexity = (params / 1e9).log10().max(0.0);
-
-        // Rough accuracy estimation based on parameter count
-        0.7 + complexity * 0.1
+    /// Predicted downstream accuracy of this design — always `None`.
+    ///
+    /// Accuracy is a property of a *trained* model on a *specific* dataset. It
+    /// cannot be read off an architecture description, and this crate contains
+    /// no scaling-law fit, no benchmark table and no proxy evaluator that would
+    /// let one be predicted. `None` says so; the caller can then obtain the
+    /// number the only way it exists, by training and evaluating.
+    ///
+    /// # What this replaces
+    ///
+    /// The previous body was
+    /// `0.7 + (params / 1e9).log10().max(0.0) * 0.1`: an invented closed form of
+    /// the parameter count, with no dataset, no task and no fitted constants.
+    /// It reported a confident "0.70 accuracy" for every model under a billion
+    /// parameters — including a two-layer toy — and that number flowed into
+    /// [`ModelMetrics::estimated_accuracy`], into design comparisons and into
+    /// the constraint solver's ranking, where it silently decided which
+    /// architecture "won".
+    ///
+    /// Unlike the other estimators on this type, which are *derivations* from
+    /// the architecture (parameter counts, FLOPs and the memory those imply)
+    /// and are honest about being approximations of a computable quantity,
+    /// accuracy is not computable from the architecture at all.
+    pub fn estimate_accuracy(&self) -> Option<f32> {
+        None
     }
 
     pub fn to_architecture(&self) -> Result<Architecture> {
@@ -1284,7 +1303,16 @@ pub struct ModelMetrics {
     pub estimated_memory_gb: f32,
     pub estimated_flops: f64,
     pub estimated_latency_ms: f32,
-    pub estimated_accuracy: f32,
+    /// Predicted downstream accuracy, when one is available.
+    ///
+    /// Always `None` for a design produced from an architecture description:
+    /// accuracy is a property of a trained model on a dataset, not of an
+    /// architecture, and this crate has no scaling-law fit or proxy evaluator
+    /// that could predict it. A previous revision filled this with
+    /// `0.7 + log10(params / 1e9) * 0.1`, an invented formula whose output was
+    /// then compared between candidate designs as though it meant something.
+    /// Populate it from a real evaluation run if you have one.
+    pub estimated_accuracy: Option<f32>,
 }
 
 impl Default for ModelMetrics {
@@ -1294,7 +1322,7 @@ impl Default for ModelMetrics {
             estimated_memory_gb: 0.0,
             estimated_flops: 0.0,
             estimated_latency_ms: 0.0,
-            estimated_accuracy: 0.0,
+            estimated_accuracy: None,
         }
     }
 }

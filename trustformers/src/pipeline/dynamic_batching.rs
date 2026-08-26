@@ -51,8 +51,23 @@ pub struct PerformanceMetrics {
     pub latency_ms: u64,
     pub throughput_rps: f64,
     pub timestamp: Instant,
-    pub memory_usage_mb: f64,
-    pub gpu_utilization: f32,
+    /// Real, measured shallow memory footprint of everything queued at
+    /// record time: `size_of::<BatchRequest<T>>() * queue_len`. This is
+    /// `DynamicBatcher<T>`'s own bookkeeping (the request wrapper plus
+    /// whatever of `T` lives on the stack) -- not a placeholder, but also
+    /// not the full picture: `T` is unconstrained generic here (no
+    /// `Send + Sync + Clone + 'static` bound gives a way to ask an
+    /// arbitrary `T` for its heap-allocated payload size), so a queued
+    /// item whose data lives on the heap (e.g. a `String`'s bytes, a
+    /// `Tensor`'s backing buffer) is undercounted: this is a real lower
+    /// bound, not a true total. See `DynamicBatcher::queued_shallow_bytes`.
+    pub queued_shallow_bytes: u64,
+    /// This batcher has no visibility into GPU telemetry -- it only ever
+    /// sees queued requests and measured latencies, never anything from
+    /// the accelerator itself. `None` always, honestly: there is no real
+    /// number to report here, and this previously reported a hardcoded
+    /// `0.5` unconditionally.
+    pub gpu_utilization: Option<f32>,
     pub queue_size: usize,
 }
 
@@ -264,8 +279,8 @@ where
             latency_ms,
             throughput_rps: throughput,
             timestamp: Instant::now(),
-            memory_usage_mb: self.estimate_memory_usage().await,
-            gpu_utilization: self.estimate_gpu_utilization().await,
+            queued_shallow_bytes: self.queued_shallow_bytes(),
+            gpu_utilization: None,
             queue_size: self.pending_requests.lock().unwrap_or_else(|p| p.into_inner()).len(),
         };
 
@@ -327,18 +342,17 @@ where
         }
     }
 
-    /// Estimate current memory usage (placeholder)
-    async fn estimate_memory_usage(&self) -> f64 {
-        // In a real implementation, this would query actual memory usage
-        // For now, return a placeholder value
-        100.0
-    }
-
-    /// Estimate GPU utilization (placeholder)
-    async fn estimate_gpu_utilization(&self) -> f32 {
-        // In a real implementation, this would query GPU metrics
-        // For now, return a placeholder value
-        0.5
+    /// Real, measured shallow memory footprint of everything currently
+    /// queued: `size_of::<BatchRequest<T>>() * queue_len`. See
+    /// [`PerformanceMetrics::queued_shallow_bytes`] for exactly what this
+    /// does and does not capture, and why: `DynamicBatcher<T>` is generic
+    /// over `T` with no bound letting an arbitrary `T` report its own
+    /// heap-allocated payload size (its callers include `T = String` in
+    /// this crate's own tests, and `Self::Input` from
+    /// [`DynamicBatchPipeline`], which varies per pipeline).
+    fn queued_shallow_bytes(&self) -> u64 {
+        let queue_len = self.pending_requests.lock().unwrap_or_else(|p| p.into_inner()).len();
+        (queue_len * std::mem::size_of::<BatchRequest<T>>()) as u64
     }
 
     /// Get current performance statistics
@@ -355,6 +369,9 @@ where
             / recent_metrics.len() as f64;
         let avg_batch_size =
             recent_metrics.iter().map(|m| m.batch_size).sum::<usize>() / recent_metrics.len();
+        let avg_queued_shallow_bytes =
+            recent_metrics.iter().map(|m| m.queued_shallow_bytes).sum::<u64>()
+                / recent_metrics.len() as u64;
 
         Some(BatchingStats {
             current_batch_size: *self.current_batch_size.read().unwrap_or_else(|p| p.into_inner()),
@@ -363,6 +380,7 @@ where
             avg_batch_size,
             queue_length: self.pending_requests.lock().unwrap_or_else(|p| p.into_inner()).len(),
             total_processed: history.len(),
+            avg_queued_shallow_bytes,
         })
     }
 }
@@ -376,6 +394,12 @@ pub struct BatchingStats {
     pub avg_batch_size: usize,
     pub queue_length: usize,
     pub total_processed: usize,
+    /// Mean of [`PerformanceMetrics::queued_shallow_bytes`] over the same
+    /// up-to-10-sample window the other `avg_*` fields use. Real and
+    /// recorded per-sample already (see that field's own doc for exactly
+    /// what it does and does not capture); this was the one recorded value
+    /// the public stats getter did not surface.
+    pub avg_queued_shallow_bytes: u64,
 }
 
 /// Enhanced pipeline trait with dynamic batching support
@@ -641,6 +665,84 @@ mod tests {
         assert!(stats.is_some(), "stats should be available after recording");
         let s = stats.expect("stats should be Some");
         assert_eq!(s.avg_batch_size, 4);
+    }
+
+    // ── PerformanceMetrics honesty: no fabricated memory/GPU numbers ──────────
+
+    #[test]
+    fn queued_shallow_bytes_scales_with_the_real_queue_not_a_hardcoded_constant() {
+        let batcher = DynamicBatcher::<i32>::new(DynamicBatchingConfig::default());
+        assert_eq!(batcher.queued_shallow_bytes(), 0, "nothing queued yet");
+
+        {
+            let mut queue = batcher.pending_requests.lock().unwrap_or_else(|p| p.into_inner());
+            for _ in 0..3 {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                queue.push_back(BatchRequest {
+                    input: 0i32,
+                    response_sender: tx,
+                    timestamp: Instant::now(),
+                    priority: RequestPriority::Normal,
+                });
+            }
+        }
+
+        let expected = 3 * std::mem::size_of::<BatchRequest<i32>>() as u64;
+        assert_eq!(
+            batcher.queued_shallow_bytes(),
+            expected,
+            "must be measured from the live queue length, not a fixed placeholder like the \
+             previous `100.0`"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_performance_stats_surfaces_avg_queued_shallow_bytes() {
+        let batcher = DynamicBatcher::<i32>::new(DynamicBatchingConfig::default());
+
+        // Keep a known, constant queue depth across both recordings so
+        // `record_performance`'s live `self.queued_shallow_bytes()` read (see
+        // that method's own body) is identical each time, making the
+        // resulting average deterministic and easy to check exactly.
+        {
+            let mut queue = batcher.pending_requests.lock().unwrap_or_else(|p| p.into_inner());
+            for _ in 0..5 {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                queue.push_back(BatchRequest {
+                    input: 0i32,
+                    response_sender: tx,
+                    timestamp: Instant::now(),
+                    priority: RequestPriority::Normal,
+                });
+            }
+        }
+
+        batcher.record_performance(4, 100).await;
+        batcher.record_performance(4, 110).await;
+
+        let stats = batcher
+            .get_performance_stats()
+            .expect("stats should be available after recording");
+
+        let expected = 5 * std::mem::size_of::<BatchRequest<i32>>() as u64;
+        assert_eq!(
+            stats.avg_queued_shallow_bytes, expected,
+            "BatchingStats must surface the real, measured queued_shallow_bytes average -- \
+             it was recorded per-sample already but not exposed via the public stats getter"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_utilization_is_honestly_none_not_a_hardcoded_number() {
+        let batcher = DynamicBatcher::<i32>::new(DynamicBatchingConfig::default());
+        batcher.record_performance(4, 100).await;
+        let history = batcher.performance_history.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = history.back().expect("one entry was just recorded above");
+        assert_eq!(
+            recorded.gpu_utilization, None,
+            "this batcher has no GPU telemetry visibility and must not fabricate a number \
+             (previously a hardcoded 0.5)"
+        );
     }
 
     // ── Basic end-to-end test ─────────────────────────────────────────────────

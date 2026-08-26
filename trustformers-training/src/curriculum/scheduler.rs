@@ -40,7 +40,10 @@ pub struct CurriculumError {
 
 impl CurriculumError {
     pub fn new(kind: CurriculumErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into() }
+        Self {
+            kind,
+            message: message.into(),
+        }
     }
 
     pub fn invalid_config(message: impl Into<String>) -> Self {
@@ -143,7 +146,7 @@ impl CurriculumScheduler {
     /// Create a new curriculum scheduler.
     ///
     /// Returns an error when the configuration is logically invalid (e.g. empty
-    /// dataset, initial percentile out of [0,1]).
+    /// dataset, initial percentile out of `[0,1]`).
     pub fn new(
         strategy: CurriculumStrategy,
         total_samples: usize,
@@ -154,7 +157,11 @@ impl CurriculumScheduler {
 
         // Validate strategy-specific constraints.
         match &strategy {
-            CurriculumStrategy::ByLength { initial_max_len, final_max_len, .. } => {
+            CurriculumStrategy::ByLength {
+                initial_max_len,
+                final_max_len,
+                ..
+            } => {
                 if *initial_max_len == 0 {
                     return Err(CurriculumError::invalid_config(
                         "initial_max_len must be > 0",
@@ -165,7 +172,7 @@ impl CurriculumScheduler {
                         "final_max_len must be >= initial_max_len",
                     ));
                 }
-            }
+            },
             CurriculumStrategy::ByDifficulty {
                 initial_percentile,
                 final_percentile,
@@ -187,14 +194,14 @@ impl CurriculumScheduler {
                         "difficulty_scores must not be empty",
                     ));
                 }
-            }
+            },
             CurriculumStrategy::SelfPaced { ramp_rate, .. } => {
                 if *ramp_rate < 0.0 || *ramp_rate > 1.0 {
                     return Err(CurriculumError::invalid_config(
                         "ramp_rate must be in [0, 1]",
                     ));
                 }
-            }
+            },
             CurriculumStrategy::CompetenceBased {
                 initial_competence,
                 growth_rate,
@@ -205,14 +212,16 @@ impl CurriculumScheduler {
                     ));
                 }
                 if *growth_rate < 0.0 {
-                    return Err(CurriculumError::invalid_config(
-                        "growth_rate must be >= 0",
-                    ));
+                    return Err(CurriculumError::invalid_config("growth_rate must be >= 0"));
                 }
-            }
+            },
         }
 
-        Ok(Self { strategy, current_step: 0, total_samples })
+        Ok(Self {
+            strategy,
+            current_step: 0,
+            total_samples,
+        })
     }
 
     /// Advance one training step and return the new curriculum window.
@@ -247,26 +256,34 @@ impl CurriculumScheduler {
             } => {
                 let t = linear_ramp_t(self.current_step, *ramp_steps);
                 (initial_percentile + (final_percentile - initial_percentile) * t).clamp(0.0, 1.0)
-            }
+            },
             CurriculumStrategy::CompetenceBased { .. } => self.competence(),
-            CurriculumStrategy::SelfPaced { uncertainty_threshold, ramp_rate } => {
+            CurriculumStrategy::SelfPaced {
+                uncertainty_threshold,
+                ramp_rate,
+            } => {
                 // Percentile = fraction of samples whose uncertainty *exceeds* the
                 // shrinking threshold. Since threshold shrinks, more samples are included.
-                let threshold = uncertainty_threshold * (1.0 - ramp_rate).powi(self.current_step as i32);
+                let threshold =
+                    uncertainty_threshold * (1.0 - ramp_rate).powi(self.current_step as i32);
                 // Return the fraction as a proxy for "how open" the curriculum is.
                 1.0 - threshold.clamp(0.0, 1.0)
-            }
-            CurriculumStrategy::ByLength { initial_max_len, final_max_len, ramp_steps } => {
+            },
+            CurriculumStrategy::ByLength {
+                initial_max_len,
+                final_max_len,
+                ramp_steps,
+            } => {
                 // Map current max length to a percentile in [0, 1].
-                let cur_len = self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps);
+                let cur_len =
+                    self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps);
                 if *final_max_len == *initial_max_len {
                     1.0
                 } else {
-                    ((cur_len - initial_max_len) as f32
-                        / (final_max_len - initial_max_len) as f32)
+                    ((cur_len - initial_max_len) as f32 / (final_max_len - initial_max_len) as f32)
                         .clamp(0.0, 1.0)
                 }
-            }
+            },
         }
     }
 
@@ -274,9 +291,11 @@ impl CurriculumScheduler {
     /// Returns `None` for other strategies.
     pub fn current_max_length(&self) -> Option<usize> {
         match &self.strategy {
-            CurriculumStrategy::ByLength { initial_max_len, final_max_len, ramp_steps } => {
-                Some(self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps))
-            }
+            CurriculumStrategy::ByLength {
+                initial_max_len,
+                final_max_len,
+                ramp_steps,
+            } => Some(self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps)),
             _ => None,
         }
     }
@@ -288,8 +307,7 @@ impl CurriculumScheduler {
         ramp_steps: usize,
     ) -> usize {
         let t = linear_ramp_t(self.current_step, ramp_steps);
-        let len =
-            initial_max_len as f32 + (final_max_len as f32 - initial_max_len as f32) * t;
+        let len = initial_max_len as f32 + (final_max_len as f32 - initial_max_len as f32) * t;
         (len.round() as usize).clamp(initial_max_len, final_max_len)
     }
 
@@ -300,8 +318,13 @@ impl CurriculumScheduler {
     pub fn active_indices(&self, all_difficulties: &[f32]) -> Vec<usize> {
         let percentile = self.current_percentile();
         match &self.strategy {
-            CurriculumStrategy::ByLength { initial_max_len, final_max_len, ramp_steps } => {
-                let max_len = self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps);
+            CurriculumStrategy::ByLength {
+                initial_max_len,
+                final_max_len,
+                ramp_steps,
+            } => {
+                let max_len =
+                    self.interpolate_length(*initial_max_len, *final_max_len, *ramp_steps);
                 // Without actual length information, return indices proportional to max_len.
                 // When difficulties represent lengths, filter by <= max_len.
                 all_difficulties
@@ -310,16 +333,21 @@ impl CurriculumScheduler {
                     .filter(|(_, &d)| (d as usize) <= max_len)
                     .map(|(i, _)| i)
                     .collect()
-            }
-            CurriculumStrategy::ByDifficulty { difficulty_scores, .. } => {
+            },
+            CurriculumStrategy::ByDifficulty {
+                difficulty_scores, ..
+            } => {
                 let scores = if all_difficulties.is_empty() {
                     difficulty_scores.as_slice()
                 } else {
                     all_difficulties
                 };
                 indices_below_percentile(scores, percentile)
-            }
-            CurriculumStrategy::SelfPaced { uncertainty_threshold, ramp_rate } => {
+            },
+            CurriculumStrategy::SelfPaced {
+                uncertainty_threshold,
+                ramp_rate,
+            } => {
                 let threshold =
                     uncertainty_threshold * (1.0 - ramp_rate).powi(self.current_step as i32);
                 all_difficulties
@@ -328,7 +356,7 @@ impl CurriculumScheduler {
                     .filter(|(_, &d)| d >= threshold)
                     .map(|(i, _)| i)
                     .collect()
-            }
+            },
             CurriculumStrategy::CompetenceBased { .. } => {
                 let n = ((self.total_samples as f32 * self.competence()) as usize)
                     .max(1)
@@ -342,7 +370,7 @@ impl CurriculumScheduler {
                         .take(n)
                         .collect()
                 }
-            }
+            },
         }
     }
 
@@ -352,9 +380,10 @@ impl CurriculumScheduler {
     /// for all other strategies.
     pub fn competence(&self) -> f32 {
         match &self.strategy {
-            CurriculumStrategy::CompetenceBased { initial_competence, growth_rate } => {
-                (initial_competence + growth_rate * self.current_step as f32).clamp(0.0, 1.0)
-            }
+            CurriculumStrategy::CompetenceBased {
+                initial_competence,
+                growth_rate,
+            } => (initial_competence + growth_rate * self.current_step as f32).clamp(0.0, 1.0),
             _ => 1.0,
         }
     }
@@ -399,9 +428,7 @@ fn indices_below_percentile(scores: &[f32], percentile: f32) -> Vec<usize> {
     let n = scores.len();
     // Sort indices by ascending difficulty.
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| {
-        scores[a].partial_cmp(&scores[b]).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    order.sort_by(|&a, &b| scores[a].partial_cmp(&scores[b]).unwrap_or(std::cmp::Ordering::Equal));
     let keep = ((n as f32 * percentile).ceil() as usize).max(1).min(n);
     order[..keep].to_vec()
 }
@@ -617,7 +644,11 @@ mod tests {
         let sched = CurriculumScheduler::new(strategy, 5).expect("valid config");
         let indices = sched.active_indices(&scores);
         // At step 0, percentile ≈ 0.4 → ⌈5 * 0.4⌉ = 2 easiest samples.
-        assert!(indices.len() <= 3, "Expected ≤3 active indices, got {}", indices.len());
+        assert!(
+            indices.len() <= 3,
+            "Expected ≤3 active indices, got {}",
+            indices.len()
+        );
         assert!(!indices.is_empty());
     }
 
@@ -636,7 +667,12 @@ mod tests {
         }
         let p20 = sched.step().percentile;
         // As threshold shrinks, percentile (1 - threshold) should grow.
-        assert!(p20 > p0, "Self-paced percentile should grow: {} vs {}", p20, p0);
+        assert!(
+            p20 > p0,
+            "Self-paced percentile should grow: {} vs {}",
+            p20,
+            p0
+        );
     }
 
     #[test]
@@ -660,7 +696,7 @@ mod tests {
         // At step 0: competence = 0.1
         assert!((sched.competence() - 0.1).abs() < 1e-5);
         sched.step(); // advances to step 1
-        // Now current_step = 1 → competence = 0.1 + 0.05 * 1 = 0.15
+                      // Now current_step = 1 → competence = 0.1 + 0.05 * 1 = 0.15
         assert!(
             (sched.competence() - 0.15).abs() < 1e-5,
             "competence at step 1 should be 0.15, got {}",
@@ -707,7 +743,10 @@ mod tests {
         };
         let result = CurriculumScheduler::new(strategy, 0);
         assert!(result.is_err());
-        assert_eq!(result.err().map(|e| e.kind), Some(CurriculumErrorKind::EmptyDataset));
+        assert_eq!(
+            result.err().map(|e| e.kind),
+            Some(CurriculumErrorKind::EmptyDataset)
+        );
     }
 
     #[test]
@@ -801,7 +840,11 @@ mod tests {
     fn test_anti_curriculum_zero_total_steps() {
         let scores = vec![0.3_f32, 0.7, 0.5];
         let indices = anti_curriculum_indices(&scores, 0, 0);
-        assert_eq!(indices.len(), 3, "zero total_steps should return all samples");
+        assert_eq!(
+            indices.len(),
+            3,
+            "zero total_steps should return all samples"
+        );
     }
 
     // --- ByDifficulty — full-dataset at final percentile -------------------
@@ -817,7 +860,11 @@ mod tests {
         };
         let sched = CurriculumScheduler::new(strategy, 10).expect("valid config");
         let indices = sched.active_indices(&scores);
-        assert_eq!(indices.len(), 10, "100% percentile should include all samples");
+        assert_eq!(
+            indices.len(),
+            10,
+            "100% percentile should include all samples"
+        );
     }
 
     // --- CompetenceBased — active_indices grows with steps -----------------
@@ -836,7 +883,12 @@ mod tests {
 
         // Step 1 → competence = 0.2 → ~20 samples.
         let idx1 = sched.active_indices(&[]).len();
-        assert!(idx1 >= idx0, "active indices should grow with competence: {} vs {}", idx1, idx0);
+        assert!(
+            idx1 >= idx0,
+            "active indices should grow with competence: {} vs {}",
+            idx1,
+            idx0
+        );
     }
 
     // --- SelfPaced — active_indices expands as threshold decreases ----------
@@ -852,7 +904,9 @@ mod tests {
         let mut sched = CurriculumScheduler::new(strategy, 20).expect("valid config");
 
         let count_step0 = sched.active_indices(&uncertainties).len();
-        for _ in 0..5 { sched.step(); }
+        for _ in 0..5 {
+            sched.step();
+        }
         let count_step5 = sched.active_indices(&uncertainties).len();
 
         assert!(
@@ -953,6 +1007,9 @@ mod tests {
         };
         let sched = CurriculumScheduler::new(strategy, 5).expect("valid config");
         let active = sched.active_indices(&scores);
-        assert!(!active.is_empty(), "at least one sample should always be active");
+        assert!(
+            !active.is_empty(),
+            "at least one sample should always be active"
+        );
     }
 }

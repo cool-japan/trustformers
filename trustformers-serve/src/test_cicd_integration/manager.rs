@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! CI/CD integration manager implementation
 
 use anyhow::Result;
@@ -29,9 +26,6 @@ pub struct CicdIntegrationManager {
     /// Configuration manager
     config_manager: Arc<ConfigurationManager>,
 
-    /// Pipeline integration
-    pipeline_integration: Arc<PipelineIntegration>,
-
     /// Reporting integration
     reporting_integration: Arc<ReportingIntegration>,
 
@@ -58,7 +52,6 @@ impl CicdIntegrationManager {
             config: config.clone(),
             environment_detector: Arc::new(EnvironmentDetector::new()?),
             config_manager: Arc::new(ConfigurationManager::new(config.clone())?),
-            pipeline_integration: Arc::new(PipelineIntegration::new()?),
             reporting_integration: Arc::new(ReportingIntegration::new()?),
             metrics_exporter: Arc::new(MetricsExporter::new()?),
             environment_optimizer: Arc::new(EnvironmentOptimizer::new()?),
@@ -101,8 +94,26 @@ impl CicdIntegrationManager {
         Ok(())
     }
 
-    /// Get optimized configuration for current environment
+    /// The whole CI/CD configuration this manager was built with.
+    pub fn config(&self) -> CicdIntegrationConfig {
+        self.config.read().clone()
+    }
+
+    /// The environment this manager detected, or `None` before [`Self::start`].
+    pub fn detected_environment(&self) -> Option<EnvironmentType> {
+        self.environment_detector.detected_environment()
+    }
+
+    /// The parallelization configuration to run with.
+    ///
+    /// When [`Self::start`] found an `environment_configs` block for the
+    /// detected environment, that block's `test_config` is what the operator
+    /// asked for and is returned verbatim. Otherwise there is nothing
+    /// environment-specific to apply and the fallback default is used.
     pub async fn get_optimized_config(&self) -> Result<TestParallelizationConfig> {
+        if let Some(environment_config) = self.config_manager.active_environment_config() {
+            return Ok(environment_config.test_config);
+        }
         self.environment_optimizer.get_optimized_config().await
     }
 
@@ -170,8 +181,11 @@ impl Default for CicdIntegrationConfig {
     }
 }
 
-/// Environment detector
+/// Detects which CI system (if any) this process is running under, from the
+/// environment variables those systems set.
 pub struct EnvironmentDetector {
+    /// The last environment [`Self::detect_environment`] resolved. `None` until
+    /// the first detection: no environment is assumed before one is observed.
     detected_environment: Arc<RwLock<Option<EnvironmentType>>>,
 }
 
@@ -182,57 +196,109 @@ impl EnvironmentDetector {
         })
     }
 
+    /// Classify the environment from the CI vendor variables present, and
+    /// remember the answer so [`Self::detected_environment`] can report it.
     pub async fn detect_environment(&self) -> Result<EnvironmentType> {
         // Check for CI environment variables
-        if env::var("GITHUB_ACTIONS").is_ok() {
-            return Ok(EnvironmentType::Pipeline(PipelineType::GitHubActions));
-        }
+        let environment = if env::var("GITHUB_ACTIONS").is_ok() {
+            EnvironmentType::Pipeline(PipelineType::GitHubActions)
+        } else if env::var("GITLAB_CI").is_ok() {
+            EnvironmentType::Pipeline(PipelineType::GitLabCi)
+        } else if env::var("JENKINS_URL").is_ok() {
+            EnvironmentType::Pipeline(PipelineType::Jenkins)
+        } else if env::var("CIRCLECI").is_ok() {
+            EnvironmentType::Pipeline(PipelineType::CircleCi)
+        } else {
+            // No CI vendor announced itself.
+            EnvironmentType::Development
+        };
 
-        if env::var("GITLAB_CI").is_ok() {
-            return Ok(EnvironmentType::Pipeline(PipelineType::GitLabCi));
-        }
+        *self.detected_environment.write() = Some(environment.clone());
+        Ok(environment)
+    }
 
-        if env::var("JENKINS_URL").is_ok() {
-            return Ok(EnvironmentType::Pipeline(PipelineType::Jenkins));
-        }
-
-        if env::var("CIRCLECI").is_ok() {
-            return Ok(EnvironmentType::Pipeline(PipelineType::CircleCi));
-        }
-
-        // Default to development environment
-        Ok(EnvironmentType::Development)
+    /// The environment detected by the most recent [`Self::detect_environment`]
+    /// call, or `None` when detection has never run.
+    pub fn detected_environment(&self) -> Option<EnvironmentType> {
+        self.detected_environment.read().clone()
     }
 }
 
-/// Configuration manager
+/// Selects the environment-specific block of a [`CicdIntegrationConfig`].
 pub struct ConfigurationManager {
+    /// The whole CI/CD configuration, shared with the owning manager.
     config: Arc<RwLock<CicdIntegrationConfig>>,
+    /// The environment block selected by the last
+    /// [`Self::load_environment_config`], if the configuration had one for that
+    /// environment.
+    active: Arc<RwLock<Option<EnvironmentConfig>>>,
 }
 
 impl ConfigurationManager {
     pub fn new(config: Arc<RwLock<CicdIntegrationConfig>>) -> Result<Self> {
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            active: Arc::new(RwLock::new(None)),
+        })
     }
 
+    /// Pick the `environment_configs` entry that matches `environment` and make
+    /// it the active one.
+    ///
+    /// 0.2.1: this used to log a line and return `Ok(())` without reading the
+    /// configuration at all -- `ConfigurationManager` held its `config` handle
+    /// and never touched it. Absence is still not an error: a configuration
+    /// that names no block for this environment simply leaves none active, and
+    /// callers fall back to their own defaults.
     pub async fn load_environment_config(&self, environment: &EnvironmentType) -> Result<()> {
-        // Load environment-specific configuration
-        info!("Loading configuration for environment: {:?}", environment);
+        let selected = {
+            let config = self.config.read();
+            config
+                .environment_configs
+                .values()
+                .find(|candidate| candidate.environment_type == *environment)
+                .cloned()
+        };
+
+        match &selected {
+            Some(found) => info!(
+                "Loaded configuration '{}' for environment {:?}",
+                found.name, environment
+            ),
+            None => info!("No configuration block for environment {:?}", environment),
+        }
+        *self.active.write() = selected;
         Ok(())
     }
 
+    /// The environment block currently in force, if one was found.
+    pub fn active_environment_config(&self) -> Option<EnvironmentConfig> {
+        self.active.read().clone()
+    }
+
+    /// Re-read the shared configuration.
+    ///
+    /// The configuration lives behind a shared lock, so "monitoring" it means
+    /// nothing more than looking again: there is no file watcher or remote
+    /// config source in this crate to poll.
     pub async fn monitor_configuration(&self) -> Result<()> {
-        // Monitor for configuration changes
+        if let Some(active) = self.active_environment_config() {
+            let still_present = {
+                let config = self.config.read();
+                config
+                    .environment_configs
+                    .values()
+                    .any(|candidate| candidate.environment_type == active.environment_type)
+            };
+            if !still_present {
+                info!(
+                    "Environment block '{}' was removed from the configuration",
+                    active.name
+                );
+                *self.active.write() = None;
+            }
+        }
         Ok(())
-    }
-}
-
-/// Pipeline integration
-pub struct PipelineIntegration;
-
-impl PipelineIntegration {
-    pub fn new() -> Result<Self> {
-        Ok(Self)
     }
 }
 
@@ -244,8 +310,12 @@ impl ReportingIntegration {
         Ok(Self)
     }
 
+    /// Accepts results and drops them.
+    ///
+    /// There is no reporting sink in this crate -- no CI annotation API, no
+    /// artifact writer -- so nothing is published. `Ok(())` here means "nothing
+    /// went wrong", not "the results were reported somewhere".
     pub async fn report_results(&self, _results: &[ExecutionResult]) -> Result<()> {
-        // Implement result reporting
         Ok(())
     }
 }
@@ -258,13 +328,14 @@ impl MetricsExporter {
         Ok(Self)
     }
 
+    /// Accepts metrics and drops them: this crate has no metrics sink wired to
+    /// the exporter, so nothing leaves the process.
     pub async fn export_metrics(&self, _metrics: &CurrentPerformanceMetrics) -> Result<()> {
-        // Implement metrics export
         Ok(())
     }
 
+    /// The periodic tick of [`Self::export_metrics`]; likewise a no-op.
     pub async fn periodic_export(&self) -> Result<()> {
-        // Implement periodic metrics export
         Ok(())
     }
 }
@@ -277,8 +348,13 @@ impl EnvironmentOptimizer {
         Ok(Self)
     }
 
+    /// The fallback parallelization configuration.
+    ///
+    /// This applies no optimization: there is no environment model here to
+    /// optimize against, so it returns the crate default unchanged. The
+    /// environment-specific configuration an operator supplies is applied by
+    /// [`CicdIntegrationManager::get_optimized_config`] instead.
     pub async fn get_optimized_config(&self) -> Result<TestParallelizationConfig> {
-        // Return optimized configuration
         Ok(TestParallelizationConfig::default())
     }
 }
@@ -1010,5 +1086,127 @@ impl Default for super::security::DashboardAccessControl {
             restrictions: vec![],
             session_timeout: Duration::from_secs(3600), // 1 hour
         }
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+    use crate::test_cicd_integration::environment::{
+        EnvironmentMonitoringConfig, EnvironmentOptimizationSettings, EnvironmentResourceLimits,
+        EnvironmentSecuritySettings,
+    };
+
+    fn environment_config(name: &str, environment_type: EnvironmentType) -> EnvironmentConfig {
+        let mut test_config = TestParallelizationConfig::default();
+        // A value no default will ever produce, so a fallback cannot pass as
+        // "the operator's configuration".
+        test_config.max_concurrent_tests = 4242;
+        EnvironmentConfig {
+            name: name.to_string(),
+            environment_type,
+            test_config,
+            resource_limits: EnvironmentResourceLimits::default(),
+            optimization: EnvironmentOptimizationSettings::default(),
+            security: EnvironmentSecuritySettings::default(),
+            monitoring: EnvironmentMonitoringConfig::default(),
+            environment_variables: HashMap::new(),
+            overrides: HashMap::new(),
+        }
+    }
+
+    /// The configuration a caller passes in must survive to the accessor, not
+    /// be silently replaced by a default.
+    #[tokio::test]
+    async fn manager_reports_the_configuration_it_was_built_with() {
+        let mut config = CicdIntegrationConfig::default();
+        config.environment_configs.insert(
+            "testing".to_string(),
+            environment_config("testing", EnvironmentType::Testing),
+        );
+
+        let manager = CicdIntegrationManager::new(config).expect("construction should succeed");
+
+        assert!(
+            manager.config().environment_configs.contains_key("testing"),
+            "the manager must expose the configuration it was given"
+        );
+        assert!(
+            manager.detected_environment().is_none(),
+            "no environment may be reported before detection has run"
+        );
+    }
+
+    /// Loading an environment block must actually select it, and the selected
+    /// block's own test configuration must be what `get_optimized_config`
+    /// returns.
+    #[tokio::test]
+    async fn loading_an_environment_block_selects_and_applies_it() {
+        let mut config = CicdIntegrationConfig::default();
+        config.environment_configs.insert(
+            "testing".to_string(),
+            environment_config("testing", EnvironmentType::Testing),
+        );
+        let manager = CicdIntegrationManager::new(config).expect("construction should succeed");
+
+        // Nothing selected yet: the fallback default is what comes back.
+        let fallback = manager
+            .get_optimized_config()
+            .await
+            .expect("fallback config should be available");
+        assert_ne!(fallback.max_concurrent_tests, 4242);
+
+        manager
+            .config_manager
+            .load_environment_config(&EnvironmentType::Testing)
+            .await
+            .expect("loading should succeed");
+
+        let selected = manager
+            .config_manager
+            .active_environment_config()
+            .expect("the testing block should now be active");
+        assert_eq!(selected.name, "testing");
+        let applied = manager
+            .get_optimized_config()
+            .await
+            .expect("applied config should be available");
+        assert_eq!(
+            applied.max_concurrent_tests, 4242,
+            "the operator's environment block must be what is applied"
+        );
+    }
+
+    /// An environment with no configured block leaves nothing active, rather
+    /// than inventing one.
+    #[tokio::test]
+    async fn an_unconfigured_environment_selects_nothing() {
+        let manager = CicdIntegrationManager::new(CicdIntegrationConfig::default())
+            .expect("construction should succeed");
+
+        manager
+            .config_manager
+            .load_environment_config(&EnvironmentType::Production)
+            .await
+            .expect("loading should succeed");
+
+        assert!(
+            manager.config_manager.active_environment_config().is_none(),
+            "no block was configured for production, so none may be active"
+        );
+    }
+
+    /// Detection must record what it found so it can be read back.
+    #[tokio::test]
+    async fn detection_is_remembered() {
+        let detector = EnvironmentDetector::new().expect("construction should succeed");
+        assert!(detector.detected_environment().is_none());
+
+        let detected = detector.detect_environment().await.expect("detection should succeed");
+        assert_eq!(
+            detector.detected_environment(),
+            Some(detected),
+            "the detector must report the environment it just resolved"
+        );
     }
 }

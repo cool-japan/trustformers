@@ -143,7 +143,15 @@ pub struct CorrelationPair {
     pub feature_a: usize,
     pub feature_b: usize,
     pub correlation: f32,
-    pub p_value: f32,
+    /// Two-sided p-value for `H0: rho = 0`, from the standard
+    /// `t = r * sqrt((n - 2) / (1 - r^2))` statistic on `n - 2` degrees of
+    /// freedom, where `n` is the number of paired samples the correlation was
+    /// computed from.
+    ///
+    /// `None` when fewer than three samples are available (no residual degrees
+    /// of freedom) or when `|r| == 1` exactly. Previously the literal `0.01`
+    /// for every reported pair, marked "Simplified p-value".
+    pub p_value: Option<f32>,
     pub relationship_type: CorrelationType,
 }
 
@@ -158,9 +166,14 @@ pub enum CorrelationType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureGroup {
     pub features: Vec<usize>,
+    /// Mean absolute pairwise correlation within the group.
     pub average_correlation: f32,
-    pub group_importance: f32,
 }
+
+// `FeatureGroup::group_importance` was removed: it was assigned
+// `average_correlation` verbatim (under the comment "Simplified importance"),
+// so a consumer saw two field names carrying one number and could reasonably
+// read them as independent evidence. Nothing here measures group importance.
 
 /// Comprehensive behavior analysis report
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,7 +309,8 @@ impl BehaviorAnalyzer {
                 let sensitivity_score = gradient.abs();
                 let gradient_magnitude = gradient.abs();
 
-                // Simulate perturbation impact (would normally require model re-evaluation)
+                // First-order (Taylor) estimate from the real gradient; see
+                // `estimate_perturbation_impact` for its error bound.
                 let perturbation_impact = self.estimate_perturbation_impact(gradient, dim);
 
                 sensitivities.push(InputSensitivity {
@@ -322,9 +336,18 @@ impl BehaviorAnalyzer {
         Ok(sensitivities)
     }
 
-    /// Estimate perturbation impact (simplified version)
+    /// First-order estimate of `|f(x + eps*e_i) - f(x)|` for a perturbation of
+    /// size [`BehaviorAnalysisConfig::perturbation_magnitude`] along dimension
+    /// `i`.
+    ///
+    /// This is the exact first-order Taylor term `|df/dx_i| * eps`, computed
+    /// from the real recorded input gradient. It is an *approximation* of the
+    /// true impact with error `O(eps^2 * |d2f/dx_i^2|)`, so it is accurate for
+    /// small `eps` and understates the impact wherever the model is strongly
+    /// curved along that dimension. Measuring the true impact would require
+    /// re-evaluating the model at the perturbed input, which this analyzer --
+    /// which receives gradients, not a model handle -- cannot do.
     fn estimate_perturbation_impact(&self, gradient: f32, _dimension: usize) -> f32 {
-        // Simplified estimation: perturbation impact is proportional to gradient magnitude
         gradient.abs() * self.config.perturbation_magnitude
     }
 
@@ -588,7 +611,11 @@ impl BehaviorAnalyzer {
 
     /// Perform correlation analysis
     async fn perform_correlation_analysis(&self) -> Result<CorrelationAnalysis> {
-        // For simplification, we'll analyze correlations between input gradients
+        // Correlations between input gradients stand in for feature
+        // interactions: two inputs whose gradients move together influence the
+        // output together. This is a real correlation of real gradients, not a
+        // second-derivative (Hessian) interaction term, which would need
+        // double backpropagation the analyzer does not receive.
         let gradient_vectors: Vec<&Vec<f32>> = self.input_gradients.values().collect();
 
         if gradient_vectors.len() < 2 {
@@ -625,7 +652,7 @@ impl BehaviorAnalyzer {
                         feature_a: i,
                         feature_b: j,
                         correlation,
-                        p_value: 0.01, // Simplified p-value
+                        p_value: correlation_p_value(correlation, gradient_vectors[i].len()),
                         relationship_type: correlation_type,
                     });
                 }
@@ -647,6 +674,7 @@ impl BehaviorAnalyzer {
     }
 
     /// Compute Pearson correlation coefficient
+    /// See [`correlation_p_value`].
     fn compute_correlation(&self, x: &[f32], y: &[f32]) -> f32 {
         if x.len() != y.len() || x.is_empty() {
             return 0.0;
@@ -698,7 +726,6 @@ impl BehaviorAnalyzer {
                 groups.push(FeatureGroup {
                     features: group,
                     average_correlation,
-                    group_importance: average_correlation, // Simplified importance
                 });
             }
 
@@ -873,11 +900,11 @@ impl BehaviorAnalyzer {
                 .map(|history| history.len())
                 .sum(),
             total_inputs_tracked: self.input_gradients.len(),
-            analysis_coverage: if self.activation_history.is_empty() {
-                0.0
-            } else {
-                1.0 // Simplified coverage metric
-            },
+            // Coverage would need the model's total layer count to divide by,
+            // which this analyzer is never told. It used to report a flat
+            // `1.0` -- "100% covered" -- as soon as a single layer had been
+            // tracked.
+            analysis_coverage: None,
         }
     }
 }
@@ -888,9 +915,37 @@ pub struct AnalysisSummary {
     pub total_layers_tracked: usize,
     pub total_activation_samples: usize,
     pub total_inputs_tracked: usize,
-    pub analysis_coverage: f32,
+    /// Fraction of the model's layers this analysis covers.
+    ///
+    /// Always `None`: the analyzer only ever sees the layers a caller chose to
+    /// record, and is never told how many the model has, so there is no
+    /// denominator. Previously a flat `1.0` whenever anything at all had been
+    /// tracked.
+    pub analysis_coverage: Option<f32>,
 }
 
 #[cfg(test)]
 #[path = "behavior_analysis_tests.rs"]
 mod behavior_analysis_tests;
+
+/// Two-sided p-value for a Pearson correlation `r` computed from `n` paired
+/// samples, via `t = r * sqrt((n - 2) / (1 - r^2))` on `n - 2` degrees of
+/// freedom.
+///
+/// `None` when `n < 3` (no residual degrees of freedom) or `|r| >= 1` (the
+/// statistic diverges). This replaces the constant `0.01` that every reported
+/// correlation pair used to carry.
+fn correlation_p_value(correlation: f32, sample_count: usize) -> Option<f32> {
+    if sample_count < 3 {
+        return None;
+    }
+    let r = f64::from(correlation);
+    let denominator = 1.0 - r * r;
+    if denominator <= 0.0 {
+        return None;
+    }
+    let degrees_of_freedom = sample_count as f64 - 2.0;
+    let t_statistic = r * (degrees_of_freedom / denominator).sqrt();
+    trustformers_core::statistics::student_t_two_sided_p_value(t_statistic, degrees_of_freedom)
+        .map(|p| p as f32)
+}

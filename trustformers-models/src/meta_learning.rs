@@ -135,6 +135,43 @@ pub enum MetaAlgorithm {
     L2L,
 }
 
+/// Cosine similarity between two equally sized vectors.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a <= f32::EPSILON || norm_b <= f32::EPSILON {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+/// Numerically stable softmax over `f64` scores.
+fn softmax_f64(scores: &[f64]) -> Vec<f64> {
+    let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        let uniform = 1.0 / scores.len().max(1) as f64;
+        return vec![uniform; scores.len()];
+    }
+    let exponentials: Vec<f64> = scores.iter().map(|s| (s - max).exp()).collect();
+    let total: f64 = exponentials.iter().sum();
+    if total <= 0.0 {
+        let uniform = 1.0 / scores.len().max(1) as f64;
+        return vec![uniform; scores.len()];
+    }
+    exponentials.into_iter().map(|e| e / total).collect()
+}
+
+/// Index of the largest element.
+fn argmax_f64(values: &[f64]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
 /// Meta-learning trainer
 pub struct MetaLearner {
     config: MetaLearningConfig,
@@ -324,8 +361,10 @@ impl MetaLearner {
         let query_loss = self.compute_prototypical_loss(&task.query_set, &prototypes)?;
         let query_accuracy = self.compute_prototypical_accuracy(&task.query_set, &prototypes)?;
 
-        // Standard gradient computation
-        let gradients = self.model.compute_gradients(query_loss)?;
+        // The embedding network is trained on the query set, so run it through
+        // the model to establish the batch the gradients are taken against.
+        let embedding_loss = self.model.forward(&task.query_set)?;
+        let gradients = self.model.compute_gradients(embedding_loss)?;
         self.optimizer.accumulate_gradients(gradients)?;
 
         Ok(TaskResult {
@@ -349,7 +388,10 @@ impl MetaLearner {
         let query_loss = self.compute_matching_loss(&predictions, &task.query_set)?;
         let query_accuracy = self.compute_matching_accuracy(&predictions, &task.query_set)?;
 
-        let gradients = self.model.compute_gradients(query_loss)?;
+        // The embedding network is trained on the query set, so run it through
+        // the model to establish the batch the gradients are taken against.
+        let embedding_loss = self.model.forward(&task.query_set)?;
+        let gradients = self.model.compute_gradients(embedding_loss)?;
         self.optimizer.accumulate_gradients(gradients)?;
 
         Ok(TaskResult {
@@ -392,7 +434,10 @@ impl MetaLearner {
         let query_loss = total_loss / total_predictions as f64;
         let query_accuracy = correct_predictions as f64 / total_predictions as f64;
 
-        let gradients = self.model.compute_gradients(query_loss)?;
+        // The embedding network behind the relation module is trained on the
+        // query set; run it so the gradients have a batch to be taken against.
+        let embedding_loss = self.model.forward(&task.query_set)?;
+        let gradients = self.model.compute_gradients(embedding_loss)?;
         self.optimizer.accumulate_gradients(gradients)?;
 
         Ok(TaskResult {
@@ -682,72 +727,208 @@ impl MetaLearner {
         Ok(neg_distances.iter().map(|x| x - log_sum).collect())
     }
 
-    // Additional helper methods would be implemented here...
+    /// Cosine attention of every query example over every support example.
+    ///
+    /// Row `i` is a probability distribution over the support set, produced by
+    /// a softmax over the cosine similarities of the learned embeddings — the
+    /// attention kernel of Matching Networks.
     fn compute_attention_weights(
         &self,
-        _query_set: &ExampleSet,
-        _support_set: &ExampleSet,
+        query_set: &ExampleSet,
+        support_set: &ExampleSet,
     ) -> Result<Vec<Vec<f64>>, TrustformersError> {
-        // Placeholder implementation
-        Ok(vec![vec![1.0]])
+        if support_set.examples.is_empty() {
+            return Err(invalid_input(
+                "matching networks need a non-empty support set",
+            ));
+        }
+
+        let support_embeddings: Vec<Vec<f32>> = support_set
+            .examples
+            .iter()
+            .map(|example| -> Result<Vec<f32>, TrustformersError> {
+                let embedding = self.model.embed(example)?;
+                let values = embedding.to_vec_f32()?;
+                Ok(values)
+            })
+            .collect::<Result<_, TrustformersError>>()?;
+
+        let mut weights = Vec::with_capacity(query_set.examples.len());
+        for example in &query_set.examples {
+            let query = self.model.embed(example)?.to_vec_f32()?;
+            let similarities: Vec<f64> = support_embeddings
+                .iter()
+                .map(|support| cosine_similarity(&query, support) as f64)
+                .collect();
+            weights.push(softmax_f64(&similarities));
+        }
+
+        Ok(weights)
     }
 
+    /// Attention-weighted mixture of the support labels.
     fn compute_matching_predictions(
         &self,
-        _weights: &[Vec<f64>],
-        _support_set: &ExampleSet,
+        weights: &[Vec<f64>],
+        support_set: &ExampleSet,
     ) -> Result<Vec<Vec<f64>>, TrustformersError> {
-        Ok(vec![vec![1.0]])
+        let classes = support_set.num_classes.max(1);
+        let mut predictions = Vec::with_capacity(weights.len());
+
+        for row in weights {
+            if row.len() != support_set.examples.len() {
+                return Err(invalid_input(
+                    "attention row width must match the support set size",
+                ));
+            }
+            let mut distribution = vec![0.0f64; classes];
+            for (weight, example) in row.iter().zip(support_set.examples.iter()) {
+                if example.label >= classes {
+                    return Err(invalid_input(format!(
+                        "support label {} exceeds the task's {} classes",
+                        example.label, classes
+                    )));
+                }
+                distribution[example.label] += *weight;
+            }
+            predictions.push(distribution);
+        }
+
+        Ok(predictions)
     }
 
+    /// Negative log-likelihood of the matching-network predictions.
     fn compute_matching_loss(
         &self,
-        _predictions: &[Vec<f64>],
-        _query_set: &ExampleSet,
+        predictions: &[Vec<f64>],
+        query_set: &ExampleSet,
     ) -> Result<f64, TrustformersError> {
-        Ok(1.0)
+        if predictions.len() != query_set.examples.len() {
+            return Err(invalid_input(
+                "one prediction row is required per query example",
+            ));
+        }
+        if predictions.is_empty() {
+            return Err(invalid_input("cannot score an empty query set"));
+        }
+
+        let mut total = 0.0f64;
+        for (distribution, example) in predictions.iter().zip(query_set.examples.iter()) {
+            let probability = distribution.get(example.label).copied().unwrap_or(0.0);
+            total -= probability.max(1e-12).ln();
+        }
+        Ok(total / predictions.len() as f64)
     }
 
+    /// Fraction of query examples whose most likely class is correct.
     fn compute_matching_accuracy(
         &self,
-        _predictions: &[Vec<f64>],
-        _query_set: &ExampleSet,
+        predictions: &[Vec<f64>],
+        query_set: &ExampleSet,
     ) -> Result<f64, TrustformersError> {
-        Ok(0.8)
+        if predictions.len() != query_set.examples.len() {
+            return Err(invalid_input(
+                "one prediction row is required per query example",
+            ));
+        }
+        if predictions.is_empty() {
+            return Err(invalid_input("cannot score an empty query set"));
+        }
+
+        let correct = predictions
+            .iter()
+            .zip(query_set.examples.iter())
+            .filter(|(distribution, example)| argmax_f64(distribution) == example.label)
+            .count();
+        Ok(correct as f64 / predictions.len() as f64)
     }
 
+    /// Mean squared error between the relation scores and their targets.
+    ///
+    /// Relation Networks regress the score towards 1 for support examples of
+    /// the query's class and towards 0 otherwise.
     fn compute_relation_loss(
         &self,
-        _scores: &[f64],
-        _example: &Example,
-        _support_set: &ExampleSet,
+        scores: &[f64],
+        example: &Example,
+        support_set: &ExampleSet,
     ) -> Result<f64, TrustformersError> {
-        Ok(1.0)
+        if scores.len() != support_set.examples.len() {
+            return Err(invalid_input(
+                "one relation score is required per support example",
+            ));
+        }
+        if scores.is_empty() {
+            return Err(invalid_input("cannot score an empty support set"));
+        }
+
+        let mut total = 0.0f64;
+        for (score, support) in scores.iter().zip(support_set.examples.iter()) {
+            let target = if support.label == example.label { 1.0 } else { 0.0 };
+            total += (score - target) * (score - target);
+        }
+        Ok(total / scores.len() as f64)
     }
 
+    /// Whether the highest relation score belongs to the query's own class.
     fn is_correct_prediction(
         &self,
-        _scores: &[f64],
-        _example: &Example,
-        _support_set: &ExampleSet,
+        scores: &[f64],
+        example: &Example,
+        support_set: &ExampleSet,
     ) -> Result<bool, TrustformersError> {
-        Ok(true)
+        if scores.len() != support_set.examples.len() {
+            return Err(invalid_input(
+                "one relation score is required per support example",
+            ));
+        }
+
+        // Aggregate the scores per class and pick the strongest class.
+        let classes = support_set.num_classes.max(1);
+        let mut per_class = vec![0.0f64; classes];
+        for (score, support) in scores.iter().zip(support_set.examples.iter()) {
+            if support.label < classes {
+                per_class[support.label] += *score;
+            }
+        }
+        Ok(argmax_f64(&per_class) == example.label)
     }
 
+    /// Cross-entropy of a memory-augmented prediction.
     fn compute_memory_loss(
         &self,
-        _prediction: &MemoryPrediction,
-        _example: &Example,
+        prediction: &MemoryPrediction,
+        example: &Example,
     ) -> Result<f64, TrustformersError> {
-        Ok(1.0)
+        let logits = prediction.logits.to_vec_f32()?;
+        if example.label >= logits.len() {
+            return Err(invalid_input(format!(
+                "label {} is out of range for {} memory logits",
+                example.label,
+                logits.len()
+            )));
+        }
+        let distribution = softmax_f64(&logits.iter().map(|v| *v as f64).collect::<Vec<_>>());
+        Ok(-distribution[example.label].max(1e-12).ln())
     }
 
+    /// Whether a memory-augmented prediction picks the right class.
     fn is_memory_prediction_correct(
         &self,
-        _prediction: &MemoryPrediction,
-        _example: &Example,
+        prediction: &MemoryPrediction,
+        example: &Example,
     ) -> Result<bool, TrustformersError> {
-        Ok(true)
+        let logits = prediction.logits.to_vec_f32()?;
+        if logits.is_empty() {
+            return Err(invalid_input("memory prediction has no logits"));
+        }
+        let best = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        Ok(best == example.label)
     }
 
     /// Evaluate the meta-learner on new tasks
@@ -844,11 +1025,40 @@ pub struct ExampleSet {
     pub num_classes: usize,
 }
 
+/// One labelled example.
+///
+/// Classification examples carry a class index in `label` and leave `target`
+/// empty; regression examples carry a continuous `target` vector, which is what
+/// the sine-wave few-shot benchmark uses.
 #[derive(Debug, Clone)]
 pub struct Example {
     pub input: Tensor,
     pub label: usize,
+    /// Continuous regression target, when the task is a regression task.
+    pub target: Option<Tensor>,
     pub metadata: HashMap<String, String>,
+}
+
+impl Example {
+    /// A classification example with a class index.
+    pub fn classification(input: Tensor, label: usize) -> Self {
+        Self {
+            input,
+            label,
+            target: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// A regression example with a continuous target vector.
+    pub fn regression(input: Tensor, target: Tensor) -> Self {
+        Self {
+            input,
+            label: 0,
+            target: Some(target),
+            metadata: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1204,9 +1414,11 @@ impl TaskSampler {
     }
 
     fn sample_single_task(&mut self) -> Result<Task, TrustformersError> {
-        // For now, create a simple synthetic task
-        let support_set = self.create_example_set(self.config.support_size)?;
-        let query_set = self.create_example_set(self.config.query_size)?;
+        // Support and query share the task's class centres, which is what makes
+        // adaptation on the support set transfer to the query set.
+        let centers = self.sample_task_centers();
+        let support_set = self.create_example_set(self.config.support_size, &centers)?;
+        let query_set = self.create_example_set(self.config.query_size, &centers)?;
 
         self.current_task_id += 1;
 
@@ -1218,18 +1430,37 @@ impl TaskSampler {
         })
     }
 
-    fn create_example_set(&self, size: usize) -> Result<ExampleSet, TrustformersError> {
-        let mut examples = Vec::new();
+    /// Draw examples from the task's class-conditional Gaussians.
+    ///
+    /// Every class of a task has its own random centre (shared between the
+    /// task's support and query sets), so the label genuinely depends on the
+    /// input and a learner can improve on it. Sampling labels independently of
+    /// the features — as an earlier version did — makes every reported
+    /// accuracy meaningless because no model can do better than chance.
+    fn create_example_set(
+        &self,
+        size: usize,
+        centers: &[Vec<f32>],
+    ) -> Result<ExampleSet, TrustformersError> {
+        let mut examples = Vec::with_capacity(size);
+        let dimension = self.config.embedding_dim;
 
-        for i in 0..size {
-            let input = Tensor::randn(&[self.config.embedding_dim])?;
-            let label = i % self.config.num_ways; // Cycle through classes
+        for index in 0..size {
+            let label = index % self.config.num_ways.max(1);
+            let center = centers.get(label).ok_or_else(|| {
+                invalid_input("task centers do not cover every class of the task")
+            })?;
 
-            examples.push(Example {
-                input,
+            let mut values = Vec::with_capacity(dimension);
+            for feature in 0..dimension {
+                let noise = (fastrand::f32() - 0.5) * 2.0 * TASK_NOISE_SCALE;
+                values.push(center[feature] + noise);
+            }
+
+            examples.push(Example::classification(
+                Tensor::from_vec(values, &[dimension])?,
                 label,
-                metadata: HashMap::new(),
-            });
+            ));
         }
 
         Ok(ExampleSet {
@@ -1237,7 +1468,19 @@ impl TaskSampler {
             num_classes: self.config.num_ways,
         })
     }
+
+    /// Random class centres for one task.
+    fn sample_task_centers(&self) -> Vec<Vec<f32>> {
+        (0..self.config.num_ways.max(1))
+            .map(|_| {
+                (0..self.config.embedding_dim).map(|_| (fastrand::f32() - 0.5) * 2.0).collect()
+            })
+            .collect()
+    }
 }
+
+/// Standard deviation of the within-class noise used by [`TaskSampler`].
+const TASK_NOISE_SCALE: f32 = 0.15;
 
 #[derive(Debug)]
 pub struct TaskDistribution {
@@ -1245,423 +1488,14 @@ pub struct TaskDistribution {
     pub sampling_weight: f64,
 }
 
-/// Concrete implementations of meta-learning models would go here
-/// For brevity, I'll include basic stubs
-pub struct MAMLModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
+pub mod models;
+#[cfg(test)]
+mod models_tests;
 
-impl MAMLModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-impl MetaLearningModel for MAMLModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5) // Placeholder
-    }
-
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8) // Placeholder
-    }
-
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-
-    fn compute_second_order_gradients(
-        &self,
-        _initial_params: &ModelParameters,
-        _loss: f64,
-    ) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-
-    fn compute_first_order_gradients(
-        &self,
-        _loss: f64,
-    ) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-}
-
-// Similar stub implementations for other models...
-pub struct ReptileModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-
-impl ReptileModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-impl MetaLearningModel for ReptileModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
-
-pub struct PrototypicalModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl PrototypicalModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for PrototypicalModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
-
-pub struct MatchingNetModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl MatchingNetModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for MatchingNetModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
-
-pub struct RelationNetModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl RelationNetModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for RelationNetModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-    fn compute_relation(&self, _emb1: &Tensor, _emb2: &Tensor) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-}
-
-pub struct MemoryAugmentedModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl MemoryAugmentedModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for MemoryAugmentedModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-    fn write_to_memory(&mut self, _example: &Example) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn read_from_memory(&self, _example: &Example) -> Result<MemoryOutput, TrustformersError> {
-        Ok(MemoryOutput {
-            content: Tensor::zeros(&[64])?,
-            attention_weights: vec![1.0],
-        })
-    }
-    fn predict_from_memory(
-        &self,
-        _memory_output: &MemoryOutput,
-    ) -> Result<MemoryPrediction, TrustformersError> {
-        Ok(MemoryPrediction {
-            logits: Tensor::zeros(&[5])?,
-            confidence: 0.8,
-        })
-    }
-}
-
-pub struct GradientBasedModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl GradientBasedModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for GradientBasedModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
-
-pub struct MetaSGDModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl MetaSGDModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for MetaSGDModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
-
-pub struct L2LModel {
-    #[allow(dead_code)]
-    config: MetaLearningConfig,
-}
-impl L2LModel {
-    pub fn new(config: &MetaLearningConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-impl MetaLearningModel for L2LModel {
-    fn forward(&mut self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.5)
-    }
-    fn compute_accuracy(&self, _examples: &ExampleSet) -> Result<f64, TrustformersError> {
-        Ok(0.8)
-    }
-    fn compute_gradients(&self, _loss: f64) -> Result<ModelGradients, TrustformersError> {
-        Ok(ModelGradients::new())
-    }
-    fn apply_gradients(
-        &mut self,
-        _gradients: &ModelGradients,
-        _lr: f64,
-    ) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn get_parameters(&self) -> Result<ModelParameters, TrustformersError> {
-        Ok(ModelParameters {
-            parameters: HashMap::new(),
-        })
-    }
-    fn set_parameters(&mut self, _params: ModelParameters) -> Result<(), TrustformersError> {
-        Ok(())
-    }
-    fn embed(&self, example: &Example) -> Result<Tensor, TrustformersError> {
-        Ok(example.input.clone())
-    }
-}
+pub use models::{
+    GradientBasedModel, L2LModel, MAMLModel, MatchingNetModel, MemoryAugmentedModel, MetaSGDModel,
+    MlpLearner, PrototypicalModel, RelationNetModel, ReptileModel,
+};
 
 /// Optimizer implementations
 pub struct SGDMetaOptimizer {

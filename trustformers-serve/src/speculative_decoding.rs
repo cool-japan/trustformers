@@ -25,6 +25,7 @@ pub enum ServingError {
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -154,7 +155,12 @@ struct VerificationCacheEntry {
 
 /// Speculative decoding engine
 pub struct SpeculativeDecoder {
-    config: SpeculativeDecodingConfig,
+    /// Live configuration.
+    ///
+    /// Held behind a lock so [`SpeculativeDecoder::update_config`] can genuinely
+    /// replace it on a running decoder: every read site takes a snapshot of this
+    /// value, so a config update takes effect from the next decoding step.
+    config: Arc<parking_lot::RwLock<SpeculativeDecodingConfig>>,
     stats: Arc<RwLock<SpeculativeStats>>,
     acceptance_history: Arc<Mutex<VecDeque<bool>>>,
     current_speculation_length: Arc<Mutex<usize>>,
@@ -170,7 +176,7 @@ impl SpeculativeDecoder {
         let verification_cache_size = config.verification_cache_size;
 
         Self {
-            config,
+            config: Arc::new(parking_lot::RwLock::new(config)),
             stats: Arc::new(RwLock::new(SpeculativeStats {
                 current_speculation_length: initial_speculation_length,
                 ..Default::default()
@@ -264,7 +270,7 @@ impl SpeculativeDecoder {
         length: usize,
         draft_model: &dyn DraftModel,
     ) -> Result<Vec<DraftToken>> {
-        let timeout = Duration::from_millis(self.config.draft_timeout_ms);
+        let timeout = Duration::from_millis(self.config_snapshot().draft_timeout_ms);
 
         match tokio::time::timeout(timeout, draft_model.generate_tokens(context, length)).await {
             Ok(Ok(tokens)) => Ok(tokens),
@@ -283,8 +289,13 @@ impl SpeculativeDecoder {
         draft_tokens: &[DraftToken],
         target_model: &dyn TargetModel,
     ) -> Result<VerificationResult> {
+        // A single snapshot drives this whole step: a concurrent `update_config`
+        // must not make one half of the step use the old value and the other the
+        // new one.
+        let config = self.config_snapshot();
+
         // Check cache first if enabled
-        if self.config.enable_verification_cache {
+        if config.enable_verification_cache {
             if let Some(cached_result) = self.check_verification_cache(context, draft_tokens).await
             {
                 self.update_cache_stats(true).await;
@@ -293,11 +304,11 @@ impl SpeculativeDecoder {
             self.update_cache_stats(false).await;
         }
 
-        let timeout = Duration::from_millis(self.config.target_timeout_ms);
+        let timeout = Duration::from_millis(config.target_timeout_ms);
 
         let result = match tokio::time::timeout(
             timeout,
-            target_model.verify_tokens(context, draft_tokens, self.config.temperature),
+            target_model.verify_tokens(context, draft_tokens, config.temperature),
         )
         .await
         {
@@ -317,7 +328,7 @@ impl SpeculativeDecoder {
         };
 
         // Cache the result if enabled
-        if self.config.enable_verification_cache {
+        if config.enable_verification_cache {
             self.cache_verification_result(context, draft_tokens, &result).await;
         }
 
@@ -353,6 +364,7 @@ impl SpeculativeDecoder {
         draft_tokens: &[DraftToken],
         result: &VerificationResult,
     ) {
+        let cache_size = self.config_snapshot().verification_cache_size;
         let mut cache = self.verification_cache.lock().unwrap_or_else(|p| p.into_inner());
 
         let entry = VerificationCacheEntry {
@@ -365,7 +377,7 @@ impl SpeculativeDecoder {
         cache.push_back(entry);
 
         // Maintain cache size limit
-        while cache.len() > self.config.verification_cache_size {
+        while cache.len() > cache_size {
             cache.pop_front();
         }
     }
@@ -392,6 +404,10 @@ impl SpeculativeDecoder {
         draft_latency: Duration,
         target_latency: Duration,
     ) {
+        // Snapshot before taking any other lock: reading the config while the
+        // stats write guard is held would nest a second lock under an await-held
+        // guard for no reason.
+        let config = self.config_snapshot();
         let mut stats = self.stats.write().await;
 
         stats.total_draft_tokens += draft_tokens.len() as u64;
@@ -409,16 +425,16 @@ impl SpeculativeDecoder {
         let acceptance_rate = verification_result.accepted_count as f32 / draft_tokens.len() as f32;
 
         // Update acceptance history for adaptive speculation
-        if self.config.adaptive_speculation {
+        if config.adaptive_speculation {
             let mut history = self.acceptance_history.lock().unwrap_or_else(|p| p.into_inner());
             history.push_back(acceptance_rate > 0.5);
 
-            if history.len() > self.config.acceptance_rate_window {
+            if history.len() > config.acceptance_rate_window {
                 history.pop_front();
             }
 
             // Adjust speculation length if we have enough history
-            if history.len() >= self.config.acceptance_rate_window / 2 {
+            if history.len() >= config.acceptance_rate_window / 2 {
                 let current_rate =
                     history.iter().filter(|&&x| x).count() as f32 / history.len() as f32;
                 stats.average_acceptance_rate = current_rate;
@@ -426,15 +442,21 @@ impl SpeculativeDecoder {
                 let mut current_length =
                     self.current_speculation_length.lock().unwrap_or_else(|p| p.into_inner());
 
-                if current_rate > self.config.target_acceptance_rate + 0.1 {
+                // A config update can lower `max_speculation_length` below the
+                // length reached under the previous config; clamp into the new
+                // window before deciding whether to grow or shrink.
+                *current_length = (*current_length)
+                    .clamp(config.min_speculation_length, config.max_speculation_length);
+
+                if current_rate > config.target_acceptance_rate + 0.1 {
                     // Acceptance rate is high, try increasing speculation length
-                    if *current_length < self.config.max_speculation_length {
+                    if *current_length < config.max_speculation_length {
                         *current_length += 1;
                         stats.adaptive_adjustments += 1;
                     }
-                } else if current_rate < self.config.target_acceptance_rate - 0.1 {
+                } else if current_rate < config.target_acceptance_rate - 0.1 {
                     // Acceptance rate is low, decrease speculation length
-                    if *current_length > self.config.min_speculation_length {
+                    if *current_length > config.min_speculation_length {
                         *current_length -= 1;
                         stats.adaptive_adjustments += 1;
                     }
@@ -487,11 +509,127 @@ impl SpeculativeDecoder {
         cache.clear();
     }
 
-    /// Update configuration
-    pub async fn update_config(&self, _new_config: SpeculativeDecodingConfig) {
-        // Note: In a real implementation, we would need to handle config updates more carefully
-        // For now, this is a placeholder for the interface
+    /// A consistent copy of the live configuration.
+    ///
+    /// Every read site snapshots through here so that a concurrent
+    /// [`Self::update_config`] can never be observed half-applied.
+    fn config_snapshot(&self) -> SpeculativeDecodingConfig {
+        self.config.read().clone()
     }
+
+    /// The configuration currently in force.
+    pub fn config(&self) -> SpeculativeDecodingConfig {
+        self.config_snapshot()
+    }
+
+    /// Replace the decoder's configuration.
+    ///
+    /// The new configuration is validated and then genuinely applied: it takes
+    /// effect from the next decoding step, and the current speculation length is
+    /// clamped into the new `[min, max]` window immediately so the decoder can
+    /// never speculate outside the window the caller just asked for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServingError::ConfigError`] when the configuration is
+    /// incoherent — an empty speculation window, an inverted `[min, max]` range,
+    /// a zero acceptance-rate window (the adaptive path divides by it), a zero
+    /// verification cache while caching is enabled, a negative temperature, or a
+    /// target acceptance rate outside `[0, 1]`. The previous configuration stays
+    /// in force when validation fails; the argument is never silently discarded.
+    pub async fn update_config(&self, new_config: SpeculativeDecodingConfig) -> Result<()> {
+        validate_speculative_config(&new_config)?;
+
+        {
+            let mut config = self.config.write();
+            *config = new_config.clone();
+        }
+
+        // Bring the live speculation length into the new window right away
+        // rather than waiting for the adaptive path to drift there.
+        let clamped = {
+            let mut current_length =
+                self.current_speculation_length.lock().unwrap_or_else(|p| p.into_inner());
+            *current_length = (*current_length).clamp(
+                new_config.min_speculation_length,
+                new_config.max_speculation_length,
+            );
+            *current_length
+        };
+
+        // Trim a verification cache that the new configuration made too large.
+        {
+            let mut cache = self.verification_cache.lock().unwrap_or_else(|p| p.into_inner());
+            while cache.len() > new_config.verification_cache_size {
+                cache.pop_front();
+            }
+        }
+
+        // Trim acceptance history that no longer fits the new window.
+        {
+            let mut history = self.acceptance_history.lock().unwrap_or_else(|p| p.into_inner());
+            while history.len() > new_config.acceptance_rate_window {
+                history.pop_front();
+            }
+        }
+
+        self.stats.write().await.current_speculation_length = clamped;
+        Ok(())
+    }
+}
+
+/// Validate a speculative decoding configuration.
+///
+/// # Errors
+///
+/// Returns [`ServingError::ConfigError`] describing the first violated
+/// invariant.
+pub fn validate_speculative_config(config: &SpeculativeDecodingConfig) -> Result<()> {
+    if config.max_speculation_length == 0 {
+        return Err(ServingError::ConfigError(
+            "max_speculation_length must be greater than 0".to_string(),
+        ));
+    }
+    if config.min_speculation_length == 0 {
+        return Err(ServingError::ConfigError(
+            "min_speculation_length must be greater than 0".to_string(),
+        ));
+    }
+    if config.min_speculation_length > config.max_speculation_length {
+        return Err(ServingError::ConfigError(format!(
+            "min_speculation_length ({}) must not exceed max_speculation_length ({})",
+            config.min_speculation_length, config.max_speculation_length
+        )));
+    }
+    if config.acceptance_rate_window == 0 {
+        return Err(ServingError::ConfigError(
+            "acceptance_rate_window must be greater than 0".to_string(),
+        ));
+    }
+    if config.enable_verification_cache && config.verification_cache_size == 0 {
+        return Err(ServingError::ConfigError(
+            "verification_cache_size must be greater than 0 while the verification cache is enabled"
+                .to_string(),
+        ));
+    }
+    if !config.temperature.is_finite() || config.temperature < 0.0 {
+        return Err(ServingError::ConfigError(format!(
+            "temperature must be a finite, non-negative value; got {}",
+            config.temperature
+        )));
+    }
+    if !(0.0..=1.0).contains(&config.target_acceptance_rate) {
+        return Err(ServingError::ConfigError(format!(
+            "target_acceptance_rate {} is out of range [0, 1]",
+            config.target_acceptance_rate
+        )));
+    }
+    if config.draft_timeout_ms == 0 || config.target_timeout_ms == 0 {
+        return Err(ServingError::ConfigError(
+            "draft_timeout_ms and target_timeout_ms must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Trait for draft models used in speculative decoding
@@ -532,10 +670,31 @@ pub struct ModelInfo {
     pub context_length: usize,
 }
 
+/// One live speculative-decoding session, together with the moment it was last
+/// handed out by [`SpeculativeDecodingManager::get_decoder`].
+///
+/// The timestamp is what makes idle-based cleanup possible: without it,
+/// "inactive" cannot be distinguished from "in use", and the only implementable
+/// eviction policy is "evict everything".
+struct DecoderSession {
+    /// The session's decoder.
+    decoder: Arc<SpeculativeDecoder>,
+    /// Nanoseconds elapsed on [`SpeculativeDecodingManager::epoch`] at the most
+    /// recent [`SpeculativeDecodingManager::get_decoder`] call for this session.
+    ///
+    /// Stored atomically so the read-locked fast path can refresh it without
+    /// taking the map's write lock.
+    last_accessed_nanos: AtomicU64,
+}
+
 /// Manager for speculative decoding sessions
 pub struct SpeculativeDecodingManager {
-    decoders: Arc<RwLock<std::collections::HashMap<String, Arc<SpeculativeDecoder>>>>,
+    decoders: Arc<RwLock<std::collections::HashMap<String, DecoderSession>>>,
     default_config: SpeculativeDecodingConfig,
+    /// Monotonic reference point the per-session access stamps are measured
+    /// from. A monotonic clock is used rather than the wall clock so that a
+    /// system time adjustment cannot make a live session look idle.
+    epoch: Instant,
 }
 
 impl SpeculativeDecodingManager {
@@ -544,35 +703,76 @@ impl SpeculativeDecodingManager {
         Self {
             decoders: Arc::new(RwLock::new(std::collections::HashMap::new())),
             default_config,
+            epoch: Instant::now(),
         }
     }
 
-    /// Get or create a decoder for a session
+    /// Nanoseconds elapsed since this manager was created.
+    ///
+    /// Saturates at [`u64::MAX`] rather than wrapping; that bound is roughly
+    /// 584 years of uptime, so it is unreachable in practice and only exists so
+    /// the conversion cannot silently produce a small value.
+    fn now_nanos(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Get or create a decoder for a session.
+    ///
+    /// Every call stamps the session as accessed, which is what
+    /// [`Self::cleanup_inactive_sessions`] measures idleness against.
     pub async fn get_decoder(&self, session_id: &str) -> Arc<SpeculativeDecoder> {
-        let decoders = self.decoders.read().await;
+        let now = self.now_nanos();
 
-        if let Some(decoder) = decoders.get(session_id) {
-            decoder.clone()
-        } else {
-            drop(decoders);
-
-            let mut decoders = self.decoders.write().await;
-
-            // Double-check after acquiring write lock
-            if let Some(decoder) = decoders.get(session_id) {
-                decoder.clone()
-            } else {
-                let decoder = Arc::new(SpeculativeDecoder::new(self.default_config.clone()));
-                decoders.insert(session_id.to_string(), decoder.clone());
-                decoder
+        {
+            let decoders = self.decoders.read().await;
+            if let Some(session) = decoders.get(session_id) {
+                session.last_accessed_nanos.store(now, AtomicOrdering::Relaxed);
+                return Arc::clone(&session.decoder);
             }
         }
+
+        let mut decoders = self.decoders.write().await;
+
+        // Double-check after acquiring write lock
+        if let Some(session) = decoders.get(session_id) {
+            session.last_accessed_nanos.store(now, AtomicOrdering::Relaxed);
+            return Arc::clone(&session.decoder);
+        }
+
+        let decoder = Arc::new(SpeculativeDecoder::new(self.default_config.clone()));
+        decoders.insert(
+            session_id.to_string(),
+            DecoderSession {
+                decoder: Arc::clone(&decoder),
+                last_accessed_nanos: AtomicU64::new(now),
+            },
+        );
+        decoder
     }
 
     /// Remove a decoder session
     pub async fn remove_decoder(&self, session_id: &str) -> Option<Arc<SpeculativeDecoder>> {
         let mut decoders = self.decoders.write().await;
-        decoders.remove(session_id)
+        decoders.remove(session_id).map(|session| session.decoder)
+    }
+
+    /// Number of sessions currently held by this manager.
+    pub async fn session_count(&self) -> usize {
+        self.decoders.read().await.len()
+    }
+
+    /// How long `session_id` has been idle, or `None` when no such session
+    /// exists.
+    ///
+    /// Idleness is measured from the last [`Self::get_decoder`] call, which is
+    /// the same quantity [`Self::cleanup_inactive_sessions`] thresholds on.
+    pub async fn session_idle_time(&self, session_id: &str) -> Option<Duration> {
+        let now = self.now_nanos();
+        let decoders = self.decoders.read().await;
+        decoders.get(session_id).map(|session| {
+            let last = session.last_accessed_nanos.load(AtomicOrdering::Relaxed);
+            Duration::from_nanos(now.saturating_sub(last))
+        })
     }
 
     /// Get statistics for all sessions
@@ -580,8 +780,8 @@ impl SpeculativeDecodingManager {
         let decoders = self.decoders.read().await;
         let mut all_stats = std::collections::HashMap::new();
 
-        for (session_id, decoder) in decoders.iter() {
-            let stats = decoder.get_stats().await;
+        for (session_id, session) in decoders.iter() {
+            let stats = session.decoder.get_stats().await;
             all_stats.insert(session_id.clone(), stats);
         }
 
@@ -616,21 +816,26 @@ impl SpeculativeDecodingManager {
         aggregate
     }
 
-    /// Clean up inactive sessions
-    pub async fn cleanup_inactive_sessions(&self, _max_idle_time: Duration) {
+    /// Drop every session that has been idle for at least `max_idle_time`.
+    ///
+    /// Idleness is measured from the last [`Self::get_decoder`] call for that
+    /// session, so a session that is still being used is never evicted.
+    /// Returns the number of sessions removed.
+    ///
+    /// A `max_idle_time` of zero evicts every session, which is the correct
+    /// reading of "idle for at least no time at all" and the only case in which
+    /// this method clears the whole map.
+    pub async fn cleanup_inactive_sessions(&self, max_idle_time: Duration) -> usize {
+        let now = self.now_nanos();
+        let threshold = u64::try_from(max_idle_time.as_nanos()).unwrap_or(u64::MAX);
+
         let mut decoders = self.decoders.write().await;
-        let mut to_remove = Vec::new();
-
-        for (session_id, _) in decoders.iter() {
-            // In a real implementation, we would track last access time
-            // For now, this is a placeholder
-            to_remove.push(session_id.clone());
-        }
-
-        // Remove sessions that haven't been active
-        for session_id in to_remove {
-            decoders.remove(&session_id);
-        }
+        let before = decoders.len();
+        decoders.retain(|_, session| {
+            let last = session.last_accessed_nanos.load(AtomicOrdering::Relaxed);
+            now.saturating_sub(last) < threshold
+        });
+        before - decoders.len()
     }
 }
 
@@ -983,6 +1188,84 @@ mod tests {
         assert_eq!(all_stats_after.len(), 0);
     }
 
+    /// Regression: `cleanup_inactive_sessions` bound its `max_idle_time`
+    /// argument to `_max_idle_time` and removed *every* session on every call,
+    /// so a single sweep destroyed sessions that were actively being decoded
+    /// into. A session younger than the idle threshold must survive.
+    #[tokio::test]
+    async fn cleanup_keeps_sessions_younger_than_the_idle_threshold() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let live = manager.get_decoder("live").await;
+        assert_eq!(manager.session_count().await, 1);
+
+        // The session was handed out microseconds ago; an hour of permitted
+        // idleness must not reach it. The old implementation removed it anyway.
+        let removed = manager.cleanup_inactive_sessions(Duration::from_secs(3600)).await;
+        assert_eq!(removed, 0, "an active session must not be swept");
+        assert_eq!(manager.session_count().await, 1);
+
+        // And it is the same decoder, not a silently recreated one.
+        assert!(Arc::ptr_eq(&live, &manager.get_decoder("live").await));
+    }
+
+    /// A session that really has gone idle past the threshold is evicted, and
+    /// the count of evictions is reported.
+    #[tokio::test]
+    async fn cleanup_evicts_sessions_past_the_idle_threshold() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("stale_one").await;
+        let _ = manager.get_decoder("stale_two").await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let removed = manager.cleanup_inactive_sessions(Duration::from_millis(10)).await;
+        assert_eq!(removed, 2);
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    /// Touching a session refreshes its idle clock, so a sweep that would have
+    /// evicted it no longer does. This is the property the discarded argument
+    /// made impossible to express.
+    #[tokio::test]
+    async fn accessing_a_session_refreshes_its_idle_clock() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("touched").await;
+        let _ = manager.get_decoder("untouched").await;
+
+        // Both sessions age well past the threshold used below.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let untouched_idle =
+            manager.session_idle_time("untouched").await.expect("session must exist");
+        assert!(untouched_idle >= Duration::from_millis(200));
+
+        // Re-acquiring "touched" stamps it as used right now; the sweep that
+        // immediately follows must therefore spare it and take only the other.
+        // The generous 100 ms budget keeps this deterministic on a loaded host.
+        let _ = manager.get_decoder("touched").await;
+        let removed = manager.cleanup_inactive_sessions(Duration::from_millis(100)).await;
+
+        assert_eq!(removed, 1, "only the untouched session is idle enough");
+        assert_eq!(manager.session_count().await, 1);
+        assert!(manager.session_idle_time("touched").await.is_some());
+        assert!(manager.session_idle_time("untouched").await.is_none());
+    }
+
+    /// Zero permitted idleness is the one case that clears everything, and it
+    /// says so through the returned count.
+    #[tokio::test]
+    async fn cleanup_with_zero_idle_time_clears_every_session() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("a").await;
+        let _ = manager.get_decoder("b").await;
+
+        let removed = manager.cleanup_inactive_sessions(Duration::ZERO).await;
+        assert_eq!(removed, 2);
+        assert_eq!(manager.session_count().await, 0);
+    }
+
     #[tokio::test]
     async fn test_manager_remove_nonexistent_decoder() {
         let config = SpeculativeDecodingConfig::default();
@@ -1200,5 +1483,147 @@ mod tests {
         assert_eq!(info.name, "MockTarget");
         assert_eq!(info.parameters, 70_000_000_000);
         assert_eq!(info.context_length, 4096);
+    }
+
+    /// Regression: `update_config` used to accept a configuration and throw it
+    /// away, so the decoder kept running under the old settings forever. The new
+    /// configuration must be readable back and must be the one in force.
+    #[tokio::test]
+    async fn test_update_config_is_actually_applied() {
+        let decoder = SpeculativeDecoder::new(SpeculativeDecodingConfig::default());
+        assert_eq!(decoder.config().max_speculation_length, 8);
+
+        let updated = SpeculativeDecodingConfig {
+            max_speculation_length: 3,
+            min_speculation_length: 1,
+            temperature: 0.25,
+            enable_verification_cache: false,
+            draft_timeout_ms: 17,
+            ..Default::default()
+        };
+        decoder.update_config(updated).await.expect("valid config must be accepted");
+
+        let live = decoder.config();
+        assert_eq!(live.max_speculation_length, 3);
+        assert_eq!(live.min_speculation_length, 1);
+        assert!((live.temperature - 0.25).abs() < f32::EPSILON);
+        assert!(!live.enable_verification_cache);
+        assert_eq!(live.draft_timeout_ms, 17);
+    }
+
+    /// Regression: the speculation length reached under the old configuration
+    /// must be clamped into the new `[min, max]` window, so a lowered maximum is
+    /// observable in behaviour and not only in the stored struct.
+    #[tokio::test]
+    async fn test_update_config_clamps_live_speculation_length() {
+        let decoder = SpeculativeDecoder::new(SpeculativeDecodingConfig {
+            max_speculation_length: 16,
+            min_speculation_length: 8,
+            ..Default::default()
+        });
+        // new() starts at (16 + 8) / 2 = 12.
+        assert_eq!(decoder.get_current_speculation_length(), 12);
+
+        decoder
+            .update_config(SpeculativeDecodingConfig {
+                max_speculation_length: 4,
+                min_speculation_length: 2,
+                ..Default::default()
+            })
+            .await
+            .expect("valid config must be accepted");
+
+        assert_eq!(decoder.get_current_speculation_length(), 4);
+        assert_eq!(decoder.get_stats().await.current_speculation_length, 4);
+    }
+
+    /// Regression: an incoherent configuration must be refused with a structured
+    /// error, and the previous configuration must stay in force. Silently
+    /// accepting it was the old behaviour.
+    #[tokio::test]
+    async fn test_update_config_rejects_incoherent_config() {
+        let decoder = SpeculativeDecoder::new(SpeculativeDecodingConfig::default());
+
+        let error = decoder
+            .update_config(SpeculativeDecodingConfig {
+                min_speculation_length: 10,
+                max_speculation_length: 4,
+                ..Default::default()
+            })
+            .await
+            .expect_err("an inverted speculation window must be refused");
+        assert!(
+            matches!(error, ServingError::ConfigError(_)),
+            "expected a config error, got {error:?}"
+        );
+        assert_eq!(decoder.config().max_speculation_length, 8);
+
+        for bad in [
+            SpeculativeDecodingConfig {
+                acceptance_rate_window: 0,
+                ..Default::default()
+            },
+            SpeculativeDecodingConfig {
+                enable_verification_cache: true,
+                verification_cache_size: 0,
+                ..Default::default()
+            },
+            SpeculativeDecodingConfig {
+                temperature: -1.0,
+                ..Default::default()
+            },
+            SpeculativeDecodingConfig {
+                target_acceptance_rate: 1.5,
+                ..Default::default()
+            },
+            SpeculativeDecodingConfig {
+                draft_timeout_ms: 0,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                decoder.update_config(bad).await.is_err(),
+                "an incoherent configuration must be refused"
+            );
+        }
+        assert_eq!(decoder.config().acceptance_rate_window, 100);
+    }
+
+    /// Regression: a lowered `verification_cache_size` must actually shrink the
+    /// live cache instead of leaving stale entries beyond the new bound.
+    #[tokio::test]
+    async fn test_update_config_trims_verification_cache() {
+        let decoder = SpeculativeDecoder::new(SpeculativeDecodingConfig {
+            adaptive_speculation: false,
+            enable_verification_cache: true,
+            verification_cache_size: 64,
+            ..Default::default()
+        });
+        let draft_model = MockDraftModel::new(vec![1, 2]);
+        let target_model = MockTargetModel::new(1.0);
+
+        for seed in 0..5u32 {
+            decoder
+                .generate(&[seed + 1], 2, &draft_model, &target_model)
+                .await
+                .expect("generation should succeed");
+        }
+        let filled = decoder.verification_cache.lock().expect("cache lock").len();
+        assert!(filled > 1, "expected a populated cache, got {filled}");
+
+        decoder
+            .update_config(SpeculativeDecodingConfig {
+                adaptive_speculation: false,
+                enable_verification_cache: true,
+                verification_cache_size: 1,
+                ..Default::default()
+            })
+            .await
+            .expect("valid config must be accepted");
+
+        assert_eq!(
+            decoder.verification_cache.lock().expect("cache lock").len(),
+            1
+        );
     }
 }

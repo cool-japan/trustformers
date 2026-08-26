@@ -31,6 +31,7 @@ use crate::errors::{Result, TrustformersError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Kernel operation types for tuning
@@ -88,13 +89,18 @@ pub struct PlatformInfo {
     /// Total memory in bytes
     pub total_memory: usize,
 
-    /// Memory bandwidth in GB/s
-    pub memory_bandwidth: f32,
+    /// Memory bandwidth in GB/s, when the platform reports it.
+    ///
+    /// `None` on platforms where the value cannot be queried; it is never
+    /// filled in with a guess.
+    pub memory_bandwidth: Option<f32>,
 
-    /// Peak compute performance in TFLOPS
-    pub peak_tflops: f32,
+    /// Peak compute performance in TFLOPS, when the platform reports it.
+    ///
+    /// `None` on platforms where the value cannot be queried.
+    pub peak_tflops: Option<f32>,
 
-    /// Cache sizes (L1, L2, L3) in bytes
+    /// Cache sizes (L1, L2, L3) in bytes. Empty when unavailable.
     pub cache_sizes: Vec<usize>,
 
     /// Warp/wavefront size
@@ -105,38 +111,55 @@ pub struct PlatformInfo {
 }
 
 impl PlatformInfo {
-    /// Detect current platform characteristics
+    /// Detect current platform characteristics from the host.
+    ///
+    /// CPU count, CPU brand string and installed RAM come from `sysinfo`.
+    /// Values the host does not expose (memory bandwidth, peak FLOPS, cache
+    /// sizes) are reported as `None`/empty rather than guessed.
     pub fn detect() -> Result<Self> {
-        // This would use actual hardware detection APIs
-        // Simplified implementation for now
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+
+        let system = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+        );
+
+        let device_name = {
+            let cpu_system = System::new_with_specifics(
+                RefreshKind::nothing().with_cpu(sysinfo::CpuRefreshKind::nothing()),
+            );
+            cpu_system
+                .cpus()
+                .first()
+                .map(|cpu| cpu.brand().trim().to_string())
+                .filter(|brand| !brand.is_empty())
+                .unwrap_or_else(|| "Unknown CPU".to_string())
+        };
+
         Ok(Self {
             backend: Backend::CPU,
-            device_name: "Generic CPU".to_string(),
+            device_name,
             compute_units: num_cpus::get(),
-            total_memory: 16 * 1024 * 1024 * 1024, // 16GB default
-            memory_bandwidth: 50.0,                // GB/s
-            peak_tflops: 1.0,
-            cache_sizes: vec![32768, 262144, 8388608], // L1: 32KB, L2: 256KB, L3: 8MB
+            total_memory: usize::try_from(system.total_memory()).unwrap_or(usize::MAX),
+            memory_bandwidth: None,
+            peak_tflops: None,
+            cache_sizes: Vec::new(),
             warp_size: 1,
-            max_threads_per_block: 256,
+            max_threads_per_block: num_cpus::get().max(1),
         })
     }
 
-    /// Create platform info for CUDA device
+    /// Create platform info for a CUDA device.
+    ///
+    /// Querying real CUDA device properties requires the CUDA driver bindings,
+    /// which this module does not link. Rather than reporting invented device
+    /// specifications, this returns [`TrustformersError::not_implemented`].
     #[cfg(feature = "cuda")]
     pub fn cuda(device_id: usize) -> Result<Self> {
-        // Would query actual CUDA device properties
-        Ok(Self {
-            backend: Backend::CUDA,
-            device_name: format!("CUDA Device {}", device_id),
-            compute_units: 128,
-            total_memory: 24 * 1024 * 1024 * 1024,
-            memory_bandwidth: 900.0,
-            peak_tflops: 82.0,
-            cache_sizes: vec![128 * 1024, 40 * 1024 * 1024], // L1: 128KB, L2: 40MB
-            warp_size: 32,
-            max_threads_per_block: 1024,
-        })
+        Err(TrustformersError::not_implemented(format!(
+            "CUDA device property query for device {} is not wired to the CUDA driver; \
+             no device characteristics are available",
+            device_id
+        )))
     }
 
     /// Get optimal block size based on hardware characteristics
@@ -245,12 +268,122 @@ impl Default for TuningConfig {
     }
 }
 
+/// Executes a kernel with a candidate parameter set so the tuner can time it.
+///
+/// The tuner never fabricates a timing: without an executor it refuses to
+/// produce (or cache) a tuning result at all.
+pub trait KernelExecutor: Send + Sync + std::fmt::Debug {
+    /// Human-readable name, used in error messages.
+    fn name(&self) -> &str;
+
+    /// Run the kernel once with `params` for an `m x k` by `k x n` problem.
+    ///
+    /// Implementations must perform the real work: the tuner measures wall
+    /// clock time around this call and ranks configurations by it.
+    fn execute(&self, params: &KernelParams, m: usize, n: usize, k: usize) -> Result<()>;
+}
+
+/// Buffers reused across benchmark iterations so the measurement reflects the
+/// kernel rather than allocation.
+#[derive(Debug, Default)]
+struct MatmulBuffers {
+    a: Vec<f32>,
+    b: Vec<f32>,
+    c: Vec<f32>,
+    dims: (usize, usize, usize),
+}
+
+/// A real blocked f32 GEMM used as the default CPU tuning target.
+///
+/// `block_size` selects the (i, j, k) tile extents and `unroll_factor` the
+/// inner-loop chunk width, so different candidate parameter sets really do
+/// execute different code paths and produce different timings.
+#[derive(Debug, Default)]
+pub struct CpuBlockedMatmulExecutor {
+    buffers: Mutex<MatmulBuffers>,
+}
+
+impl CpuBlockedMatmulExecutor {
+    /// Create a new CPU GEMM tuning target.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl KernelExecutor for CpuBlockedMatmulExecutor {
+    fn name(&self) -> &str {
+        "cpu_blocked_matmul_f32"
+    }
+
+    fn execute(&self, params: &KernelParams, m: usize, n: usize, k: usize) -> Result<()> {
+        if m == 0 || n == 0 || k == 0 {
+            return Err(TrustformersError::invalid_input(
+                "matmul tuning requires non-zero m, n and k".to_string(),
+            ));
+        }
+
+        let mut buffers = self
+            .buffers
+            .lock()
+            .map_err(|error| TrustformersError::lock_error(error.to_string()))?;
+
+        if buffers.dims != (m, n, k) {
+            // Deterministic, non-trivial operands so the compiler cannot fold
+            // the multiplication away.
+            buffers.a = (0..m * k).map(|i| ((i % 17) as f32) * 0.125 - 1.0).collect();
+            buffers.b = (0..k * n).map(|i| ((i % 13) as f32) * 0.0625 - 0.5).collect();
+            buffers.c = vec![0.0f32; m * n];
+            buffers.dims = (m, n, k);
+        }
+
+        let block_m = params.block_size.0.max(1);
+        let block_n = params.block_size.1.max(1);
+        let block_k = params.block_size.2.max(1);
+        let unroll = params.unroll_factor.max(1);
+
+        let MatmulBuffers { a, b, c, .. } = &mut *buffers;
+        c.fill(0.0);
+
+        for i0 in (0..m).step_by(block_m) {
+            let i_end = (i0 + block_m).min(m);
+            for j0 in (0..n).step_by(block_n) {
+                let j_end = (j0 + block_n).min(n);
+                for p0 in (0..k).step_by(block_k) {
+                    let p_end = (p0 + block_k).min(k);
+                    for i in i0..i_end {
+                        let row_c = i * n;
+                        let row_a = i * k;
+                        for p in p0..p_end {
+                            let a_value = a[row_a + p];
+                            let row_b = p * n;
+                            let mut j = j0;
+                            while j + unroll <= j_end {
+                                for offset in 0..unroll {
+                                    c[row_c + j + offset] += a_value * b[row_b + j + offset];
+                                }
+                                j += unroll;
+                            }
+                            while j < j_end {
+                                c[row_c + j] += a_value * b[row_b + j];
+                                j += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Keep the result observable so the work cannot be optimised out.
+        std::hint::black_box(&c[0]);
+        Ok(())
+    }
+}
+
 /// Tuning result for a specific configuration
 #[derive(Debug, Clone)]
 struct TuningResult {
     params: KernelParams,
     mean_time: Duration,
-    #[allow(dead_code)]
     std_dev: f64,
 }
 
@@ -264,6 +397,7 @@ struct CacheKey {
 }
 
 /// Automatic kernel tuner
+#[derive(Debug)]
 pub struct KernelTuner {
     /// Tuning configuration
     config: TuningConfig,
@@ -276,18 +410,35 @@ pub struct KernelTuner {
 
     /// Whether cache has been modified
     cache_dirty: bool,
+
+    /// The kernel actually timed while searching the parameter space.
+    executor: Option<Box<dyn KernelExecutor>>,
 }
 
 impl KernelTuner {
-    /// Create a new kernel tuner
+    /// Create a new kernel tuner.
+    ///
+    /// A CPU platform gets the in-tree blocked GEMM
+    /// ([`CpuBlockedMatmulExecutor`]) as its tuning target. Other backends
+    /// start without an executor; call [`Self::with_executor`] before enabling
+    /// tuning, otherwise `tune_matmul` reports that no kernel can be measured.
     pub fn new(config: TuningConfig) -> Result<Self> {
         let platform = PlatformInfo::detect()?;
+        Self::with_platform(config, platform)
+    }
+
+    fn with_platform(config: TuningConfig, platform: PlatformInfo) -> Result<Self> {
+        let executor: Option<Box<dyn KernelExecutor>> = match platform.backend {
+            Backend::CPU => Some(Box::new(CpuBlockedMatmulExecutor::new())),
+            _ => None,
+        };
 
         let mut tuner = Self {
             config,
             platform,
             cache: HashMap::new(),
             cache_dirty: false,
+            executor,
         };
 
         // Load cached tuning results
@@ -304,16 +455,23 @@ impl KernelTuner {
             _ => PlatformInfo::detect()?,
         };
 
-        let mut tuner = Self {
-            config,
-            platform,
-            cache: HashMap::new(),
-            cache_dirty: false,
-        };
+        Self::with_platform(config, platform)
+    }
 
-        tuner.load_cache()?;
+    /// Install the kernel the tuner should benchmark.
+    pub fn with_executor(mut self, executor: Box<dyn KernelExecutor>) -> Self {
+        self.executor = Some(executor);
+        self
+    }
 
-        Ok(tuner)
+    /// Install the kernel the tuner should benchmark, in place.
+    pub fn set_executor(&mut self, executor: Box<dyn KernelExecutor>) {
+        self.executor = Some(executor);
+    }
+
+    /// Name of the kernel currently wired up for benchmarking, if any.
+    pub fn executor_name(&self) -> Option<&str> {
+        self.executor.as_ref().map(|executor| executor.name())
     }
 
     /// Get or tune parameters for matrix multiplication
@@ -343,15 +501,31 @@ impl KernelTuner {
         Ok(params)
     }
 
-    /// Auto-tune matrix multiplication parameters
+    /// Auto-tune matrix multiplication parameters by timing the installed
+    /// kernel executor over the candidate parameter space.
+    ///
+    /// Only parameters the executor can act on are searched: the tile extents
+    /// and the inner-loop unroll factor. `threads_per_block` is taken from the
+    /// platform, because ranking configurations by a parameter the kernel
+    /// ignores would be ranking scheduler jitter.
     fn auto_tune_matmul(&self, m: usize, n: usize, k: usize) -> Result<KernelParams> {
+        let executor = self.executor.as_ref().ok_or_else(|| {
+            TrustformersError::not_implemented(format!(
+                "no kernel executor is wired up for backend {:?}; \
+                 install one with KernelTuner::with_executor before enabling tuning, \
+                 or set TuningConfig::enable_tuning = false to use heuristic defaults",
+                self.platform.backend
+            ))
+        })?;
+
         let start_time = Instant::now();
         let max_duration = Duration::from_secs_f32(self.config.max_tuning_time_secs);
 
         let mut best_result: Option<TuningResult> = None;
+        let mut measured_configurations = 0usize;
 
         // Search space for block sizes
-        let block_sizes = vec![
+        let block_sizes = [
             (8, 8, 8),
             (16, 16, 16),
             (32, 32, 32),
@@ -359,80 +533,77 @@ impl KernelTuner {
             (128, 128, 8),
         ];
 
-        // Search space for thread counts
-        let thread_counts = vec![64, 128, 256, 512, 1024];
-
         // Search space for unroll factors
-        let unroll_factors = vec![1, 2, 4, 8];
+        let unroll_factors = [1usize, 2, 4, 8];
 
-        for &block_size in &block_sizes {
-            if start_time.elapsed() > max_duration {
-                break;
-            }
+        let threads_per_block = self
+            .platform
+            .max_threads_per_block
+            .clamp(1, self.platform.max_threads_per_block.max(1));
 
-            for &threads in &thread_counts {
-                if threads > self.platform.max_threads_per_block {
-                    continue;
+        'search: for &block_size in &block_sizes {
+            for &unroll in &unroll_factors {
+                if start_time.elapsed() > max_duration && best_result.is_some() {
+                    break 'search;
                 }
 
-                for &unroll in &unroll_factors {
-                    if start_time.elapsed() > max_duration {
-                        break;
-                    }
+                let params = KernelParams {
+                    operation: Operation::MatMul,
+                    block_size,
+                    threads_per_block,
+                    use_shared_memory: true,
+                    unroll_factor: unroll,
+                    vector_width: 4,
+                    grid_size: self.compute_grid_size(m, n, block_size),
+                    estimated_time_us: 0.0,
+                };
 
-                    let params = KernelParams {
-                        operation: Operation::MatMul,
-                        block_size,
-                        threads_per_block: threads,
-                        use_shared_memory: true,
-                        unroll_factor: unroll,
-                        vector_width: 4,
-                        grid_size: self.compute_grid_size(m, n, block_size),
-                        estimated_time_us: 0.0,
-                    };
-
-                    // Benchmark this configuration
-                    if let Ok(result) = self.benchmark_config(&params, m, n, k) {
-                        let is_better = match &best_result {
-                            None => true,
-                            Some(best) => result.mean_time < best.mean_time,
-                        };
-                        if is_better {
-                            best_result = Some(result);
-                        }
-                    }
+                // Benchmark this configuration against the real kernel.
+                let result = self.benchmark_config(executor.as_ref(), &params, m, n, k)?;
+                measured_configurations += 1;
+                let is_better = match &best_result {
+                    None => true,
+                    Some(best) => result.mean_time < best.mean_time,
+                };
+                if is_better {
+                    best_result = Some(result);
                 }
             }
         }
 
-        if let Some(result) = best_result {
-            let mut params = result.params;
-            params.estimated_time_us = result.mean_time.as_secs_f64() * 1_000_000.0;
-            Ok(params)
-        } else {
-            Ok(self.default_matmul_params(m, n, k))
-        }
+        let result = best_result.ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "kernel tuning produced no measurement; refusing to cache a tuning result"
+                    .to_string(),
+            )
+        })?;
+
+        debug_assert!(measured_configurations > 0);
+        let mut params = result.params;
+        params.estimated_time_us = result.mean_time.as_secs_f64() * 1_000_000.0;
+        Ok(params)
     }
 
-    /// Benchmark a specific kernel configuration
+    /// Benchmark a specific kernel configuration.
     fn benchmark_config(
         &self,
+        executor: &dyn KernelExecutor,
         params: &KernelParams,
         m: usize,
         n: usize,
         k: usize,
     ) -> Result<TuningResult> {
-        let mut timings = Vec::new();
-
         // Warmup iterations
         for _ in 0..self.config.warmup_iterations {
-            self.execute_kernel(params, m, n, k)?;
+            executor.execute(params, m, n, k)?;
         }
 
-        // Benchmark iterations
-        for _ in 0..self.config.benchmark_iterations {
+        // Benchmark iterations, timed around the real kernel invocation.
+        let iterations = self.config.benchmark_iterations.max(1);
+        let mut timings = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
             let start = Instant::now();
-            self.execute_kernel(params, m, n, k)?;
+            executor.execute(params, m, n, k)?;
             timings.push(start.elapsed());
         }
 
@@ -457,18 +628,24 @@ impl KernelTuner {
         })
     }
 
-    /// Execute kernel with given parameters (mock implementation)
-    fn execute_kernel(
+    /// Measure one parameter set against the installed executor.
+    ///
+    /// Returns the mean wall-clock time and its standard deviation over
+    /// [`TuningConfig::benchmark_iterations`] runs.
+    pub fn measure(
         &self,
-        _params: &KernelParams,
-        _m: usize,
-        _n: usize,
-        _k: usize,
-    ) -> Result<()> {
-        // This would execute the actual kernel
-        // For now, simulate execution time based on parameters
-        std::thread::sleep(Duration::from_micros(10));
-        Ok(())
+        params: &KernelParams,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(Duration, f64)> {
+        let executor = self.executor.as_ref().ok_or_else(|| {
+            TrustformersError::not_implemented(
+                "no kernel executor is wired up; nothing can be measured".to_string(),
+            )
+        })?;
+        let result = self.benchmark_config(executor.as_ref(), params, m, n, k)?;
+        Ok((result.mean_time, result.std_dev))
     }
 
     /// Compute grid size for given problem and block size
@@ -499,7 +676,12 @@ impl KernelTuner {
         }
     }
 
-    /// Tune parameters for a generic operation
+    /// Heuristic parameters for a generic operation.
+    ///
+    /// No benchmark is run for non-matmul operations (this crate has no
+    /// executor for them), so the result is *not* written into the tuning
+    /// cache: the cache only ever holds measured configurations.
+    /// `estimated_time_us` stays `0.0` because nothing was measured.
     pub fn tune_operation(
         &mut self,
         operation: Operation,
@@ -519,7 +701,7 @@ impl KernelTuner {
         // Use heuristic defaults for non-matmul operations
         let block_size = self.platform.suggested_block_size(operation);
 
-        let params = KernelParams {
+        Ok(KernelParams {
             operation,
             block_size,
             threads_per_block: 256,
@@ -531,12 +713,7 @@ impl KernelTuner {
             vector_width: 4,
             grid_size: (1, 1, 1),
             estimated_time_us: 0.0,
-        };
-
-        self.cache.insert(key, params.clone());
-        self.cache_dirty = true;
-
-        Ok(params)
+        })
     }
 
     /// Load tuning cache from disk
@@ -646,26 +823,34 @@ pub struct TuningStatistics {
     pub operations_tuned: Vec<Operation>,
 }
 
-/// Global kernel tuner instance
-static mut GLOBAL_TUNER: Option<KernelTuner> = None;
-static TUNER_INIT: std::sync::Once = std::sync::Once::new();
+/// Global kernel tuner instance.
+///
+/// A `OnceLock<Mutex<_>>` rather than a `static mut`: the previous accessor
+/// handed out aliasing `&'static mut` references from safe code, which is
+/// undefined behaviour and a data race on the tuning cache.
+static GLOBAL_TUNER: OnceLock<Mutex<KernelTuner>> = OnceLock::new();
 
-/// Get or initialize the global kernel tuner
-#[allow(static_mut_refs)]
-pub fn get_kernel_tuner() -> &'static mut KernelTuner {
-    unsafe {
-        TUNER_INIT.call_once(|| {
-            if let Ok(tuner) = KernelTuner::new(TuningConfig::default()) {
-                GLOBAL_TUNER = Some(tuner);
-            }
-        });
-
-        // reason: `call_once` above initialises the global singleton with a
-        // default config that does not fail in practice; the return type
-        // (`&'static mut`) leaves no fallible alternative for this accessor.
-        #[allow(clippy::expect_used)]
-        GLOBAL_TUNER.as_mut().expect("GLOBAL_TUNER is initialised by call_once above")
+/// Get the global kernel tuner, locking it for exclusive use.
+///
+/// Returns an error if the tuner could not be constructed (for example because
+/// the platform could not be detected) or if the lock is poisoned.
+pub fn get_kernel_tuner() -> Result<MutexGuard<'static, KernelTuner>> {
+    // `OnceLock::get_or_init` cannot fail, so construct fallibly first and
+    // store only a successfully built tuner.
+    if GLOBAL_TUNER.get().is_none() {
+        let tuner = KernelTuner::new(TuningConfig::default())?;
+        // A concurrent initialiser may win the race; that is fine, the loser's
+        // tuner is simply dropped.
+        let _ = GLOBAL_TUNER.set(Mutex::new(tuner));
     }
+
+    let tuner = GLOBAL_TUNER.get().ok_or_else(|| {
+        TrustformersError::runtime_error("global kernel tuner is not initialised".to_string())
+    })?;
+
+    tuner.lock().map_err(|error| {
+        TrustformersError::lock_error(format!("global kernel tuner mutex poisoned: {}", error))
+    })
 }
 
 #[cfg(test)]
@@ -708,19 +893,30 @@ mod tests {
         Ok(())
     }
 
+    fn test_cache_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "trustformers_kernel_cache_{}_{}",
+            name,
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn test_cache_persistence() -> Result<()> {
-        let temp_dir = std::env::temp_dir().join("kernel_cache_test");
+        let temp_dir = test_cache_dir("persistence");
+        let _ = std::fs::remove_dir_all(&temp_dir);
 
         {
             let mut tuner = KernelTuner::new(TuningConfig {
                 cache_dir: Some(temp_dir.clone()),
                 enable_tuning: true,
                 max_tuning_time_secs: 1.0, // Short tuning time for tests
+                warmup_iterations: 1,
+                benchmark_iterations: 2,
                 ..Default::default()
             })?;
 
-            let _ = tuner.tune_matmul(128, 128, 128)?;
+            let _ = tuner.tune_matmul(48, 48, 48)?;
             assert!(
                 !tuner.cache.is_empty(),
                 "Cache should be populated after tuning"
@@ -744,14 +940,128 @@ mod tests {
         Ok(())
     }
 
+    /// Regression test: `execute_kernel` used to `thread::sleep(10us)` and
+    /// ignore every parameter, so all configurations timed identically and the
+    /// "optimal" configuration was scheduler jitter. Timing must now reflect
+    /// the actual amount of work.
+    #[test]
+    fn test_tuning_measures_real_kernel_work() -> Result<()> {
+        let tuner = KernelTuner::new(TuningConfig {
+            cache_dir: None,
+            enable_tuning: true,
+            warmup_iterations: 1,
+            benchmark_iterations: 3,
+            ..Default::default()
+        })?;
+
+        assert_eq!(tuner.executor_name(), Some("cpu_blocked_matmul_f32"));
+
+        let params = KernelParams {
+            operation: Operation::MatMul,
+            block_size: (32, 32, 32),
+            ..Default::default()
+        };
+
+        let (small_time, _) = tuner.measure(&params, 16, 16, 16)?;
+        let (large_time, _) = tuner.measure(&params, 96, 96, 96)?;
+
+        // 96^3 is 216x the work of 16^3. A fixed sleep would make these equal.
+        assert!(
+            large_time > small_time * 4,
+            "a 216x larger GEMM must take measurably longer: {:?} vs {:?}",
+            large_time,
+            small_time
+        );
+        assert!(
+            small_time < Duration::from_millis(50),
+            "a 16x16x16 GEMM must not take the old fixed 10us sleep path"
+        );
+
+        Ok(())
+    }
+
+    /// Regression test: without a kernel to time, the tuner must refuse rather
+    /// than cache a configuration ranked on nothing.
+    #[test]
+    fn test_tuning_without_executor_is_refused() -> Result<()> {
+        let mut tuner = KernelTuner::new(TuningConfig {
+            cache_dir: None,
+            enable_tuning: true,
+            ..Default::default()
+        })?;
+        tuner.executor = None;
+
+        let error = tuner.tune_matmul(32, 32, 32).expect_err("must not tune without an executor");
+        assert!(
+            error.to_string().contains("no kernel executor"),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            tuner.cache.is_empty(),
+            "nothing may be cached when nothing was measured"
+        );
+
+        Ok(())
+    }
+
+    /// Regression test: `tune_operation` used to cache an unmeasured heuristic
+    /// as if it were a tuning result.
     #[test]
     fn test_operation_tuning() -> Result<()> {
-        let mut tuner = KernelTuner::new(TuningConfig::default())?;
+        let mut tuner = KernelTuner::new(TuningConfig {
+            cache_dir: None,
+            ..Default::default()
+        })?;
 
         let params = tuner.tune_operation(Operation::Softmax, &[1024, 512])?;
 
         assert_eq!(params.operation, Operation::Softmax);
+        assert_eq!(
+            params.estimated_time_us, 0.0,
+            "no measurement was taken, so no time may be reported"
+        );
+        assert!(
+            tuner.cache.is_empty(),
+            "heuristic parameters must not enter the measured-configuration cache"
+        );
 
+        Ok(())
+    }
+
+    /// Regression test: `get_kernel_tuner` used to hand out `&'static mut` from
+    /// a `static mut`. It must now hand out a guarded, shareable handle.
+    #[test]
+    fn test_global_tuner_is_mutex_guarded() -> Result<()> {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let mut tuner = get_kernel_tuner().expect("global tuner");
+                    let params = tuner.tune_operation(Operation::LayerNorm, &[128])?;
+                    assert_eq!(params.operation, Operation::LayerNorm);
+                    Ok::<(), TrustformersError>(())
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().map_err(|_| {
+                TrustformersError::runtime_error("tuner thread panicked".to_string())
+            })??;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_platform_detection_reports_no_invented_specs() -> Result<()> {
+        let platform = PlatformInfo::detect()?;
+        assert!(
+            platform.memory_bandwidth.is_none(),
+            "memory bandwidth is not queryable and must not be invented"
+        );
+        assert!(platform.peak_tflops.is_none());
+        assert!(platform.total_memory > 0, "total memory comes from sysinfo");
         Ok(())
     }
 
@@ -762,8 +1072,8 @@ mod tests {
             device_name: "Test GPU".to_string(),
             compute_units: 80,
             total_memory: 16 * 1024 * 1024 * 1024,
-            memory_bandwidth: 600.0,
-            peak_tflops: 40.0,
+            memory_bandwidth: None,
+            peak_tflops: None,
             cache_sizes: vec![128 * 1024],
             warp_size: 32,
             max_threads_per_block: 1024,

@@ -5,45 +5,68 @@ use crate::batching::{
     config::{BatchingConfig, Priority},
 };
 use anyhow::Result;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+/// Map an optimization target onto the scheduling policy that implements it.
+fn policy_for_target(target: crate::batching::config::OptimizationTarget) -> SchedulingPolicy {
+    match target {
+        crate::batching::config::OptimizationTarget::Throughput => SchedulingPolicy::Throughput,
+        crate::batching::config::OptimizationTarget::Latency => SchedulingPolicy::Latency,
+        crate::batching::config::OptimizationTarget::Balanced => SchedulingPolicy::Balanced,
+        crate::batching::config::OptimizationTarget::Cost => SchedulingPolicy::Cost,
+    }
+}
+
 /// Batch scheduler that manages batch execution order
 pub struct BatchScheduler {
-    config: BatchingConfig,
-    policy: SchedulingPolicy,
+    /// Live configuration. Held behind a synchronous lock so that
+    /// [`BatchScheduler::update_config`] genuinely takes effect for subsequent
+    /// scheduling decisions instead of being discarded.
+    config: SyncRwLock<BatchingConfig>,
+    policy: SyncRwLock<SchedulingPolicy>,
     queue: Arc<Mutex<PriorityQueue<ScheduledBatch>>>,
-    stats: Arc<Mutex<SchedulerStats>>,
+    /// Live counters. A synchronous lock keeps [`BatchScheduler::get_stats`]
+    /// callable from non-async contexts while still returning the real numbers.
+    stats: Arc<SyncMutex<SchedulerStats>>,
 }
 
 impl BatchScheduler {
     pub fn new(config: BatchingConfig) -> Self {
-        let policy = match config.optimization_target {
-            crate::batching::config::OptimizationTarget::Throughput => SchedulingPolicy::Throughput,
-            crate::batching::config::OptimizationTarget::Latency => SchedulingPolicy::Latency,
-            crate::batching::config::OptimizationTarget::Balanced => SchedulingPolicy::Balanced,
-            crate::batching::config::OptimizationTarget::Cost => SchedulingPolicy::Cost,
-        };
+        let policy = policy_for_target(config.optimization_target);
 
         Self {
-            config,
-            policy,
+            config: SyncRwLock::new(config),
+            policy: SyncRwLock::new(policy),
             queue: Arc::new(Mutex::new(PriorityQueue::new())),
-            stats: Arc::new(Mutex::new(SchedulerStats::default())),
+            stats: Arc::new(SyncMutex::new(SchedulerStats::default())),
         }
+    }
+
+    /// Current scheduling policy (reflects the latest `update_config`).
+    pub fn policy(&self) -> SchedulingPolicy {
+        *self.policy.read()
+    }
+
+    /// Snapshot of the currently active configuration.
+    pub fn config(&self) -> BatchingConfig {
+        self.config.read().clone()
     }
 
     /// Schedule a batch for execution
     pub async fn schedule_batch(&self, batch: RequestBatch) -> Result<()> {
-        let scheduled = ScheduledBatch::new(batch, &self.policy);
+        let policy = self.policy();
+        let scheduled = ScheduledBatch::new(batch, &policy);
 
         let mut queue = self.queue.lock().await;
         queue.push(scheduled);
+        drop(queue);
 
-        self.stats.lock().await.record_scheduled();
+        self.stats.lock().record_scheduled();
 
         Ok(())
     }
@@ -53,7 +76,9 @@ impl BatchScheduler {
         let mut queue = self.queue.lock().await;
 
         if let Some(scheduled) = queue.pop() {
-            self.stats.lock().await.record_dispatched();
+            drop(queue);
+            let queue_time_ms = scheduled.scheduled_at.elapsed().as_secs_f64() * 1000.0;
+            self.stats.lock().record_dispatched(queue_time_ms);
             Some(scheduled.batch)
         } else {
             None
@@ -74,20 +99,31 @@ impl BatchScheduler {
         for batch in batches {
             queue.push(ScheduledBatch::new(batch, &policy));
         }
+        drop(queue);
+
+        *self.policy.write() = policy;
 
         Ok(())
     }
 
-    /// Update scheduler configuration
-    pub fn update_config(&self, _config: BatchingConfig) -> Result<()> {
-        // In practice, would update internal config
+    /// Update scheduler configuration.
+    ///
+    /// The new configuration is stored and takes effect for every subsequent
+    /// scheduling decision; the derived scheduling policy is recomputed from the
+    /// new optimization target.
+    pub fn update_config(&self, config: BatchingConfig) -> Result<()> {
+        let new_policy = policy_for_target(config.optimization_target);
+        *self.config.write() = config;
+        *self.policy.write() = new_policy;
         Ok(())
     }
 
-    /// Get scheduler statistics
+    /// Get scheduler statistics.
+    ///
+    /// Returns the real accumulated counters maintained by `schedule_batch` /
+    /// `get_next_batch`.
     pub fn get_stats(&self) -> SchedulerStats {
-        // Would need async access
-        SchedulerStats::default()
+        self.stats.lock().clone()
     }
 
     /// Get queue depth
@@ -341,8 +377,11 @@ impl SchedulerStats {
         self.total_scheduled += 1;
     }
 
-    fn record_dispatched(&mut self) {
+    /// Record a dispatch together with the time the batch actually spent queued.
+    fn record_dispatched(&mut self, queue_time_ms: f64) {
         self.total_dispatched += 1;
+        let n = self.total_dispatched as f64;
+        self.avg_queue_time_ms = (self.avg_queue_time_ms * (n - 1.0) + queue_time_ms) / n;
     }
 }
 
@@ -560,8 +599,6 @@ pub struct SystemLoadMonitor {
     cpu_usage: f64,
     memory_usage: f64,
     gpu_usage: f64,
-    queue_depths: HashMap<AdvancedPriority, usize>,
-    throughput_history: VecDeque<(Instant, f64)>,
     last_update: Instant,
 }
 
@@ -577,8 +614,6 @@ impl SystemLoadMonitor {
             cpu_usage: 0.0,
             memory_usage: 0.0,
             gpu_usage: 0.0,
-            queue_depths: HashMap::new(),
-            throughput_history: VecDeque::new(),
             last_update: Instant::now(),
         }
     }

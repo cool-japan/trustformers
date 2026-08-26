@@ -1,124 +1,367 @@
-# TrustformeRS Cargo Deny Configuration
-# This file configures cargo-deny for dependency checking
+# TrustformeRS `cargo-deny` configuration
+#
+# Schema: cargo-deny 0.18/0.19 (the 0.13-era keys `[advisories] vulnerability`,
+# `notice`, `[licenses] unlicensed`/`default`/`allow-osi-fsf-free` and
+# `[bans] deprecated`/`denied` were removed upstream and make the whole file
+# fail to deserialize, which silently disabled every gate below).
+#
+# Run all gates:      cargo deny check
+# Run the ban gate:   cargo deny check bans      <- COOLJAPAN policy gate
+#
+# The ban list below is the COOLJAPAN Pure-Rust policy: no C/C++/Fortran in the
+# default dependency tree, and the oxi* ecosystem crates in place of the classic
+# C-backed (or ecosystem-duplicating) crates. Every exception is a `wrappers`
+# entry naming the exact parent crate that pulls the banned crate in, together
+# with the reason it is currently unavoidable.
 
-# The lint level for crates that have security vulnerabilities
+# ---------------------------------------------------------------------------
+# Dependency graph construction
+# ---------------------------------------------------------------------------
+[graph]
+# Resolve every feature of every workspace member. The policy is about what a
+# consumer *can* pull in, not only what `default` happens to enable, so the
+# opt-in backends (swagger-ui, lambda, visual, gif, cuda, metal, ...)
+# are all part of the graph that the ban list is evaluated against.
+all-features = true
+# `targets = []` (the default) keeps every platform in the graph, so the
+# iOS/Android/Windows-only dependency blocks are audited too.
+targets = []
+# Dev-dependencies stay in the graph: criterion's `html_reports` -> plotters ->
+# image codec stack is exactly the kind of transitive C-adjacent pull we want
+# visible.
+exclude-dev = false
+# NOTE for anyone reading a failure: `all-features = true` + `exclude-dev = false`
+# means these gates are evaluated over a graph that is strictly wider than any
+# real build (every opt-in backend plus every dev-dependency). A finding here is
+# a policy signal about what a consumer *could* pull in, not proof that the
+# default `cargo build` contains the crate.
+
+# ---------------------------------------------------------------------------
+# RustSec advisory database
+# ---------------------------------------------------------------------------
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+# "workspace" = flag unmaintained crates that this workspace depends on
+# directly; transitive-only unmaintained crates are not actionable here.
+#
+# This is a real narrowing of the gate, so record what it costs rather than
+# leaving the reader to assume it costs nothing. Measured 2026-08-24 by running
+# `cargo deny check advisories` against a copy of this file with
+# `unmaintained = "all"`: exactly three extra findings appear, and every one of
+# them is transitive-only — no workspace member declares any of these crates.
+#   * RUSTSEC-2024-0436  paste 1.0.15      <- metal, pulp, rav1e, simba, tokenizers
+#   * RUSTSEC-2025-0058  custom_derive     <- conv
+#   * RUSTSEC-2026-0192  ttf-parser 0.25.1 <- owned_ttf_parser <- ab_glyph
+#                                             <- plotters <- criterion (dev-dep)
+# None has a safe upgrade, and none is reachable by a manifest change here.
+#
+# Provenance, because "workspace" narrowing a gate to make a finding pass would
+# be a disguised ignore: this value was NOT chosen to silence `paste`. It was set
+# in commit 78e814fd (2026-08-18), six days before the 2026-08-24 advisory work
+# that dropped the direct `paste` dev-dependency, and its predecessor value,
+# `unmaintained = "warn"`, is not a legal value in cargo-deny 0.18+ at all
+# (`error[unexpected-value]: expected '["all", "workspace", "transitive",
+# "none"]'`, which failed the whole file to deserialize and so disabled every
+# gate in it). The change was a forced schema migration, not a weakening.
+unmaintained = "workspace"
+yanked = "deny"
 ignore = [
-    # Add any advisory IDs to ignore here
-    # Example: "RUSTSEC-2020-0001",
+    # Add RUSTSEC ids here ONLY with a comment stating why the exposure does not
+    # apply and who owns the removal. Never add one to silence a real finding.
+    #
+    # ---------------------------------------------------------------------
+    # RUSTSEC-2023-0071 — "Marvin Attack" timing side-channel in `rsa 0.9.10`.
+    # Accepted 2026-08-24. This is a REAL, UNPATCHED vulnerability in a crate
+    # that is genuinely in the tree; it is ignored because there is no pure-Rust
+    # way to remove it, NOT because the exposure has been ruled out.
+    #
+    # Chain:  rsa 0.9.10  <-  jsonwebtoken 11.0.0  <-  trustformers-serve
+    #
+    # Why it cannot be fixed:
+    #  * Upstream RustSec says "No safe upgrade is available!"; the RustCrypto
+    #    RSA constant-time rewrite (RustCrypto/RSA#626) has not shipped.
+    #  * `jsonwebtoken` requires exactly one crypto backend. Checked against the
+    #    latest release (11.0.0, published 2026-07-24) rather than assumed: its
+    #    feature table is
+    #      rust_crypto = ["ed25519-dalek", "hmac", "p256", "p384", "rand", "rsa", "sha2"]
+    #      aws_lc_rs   = ["aws-lc-rs"]
+    #    `rsa` is not separable from `rust_crypto` — there is no HMAC-only or
+    #    HMAC+EdDSA-only feature — and the alternative backend, `aws_lc_rs`,
+    #    links AWS-LC (C/C++, BoringSSL-derived) and is banned by the COOLJAPAN
+    #    Pure-Rust policy. So the choice is "keep `rsa`" or "keep a C library".
+    #
+    # Honest scope of the exposure (do NOT read this as "unreachable"):
+    # `trustformers-serve`'s `impl Default for AuthConfig` sets
+    # `algorithm: Algorithm::HS256` (`src/auth/authconfig_traits.rs`, line 22 as
+    # of 2026-08-24), and every JWT the server issues and verifies today is
+    # HMAC-SHA256, which never enters `rsa`. But `AuthConfig::algorithm`
+    # (`src/auth/types.rs`, line 365 as of 2026-08-24) is a `pub` field of type
+    # `jsonwebtoken::Algorithm`, so an embedder can set RS256/RS384/RS512/PS* and
+    # reach the vulnerable code path. Exploiting it additionally requires a
+    # network-observable signing or decryption oracle under attacker-chosen
+    # input.
+    #
+    # Both citations name the symbol as well as the line because `src/auth/` is
+    # not owned by whoever maintains this file; re-locate with
+    # `grep -n 'Algorithm::HS256' trustformers-serve/src/auth/authconfig_traits.rs`
+    # and `grep -n 'pub algorithm' trustformers-serve/src/auth/types.rs` if the
+    # lines have drifted. Verified accurate on 2026-08-24.
+    #
+    # Owned removal path (the real fix, not a mitigation): drop `jsonwebtoken`
+    # and implement HS256/HS384/HS512 directly on the RustCrypto crates
+    # `trustformers-serve` already depends on — `hmac`, `sha2`, `base64`,
+    # `subtle` (constant-time tag compare) and `serde_json`. That deletes `rsa`
+    # from the tree outright and narrows the public API to the algorithms the
+    # server actually implements. It is a source change in `src/auth/`.
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 <- jsonwebtoken 11 <- trustformers-serve; `rust_crypto` does not separate `rsa`, and the only other backend (`aws_lc_rs`) is banned C/C++ FFI. Accepted 2026-08-24; removal = replace jsonwebtoken with a native HMAC-only JWT implementation in src/auth/." },
 ]
 
-# Lint level for licenses
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
 [licenses]
-# The lint level for crates which do not have a detectable license
-unlicensed = "deny"
-# Lint level for crates with multiple versions with different licenses
-allow-osi-fsf-free = "both"
-# Lint level for licenses not explicitly allowed
-default = "deny"
-# The confidence threshold for detecting licenses from license text
-confidence-threshold = 0.8
-
-# List of allowed licenses
+# Anything not listed here is denied (that is the cargo-deny 0.18+ default, the
+# old explicit `default = "deny"` key no longer exists).
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
     "MPL-2.0",
     "BSL-1.0",
     "Unlicense",
     "Zlib",
     "0BSD",
-    "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
+confidence-threshold = 0.8
 
-# List of denied licenses
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1", 
-    "LGPL-3.0",
-    "AGPL-3.0",
-    "BUSL-1.1",
-]
+# REMOVED 2026-08-24: `Unicode-DFS-2016` and `OpenSSL`.
+#
+# Both were reported by `cargo deny check licenses` as
+# `warning[license-not-encountered]` — no crate in the graph resolves to either,
+# and this graph is the widest one the repository can produce (`all-features =
+# true`, `targets = []`, `exclude-dev = false`), so "not encountered here" means
+# "not reachable at all". `Unicode-DFS-2016` was superseded upstream by
+# `Unicode-3.0`, which is still allowed above. `OpenSSL` existed only to satisfy
+# the `[[licenses.clarify]]` entry for `ring` that was deleted in the same edit
+# — see the note where that entry used to be.
+#
+# Re-add either one only together with the crate that needs it and a line saying
+# which crate that is.
 
-# Clarify ambiguous license specifications
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 },
-]
-
-# Exceptions for specific crates
+# Per-crate exceptions. Each one names a permissive license that is fine for this
+# specific dependency but is deliberately NOT added to the global allow list.
 [[licenses.exceptions]]
-# Example: Allow a specific crate with GPL license
-# name = "some-gpl-crate"
-# allow = ["GPL-3.0"]
+# libfuzzer-sys: "(MIT OR Apache-2.0) AND NCSA" — NCSA is the permissive
+# University of Illinois/NCSA license covering the bundled libFuzzer sources.
+# Reached only through image -> ravif -> rav1e (opt-in `vision`/`visual`).
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
 
+[[licenses.exceptions]]
+# minicbor: Blue Oak Model License 1.0.0 (OSI-approved permissive). Pulled by the
+# AWS SDK's CBOR wire codec (aws-smithy-cbor -> aws-sdk-cloudwatch).
+crate = "minicbor"
+allow = ["BlueOak-1.0.0"]
+
+# REMOVED 2026-08-24: the `[[licenses.clarify]]` entry for `ring`
+# (`expression = "MIT AND ISC AND OpenSSL"`, `license-files = [{ path =
+# "LICENSE", hash = 0xbd0eed23 }]`), whose comment claimed that "`ring` ships a
+# composite license that the SPDX scanner cannot infer from the file alone".
+#
+# That claim is false against the version actually in the tree, and the entry was
+# inert. Both were measured, not assumed:
+#  * `ring 0.17.14`'s own manifest declares `license = "Apache-2.0 AND ISC"` — a
+#    valid SPDX expression, so there is nothing for a clarification to resolve,
+#    and both halves are on the allow list above.
+#  * Rewriting the clarification's expression to `"MIT AND ISC AND CDDL-1.0"`
+#    (CDDL-1.0 being deliberately absent from the allow list) and re-running
+#    `cargo deny check licenses -c <probe>` still printed `licenses ok`. Had the
+#    entry been applied, `ring` would have been rejected. cargo-deny 0.19 takes
+#    the crate's declared expression in preference to it.
+#
+# So the green `licenses` gate already rested on `Apache-2.0 AND ISC`, both
+# before and after this deletion. If a future `ring` (or any other crate) ever
+# ships without a parseable expression, add a clarification back — with the
+# hash of the LICENSE file as it exists then, and a re-run showing it bites.
+
+# ---------------------------------------------------------------------------
+# Banned crates (COOLJAPAN Pure-Rust / oxi* ecosystem policy)
+# ---------------------------------------------------------------------------
 [bans]
-# Lint level for when multiple versions of a crate are detected
 multiple-versions = "warn"
-# Lint level for when a crate marked as 'deprecated' is used
-deprecated = "warn"
-# Lint level for crates which are not allowed
-denied = "deny"
-# Allow certain wildcard dependencies
-wildcards = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 
-# Deny specific crates
 deny = [
-    # Example: { name = "openssl", reason = "Use rustls instead" },
+    # -- BLAS / LAPACK ------------------------------------------------------
+    # Every one of these compiles or links Fortran/C BLAS. `oxiblas` is the
+    # pure-Rust replacement and is already the workspace's BLAS provider.
+    { crate = "openblas", use-instead = "oxiblas", reason = "FFI bindings to the C/Fortran OpenBLAS library" },
+    { crate = "openblas-src", use-instead = "oxiblas", reason = "C/Fortran OpenBLAS build; COOLJAPAN uses the pure-Rust oxiblas stack" },
+    { crate = "openblas-build", use-instead = "oxiblas", reason = "build driver for the C/Fortran OpenBLAS sources" },
+    { crate = "blas-src", use-instead = "oxiblas", reason = "selects a C/Fortran BLAS backend; oxiblas provides BLAS in pure Rust" },
+    { crate = "blas-sys", use-instead = "oxiblas-blas", reason = "raw FFI bindings to a C BLAS" },
+    { crate = "lapack-src", use-instead = "oxiblas", reason = "selects a C/Fortran LAPACK backend" },
+    { crate = "lapack-sys", use-instead = "oxiblas", reason = "raw FFI bindings to a C/Fortran LAPACK" },
+    { crate = "netlib-src", use-instead = "oxiblas", reason = "builds reference Fortran BLAS/LAPACK" },
+    { crate = "intel-mkl-src", use-instead = "oxiblas", reason = "downloads and links Intel MKL (closed-source C)" },
+    { crate = "accelerate-src", use-instead = "oxiblas", reason = "links Apple's Accelerate framework (C); macOS-only escape hatch is not the default path" },
+
+    # -- Serialization ------------------------------------------------------
+    { crate = "bincode", use-instead = "oxicode", reason = "COOLJAPAN ecosystem replacement (oxicode) is the mandated binary codec" },
+
+    # -- FFT ----------------------------------------------------------------
+    { crate = "rustfft", use-instead = "oxifft", reason = "COOLJAPAN ecosystem replacement (oxifft)" },
+
+    # -- SQLite -------------------------------------------------------------
+    { crate = "rusqlite", use-instead = "oxisql-sqlite-compat", reason = "wraps libsqlite3 (C); oxisql-sqlite-compat is the pure-Rust SQLite-format backend" },
+    { crate = "libsqlite3-sys", use-instead = "oxisql-sqlite-compat", reason = "vendors/links the SQLite C amalgamation" },
+
+    # -- SMT solver ---------------------------------------------------------
+    { crate = "z3", use-instead = "oxiz", reason = "links the Z3 C++ solver; oxiz is the pure-Rust replacement" },
+    { crate = "z3-sys", use-instead = "oxiz", reason = "raw FFI bindings to the Z3 C++ solver" },
+
+    # -- Compression / archives (oxiarc-* family) ---------------------------
+    # `flate2` is never used first-hand; it is only reachable through third-party
+    # crates we do not control. Each wrapper below is a parent that is currently
+    # unavoidable, with the reason it cannot be dropped. Any OTHER parent is a
+    # real policy violation and is intentionally left unwrapped so this gate
+    # reports it; today there is none — see the status note under the list.
+    { crate = "flate2", use-instead = "oxiarc-deflate", wrappers = [
+        "png",   # image-rs PNG decoder (image -> png), opt-in `vision`/`visual`
+        "tiff",  # image-rs TIFF decoder (image -> tiff), opt-in `vision`/`visual`
+        "zip",   # utoipa-swagger-ui build script (opt-in `swagger-ui` feature)
+        # The AWS SDK compresses request bodies itself. trustformers-serve has a
+        # real, used CloudWatch metrics integration (29 call sites in
+        # src/), so this edge cannot be removed without dropping that feature.
+        "aws-sdk-cloudwatch",
+        "aws-smithy-compression",
+    ], reason = "C-free but ecosystem-duplicating DEFLATE; COOLJAPAN uses oxiarc-deflate" },
+    { crate = "miniz_oxide", use-instead = "oxiarc-deflate", wrappers = [
+        "flate2", # flate2's own pure-Rust backend
+        "png",    # image-rs PNG decoder
+        "exr",    # image-rs OpenEXR decoder (image -> exr)
+    ], reason = "DEFLATE implementation behind flate2; COOLJAPAN uses oxiarc-deflate" },
+    { crate = "zip", use-instead = "oxiarc-archive", wrappers = [
+        "utoipa-swagger-ui", # build-dependency that unpacks the bundled Swagger UI
+                             # assets; reachable only via the opt-in `swagger-ui`
+                             # feature of trustformers-serve.
+    ], reason = "COOLJAPAN uses oxiarc-archive for ZIP containers" },
+    { crate = "zstd", use-instead = "oxiarc-zstd", reason = "wraps the zstd C library" },
+    { crate = "zstd-sys", use-instead = "oxiarc-zstd", reason = "builds/links the zstd C library" },
+    { crate = "zstd-safe", use-instead = "oxiarc-zstd", reason = "safe wrapper over zstd-sys (C)" },
+    { crate = "bzip2", use-instead = "oxiarc-archive", reason = "wraps libbz2 (C)" },
+    { crate = "bzip2-sys", use-instead = "oxiarc-archive", reason = "builds/links libbz2 (C)" },
+    { crate = "lz4", use-instead = "oxiarc-lz4", reason = "wraps the lz4 C library" },
+    { crate = "lz4-sys", use-instead = "oxiarc-lz4", reason = "builds/links the lz4 C library" },
+    { crate = "lz4_flex", use-instead = "oxiarc-lz4", reason = "ecosystem-duplicating LZ4; COOLJAPAN uses oxiarc-lz4" },
+    { crate = "tar", use-instead = "oxiarc-archive", reason = "COOLJAPAN uses oxiarc-archive for TAR containers" },
+    { crate = "snap", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Snappy; COOLJAPAN uses the oxiarc-* family" },
+    # No `wrappers` any more: as of 2026-08-24 neither `brotli` nor
+    # `brotli-decompressor` is in the graph at all. Their only parent was
+    # `lambda-web`, an optional dependency behind `trustformers-serve`'s `lambda`
+    # feature; both the feature and the dependency were deleted because nothing in
+    # that crate ever referenced `lambda_web` or `#[cfg(feature = "lambda")]`.
+    # These entries are kept unwrapped so the gate reports the next parent that
+    # appears, instead of silently permitting one. The workspace's own Brotli is
+    # `oxiarc-brotli`, which is not this crate and is not banned.
+    { crate = "brotli", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
+    { crate = "brotli-decompressor", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
 ]
 
-# Skip certain crates when checking for duplicates
-skip = [
-    # Example: { name = "winapi", version = "0.2.8" },
-]
+# STATUS OF THE `flate2` GATE (verified with `cargo deny check bans` -> `bans ok`)
+#
+# This block used to record a KNOWN OPEN VIOLATION: `flate2` reached the default
+# build through `compression-codecs <- async-compression <- tower-http`, a chain
+# created by `azure_core`/`azure_identity`'s `reqwest_gzip` / `reqwest_deflate`
+# features. Those four Azure crates had zero references in
+# `trustformers-serve/src` and have since been dropped, and with them the whole
+# chain: `cargo tree -i compression-codecs --all-features` now reports that no
+# package matches, and `cargo deny check bans` reports `bans ok`.
+#
+# Every remaining parent of `flate2` is a wrapper listed above. Re-verify with:
+#
+#   cargo tree -i flate2 --all-features --depth 1
+#
+# which today prints exactly `zip` (utoipa-swagger-ui build script),
+# `aws-sdk-cloudwatch`, `aws-smithy-compression`, `png` and `tiff`.
+#
+# If a NEW unwrapped parent ever appears, do not add a wrapper reflexively: a
+# wrapper entry is a statement that the edge is unavoidable, so it needs the
+# same kind of evidence as the paragraph above.
 
-# Similarly named crates that are allowed to coexist
-allow = [
-    # Example: { name = "num-traits", version = "0.1" },
-]
+# KNOWN OPEN PURE-RUST GAP: `aws-lc-sys` (2026-08-24)
+#
+# `aws-lc-rs 1.18.0` -> `aws-lc-sys 0.44.0` is in the default dependency tree.
+# `aws-lc-sys` builds AWS-LC, a BoringSSL-derived C/C++ library — a genuine
+# COOLJAPAN Pure-Rust policy violation. It is NOT in the `deny` list above,
+# deliberately: adding it would turn `cargo deny check bans` red with no
+# in-tree remedy, and this file's rule is that a `deny` entry states a policy
+# that can actually be enforced today.
+#
+# It arrives through `trustformers-serve`'s AWS SDK clients:
+#   aws-sdk-*/default-https-client -> aws-smithy-runtime/default-https-client
+#                                  -> aws-smithy-http-client/rustls-aws-lc
+#                                  -> rustls 0.23 (aws_lc_rs provider)
+#
+# There is no manifest-only escape, and that was measured, not assumed:
+# `aws-smithy-http-client` does expose a pure-Rust `rustls-ring` feature, but
+# `aws-smithy-runtime` has no feature that forwards to it, and
+# `aws_smithy_runtime::client::http::default_https_client` hardcodes
+# `tls::rustls_provider::CryptoMode::AwsLc`. Do not re-attempt a feature-flag
+# fix.
+#
+# Re-verified independently 2026-08-24 against the exact versions the lockfile
+# resolves, by reading the vendored sources rather than the docs:
+#   aws-smithy-runtime 1.13.1  Cargo.toml
+#     default-https-client = ["aws-smithy-http-client?/rustls-aws-lc", ...]
+#     tls-rustls           = ["aws-smithy-http-client?/legacy-rustls-ring", ...]
+#     ^ those are its ONLY two TLS features; neither reaches `rustls-ring`, and
+#       `tls-rustls` is the one that drags the obsolete rustls-0.21 stack back in.
+#   aws-smithy-runtime 1.13.1  src/client/http.rs:92
+#     tls::rustls_provider::CryptoMode::AwsLc     <- hardcoded, not a parameter
+#   aws-smithy-http-client 1.3.0  Cargo.toml
+#     rustls-ring = [...]                          <- exists, pure Rust; only a
+#       direct dependency can select it, which is why the remedy below is a
+#       source change and not a feature edit.
+#
+# Closing it requires a source change in `trustformers-serve`: drop
+# `default-https-client`, add a direct
+# `aws-smithy-http-client = { default-features = false, features = ["rustls-ring"] }`
+# dependency, and build the connector explicitly at the three
+# `aws_config::load_defaults` sites (`src/message_queue/sqs.rs`,
+# `src/cloud_providers/sagemaker.rs`, `src/serverless/types.rs`), passing it via
+# `aws_config::defaults(..).http_client(..)`. Removing `default-https-client`
+# without that code change makes every AWS request fail at runtime with
+# "a http_client is required".
+#
+# Note `ring 0.17.14` is already in the tree (via rustls 0.23's other consumers:
+# async-nats, rustls-webpki, tokio-websockets), so the ring provider costs no new
+# dependency — only the wiring above.
 
-# Certain crates that are allowed to have wildcards
-# wildcards = [
-#     { allow = ["example-*"], reason = "Internal crates" },
-# ]
+# Crates allowed to appear at multiple versions (the `multiple-versions` lint is
+# only a warning today; add entries here with a justification when a duplicate
+# is genuinely unavoidable).
+skip = []
+skip-tree = []
 
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
 [sources]
-# Lint level for what to happen when a crate from a git repository is used
-unknown-git = "warn"
-# Lint level for what to happen when a crate from a registry not in the allow list is used
-unknown-registry = "warn"
-# List of allowed registries
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# List of allowed Git repositories  
-allow-git = [
-    # Add any allowed git dependencies here
-    # Example: "https://github.com/rust-lang/cargo",
-]
+allow-git = []
 
 [sources.allow-org]
-# GitHub organizations that are allowed
-github = [
-    # Example: "rust-lang",
-    # Example: "tokio-rs",
-]
-# GitLab organizations that are allowed
-# gitlab = []
-# Bitbucket organizations that are allowed
-# bitbucket = []
+github = []

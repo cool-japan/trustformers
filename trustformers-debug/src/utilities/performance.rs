@@ -1,5 +1,6 @@
 //! Performance monitoring and profiling utilities
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -233,9 +234,17 @@ pub enum BottleneckSeverity {
 /// Memory performance monitoring
 #[derive(Debug)]
 pub struct SystemMemoryProfiler {
-    baseline_memory: usize,
-    peak_memory: usize,
-    checkpoints: HashMap<String, usize>,
+    /// RSS at construction; `None` when the platform gave no reading.
+    baseline_memory: Option<usize>,
+    /// Largest RSS observed across [`SystemMemoryProfiler::checkpoint`] calls;
+    /// `None` until at least one real reading has been taken.
+    peak_memory: Option<usize>,
+    /// Insertion-ordered so the delta chain in
+    /// [`SystemMemoryProfiler::memory_report`] follows the order the caller
+    /// actually took the checkpoints in. With a `HashMap` (the previous type)
+    /// every delta depended on hash-seed iteration order and so varied run to
+    /// run for the same measurements.
+    checkpoints: IndexMap<String, usize>,
 }
 
 impl Default for SystemMemoryProfiler {
@@ -247,32 +256,47 @@ impl Default for SystemMemoryProfiler {
 impl SystemMemoryProfiler {
     pub fn new() -> Self {
         Self {
-            baseline_memory: Self::get_current_memory_usage(),
-            peak_memory: 0,
-            checkpoints: HashMap::new(),
+            baseline_memory: Self::current_memory_usage(),
+            peak_memory: None,
+            checkpoints: IndexMap::new(),
         }
     }
 
+    /// Record this process's current RSS under `name`.
+    ///
+    /// Silently skips the checkpoint when the platform did not return a
+    /// reading, rather than recording a fabricated zero.
     pub fn checkpoint(&mut self, name: &str) {
-        let current_memory = Self::get_current_memory_usage();
+        let Some(current_memory) = Self::current_memory_usage() else {
+            tracing::debug!(
+                checkpoint = name,
+                "no process memory reading available; checkpoint not recorded"
+            );
+            return;
+        };
         self.checkpoints.insert(name.to_string(), current_memory);
 
-        if current_memory > self.peak_memory {
-            self.peak_memory = current_memory;
+        if self.peak_memory.is_none_or(|peak| current_memory > peak) {
+            self.peak_memory = Some(current_memory);
         }
     }
 
     pub fn memory_report(&self) -> MemoryReport {
-        let current_memory = Self::get_current_memory_usage();
-        let memory_growth = current_memory.saturating_sub(self.baseline_memory);
+        let current_memory = Self::current_memory_usage();
+        let memory_growth = match (current_memory, self.baseline_memory) {
+            (Some(current), Some(baseline)) => Some(current as i64 - baseline as i64),
+            _ => None,
+        };
 
-        let mut memory_deltas = HashMap::new();
+        // Deltas are chained through the checkpoints in insertion order, so the
+        // sequence is the real one the caller recorded.
+        let mut memory_deltas = IndexMap::new();
         let mut prev_memory = self.baseline_memory;
-
         for (name, memory) in &self.checkpoints {
-            let delta = memory.saturating_sub(prev_memory) as i64;
-            memory_deltas.insert(name.clone(), delta);
-            prev_memory = *memory;
+            if let Some(prev) = prev_memory {
+                memory_deltas.insert(name.clone(), *memory as i64 - prev as i64);
+            }
+            prev_memory = Some(*memory);
         }
 
         MemoryReport {
@@ -285,22 +309,42 @@ impl SystemMemoryProfiler {
         }
     }
 
-    fn get_current_memory_usage() -> usize {
-        // Simplified memory usage - in practice this would use platform-specific APIs
-        // This is a placeholder implementation
-        0
+    /// Resident set size of THIS process, in bytes, read from `sysinfo`.
+    ///
+    /// Returns `None` when the platform's process table does not list this
+    /// PID (which `sysinfo` supports on every tier-1 target, but not on every
+    /// sandbox). It used to return a hardcoded `0`, which made every field of
+    /// every [`MemoryReport`] a fabricated zero.
+    pub fn current_memory_usage() -> Option<usize> {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|p| p.memory() as usize)
     }
 }
 
 /// Memory profiling report
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryReport {
-    pub baseline_memory: usize,
-    pub current_memory: usize,
-    pub peak_memory: usize,
-    pub memory_growth: usize,
-    pub checkpoints: HashMap<String, usize>,
-    pub memory_deltas: HashMap<String, i64>,
+    /// Process RSS in bytes when the profiler was created.
+    pub baseline_memory: Option<usize>,
+    /// Process RSS in bytes when the report was taken.
+    pub current_memory: Option<usize>,
+    /// Largest RSS seen at any checkpoint.
+    pub peak_memory: Option<usize>,
+    /// `current_memory - baseline_memory`, signed: memory can genuinely fall.
+    /// (It used to be a `usize` produced with `saturating_sub`, so every
+    /// release of memory was reported as zero growth.)
+    pub memory_growth: Option<i64>,
+    /// Real RSS reading recorded at each named checkpoint, in the order the
+    /// checkpoints were taken.
+    pub checkpoints: IndexMap<String, usize>,
+    /// Signed byte delta between consecutive checkpoints, in the same order.
+    pub memory_deltas: IndexMap<String, i64>,
 }
 
 /// Combined performance and memory profiler
@@ -354,4 +398,75 @@ pub struct SystemReport {
     pub memory_report: MemoryReport,
     pub bottleneck_analysis: BottleneckAnalysis,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[cfg(test)]
+mod memory_profiler_tests {
+    use super::*;
+
+    #[test]
+    fn current_memory_usage_reports_a_real_non_zero_rss() {
+        // The old `get_current_memory_usage` returned a hardcoded 0.
+        let reading = SystemMemoryProfiler::current_memory_usage();
+        // On every platform this crate is tested on, `sysinfo` lists our own
+        // PID, so a `None` here is a real regression, not an acceptable
+        // absence.
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        let bytes = reading.expect("sysinfo must list this process on a tier-1 target");
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let Some(bytes) = reading
+        else {
+            return;
+        };
+        assert!(
+            bytes > 0,
+            "a live process must have non-zero RSS, got {bytes} (the old placeholder was 0)"
+        );
+        // A test binary is comfortably over 1 MiB resident; a fabricated
+        // constant would not scale with the real process.
+        assert!(bytes > 1024 * 1024, "implausibly small RSS: {bytes} bytes");
+    }
+
+    #[test]
+    fn checkpoints_and_deltas_follow_the_real_recording_order() {
+        let mut profiler = SystemMemoryProfiler::new();
+        if SystemMemoryProfiler::current_memory_usage().is_none() {
+            return; // no readings available on this platform; nothing to assert
+        }
+        profiler.checkpoint("first");
+        // Force a measurable allocation so the second reading is meaningful.
+        let ballast: Vec<u8> = vec![7u8; 8 * 1024 * 1024];
+        assert_eq!(ballast.len(), 8 * 1024 * 1024);
+        profiler.checkpoint("second");
+
+        let report = profiler.memory_report();
+        assert_eq!(
+            report.checkpoints.keys().collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "checkpoints must keep recording order"
+        );
+        assert_eq!(
+            report.memory_deltas.keys().collect::<Vec<_>>(),
+            vec!["first", "second"],
+            "deltas must keep the same order as the checkpoints"
+        );
+        assert!(
+            report.peak_memory.is_some(),
+            "a real peak must have been recorded"
+        );
+        assert!(report.baseline_memory.is_some());
+        assert!(report.current_memory.is_some());
+    }
+
+    #[test]
+    fn memory_growth_is_signed_so_a_release_is_not_reported_as_zero() {
+        let profiler = SystemMemoryProfiler::new();
+        let report = profiler.memory_report();
+        if let Some(growth) = report.memory_growth {
+            // Signed type: this compiles and is meaningful only because the
+            // field is `i64` now. `usize` + `saturating_sub` reported every
+            // memory release as "zero growth".
+            let _: i64 = growth;
+        }
+    }
 }

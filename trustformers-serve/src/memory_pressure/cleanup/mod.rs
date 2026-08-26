@@ -292,6 +292,27 @@ pub trait CacheManager: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Registry of loaded models that [`handlers::ModelUnloadingHandler`] can
+/// release memory through.
+///
+/// Unloading a model is only meaningful against something that actually holds
+/// them, so the handler takes this trait rather than inventing a model list.
+/// Implementations live wherever models are owned — see
+/// [`crate::model_management`] for the server's registry.
+pub trait ModelRegistry: Send + Sync + std::fmt::Debug {
+    /// Models currently resident in memory, as `(name, resident_bytes)`.
+    ///
+    /// Order is the registry's own unload preference: the handler unloads from
+    /// the front.
+    fn resident_models(&self) -> Vec<(String, u64)>;
+
+    /// Unload `model_name`, returning the number of bytes actually released.
+    ///
+    /// Returning `Ok(0)` means the model was already gone or could not be
+    /// released; it must not be used to report an unload that did not happen.
+    fn unload_model(&self, model_name: &str) -> Result<u64>;
+}
+
 // =============================================================================
 // Cleanup Action Management
 // =============================================================================

@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -333,9 +330,11 @@ enum CircuitState {
 /// Hash ring node for consistent hashing
 #[derive(Debug, Clone)]
 struct HashRingNode {
+    // 0.2.1: a `virtual_node_id: u32` field lived here. It was written on every
+    // insertion and never read: the ring is looked up purely by `hash`, which
+    // already derives from `instance_id` and the replica index.
     hash: u64,
     instance_id: String,
-    virtual_node_id: u32,
 }
 
 /// Load balancer metrics
@@ -732,13 +731,23 @@ impl LoadBalancer {
             .map(|&i| i.clone())
     }
 
+    /// Geographic selection.
+    ///
+    /// No geolocation source is configured, so this cannot rank instances by
+    /// distance from the client and falls back to the first healthy instance —
+    /// the same choice `RoundRobin` would make on its first call. The fallback
+    /// is logged so an operator who configured `Geographic` learns that the
+    /// strategy is not in effect, rather than believing requests are being
+    /// routed by locality.
     async fn select_geographic(
         &self,
         instances: &[&BackendInstance],
         _context: &RequestContext,
     ) -> Option<BackendInstance> {
-        // Placeholder for geographic selection
-        // Would use geolocation services to find nearest instance
+        log::warn!(
+            "load balancer strategy 'Geographic' is configured but no geolocation source is \
+             available; falling back to the first healthy instance"
+        );
         instances.first().map(|&i| i.clone())
     }
 
@@ -766,14 +775,24 @@ impl LoadBalancer {
         instances.iter().find(|i| i.id == node.instance_id).map(|&i| i.clone())
     }
 
+    /// Custom, caller-named selection.
+    ///
+    /// No custom strategies are registered on this build, so the named
+    /// strategy cannot be resolved and this falls back to the first healthy
+    /// instance. The fallback is logged with the requested name: silently
+    /// ignoring it made a misspelled strategy name indistinguishable from a
+    /// working one.
     async fn select_custom(
         &self,
         instances: &[&BackendInstance],
-        _name: &str,
+        name: &str,
         _parameters: &HashMap<String, String>,
         _context: &RequestContext,
     ) -> Option<BackendInstance> {
-        // Placeholder for custom selection logic
+        log::warn!(
+            "load balancer strategy 'Custom {{ name: {name} }}' is configured but no custom \
+             selector is registered; falling back to the first healthy instance"
+        );
         instances.first().map(|&i| i.clone())
     }
 
@@ -792,7 +811,6 @@ impl LoadBalancer {
                     state.hash_ring.push(HashRingNode {
                         hash,
                         instance_id: instance.id.clone(),
-                        virtual_node_id: i,
                     });
                 }
             }

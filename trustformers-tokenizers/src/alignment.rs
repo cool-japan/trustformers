@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::errors::Result;
 
+/// Upper bound on the number of cached word-boundary lookups.
+///
+/// `AlignmentEngine::word_boundary_cache` is keyed on the *entire* input text
+/// (not a bounded pre-token), so a long-running service that calls
+/// `extract_words` on a stream of distinct texts would otherwise grow the
+/// cache by one full-text-sized entry per call, without bound, for as long as
+/// the engine lives. When the bound is hit the cache is cleared wholesale
+/// (cheap, and word boundaries are trivially recomputable) rather than
+/// evicting one entry at a time, mirroring the pre-token cache in `bpe.rs`.
+const WORD_BOUNDARY_CACHE_CAPACITY: usize = 4096;
+
 /// Represents a word in the original text
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Word {
@@ -119,6 +130,9 @@ impl AlignmentEngine {
             })
             .collect();
 
+        if self.word_boundary_cache.len() >= WORD_BOUNDARY_CACHE_CAPACITY {
+            self.word_boundary_cache.clear();
+        }
         self.word_boundary_cache.insert(text.to_string(), word_boundaries);
         words
     }
@@ -668,5 +682,57 @@ mod tests {
         assert_eq!(stats.aligned_tokens, 1);
         assert_eq!(stats.unique_words, 1);
         assert_eq!(stats.alignment_ratio, 0.5);
+    }
+
+    /// Regression: `word_boundary_cache` is keyed on the full input text, so a
+    /// caller that runs `extract_words` over a stream of distinct texts (the
+    /// common case for a long-running service) must not grow the cache
+    /// without bound. Before this fix the cache had no capacity check at all,
+    /// so this test would fail (`cache_len` would equal `NUM_TEXTS`, far above
+    /// the bound) against the old code.
+    #[test]
+    fn test_word_boundary_cache_is_bounded() {
+        let mut engine = AlignmentEngine::new(AlignmentConfig::default());
+
+        // Deliberately not a multiple of the capacity: processing exactly
+        // `CAPACITY` texts after the (first) wholesale clear leaves a small,
+        // easy-to-reason-about remainder, rather than landing back exactly on
+        // the boundary.
+        const NUM_TEXTS: usize = WORD_BOUNDARY_CACHE_CAPACITY + 500;
+        for i in 0..NUM_TEXTS {
+            let text = format!("distinct input text number {i}");
+            engine.extract_words(&text);
+        }
+
+        let cache_len = engine.word_boundary_cache.len();
+        assert!(
+            cache_len <= WORD_BOUNDARY_CACHE_CAPACITY,
+            "word_boundary_cache must never exceed its bound: got {cache_len}"
+        );
+        // The wholesale-clear strategy means the cache holds only the texts
+        // processed since the last clear, i.e. well under the bound once
+        // flushed, not merely capped right at it.
+        assert_eq!(
+            cache_len, 500,
+            "cache must have been cleared once the bound was reached, \
+             leaving only the entries inserted since"
+        );
+    }
+
+    /// A cache hit must still return the same words as the first lookup.
+    #[test]
+    fn test_word_boundary_cache_hit_matches_original() {
+        let mut engine = AlignmentEngine::new(AlignmentConfig::default());
+        let text = "cache hit sanity check";
+
+        let first = engine.extract_words(text);
+        let second = engine.extract_words(text);
+
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.text, b.text);
+            assert_eq!(a.start, b.start);
+            assert_eq!(a.end, b.end);
+        }
     }
 }

@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use super::logits_processing::{apply_repetition_penalty_indexed, forbidden_ngram_tokens};
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -28,11 +30,11 @@ impl fmt::Display for BeamError {
             BeamError::EmptyLogProbs => write!(f, "log_probs slice is empty"),
             BeamError::VocabSizeMismatch => {
                 write!(f, "vocab size of log_probs does not match config")
-            }
+            },
             BeamError::InvalidConfig(msg) => write!(f, "invalid beam search config: {msg}"),
             BeamError::ScoreFunctionError(msg) => {
                 write!(f, "score function returned an error: {msg}")
-            }
+            },
         }
     }
 }
@@ -109,7 +111,7 @@ impl BeamSearchConfig {
                 "num_beam_groups must not exceed num_beams".to_string(),
             ));
         }
-        if self.num_beams % self.num_beam_groups != 0 {
+        if !self.num_beams.is_multiple_of(self.num_beam_groups) {
             return Err(BeamError::InvalidConfig(
                 "num_beams must be divisible by num_beam_groups".to_string(),
             ));
@@ -203,14 +205,11 @@ impl BeamState {
 
     /// Return the best hypothesis with an explicit length penalty.
     pub fn best_hypothesis_with_penalty(&self, length_penalty: f32) -> Option<&BeamHypothesis> {
-        let best_completed = self
-            .completed
-            .iter()
-            .max_by(|a, b| {
-                a.length_normalized_score(length_penalty)
-                    .partial_cmp(&b.length_normalized_score(length_penalty))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let best_completed = self.completed.iter().max_by(|a, b| {
+            a.length_normalized_score(length_penalty)
+                .partial_cmp(&b.length_normalized_score(length_penalty))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         if best_completed.is_some() {
             return best_completed;
@@ -246,36 +245,7 @@ impl BeamState {
 /// Returns an empty vec when `ngram_size` is 0 or fewer than `ngram_size-1`
 /// tokens have been generated.
 pub fn get_forbidden_tokens_for_ngram(tokens: &[u32], ngram_size: usize) -> Vec<u32> {
-    if ngram_size == 0 || tokens.len() < ngram_size - 1 {
-        return Vec::new();
-    }
-
-    // The (ngram_size-1)-gram suffix that must be matched.
-    let suffix_start = tokens.len() + 1 - ngram_size;
-    let suffix = &tokens[suffix_start..];
-
-    let mut forbidden = Vec::new();
-
-    // Walk all previous (ngram_size-1)-grams and record the token that follows them.
-    let window_size = ngram_size - 1;
-    if tokens.len() < window_size {
-        return forbidden;
-    }
-
-    for start in 0..=(tokens.len() - window_size) {
-        let window = &tokens[start..start + window_size];
-        if window == suffix {
-            // The next token at position `start + window_size` completes a repeat n-gram.
-            if start + window_size < tokens.len() {
-                forbidden.push(tokens[start + window_size]);
-            }
-        }
-    }
-
-    // Deduplicate
-    forbidden.sort_unstable();
-    forbidden.dedup();
-    forbidden
+    forbidden_ngram_tokens(tokens, ngram_size)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,10 +257,17 @@ pub fn get_forbidden_tokens_for_ngram(tokens: &[u32], ngram_size: usize) -> Vec<
 /// `log_probs` has shape `[num_active_beams][vocab_size]`.
 ///
 /// The function:
-/// 1. Applies repetition penalty and n-gram blocking to the per-beam logits.
-/// 2. Computes `new_score = beam.score + log_prob` for every (beam, token) pair.
-/// 3. Selects the top-`num_beams` (beam, token) combinations.
-/// 4. Moves beams that emitted EOS into `beam_state.completed`.
+/// 1. Collapses parents that carry the *same* token sequence.  All beams start
+///    out identical, so without this the top-`num_beams` candidates would be
+///    the same token proposed by every parent and the whole beam would follow a
+///    single greedy path forever.
+/// 2. Applies repetition penalty, n-gram blocking and minimum-length EOS
+///    suppression to the per-beam log-probabilities.
+/// 3. Computes `new_score = beam.score + log_prob` for every (beam, token) pair
+///    and keeps the best `2 * num_beams` of them, so that beams which finish on
+///    EOS can be replaced instead of shrinking the active set.
+/// 4. Moves beams that emitted EOS into `beam_state.completed`, keeping only
+///    the `num_beams` best finished hypotheses.
 pub fn beam_search_step(
     beam_state: &mut BeamState,
     log_probs: &[Vec<f32>],
@@ -311,66 +288,88 @@ pub fn beam_search_step(
         }
     }
 
-    // Build candidate list: (new_score, beam_idx, token_id)
-    let mut candidates: Vec<(f32, usize, u32)> = Vec::new();
-
-    for (beam_idx, hyp) in beam_state.hypotheses.iter().enumerate() {
-        let mut lp = log_probs[beam_idx].clone();
-
-        // All tokens in this beam (prompt + generated)
-        let all_tokens: Vec<u32> = beam_state
-            .prompt_tokens
-            .iter()
-            .chain(hyp.tokens.iter())
-            .copied()
-            .collect();
-
-        // Repetition penalty
-        if (config.repetition_penalty - 1.0).abs() > f32::EPSILON {
-            for &tok in &all_tokens {
-                if (tok as usize) < lp.len() {
-                    lp[tok as usize] /= config.repetition_penalty;
-                }
-            }
-        }
-
-        // N-gram blocking: set forbidden tokens to -inf
-        if config.no_repeat_ngram_size > 0 {
-            let forbidden =
-                get_forbidden_tokens_for_ngram(&all_tokens, config.no_repeat_ngram_size);
-            for tok in forbidden {
-                if (tok as usize) < lp.len() {
-                    lp[tok as usize] = f32::NEG_INFINITY;
-                }
-            }
-        }
-
-        // Suppress EOS if below min_length
-        if let Some(eos) = config.eos_token_id {
-            if hyp.tokens.len() < config.min_length {
-                if (eos as usize) < lp.len() {
-                    lp[eos as usize] = f32::NEG_INFINITY;
-                }
-            }
-        }
-
-        for (token_id, &lp_val) in lp.iter().enumerate() {
-            let new_score = hyp.score + lp_val;
-            candidates.push((new_score, beam_idx, token_id as u32));
+    // Step 1: unique parents only.
+    let mut unique_parents: Vec<usize> = Vec::with_capacity(num_active);
+    for beam_idx in 0..num_active {
+        let is_duplicate = unique_parents.iter().any(|&kept| {
+            beam_state.hypotheses[kept].tokens == beam_state.hypotheses[beam_idx].tokens
+        });
+        if !is_duplicate {
+            unique_parents.push(beam_idx);
         }
     }
 
-    // Sort descending by score, take top num_beams
-    candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    candidates.truncate(config.num_beams);
+    // Number of candidates kept per parent: 2x the beam width lets EOS-finished
+    // candidates be replaced without starving the active set.
+    let per_parent = config.num_beams.saturating_mul(2).max(1).min(config.vocab_size);
 
-    // Build new hypothesis list
-    let old_hypotheses = beam_state.hypotheses.clone();
-    let mut new_hypotheses: Vec<BeamHypothesis> = Vec::new();
+    let mut candidates: Vec<(f32, usize, u32)> =
+        Vec::with_capacity(unique_parents.len() * per_parent);
+
+    for &beam_idx in &unique_parents {
+        let hyp = &beam_state.hypotheses[beam_idx];
+        let mut scores = log_probs[beam_idx].clone();
+
+        // All tokens in this beam (prompt + generated)
+        let all_tokens: Vec<u32> =
+            beam_state.prompt_tokens.iter().chain(hyp.tokens.iter()).copied().collect();
+
+        apply_repetition_penalty_indexed(
+            &mut scores,
+            all_tokens.iter().map(|&token| token as usize),
+            config.repetition_penalty,
+        );
+
+        if config.no_repeat_ngram_size > 0 {
+            for token in forbidden_ngram_tokens(&all_tokens, config.no_repeat_ngram_size) {
+                if let Some(slot) = scores.get_mut(token as usize) {
+                    *slot = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        // Suppress EOS while the hypothesis is shorter than min_length.
+        let below_min_length = hyp.tokens.len() < config.min_length;
+        let eos_slot = config
+            .eos_token_id
+            .filter(|_| below_min_length)
+            .and_then(|eos| scores.get_mut(eos as usize));
+        if let Some(slot) = eos_slot {
+            *slot = f32::NEG_INFINITY;
+        }
+
+        // Keep this parent's best `per_parent` tokens in O(vocab).
+        let mut order: Vec<u32> = (0..scores.len() as u32).collect();
+        if per_parent < order.len() {
+            let view: &[f32] = &scores;
+            order.select_nth_unstable_by(per_parent - 1, |&a, &b| {
+                view[b as usize].total_cmp(&view[a as usize]).then_with(|| a.cmp(&b))
+            });
+        }
+        for &token_id in order.iter().take(per_parent) {
+            let log_prob = scores[token_id as usize];
+            if !log_prob.is_finite() {
+                continue; // blocked token
+            }
+            candidates.push((hyp.score + log_prob, beam_idx, token_id));
+        }
+    }
+
+    // Step 3: global ranking of the pooled candidates.
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+
+    let old_hypotheses = std::mem::take(&mut beam_state.hypotheses);
+    let mut new_hypotheses: Vec<BeamHypothesis> = Vec::with_capacity(config.num_beams);
 
     for (new_score, beam_idx, token_id) in candidates {
+        let is_eos = config.eos_token_id == Some(token_id);
+        if !is_eos && new_hypotheses.len() >= config.num_beams {
+            continue;
+        }
+
         let parent = &old_hypotheses[beam_idx];
-        let mut new_tokens = parent.tokens.clone();
+        let mut new_tokens = Vec::with_capacity(parent.tokens.len() + 1);
+        new_tokens.extend_from_slice(&parent.tokens);
         new_tokens.push(token_id);
 
         let new_hyp = BeamHypothesis {
@@ -378,16 +377,22 @@ pub fn beam_search_step(
             score: new_score,
         };
 
-        let is_eos = config
-            .eos_token_id
-            .map(|eos| token_id == eos)
-            .unwrap_or(false);
-
         if is_eos {
             beam_state.completed.push(new_hyp);
         } else {
             new_hypotheses.push(new_hyp);
         }
+    }
+
+    // Step 4: keep only the best finished hypotheses so the list cannot grow
+    // without bound over long generations.
+    if beam_state.completed.len() > config.num_beams {
+        let penalty = config.length_penalty;
+        beam_state.completed.sort_by(|a, b| {
+            b.length_normalized_score(penalty)
+                .total_cmp(&a.length_normalized_score(penalty))
+        });
+        beam_state.completed.truncate(config.num_beams);
     }
 
     beam_state.hypotheses = new_hypotheses;
@@ -412,9 +417,8 @@ impl BeamSearchDecoder {
 
     /// Create `num_beams` identical initial beams from the prompt.
     pub fn initialize_beams(&self, prompt_tokens: &[u32]) -> BeamState {
-        let hypotheses: Vec<BeamHypothesis> = (0..self.config.num_beams)
-            .map(|_| BeamHypothesis::new())
-            .collect();
+        let hypotheses: Vec<BeamHypothesis> =
+            (0..self.config.num_beams).map(|_| BeamHypothesis::new()).collect();
         BeamState::new(prompt_tokens.to_vec(), hypotheses)
     }
 
@@ -429,6 +433,32 @@ impl BeamSearchDecoder {
         prompt_tokens: &[u32],
         score_fn: impl Fn(&[Vec<u32>]) -> Result<Vec<Vec<f32>>, BeamError>,
     ) -> Result<Vec<u32>, BeamError> {
+        let mut best = self.decode_top_n(prompt_tokens, 1, score_fn)?;
+        if best.is_empty() {
+            return Err(BeamError::EmptyLogProbs);
+        }
+        Ok(best.remove(0).tokens)
+    }
+
+    /// Run full beam search decoding and return the `n` best hypotheses,
+    /// ranked by length-normalised score.
+    ///
+    /// `score_fn` receives the current set of beam sequences (prompt + generated)
+    /// and must return `[num_active_beams][vocab_size]` log-probabilities.
+    ///
+    /// Fewer than `n` hypotheses are returned only when the search itself
+    /// produced fewer; `n` is capped at `num_beams`.
+    pub fn decode_top_n(
+        &self,
+        prompt_tokens: &[u32],
+        n: usize,
+        score_fn: impl Fn(&[Vec<u32>]) -> Result<Vec<Vec<f32>>, BeamError>,
+    ) -> Result<Vec<BeamHypothesis>, BeamError> {
+        if n == 0 {
+            return Err(BeamError::InvalidConfig(
+                "requested zero hypotheses".to_string(),
+            ));
+        }
         let mut beam_state = self.initialize_beams(prompt_tokens);
 
         for _step in 0..self.config.max_new_tokens {
@@ -450,8 +480,7 @@ impl BeamSearchDecoder {
                 })
                 .collect();
 
-            let log_probs = score_fn(&sequences)
-                .map_err(|e| BeamError::ScoreFunctionError(e.to_string()))?;
+            let log_probs = score_fn(&sequences)?;
 
             beam_search_step(&mut beam_state, &log_probs, &self.config)?;
         }
@@ -460,11 +489,18 @@ impl BeamSearchDecoder {
         let active: Vec<BeamHypothesis> = beam_state.hypotheses.drain(..).collect();
         beam_state.completed.extend(active);
 
-        let best = beam_state
-            .best_hypothesis_with_penalty(self.config.length_penalty)
-            .ok_or(BeamError::EmptyLogProbs)?;
+        if beam_state.completed.is_empty() {
+            return Err(BeamError::EmptyLogProbs);
+        }
 
-        Ok(best.tokens.clone())
+        let penalty = self.config.length_penalty;
+        beam_state.completed.sort_by(|a, b| {
+            b.length_normalized_score(penalty)
+                .total_cmp(&a.length_normalized_score(penalty))
+        });
+        beam_state.completed.truncate(n.min(self.config.num_beams).max(1));
+
+        Ok(beam_state.completed)
     }
 
     /// Diverse beam search step that applies a diversity penalty for tokens
@@ -521,21 +557,6 @@ impl BeamSearchDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    /// Build a trivial log_probs matrix: all -inf except `best_token` which is 0.0.
-    fn single_token_log_probs(vocab_size: usize, best_token: usize, num_beams: usize) -> Vec<Vec<f32>> {
-        (0..num_beams)
-            .map(|_| {
-                let mut lp = vec![f32::NEG_INFINITY; vocab_size];
-                lp[best_token] = 0.0_f32; // log(1) = 0
-                lp
-            })
-            .collect()
-    }
 
     // ------------------------------------------------------------------
     // 1. Config defaults
@@ -670,37 +691,65 @@ mod tests {
     // 5. Repetition penalty
     // ------------------------------------------------------------------
     #[test]
-    fn test_repetition_penalty_applied() {
+    fn test_repetition_penalty_demotes_seen_tokens() {
+        // Regression: the previous implementation divided *every* logit by the
+        // penalty.  Beam scores are log-probabilities, i.e. negative, so
+        // dividing made an already-seen token MORE attractive - the exact
+        // opposite of a repetition penalty.
         let cfg = BeamSearchConfig {
             num_beams: 1,
             vocab_size: 4,
-            repetition_penalty: 2.0,
+            repetition_penalty: 10.0,
             max_new_tokens: 1,
             ..Default::default()
         };
 
-        // Token 0 appeared in the prompt, so it should be penalised.
-        // Log-probs: token 0 = -0.5, token 1 = -1.0, token 2 = -1.0, token 3 = -1.0
-        // After penalty: token 0 lp = -0.5 / 2.0 = -0.25 (but score += lp, so less preferred)
-        // Actually repetition_penalty divides the logit, making it more negative for negative values.
-        // token 0 = -0.5 / 2.0 = -0.25  wait, that would make it BETTER.
-        // Implementation uses: lp[id] /= penalty.  -0.5 / 2.0 = -0.25 (better).
-        // Let's use a positive penalty scenario: token 0 = 0.0, token 1 = -0.1
-        // After penalty on token 0: 0.0 / 2.0 = 0.0  (same)
-        // Use: token 0 = -0.5 penalised to -0.25, token 1 = -0.3.  Token 1 wins.
-        // Actually: -0.5/2 = -0.25 which is BETTER than -0.3.  Reverse.
-        // Standard HF: for negative logits penalty *increases* probability — let's test the
-        // effect: token 0 appears in prompt, so after /=penalty its score = lp/penalty.
-        // If lp is -1.0, penalty=2.0 → new lp = -0.5 (better). That's the HF behaviour for
-        // negative logits (makes past tokens slightly more likely when penalty > 1?).
-        // Our impl matches the spec as-written (divide by penalty).
-        // Just test that beam_search_step runs without error with penalty > 1.
+        // Token 0 is in the prompt and is also the unpenalised argmax (-0.1).
+        // Sign-aware penalty: -0.1 * 10 = -1.0, which loses against -0.5.
         let mut state = BeamState::new(vec![0], vec![BeamHypothesis::new()]);
-        let log_probs = vec![vec![-0.1_f32, -0.5, -0.5, -0.5]];
+        let log_probs = vec![vec![-0.1_f32, -0.5, -0.6, -0.7]];
         beam_search_step(&mut state, &log_probs, &cfg).expect("step ok");
-        // Token 0 is in prompt (all_tokens). After division by 2.0: -0.1 / 2.0 = -0.05.
-        // Token 1,2,3 stay at -0.5.  Token 0 wins.
-        assert_eq!(state.hypotheses[0].tokens[0], 0, "token 0 wins after penalty");
+        assert_eq!(
+            state.hypotheses[0].tokens[0], 1,
+            "the repeated token must be demoted, got {:?}",
+            state.hypotheses[0].tokens
+        );
+    }
+
+    #[test]
+    fn test_repetition_penalty_one_is_identity() {
+        let cfg = BeamSearchConfig {
+            num_beams: 1,
+            vocab_size: 4,
+            repetition_penalty: 1.0,
+            max_new_tokens: 1,
+            ..Default::default()
+        };
+        let mut state = BeamState::new(vec![0], vec![BeamHypothesis::new()]);
+        let log_probs = vec![vec![-0.1_f32, -0.5, -0.6, -0.7]];
+        beam_search_step(&mut state, &log_probs, &cfg).expect("step ok");
+        assert_eq!(state.hypotheses[0].tokens[0], 0);
+    }
+
+    #[test]
+    fn test_identical_parents_are_collapsed_so_beams_stay_distinct() {
+        // Regression: every beam starts identical.  Expanding all of them made
+        // the top-`num_beams` candidates the SAME token from N parents, so the
+        // beam collapsed onto one greedy path.
+        let cfg = BeamSearchConfig {
+            num_beams: 3,
+            vocab_size: 4,
+            ..Default::default()
+        };
+        let decoder = BeamSearchDecoder::new(cfg.clone()).expect("valid config");
+        let mut state = decoder.initialize_beams(&[]);
+
+        let log_probs = vec![vec![-0.1_f32, -0.2, -0.3, -0.4]; 3];
+        beam_search_step(&mut state, &log_probs, &cfg).expect("step ok");
+
+        assert_eq!(state.hypotheses.len(), 3);
+        let tokens: Vec<u32> = state.hypotheses.iter().map(|hyp| hyp.tokens[0]).collect();
+        assert_eq!(tokens, vec![0, 1, 2], "beams must explore distinct tokens");
     }
 
     // ------------------------------------------------------------------
@@ -739,8 +788,8 @@ mod tests {
         let mut state = BeamState::new(vec![], hypotheses);
 
         let log_probs = vec![
-            vec![-1.0_f32, -1.0, -1.0, 0.0],  // beam 0: best is token 3
-            vec![-0.1_f32, 0.0, -1.0, -1.0],   // wait: beam 1: token 1 = 0.0, token 0 = -0.1
+            vec![-1.0_f32, -1.0, -1.0, 0.0], // beam 0: best is token 3
+            vec![-0.1_f32, 0.0, -1.0, -1.0], // wait: beam 1: token 1 = 0.0, token 0 = -0.1
         ];
         // Actually beam1 best = token 1 (score 0.0), beam0 best = token 3 (score 0.0).
         // Both tied at 0.0 — we just verify the step doesn't error and produces 2 active beams.
@@ -762,15 +811,56 @@ mod tests {
         let hypotheses = vec![BeamHypothesis::new(), BeamHypothesis::new()];
         let mut state = BeamState::new(vec![], hypotheses);
 
-        // Both beams emit EOS (token 2) as best candidate.
-        let log_probs = vec![
-            vec![-1.0_f32, -1.0, 0.0],
-            vec![-1.0_f32, -1.0, 0.0],
-        ];
+        // Both beams are identical, so they collapse into one parent whose best
+        // candidate is EOS (token 2); the remaining candidates stay active.
+        let log_probs = vec![vec![-1.0_f32, -1.0, 0.0], vec![-1.0_f32, -1.0, 0.0]];
         beam_search_step(&mut state, &log_probs, &cfg).expect("step ok");
 
-        // Both moved to completed
-        assert_eq!(state.completed.len(), 2);
+        assert_eq!(state.completed.len(), 1);
+        assert_eq!(state.completed[0].tokens, vec![2]);
+        assert_eq!(state.hypotheses.len(), 2, "active beams get refilled");
+    }
+
+    #[test]
+    fn test_eos_is_suppressed_below_min_length() {
+        let cfg = BeamSearchConfig {
+            num_beams: 1,
+            vocab_size: 3,
+            eos_token_id: Some(2),
+            min_length: 2,
+            ..Default::default()
+        };
+        let mut state = BeamState::new(vec![], vec![BeamHypothesis::new()]);
+        // EOS is by far the best token, but the hypothesis has length 0 < 2.
+        let log_probs = vec![vec![-1.0_f32, -2.0, 0.0]];
+        beam_search_step(&mut state, &log_probs, &cfg).expect("step ok");
+        assert!(state.completed.is_empty(), "EOS must be blocked");
+        assert_eq!(state.hypotheses[0].tokens, vec![0]);
+    }
+
+    #[test]
+    fn test_decode_top_n_returns_ranked_hypotheses() {
+        let cfg = BeamSearchConfig {
+            num_beams: 3,
+            max_new_tokens: 2,
+            vocab_size: 4,
+            ..Default::default()
+        };
+        let decoder = BeamSearchDecoder::new(cfg).expect("valid config");
+        let hypotheses = decoder
+            .decode_top_n(&[0], 3, |seqs| {
+                Ok(seqs.iter().map(|_| vec![-0.1_f32, -0.2, -0.3, -0.4]).collect())
+            })
+            .expect("decode");
+
+        assert_eq!(hypotheses.len(), 3);
+        for pair in hypotheses.windows(2) {
+            assert!(
+                pair[0].length_normalized_score(1.0) >= pair[1].length_normalized_score(1.0),
+                "hypotheses must be ranked best-first"
+            );
+        }
+        assert_eq!(hypotheses[0].tokens, vec![0, 0], "best path is 0 -> 0");
     }
 
     // ------------------------------------------------------------------
@@ -778,10 +868,17 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_best_hypothesis_prefers_completed() {
-        let mut state = BeamState::new(vec![], vec![
-            BeamHypothesis { tokens: vec![1, 2, 3], score: -3.0 },
-        ]);
-        state.completed.push(BeamHypothesis { tokens: vec![5, 6], score: -1.0 });
+        let mut state = BeamState::new(
+            vec![],
+            vec![BeamHypothesis {
+                tokens: vec![1, 2, 3],
+                score: -3.0,
+            }],
+        );
+        state.completed.push(BeamHypothesis {
+            tokens: vec![5, 6],
+            score: -1.0,
+        });
 
         let best = state.best_hypothesis().expect("has a best");
         // Completed has higher length-normalised score: -1.0/2^1 = -0.5 vs -3.0/3^1 = -1.0
@@ -809,12 +906,16 @@ mod tests {
         BeamSearchDecoder::diverse_beam_search_step(
             &mut state,
             &log_probs,
-            1,        // group_idx
-            &[0],     // previous group emitted token 0
+            1,    // group_idx
+            &[0], // previous group emitted token 0
             &cfg,
-        ).expect("step ok");
+        )
+        .expect("step ok");
 
-        assert_eq!(state.hypotheses[0].tokens[0], 1, "token 1 should win after diversity penalty");
+        assert_eq!(
+            state.hypotheses[0].tokens[0], 1,
+            "token 1 should win after diversity penalty"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -843,7 +944,11 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_error_empty_log_probs() {
-        let cfg = BeamSearchConfig { num_beams: 1, vocab_size: 4, ..Default::default() };
+        let cfg = BeamSearchConfig {
+            num_beams: 1,
+            vocab_size: 4,
+            ..Default::default()
+        };
         let mut state = BeamState::new(vec![], vec![BeamHypothesis::new()]);
         let result = beam_search_step(&mut state, &[], &cfg);
         assert_eq!(result, Err(BeamError::EmptyLogProbs));
@@ -851,7 +956,11 @@ mod tests {
 
     #[test]
     fn test_error_vocab_size_mismatch() {
-        let cfg = BeamSearchConfig { num_beams: 1, vocab_size: 4, ..Default::default() };
+        let cfg = BeamSearchConfig {
+            num_beams: 1,
+            vocab_size: 4,
+            ..Default::default()
+        };
         let mut state = BeamState::new(vec![], vec![BeamHypothesis::new()]);
         // Wrong vocab size (3 instead of 4)
         let log_probs = vec![vec![0.0_f32, 0.0, 0.0]];
@@ -861,7 +970,10 @@ mod tests {
 
     #[test]
     fn test_error_invalid_config_zero_beams() {
-        let cfg = BeamSearchConfig { num_beams: 0, ..Default::default() };
+        let cfg = BeamSearchConfig {
+            num_beams: 0,
+            ..Default::default()
+        };
         let result = BeamSearchDecoder::new(cfg);
         assert!(matches!(result, Err(BeamError::InvalidConfig(_))));
     }

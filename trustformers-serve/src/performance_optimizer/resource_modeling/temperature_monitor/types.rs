@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::super::types::{CoolingCurve, FanController, TemperatureMetrics};
+use super::super::types::TemperatureMetrics;
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -15,33 +15,11 @@ use sysinfo::{Components, System};
 use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 // use super::types::*; // Circular import - commented out
 
-use super::functions::{
-    AlertChannel, HeatFlowModel, ReferenceTemperatureSource, ReportGenerator,
-    ThermalAnalysisAlgorithm, TrendAnalyzer,
-};
-
 /// Temperature alerting system for real-time notifications
-pub struct TemperatureAlerting {
-    /// Alert channels
-    alert_channels: Vec<Box<dyn AlertChannel + Send + Sync>>,
-    /// Alert rules engine
-    rules_engine: Arc<AlertRulesEngine>,
-    /// Active alerts tracker
-    active_alerts: Arc<Mutex<HashMap<String, ActiveAlert>>>,
-    /// Alert history
-    alert_history: Arc<Mutex<VecDeque<AlertEvent>>>,
-    /// Configuration
-    config: AlertingConfig,
-}
+pub struct TemperatureAlerting {}
 impl TemperatureAlerting {
     pub async fn new(_config: AlertingConfig) -> Result<Self> {
-        Ok(Self {
-            alert_channels: Vec::new(),
-            rules_engine: Arc::new(AlertRulesEngine::new()),
-            active_alerts: Arc::new(Mutex::new(HashMap::new())),
-            alert_history: Arc::new(Mutex::new(VecDeque::new())),
-            config: _config,
-        })
+        Ok(Self {})
     }
     pub async fn check_alerts(
         &self,
@@ -52,24 +30,10 @@ impl TemperatureAlerting {
     }
 }
 /// Thermal calibrator for sensor accuracy verification
-pub struct ThermalCalibrator {
-    /// Calibration procedures
-    procedures: HashMap<String, CalibrationProcedure>,
-    /// Calibration results
-    calibration_results: Arc<Mutex<HashMap<String, CalibrationResult>>>,
-    /// Reference temperature sources
-    reference_sources: Vec<Box<dyn ReferenceTemperatureSource + Send + Sync>>,
-    /// Configuration
-    config: CalibratorConfig,
-}
+pub struct ThermalCalibrator {}
 impl ThermalCalibrator {
     pub async fn new(_config: CalibratorConfig) -> Result<Self> {
-        Ok(Self {
-            procedures: HashMap::new(),
-            calibration_results: Arc::new(Mutex::new(HashMap::new())),
-            reference_sources: Vec::new(),
-            config: _config,
-        })
+        Ok(Self {})
     }
 }
 #[derive(Debug, Clone)]
@@ -93,10 +57,6 @@ pub struct TemperatureMonitor {
     thermal_analyzer: Arc<ThermalAnalyzer>,
     /// Temperature alerting system
     alerting_system: Arc<TemperatureAlerting>,
-    /// Thermal calibrator
-    calibrator: Arc<ThermalCalibrator>,
-    /// Heat dissipation analyzer
-    heat_analyzer: Arc<HeatDissipationAnalyzer>,
     /// Thermal reporting system
     reporting_system: Arc<ThermalReporting>,
     /// Configuration
@@ -118,9 +78,6 @@ impl TemperatureMonitor {
         let cooling_controller = Arc::new(CoolingController::new(CoolingConfig::default()).await?);
         let thermal_analyzer = Arc::new(ThermalAnalyzer::new(AnalyzerConfig::default()).await?);
         let alerting_system = Arc::new(TemperatureAlerting::new(AlertingConfig::default()).await?);
-        let calibrator = Arc::new(ThermalCalibrator::new(CalibratorConfig::default()).await?);
-        let heat_analyzer =
-            Arc::new(HeatDissipationAnalyzer::new(HeatAnalysisConfig::default()).await?);
         let reporting_system = Arc::new(ThermalReporting::new(ReportingConfig::default()).await?);
         Ok(Self {
             sensor_manager,
@@ -129,8 +86,6 @@ impl TemperatureMonitor {
             cooling_controller,
             thermal_analyzer,
             alerting_system,
-            calibrator,
-            heat_analyzer,
             reporting_system,
             config,
             monitoring_task: None,
@@ -283,8 +238,6 @@ pub struct SensorReadings {
 }
 /// Thermal sensor manager for managing multiple temperature sensors
 pub struct ThermalSensorManager {
-    /// Active thermal sensors
-    sensors: Arc<RwLock<HashMap<String, ThermalSensor>>>,
     /// Sensor readings history
     readings_history: Arc<Mutex<VecDeque<SensorReadings>>>,
     /// Sensor configuration
@@ -315,7 +268,6 @@ impl ThermalSensorManager {
             sensors.insert(sensor_id, sensor);
         }
         Ok(Self {
-            sensors: Arc::new(RwLock::new(sensors)),
             readings_history: Arc::new(Mutex::new(VecDeque::with_capacity(
                 config.max_history_size,
             ))),
@@ -441,26 +393,15 @@ pub struct ThrottlingPrediction {
 }
 /// Cooling controller for intelligent thermal management
 pub struct CoolingController {
-    /// Fan controllers
-    fan_controllers: Arc<RwLock<HashMap<String, FanController>>>,
-    /// Cooling curves
-    cooling_curves: Arc<RwLock<HashMap<String, CoolingCurve>>>,
     /// Cooling strategy
     cooling_strategy: Arc<Mutex<CoolingStrategy>>,
-    /// Configuration
-    config: CoolingConfig,
 }
 impl CoolingController {
     /// Create a new cooling controller
     pub async fn new(config: CoolingConfig) -> Result<Self> {
-        let fan_controllers = HashMap::new();
-        let cooling_curves = HashMap::new();
         let cooling_strategy = CoolingStrategy::new(&config);
         Ok(Self {
-            fan_controllers: Arc::new(RwLock::new(fan_controllers)),
-            cooling_curves: Arc::new(RwLock::new(cooling_curves)),
             cooling_strategy: Arc::new(Mutex::new(cooling_strategy)),
-            config,
         })
     }
     /// Update cooling based on thermal readings
@@ -581,24 +522,10 @@ pub enum ThermalState {
     Recovery,
 }
 /// Thermal analyzer for pattern analysis and optimization
-pub struct ThermalAnalyzer {
-    /// Analysis algorithms
-    analyzers: Vec<Box<dyn ThermalAnalysisAlgorithm + Send + Sync>>,
-    /// Analysis results cache
-    analysis_cache: Arc<Mutex<HashMap<String, AnalysisResult>>>,
-    /// Optimization recommendations
-    recommendations: Arc<Mutex<Vec<OptimizationRecommendation>>>,
-    /// Configuration
-    config: AnalyzerConfig,
-}
+pub struct ThermalAnalyzer {}
 impl ThermalAnalyzer {
     pub async fn new(_config: AnalyzerConfig) -> Result<Self> {
-        Ok(Self {
-            analyzers: Vec::new(),
-            analysis_cache: Arc::new(Mutex::new(HashMap::new())),
-            recommendations: Arc::new(Mutex::new(Vec::new())),
-            config: _config,
-        })
+        Ok(Self {})
     }
     pub async fn analyze_readings(&self, _readings: &SensorReadings) -> Result<()> {
         Ok(())
@@ -719,24 +646,10 @@ impl ThermalStateManager {
     }
 }
 /// Heat dissipation analyzer for thermal design analysis
-pub struct HeatDissipationAnalyzer {
-    /// Heat flow models
-    heat_models: Vec<Box<dyn HeatFlowModel + Send + Sync>>,
-    /// Dissipation calculations
-    dissipation_calculator: Arc<DissipationCalculator>,
-    /// Thermal design analysis
-    design_analyzer: Arc<ThermalDesignAnalyzer>,
-    /// Configuration
-    config: HeatAnalysisConfig,
-}
+pub struct HeatDissipationAnalyzer {}
 impl HeatDissipationAnalyzer {
     pub async fn new(_config: HeatAnalysisConfig) -> Result<Self> {
-        Ok(Self {
-            heat_models: Vec::new(),
-            dissipation_calculator: Arc::new(DissipationCalculator::new()),
-            design_analyzer: Arc::new(ThermalDesignAnalyzer::new()),
-            config: _config,
-        })
+        Ok(Self {})
     }
 }
 pub struct ThrottlingProbabilityCalculator;
@@ -815,24 +728,10 @@ pub struct PredictorConfig {
     pub max_prediction_history: usize,
 }
 /// Thermal reporting system for comprehensive reporting
-pub struct ThermalReporting {
-    /// Report generators
-    report_generators: HashMap<String, Box<dyn ReportGenerator + Send + Sync>>,
-    /// Report cache
-    report_cache: Arc<Mutex<HashMap<String, GeneratedReport>>>,
-    /// Trend analyzers
-    trend_analyzers: Vec<Box<dyn TrendAnalyzer + Send + Sync>>,
-    /// Configuration
-    config: ReportingConfig,
-}
+pub struct ThermalReporting {}
 impl ThermalReporting {
     pub async fn new(_config: ReportingConfig) -> Result<Self> {
-        Ok(Self {
-            report_generators: HashMap::new(),
-            report_cache: Arc::new(Mutex::new(HashMap::new())),
-            trend_analyzers: Vec::new(),
-            config: _config,
-        })
+        Ok(Self {})
     }
     pub async fn generate_report(&self, _report_type: ReportType) -> Result<ThermalReport> {
         Ok(ThermalReport)
@@ -850,8 +749,6 @@ pub struct HeatAnalysisConfig {
 }
 /// Throttling predictor for preventing thermal throttling events
 pub struct ThrottlingPredictor {
-    /// Temperature prediction model
-    prediction_model: Arc<Mutex<PredictionModel>>,
     /// Throttling probability calculator
     probability_calculator: Arc<ThrottlingProbabilityCalculator>,
     /// Prediction history
@@ -862,10 +759,8 @@ pub struct ThrottlingPredictor {
 impl ThrottlingPredictor {
     /// Create a new throttling predictor
     pub async fn new(config: PredictorConfig) -> Result<Self> {
-        let prediction_model = PredictionModel::new(&config);
         let probability_calculator = ThrottlingProbabilityCalculator::new(&config);
         Ok(Self {
-            prediction_model: Arc::new(Mutex::new(prediction_model)),
             probability_calculator: Arc::new(probability_calculator),
             prediction_history: Arc::new(Mutex::new(VecDeque::with_capacity(
                 config.max_prediction_history,

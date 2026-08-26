@@ -36,6 +36,7 @@ byteorder.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 lazy_static.workspace = true
 dashmap.workspace = true
 oxiarc-zstd.workspace = true
@@ -45,6 +46,7 @@ async-trait.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 hex.workspace = true
+sysinfo.workspace = true
 # COOLJAPAN Pure-Rust Policy (Campaign B): reqwest pulls rustls -> aws-lc-rs ->
 # aws-lc-sys (C/C++ via cmake/cc). Keep it OUT of the default tree by making it
 # optional; only the remote leaderboard storage backend needs it.
@@ -61,12 +63,10 @@ tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS
 # Note: GPU backends (metal, cuda, opencl, wgpu) should be enabled via scirs2-core for policy compliance
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
 
-# Optional backends
-candle-core = { workspace = true, optional = true }
-
 # MPI for multi-node communication (optional - only needed for multi-node training)
-# Disable default features to avoid libffi-sys build issues on macOS ARM64
-mpi = { version = "0.8", optional = true, default-features = false }
+# `default-features = false` is declared on the workspace entry (it avoids the
+# libffi-sys C build that breaks macOS ARM64).
+mpi = { workspace = true, optional = true }
 
 # Hardware acceleration backends
 vulkano = { workspace = true, optional = true }
@@ -76,19 +76,19 @@ bytemuck = { workspace = true, optional = true }
 
 # WebGPU backend (cross-platform)
 wgpu = { workspace = true, optional = true }
-pollster = { version = "0.4", optional = true }
+pollster = { workspace = true, optional = true }
 
 # OpenCL backend (universal GPU support)
-opencl3 = { version = "0.12", optional = true }
+opencl3 = { workspace = true, optional = true }
 
 # Dynamic loading for optional GPU backends (ROCm)
 libloading = { workspace = true, optional = true }
 
 # Campaign C0 spike: oxicuda Pure-Rust CUDA replacement (compile-validation; runtime-loads libcuda)
-oxicuda-blas = { version = "0.4.1", optional = true }
-oxicuda-dnn = { version = "0.4.1", optional = true }
-oxicuda-memory = { version = "0.4.1", optional = true }
-oxicuda-driver = { version = "0.4.1", optional = true }
+oxicuda-blas = { workspace = true, optional = true }
+oxicuda-dnn = { workspace = true, optional = true }
+oxicuda-memory = { workspace = true, optional = true }
+oxicuda-driver = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -104,17 +104,28 @@ linalg = ["scirs2-core/linalg"]  # Linear algebra operations
 # Remote (HTTP) leaderboard storage backend. Opt-in because it pulls reqwest ->
 # rustls -> aws-lc-sys (C/C++). The file/in-memory backends work without it.
 remote-leaderboard = ["dep:reqwest"]
-candle = ["dep:candle-core"]
-parallel = []
+# There is no `candle` feature. `Tensor` carried a `Candle(candle_core::Tensor)`
+# variant behind one, but nothing in the workspace ever constructed it: every
+# site that mentioned it was a match arm returning "Candle tensors not yet
+# supported". The feature therefore added a whole tensor backend (and, through
+# `candle-core`, the policy-banned `zip` 8.6.0) to `--all-features` builds while
+# providing no reachable behaviour, so it was removed.
+# Multi-threaded kernels (attention, SDPA, ...) via scirs2-core's rayon-backed
+# `parallel_ops`. scirs2-core is already built with this feature above, so the
+# flag documents the dependency rather than toggling it.
+parallel = ["scirs2-core/parallel"]
 mpi = ["dep:mpi"]
 cuda = ["dep:oxicuda-blas", "dep:oxicuda-dnn", "dep:oxicuda-memory", "dep:oxicuda-driver"]
 rocm = ["dep:libloading"]
 intel = []
-llvm = []
-cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
 # Note: OxiBLAS is now used for all BLAS/LAPACK operations (pure Rust implementation)
-metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal", "dep:oxicuda-metal", "dep:oxicuda-backend"]
+metal = ["dep:metal", "dep:mpsgraph", "dep:oxicuda-metal", "dep:oxicuda-backend"]
+# Pure-Rust policy escape hatch (macOS): link Apple's Accelerate framework.
+# OFF BY DEFAULT and used by no code path in this crate - `oxiblas` provides
+# BLAS/LAPACK. Kept only so downstream consumers that vendor Accelerate-dependent
+# code can re-enable the link directive from `build.rs` without patching it.
+accelerate = []
 wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 opencl = ["dep:opencl3"]
 xla = []
@@ -126,7 +137,7 @@ backtrace = []
 # Deprecated alias: oxicuda is now the `cuda` backend
 cuda-oxicuda = ["cuda"]
 # Full feature set for testing
-full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
+full = ["linalg", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
 [[bench]]
 name = "tensor_operations"
@@ -144,14 +155,12 @@ path = "src/bin/naming_checker.rs"
 # Metal is only supported on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
-metal = { version = "0.33", optional = true }
-mpsgraph = { version = "0.2", optional = true }
-objc2 = { version = "0.6", optional = true }
-objc2-metal = { version = "0.3", optional = true }
+metal = { workspace = true, optional = true }
+mpsgraph = { workspace = true, optional = true }
 # OxiBLAS - Pure Rust BLAS/LAPACK implementation (replaces Accelerate framework)
 oxiblas = { workspace = true }
 oxiblas-blas = { workspace = true }
 oxiblas-matrix = { workspace = true }
 # Campaign C0 spike: oxicuda Metal backend + compute-backend trait (macOS only)
-oxicuda-metal = { version = "0.4.1", optional = true }
-oxicuda-backend = { version = "0.4.1", optional = true }
+oxicuda-metal = { workspace = true, optional = true }
+oxicuda-backend = { workspace = true, optional = true }

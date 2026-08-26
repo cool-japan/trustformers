@@ -1,8 +1,12 @@
 use crate::phi2::config::Phi2Config;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_bias, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::{tensor_op_error, Result},
+    errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
     ops::activations::gelu,
     tensor::Tensor,
@@ -31,6 +35,45 @@ impl Phi2LayerNorm {
 
     pub fn parameter_count(&self) -> usize {
         self.weight.len() + self.bias.len()
+    }
+
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` has the wrong shape.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "Phi2LayerNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// Install the normalisation shift from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `bias` has the wrong shape.
+    pub fn set_bias(&mut self, bias: Tensor) -> Result<()> {
+        if bias.shape() != self.bias.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "Phi2LayerNorm expects a {:?} shift, got {:?}",
+                self.bias.shape(),
+                bias.shape()
+            )));
+        }
+        self.bias = bias;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
     }
 }
 
@@ -146,8 +189,8 @@ impl Phi2RotaryEmbedding {
 ///
 /// `MLP(x) = fc2(GELU(fc1(x)))`
 pub struct Phi2MLP {
-    fc1: Linear,
-    fc2: Linear,
+    pub(crate) fc1: Linear,
+    pub(crate) fc2: Linear,
 }
 
 impl Phi2MLP {
@@ -185,10 +228,10 @@ impl Layer for Phi2MLP {
 
 /// Phi-2 Multi-Head Self-Attention (no GQA — full MHA)
 pub struct Phi2Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    dense: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
+    pub(crate) dense: Linear,
     rotary_emb: Phi2RotaryEmbedding,
     num_heads: usize,
     head_dim: usize,
@@ -313,9 +356,9 @@ impl Layer for Phi2Attention {
 /// output   = residual + attn_out + mlp_out
 /// ```
 pub struct Phi2DecoderLayer {
-    self_attn: Phi2Attention,
-    mlp: Phi2MLP,
-    input_layernorm: Phi2LayerNorm,
+    pub(crate) self_attn: Phi2Attention,
+    pub(crate) mlp: Phi2MLP,
+    pub(crate) input_layernorm: Phi2LayerNorm,
 }
 
 impl Phi2DecoderLayer {
@@ -417,12 +460,13 @@ impl Model for Phi2Model {
         self.run(input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(
-            trustformers_core::errors::TrustformersError::not_implemented(
-                "Weight loading not yet implemented for Phi-2".to_string(),
-            ),
-        )
+    /// Load a HuggingFace Phi-2 checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`Phi2Model::load_checkpoint`] for the name map and failure modes.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -479,12 +523,46 @@ impl Model for Phi2ForCausalLM {
         Phi2ForCausalLM::forward(self, input_ids)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Err(
-            trustformers_core::errors::TrustformersError::not_implemented(
-                "Weight loading not yet implemented for Phi-2".to_string(),
-            ),
-        )
+    /// Load a HuggingFace `Phi2ForCausalLM` checkpoint.
+    ///
+    /// The backbone is bound first, then the LM head. Phi-2's head carries a
+    /// bias in the released checkpoints, which is bound when present.
+    ///
+    /// # Errors
+    ///
+    /// See [`Phi2Model::load_checkpoint`]; additionally fails when the
+    /// checkpoint carries no `lm_head.weight`, or when it has the wrong shape.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
+
+        let config = self.model.config();
+        let expected = [config.vocab_size, config.hidden_size];
+        let head = checkpoint.get("lm_head.weight").ok_or_else(|| {
+            TrustformersError::weight_load_error(
+                "checkpoint carries no lm_head.weight; Phi-2 does not tie its word embeddings, \
+                 so the head cannot be reconstructed from the embedding matrix"
+                    .to_string(),
+            )
+        })?;
+        if head.shape() != expected {
+            return Err(TrustformersError::shape_error(format!(
+                "language-model head has shape {:?} but this model expects {expected:?}",
+                head.shape()
+            )));
+        }
+        self.lm_head.set_weight(head.clone())?;
+        if let Some(bias) = checkpoint.get("lm_head.bias") {
+            if bias.shape() != vec![config.vocab_size] {
+                return Err(TrustformersError::shape_error(format!(
+                    "language-model head bias has shape {:?} but {} was expected",
+                    bias.shape(),
+                    config.vocab_size
+                )));
+            }
+            self.lm_head.set_bias(bias.clone())?;
+        }
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -499,6 +577,109 @@ impl Model for Phi2ForCausalLM {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+impl Phi2Model {
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// Phi-2 is a **parallel-block** decoder: attention and MLP both read the
+    /// *same* normalised hidden state and their outputs are summed into one
+    /// residual, so each layer carries a single `input_layernorm` and there is
+    /// no `post_attention_layernorm` — a loader written for the LLaMA layout
+    /// would report that norm as missing on every layer. Its attention output
+    /// projection is spelled `dense` rather than `o_proj`, its MLP is a plain
+    /// two-layer `fc1`/`fc2` rather than a gated triple, and every projection
+    /// carries a bias.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a Phi-2 checkpoint, when any
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let intermediate = self.config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            for (name, projection) in [
+                ("q_proj", &mut layer.self_attn.q_proj),
+                ("k_proj", &mut layer.self_attn.k_proj),
+                ("v_proj", &mut layer.self_attn.v_proj),
+            ] {
+                bind_linear(
+                    &mut binder,
+                    &format!("{attn}.{name}"),
+                    hidden,
+                    hidden,
+                    true,
+                    projection,
+                )?;
+            }
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.dense"),
+                hidden,
+                hidden,
+                true,
+                &mut layer.self_attn.dense,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.fc1"),
+                intermediate,
+                hidden,
+                true,
+                &mut layer.mlp.fc1,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.fc2"),
+                hidden,
+                intermediate,
+                true,
+                &mut layer.mlp.fc2,
+            )?;
+
+            // One norm per layer: the parallel block shares it.
+            let norm = format!("layers.{i}.input_layernorm");
+            if let Some(w) = take_norm_weight(&mut binder, &norm, hidden)? {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &norm, hidden)? {
+                layer.input_layernorm.set_bias(b)?;
+            }
+        }
+
+        if let Some(w) = take_norm_weight(&mut binder, "final_layernorm", hidden)? {
+            self.final_layernorm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "final_layernorm", hidden)? {
+            self.final_layernorm.set_bias(b)?;
+        }
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -768,6 +949,167 @@ mod tests {
         assert!(
             output.shape().iter().product::<usize>() > 0,
             "output must be non-empty"
+        );
+    }
+
+    // ── Real checkpoint loading ─────────────────────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    fn loading_config() -> Phi2Config {
+        Phi2Config {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            max_position_embeddings: 16,
+            rope_theta: 10000.0,
+            layer_norm_eps: 1e-5,
+            initializer_range: 0.02,
+        }
+    }
+
+    /// Phi-2's parallel block: one norm per layer, `dense` instead of `o_proj`,
+    /// an ungated `fc1`/`fc2` MLP, and biases everywhere.
+    fn phi2_fixture(config: &Phi2Config) -> DecoderFixtureSpec {
+        let mut spec = DecoderFixtureSpec::llama_style(
+            "model.",
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.hidden_size,
+            config.hidden_size,
+        );
+        spec.attention_bias = true;
+        spec.mlp_bias = true;
+        spec.gated_mlp = false;
+        spec.post_attention_norm = false;
+        spec.norm_bias = true;
+        spec.attention_output_name = "dense".to_string();
+        spec
+    }
+
+    /// The fixture's final norm is named `model.norm`; Phi-2 calls it
+    /// `model.final_layernorm`, so rename it.
+    fn phi2_tensors(config: &Phi2Config) -> Vec<F32Tensor> {
+        phi2_fixture(config)
+            .tensors()
+            .into_iter()
+            .map(|mut t| {
+                if let Some(rest) = t.name.strip_prefix("model.norm.") {
+                    t.name = format!("model.final_layernorm.{rest}");
+                }
+                t
+            })
+            .collect()
+    }
+
+    /// Regression: `load_pretrained` returned `not_implemented`, so no Phi-2
+    /// checkpoint could ever reach the model.
+    #[test]
+    fn load_pretrained_binds_every_parameter() {
+        let config = loading_config();
+        let tensors = phi2_tensors(&config);
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi2Model::new(config).expect("model must build");
+        let report = model
+            .load_checkpoint(
+                &crate::weight_loading::checkpoint::Checkpoint::from_bytes(&bytes)
+                    .expect("checkpoint must parse"),
+                &["lm_head."],
+            )
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.unexpected.is_empty(),
+            "nothing should be left over: {:?}",
+            report.unexpected
+        );
+    }
+
+    /// Phi-2's parallel block has **no** `post_attention_layernorm`. A loader
+    /// written for the LLaMA layout would report it missing on every layer.
+    #[test]
+    fn load_pretrained_does_not_demand_a_post_attention_norm() {
+        let config = loading_config();
+        let tensors = phi2_tensors(&config);
+        assert!(
+            !tensors.iter().any(|t| t.name.contains("post_attention_layernorm")),
+            "the Phi-2 fixture must not carry a post-attention norm"
+        );
+        let bytes = build_safetensors(&tensors);
+        let mut model = Phi2Model::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a single-norm checkpoint must load");
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter() {
+        let config = loading_config();
+        let mut tensors = phi2_tensors(&config);
+        tensors.retain(|t| t.name != "model.layers.1.mlp.fc2.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi2Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.fc2.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = Phi2Model::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The causal-LM wrapper must bind the head; Phi-2 does not tie embeddings,
+    /// so a checkpoint without one is an error rather than a silent fallback.
+    #[test]
+    fn causal_lm_requires_an_explicit_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&phi2_tensors(&config));
+        let mut model = Phi2ForCausalLM::new(config.clone()).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("Phi-2 does not tie its embeddings");
+        assert!(
+            err.to_string().contains("lm_head.weight"),
+            "unexpected: {err}"
+        );
+
+        let mut tensors = phi2_tensors(&config);
+        let head = F32Tensor::ramp(
+            "lm_head.weight",
+            &[config.vocab_size, config.hidden_size],
+            90.0,
+        );
+        tensors.push(head.clone());
+        tensors.push(F32Tensor::ramp("lm_head.bias", &[config.vocab_size], 99.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = Phi2ForCausalLM::new(config).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+        assert_eq!(
+            model.lm_head.weight().data().expect("readable"),
+            head.values
         );
     }
 }

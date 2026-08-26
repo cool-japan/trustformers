@@ -491,6 +491,11 @@ pub struct PerformanceTracker {
     total_bursts_generated: Mutex<usize>,
     total_content_processed: Mutex<usize>,
 }
+/// Bound on the timing histories `PerformanceTracker` keeps, so a
+/// long-running simulator doesn't grow them unboundedly; oldest samples are
+/// evicted first.
+const PERFORMANCE_HISTORY_CAPACITY: usize = 200;
+
 impl PerformanceTracker {
     pub fn new() -> Self {
         Self {
@@ -507,6 +512,24 @@ impl PerformanceTracker {
         ) {
             *bursts += burst_count;
             *content += content_length;
+        }
+    }
+    /// Records how long one `generate_typing_burst` call took, for
+    /// `analyze_patterns`'s efficiency/consistency scoring.
+    pub fn record_burst_generation_time(&self, duration: Duration) {
+        Self::push_bounded(&self.burst_generation_times, duration);
+    }
+    /// Records how long one `TypingPatterns::analyze_content` call took, for
+    /// `analyze_patterns`'s adaptability scoring.
+    pub fn record_analysis_time(&self, duration: Duration) {
+        Self::push_bounded(&self.analysis_times, duration);
+    }
+    fn push_bounded(target: &Mutex<VecDeque<Duration>>, duration: Duration) {
+        if let Ok(mut samples) = target.lock() {
+            samples.push_back(duration);
+            while samples.len() > PERFORMANCE_HISTORY_CAPACITY {
+                samples.pop_front();
+            }
         }
     }
     pub fn get_metrics(&self) -> PerformanceMetrics {
@@ -528,11 +551,79 @@ impl PerformanceTracker {
             },
         }
     }
+    /// Derives efficiency/consistency/adaptability scores from the timing
+    /// history recorded via `record_burst_generation_time` /
+    /// `record_analysis_time`. Every score defaults to `0.5` (neutral, not a
+    /// fabricated pass/fail) when there isn't enough data yet to measure it.
     pub fn analyze_patterns(&self) -> TypingPatternSummary {
+        let burst_times: Vec<Duration> = self
+            .burst_generation_times
+            .lock()
+            .map(|g| g.iter().copied().collect())
+            .unwrap_or_default();
+        let analysis_times: Vec<Duration> = self
+            .analysis_times
+            .lock()
+            .map(|g| g.iter().copied().collect())
+            .unwrap_or_default();
+
         TypingPatternSummary {
-            efficiency_score: 0.85,
-            consistency_score: 0.92,
-            adaptability_score: 0.78,
+            efficiency_score: Self::efficiency_from_durations(&burst_times),
+            consistency_score: Self::consistency_from_durations(&burst_times),
+            adaptability_score: Self::adaptability_from_durations(&analysis_times, &burst_times),
+        }
+    }
+
+    fn mean_millis(durations: &[Duration]) -> Option<f32> {
+        if durations.is_empty() {
+            return None;
+        }
+        let total: f32 = durations.iter().map(|d| d.as_secs_f32() * 1000.0).sum();
+        Some(total / durations.len() as f32)
+    }
+
+    /// Faster average burst-generation time maps to a higher score.
+    fn efficiency_from_durations(durations: &[Duration]) -> f32 {
+        match Self::mean_millis(durations) {
+            None => 0.5,
+            Some(mean_ms) => (1.0 / (1.0 + mean_ms / 10.0)).clamp(0.0, 1.0),
+        }
+    }
+
+    /// Lower relative variability (coefficient of variation) in
+    /// burst-generation time maps to a higher score.
+    fn consistency_from_durations(durations: &[Duration]) -> f32 {
+        if durations.len() < 2 {
+            return 0.5;
+        }
+        let mean_ms = Self::mean_millis(durations).unwrap_or(0.0);
+        if mean_ms <= 0.0 {
+            return 1.0;
+        }
+        let variance_ms2 = durations
+            .iter()
+            .map(|d| {
+                let ms = d.as_secs_f32() * 1000.0;
+                (ms - mean_ms).powi(2)
+            })
+            .sum::<f32>()
+            / durations.len() as f32;
+        let coefficient_of_variation = variance_ms2.sqrt() / mean_ms;
+        (1.0 - coefficient_of_variation).clamp(0.0, 1.0)
+    }
+
+    /// Lower content-analysis overhead relative to total (analysis +
+    /// generation) time maps to a higher score: the simulator adapts to new
+    /// content quickly without analysis dominating the latency budget.
+    fn adaptability_from_durations(analysis_times: &[Duration], burst_times: &[Duration]) -> f32 {
+        match (
+            Self::mean_millis(analysis_times),
+            Self::mean_millis(burst_times),
+        ) {
+            (Some(analysis_mean), Some(burst_mean)) if analysis_mean + burst_mean > 0.0 => {
+                (1.0 - (analysis_mean / (analysis_mean + burst_mean))).clamp(0.0, 1.0)
+            },
+            _ => 0.5,
         }
     }
 }

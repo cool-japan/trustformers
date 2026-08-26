@@ -49,7 +49,8 @@ async fn test_isolated_auth_flow() {
         let router = server.create_test_router().await;
         let test_server = TestServer::new(router);
 
-        // Test authentication flow in isolation
+        // No authentication service is configured on this server, so the token
+        // endpoint must report that rather than issuing a canned token.
         let response = test_server
             .post("/auth/token")
             .json(&json!({
@@ -58,18 +59,12 @@ async fn test_isolated_auth_flow() {
             }))
             .await;
 
-        assert_eq!(response.status_code(), StatusCode::OK);
-        let token_response: Value = response.json();
-        assert!(token_response["access_token"].is_string());
+        assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
 
-        // Test that this token works for protected endpoints
-        let token = token_response["access_token"].as_str().expect("operation failed in test");
-        let metrics_response = test_server
-            .get("/metrics")
-            .add_header("Authorization", &format!("Bearer {}", token))
-            .await;
-
+        // Metrics remain available without a token when auth is not configured.
+        let metrics_response = test_server.get("/metrics").await;
         assert_eq!(metrics_response.status_code(), StatusCode::OK);
+        assert!(metrics_response.text().contains("trustformers_serve_uptime_seconds"));
     })
     .await;
 
@@ -136,7 +131,13 @@ async fn run_isolated_inference_test(
             ..Default::default()
         };
 
-        let server = TrustformerServer::new(config);
+        // A real (untrained) model so the inference path genuinely runs.
+        let executor: std::sync::Arc<dyn trustformers_serve::batching::BatchExecutor> =
+            std::sync::Arc::new(
+                trustformers_serve::batching::untrained_byte_gpt2_executor(1, 16, 8)
+                    .expect("the tiny GPT-2 used by the tests must build"),
+            );
+        let server = TrustformerServer::with_executor(config, executor);
         let router = server.create_test_router().await;
         let test_server = TestServer::new(router);
 

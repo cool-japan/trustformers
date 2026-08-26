@@ -6,6 +6,45 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use trustformers_core::errors::{Result, TrustformersError};
 
+/// `serde(with = "json_value_map")` helper for `BinaryTokenizer::config`.
+///
+/// `serde_json::Value`'s `Deserialize` impl needs `deserialize_any` (it asks
+/// the deserializer at runtime "what shape is this value"), which
+/// non-self-describing binary formats like `oxicode`/bincode cannot support
+/// (they need the shape known at compile time). Serializing each value as
+/// its JSON text instead lets any wire format carry it losslessly as a plain
+/// string, then reconstructs the real `Value` on the way back in.
+mod json_value_map {
+    use serde::de::Error as DeError;
+    use serde::ser::Error as SerError;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<String, serde_json::Value>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let mut as_strings: HashMap<String, String> = HashMap::with_capacity(map.len());
+        for (key, value) in map {
+            let text = serde_json::to_string(value).map_err(SerError::custom)?;
+            as_strings.insert(key.clone(), text);
+        }
+        as_strings.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<HashMap<String, serde_json::Value>, D::Error> {
+        let as_strings: HashMap<String, String> = HashMap::deserialize(deserializer)?;
+        let mut map = HashMap::with_capacity(as_strings.len());
+        for (key, text) in as_strings {
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(DeError::custom)?;
+            map.insert(key, value);
+        }
+        Ok(map)
+    }
+}
+
 /// Binary format version for compatibility tracking
 const BINARY_FORMAT_VERSION: u32 = 1;
 
@@ -89,7 +128,15 @@ pub struct BinaryTokenizer {
     /// Merges for BPE tokenizers (if applicable)
     pub merges: Option<Vec<(String, String)>>,
 
-    /// Additional tokenizer-specific configuration
+    /// Additional tokenizer-specific configuration.
+    ///
+    /// Encoded on the wire as JSON text per entry (see `json_value_map`)
+    /// rather than passed through serde generically: `serde_json::Value`'s
+    /// `Deserialize` impl requires `deserialize_any` (runtime type
+    /// introspection), which `oxicode`'s non-self-describing binary format
+    /// does not implement, so round-tripping a `HashMap<String, Value>`
+    /// through it directly fails with "deserialize_any not supported".
+    #[serde(with = "json_value_map")]
     pub config: HashMap<String, serde_json::Value>,
 
     /// Normalization rules
@@ -103,6 +150,8 @@ pub struct BinaryTokenizer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizationRule {
     pub rule_type: String,
+    /// See `json_value_map` for why this needs a custom (de)serializer.
+    #[serde(with = "json_value_map")]
     pub parameters: HashMap<String, serde_json::Value>,
 }
 
@@ -459,7 +508,22 @@ impl BinaryUtils {
 pub struct TokenizerConverter;
 
 impl TokenizerConverter {
-    /// Convert a HuggingFace tokenizer.json to binary format
+    /// Convert a HuggingFace tokenizer.json to binary format.
+    ///
+    /// Handles both vocabulary shapes HF's tokenizer.json uses (BPE/WordPiece
+    /// store `model.vocab` as a `{token: id}` object; Unigram stores it as an
+    /// array of `[piece, score]` pairs, with the array index as the id) and
+    /// both merge-list encodings (`tokenizers` < 0.20 wrote `"a b"` strings;
+    /// this workspace's `tokenizers` 0.23 writes `["a", "b"]` pairs). A
+    /// genuinely malformed or unsupported shape is reported as an error
+    /// rather than silently producing an empty or partial vocabulary/merge
+    /// list. `normalizer`/`pre_tokenizer`/`post_processor`/`decoder`/
+    /// `truncation`/`padding` are carried into `BinaryTokenizer::config`
+    /// verbatim (as raw JSON) rather than dropped: this crate's
+    /// [`NormalizationRule`]/[`PreTokenizationRule`] are a much simpler,
+    /// crate-specific rule format, not a structural mirror of HF's
+    /// normalizer/pre-tokenizer graph, so preserving the source JSON
+    /// losslessly is more honest than a lossy best-effort translation.
     pub fn from_tokenizer_json<P: AsRef<Path>>(
         json_path: P,
         binary_path: P,
@@ -473,91 +537,184 @@ impl TokenizerConverter {
             TrustformersError::serialization_error(format!("Failed to parse JSON: {}", e))
         })?;
 
-        // Extract vocabulary
+        let model = json_value.get("model").ok_or_else(|| {
+            TrustformersError::invalid_config(
+                "tokenizer.json is missing the required \"model\" field".to_string(),
+            )
+        })?;
+
+        // Extract vocabulary (and, for Unigram, per-piece scores).
         let mut vocab = HashMap::new();
         let mut id_to_token = HashMap::new();
+        let mut scores: Option<HashMap<u32, f32>> = None;
 
-        if let Some(model) = json_value.get("model") {
-            if let Some(vocab_obj) = model.get("vocab") {
-                if let Some(vocab_map) = vocab_obj.as_object() {
-                    for (token, id) in vocab_map {
-                        if let Some(id_num) = id.as_u64() {
-                            let id_u32 = id_num as u32;
-                            vocab.insert(token.clone(), id_u32);
-                            id_to_token.insert(id_u32, token.clone());
-                        }
-                    }
+        match model.get("vocab") {
+            Some(serde_json::Value::Object(vocab_map)) => {
+                // BPE / WordPiece: {token: id}.
+                for (token, id) in vocab_map {
+                    let id_u32 = id.as_u64().ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "tokenizer.json: vocab entry {:?} has a non-integer id",
+                            token
+                        ))
+                    })? as u32;
+                    vocab.insert(token.clone(), id_u32);
+                    id_to_token.insert(id_u32, token.clone());
                 }
-            }
+            },
+            Some(serde_json::Value::Array(entries)) => {
+                // Unigram: [[piece, score], ...]; id = array index.
+                let mut piece_scores = HashMap::with_capacity(entries.len());
+                for (index, entry) in entries.iter().enumerate() {
+                    let pair = entry.as_array().ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "tokenizer.json: Unigram vocab entry {} is not a [piece, score] pair",
+                            index
+                        ))
+                    })?;
+                    let piece = pair.first().and_then(|v| v.as_str()).ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "tokenizer.json: Unigram vocab entry {} is missing a string piece",
+                            index
+                        ))
+                    })?;
+                    let score = pair.get(1).and_then(|v| v.as_f64()).ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "tokenizer.json: Unigram vocab entry {} is missing a numeric score",
+                            index
+                        ))
+                    })? as f32;
+
+                    let id = index as u32;
+                    vocab.insert(piece.to_string(), id);
+                    id_to_token.insert(id, piece.to_string());
+                    piece_scores.insert(id, score);
+                }
+                scores = Some(piece_scores);
+            },
+            Some(other) => {
+                return Err(TrustformersError::invalid_config(format!(
+                    "tokenizer.json: unsupported \"model.vocab\" shape: {}",
+                    other
+                )));
+            },
+            None => {
+                return Err(TrustformersError::invalid_config(
+                    "tokenizer.json: \"model.vocab\" is missing".to_string(),
+                ));
+            },
         }
 
-        // Extract special tokens
+        // Extract special tokens, preserving the full `added_tokens` entries
+        // (including the lstrip/rstrip/single_word/normalized/special flags
+        // the old code discarded) in `config` for lossless round-tripping.
         let mut special_tokens = HashMap::new();
-        if let Some(added_tokens) = json_value.get("added_tokens") {
-            if let Some(tokens_array) = added_tokens.as_array() {
-                for token_obj in tokens_array {
-                    if let Some(content) = token_obj.get("content") {
-                        if let Some(id) = token_obj.get("id") {
-                            if let (Some(token_str), Some(id_num)) = (content.as_str(), id.as_u64())
-                            {
-                                special_tokens.insert(token_str.to_string(), id_num as u32);
-                            }
-                        }
-                    }
+        let mut added_tokens_meta = Vec::new();
+        if let Some(added_tokens) = json_value.get("added_tokens").and_then(|v| v.as_array()) {
+            for token_obj in added_tokens {
+                let content = token_obj.get("content").and_then(|v| v.as_str());
+                let id = token_obj.get("id").and_then(|v| v.as_u64());
+                if let (Some(token_str), Some(id_num)) = (content, id) {
+                    special_tokens.insert(token_str.to_string(), id_num as u32);
                 }
+                added_tokens_meta.push(token_obj.clone());
             }
         }
 
-        // Extract merges for BPE
-        let merges = if let Some(model) = json_value.get("model") {
-            if let Some(merges_array) = model.get("merges") {
-                if let Some(merges_vec) = merges_array.as_array() {
-                    let mut extracted_merges = Vec::new();
-                    for merge in merges_vec {
-                        if let Some(merge_str) = merge.as_str() {
+        // Extract merges for BPE, supporting both encodings tokenizer.json
+        // has used across `tokenizers` versions.
+        let merges = match model.get("merges") {
+            Some(serde_json::Value::Array(merges_vec)) => {
+                let mut extracted_merges = Vec::with_capacity(merges_vec.len());
+                for (index, merge) in merges_vec.iter().enumerate() {
+                    let pair = match merge {
+                        serde_json::Value::String(merge_str) => {
                             let parts: Vec<&str> = merge_str.split(' ').collect();
-                            if parts.len() == 2 {
-                                extracted_merges.push((parts[0].to_string(), parts[1].to_string()));
+                            if parts.len() != 2 {
+                                return Err(TrustformersError::invalid_config(format!(
+                                    "tokenizer.json: merge entry {} {:?} is not \"a b\"",
+                                    index, merge_str
+                                )));
                             }
-                        }
-                    }
-                    Some(extracted_merges)
-                } else {
-                    None
+                            (parts[0].to_string(), parts[1].to_string())
+                        },
+                        serde_json::Value::Array(pair_arr) if pair_arr.len() == 2 => {
+                            let a = pair_arr[0].as_str().ok_or_else(|| {
+                                TrustformersError::invalid_config(format!(
+                                    "tokenizer.json: merge entry {} has a non-string element",
+                                    index
+                                ))
+                            })?;
+                            let b = pair_arr[1].as_str().ok_or_else(|| {
+                                TrustformersError::invalid_config(format!(
+                                    "tokenizer.json: merge entry {} has a non-string element",
+                                    index
+                                ))
+                            })?;
+                            (a.to_string(), b.to_string())
+                        },
+                        other => {
+                            return Err(TrustformersError::invalid_config(format!(
+                                "tokenizer.json: unsupported merge entry {} shape: {}",
+                                index, other
+                            )));
+                        },
+                    };
+                    extracted_merges.push(pair);
                 }
-            } else {
-                None
-            }
-        } else {
-            None
+                Some(extracted_merges)
+            },
+            Some(other) => {
+                return Err(TrustformersError::invalid_config(format!(
+                    "tokenizer.json: unsupported \"model.merges\" shape: {}",
+                    other
+                )));
+            },
+            None => None,
         };
+
+        // Preserve normalizer/pre_tokenizer/post_processor/decoder/
+        // truncation/padding verbatim instead of silently dropping them.
+        let mut config_map = HashMap::new();
+        for key in [
+            "normalizer",
+            "pre_tokenizer",
+            "post_processor",
+            "decoder",
+            "truncation",
+            "padding",
+        ] {
+            if let Some(value) = json_value.get(key) {
+                if !value.is_null() {
+                    config_map.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        if !added_tokens_meta.is_empty() {
+            config_map.insert(
+                "added_tokens".to_string(),
+                serde_json::Value::Array(added_tokens_meta),
+            );
+        }
 
         // Create binary tokenizer
         let binary_tokenizer = BinaryTokenizer {
             vocab,
             id_to_token,
             special_tokens,
-            scores: None, // JSON tokenizers typically don't have scores
+            scores,
             merges,
-            config: HashMap::new(),
+            config: config_map,
             normalization_rules: None,
             pre_tokenization_rules: None,
         };
 
         // Determine tokenizer type
-        let tokenizer_type = if let Some(model) = json_value.get("model") {
-            if let Some(type_str) = model.get("type") {
-                type_str.as_str().unwrap_or("unknown").to_string()
-            } else {
-                "unknown".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        };
+        let tokenizer_type = model.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
 
         // Serialize to binary format
         let serializer = BinarySerializer::new(config.clone());
-        serializer.serialize(&binary_tokenizer, &tokenizer_type, binary_path)
+        serializer.serialize(&binary_tokenizer, tokenizer_type, binary_path)
     }
 
     /// Convert from SentencePiece model to binary format
@@ -572,6 +729,13 @@ impl TokenizerConverter {
         let (vocab, id_to_token, special_tokens, scores, sp_config) =
             Self::load_sentencepiece_model(sp_path)?;
 
+        // Derive rules from whatever the model actually told us (protobuf
+        // models carry `normalizer_spec`; plain-text `.vocab` files carry no
+        // such metadata at all, so no rules are asserted for those instead
+        // of assuming HF/SentencePiece defaults that may not hold).
+        let normalization_rules = Self::extract_normalization_rules(&sp_config);
+        let pre_tokenization_rules = Self::extract_pre_tokenization_rules(&sp_config);
+
         // Create binary tokenizer with loaded data
         let binary_tokenizer = BinaryTokenizer {
             vocab,
@@ -583,8 +747,8 @@ impl TokenizerConverter {
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::String(v.to_string())))
                 .collect(),
-            normalization_rules: Some(Self::extract_normalization_rules()),
-            pre_tokenization_rules: Some(Self::extract_pre_tokenization_rules()),
+            normalization_rules: Some(normalization_rules),
+            pre_tokenization_rules: Some(pre_tokenization_rules),
         };
 
         let serializer = BinarySerializer::new(config.clone());
@@ -634,11 +798,15 @@ impl TokenizerConverter {
             )
         })?;
 
-        // Parse protobuf data (simplified - would use actual protobuf parsing in production)
         Self::parse_sentencepiece_protobuf(&buffer)
     }
 
-    /// Parse SentencePiece protobuf data
+    /// Parse a real SentencePiece `ModelProto` (see
+    /// [`crate::sentencepiece::proto`]) into the binary format's flat
+    /// vocab/score/config representation. Every piece, score, and type comes
+    /// directly from the model file's wire-format bytes; nothing is
+    /// synthesized, and a malformed or truncated file is rejected rather
+    /// than heuristically scanned for UTF-8-looking runs.
     fn parse_sentencepiece_protobuf(
         data: &[u8],
     ) -> Result<(
@@ -648,96 +816,72 @@ impl TokenizerConverter {
         HashMap<u32, f32>,
         HashMap<String, String>,
     )> {
-        // Simplified protobuf parsing - in production this would use proper protobuf library
-        let mut vocab = HashMap::new();
-        let mut id_to_token = HashMap::new();
+        let model = crate::sentencepiece::proto::parse_model_proto(data)?;
+
+        let mut vocab = HashMap::with_capacity(model.pieces.len());
+        let mut id_to_token = HashMap::with_capacity(model.pieces.len());
         let mut special_tokens = HashMap::new();
-        let mut scores = HashMap::new();
+        let mut scores = HashMap::with_capacity(model.pieces.len());
+
+        // SentencePiece IDs are the piece's index within `ModelProto.pieces`.
+        for (index, piece) in model.pieces.iter().enumerate() {
+            let id = index as u32;
+            vocab.insert(piece.piece.clone(), id);
+            id_to_token.insert(id, piece.piece.clone());
+            scores.insert(id, piece.score);
+
+            if matches!(
+                piece.piece_type,
+                crate::sentencepiece::proto::PieceType::Unknown
+                    | crate::sentencepiece::proto::PieceType::Control
+                    | crate::sentencepiece::proto::PieceType::UserDefined
+            ) {
+                special_tokens.insert(piece.piece.clone(), id);
+            }
+        }
+
         let mut config = HashMap::new();
-
-        // Add standard SentencePiece tokens
-        let standard_tokens = vec![
-            ("<unk>", 0, -100.0, true),
-            ("<s>", 1, -1.0, true),
-            ("</s>", 2, -1.0, true),
-            ("<pad>", 3, -1.0, true),
-        ];
-
-        for (token, id, score, is_special) in standard_tokens {
-            vocab.insert(token.to_string(), id);
-            id_to_token.insert(id, token.to_string());
-            scores.insert(id, score);
-            if is_special {
-                special_tokens.insert(token.to_string(), id);
-            }
-        }
-
-        // Extract vocabulary from protobuf data
-        let mut current_id = 4;
-        let mut i = 0;
-
-        while i < data.len() {
-            // Look for token patterns in the binary data
-            if let Some(token_data) = Self::extract_token_from_protobuf(data, &mut i) {
-                let (token, score) = token_data;
-
-                if !vocab.contains_key(&token) {
-                    vocab.insert(token.clone(), current_id);
-                    id_to_token.insert(current_id, token.clone());
-                    scores.insert(current_id, score);
-                    current_id += 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
-
-        // Add configuration metadata
-        config.insert("model_type".to_string(), "sentencepiece".to_string());
+        config.insert(
+            "model_type".to_string(),
+            sentencepiece_model_type_name(model.trainer_spec.model_type).to_string(),
+        );
         config.insert("vocab_size".to_string(), vocab.len().to_string());
-        config.insert("normalization".to_string(), "nfkc".to_string());
-        config.insert("add_dummy_prefix".to_string(), "true".to_string());
+        config.insert(
+            "normalization".to_string(),
+            if model.normalizer_spec.name.is_empty() {
+                "identity".to_string()
+            } else {
+                model.normalizer_spec.name.clone()
+            },
+        );
+        config.insert(
+            "add_dummy_prefix".to_string(),
+            model.normalizer_spec.add_dummy_prefix.to_string(),
+        );
+        config.insert(
+            "remove_extra_whitespaces".to_string(),
+            model.normalizer_spec.remove_extra_whitespaces.to_string(),
+        );
+        config.insert(
+            "escape_whitespaces".to_string(),
+            model.normalizer_spec.escape_whitespaces.to_string(),
+        );
+        config.insert(
+            "byte_fallback".to_string(),
+            model.trainer_spec.byte_fallback.to_string(),
+        );
+        config.insert(
+            "treat_whitespace_as_suffix".to_string(),
+            model.trainer_spec.treat_whitespace_as_suffix.to_string(),
+        );
 
         Ok((vocab, id_to_token, special_tokens, scores, config))
     }
 
-    /// Extract token from SentencePiece protobuf data
-    fn extract_token_from_protobuf(data: &[u8], pos: &mut usize) -> Option<(String, f32)> {
-        if *pos >= data.len() {
-            return None;
-        }
-
-        // Simplified extraction - look for UTF-8 sequences that could be tokens
-        let start = *pos;
-        let mut end = start;
-
-        // Find potential token boundaries
-        while end < data.len() && end < start + 50 {
-            if data[end] == 0
-                || (data[end] < 32 && data[end] != 9 && data[end] != 10 && data[end] != 13)
-            {
-                break;
-            }
-            end += 1;
-        }
-
-        if end > start {
-            if let Ok(token) = String::from_utf8(data[start..end].to_vec()) {
-                let clean_token = token.trim().to_string();
-                if !clean_token.is_empty() && Self::is_valid_token(&clean_token) {
-                    *pos = end + 1;
-                    // Generate a score based on token characteristics
-                    let score = Self::estimate_token_score(&clean_token);
-                    return Some((clean_token, score));
-                }
-            }
-        }
-
-        *pos += 1;
-        None
-    }
-
-    /// Load SentencePiece vocabulary file
+    /// Load a SentencePiece plain-text `.vocab` file (one `piece<TAB>score`
+    /// entry per line, the format `spm_export_vocab` produces). Every score
+    /// comes from the file itself; a line with a missing or unparsable score
+    /// is rejected rather than silently defaulted to a heuristic estimate.
     fn load_sentencepiece_vocab<P: AsRef<Path>>(
         vocab_path: P,
     ) -> Result<(
@@ -759,11 +903,16 @@ impl TokenizerConverter {
         let mut special_tokens = HashMap::new();
         let mut scores = HashMap::new();
         let mut config = HashMap::new();
+        // IDs are assigned by *vocabulary entry* order, not by source line
+        // number: the old code used `line_num` directly, which silently
+        // mis-numbered every entry after the first skipped blank/comment
+        // line.
+        let mut next_id: u32 = 0;
 
         for (line_num, line) in reader.lines().enumerate() {
             let line = line.map_err(|e| {
                 TrustformersError::other(
-                    anyhow!("Failed to read line {}: {}", line_num, e).to_string(),
+                    anyhow!("Failed to read line {}: {}", line_num + 1, e).to_string(),
                 )
             })?;
             let line = line.trim();
@@ -772,25 +921,36 @@ impl TokenizerConverter {
                 continue;
             }
 
-            // Parse line format: token\tscore or token score
+            // Format: "<piece>\t<score>" (spm_export_vocab's output); a few
+            // hand-edited vocab files use plain whitespace instead of a tab.
             let parts: Vec<&str> = if line.contains('\t') {
-                line.split('\t').collect()
+                line.splitn(2, '\t').collect()
             } else {
-                line.split_whitespace().collect()
+                line.splitn(2, char::is_whitespace).collect()
             };
-
-            if parts.is_empty() {
-                continue;
-            }
 
             let token = parts[0].to_string();
-            let score = if parts.len() > 1 {
-                parts[1].parse::<f32>().unwrap_or(0.0)
-            } else {
-                Self::estimate_token_score(&token)
+            let score = match parts.get(1) {
+                Some(raw) => raw.trim().parse::<f32>().map_err(|e| {
+                    TrustformersError::other(format!(
+                        "SentencePiece vocab line {}: invalid score {:?} for piece {:?}: {}",
+                        line_num + 1,
+                        raw,
+                        token,
+                        e
+                    ))
+                })?,
+                None => {
+                    return Err(TrustformersError::other(format!(
+                        "SentencePiece vocab line {}: missing score column for piece {:?}",
+                        line_num + 1,
+                        token
+                    )));
+                },
             };
 
-            let id = line_num as u32;
+            let id = next_id;
+            next_id += 1;
             vocab.insert(token.clone(), id);
             id_to_token.insert(id, token.clone());
             scores.insert(id, score);
@@ -801,57 +961,41 @@ impl TokenizerConverter {
             }
         }
 
-        // Add configuration
+        if vocab.is_empty() {
+            return Err(TrustformersError::other(
+                "SentencePiece vocab file contains no entries".to_string(),
+            ));
+        }
+
+        // Plain-text `.vocab` files carry no normalizer/trainer metadata, so
+        // (unlike the protobuf path) only the fields we can actually know
+        // are populated; `extract_normalization_rules`/
+        // `extract_pre_tokenization_rules` correctly emit no rules at all
+        // for a config missing these keys rather than assuming defaults.
         config.insert("model_type".to_string(), "sentencepiece".to_string());
         config.insert("vocab_size".to_string(), vocab.len().to_string());
-        config.insert("normalization".to_string(), "nfkc".to_string());
 
         Ok((vocab, id_to_token, special_tokens, scores, config))
     }
 
-    /// Check if a token is valid
-    fn is_valid_token(token: &str) -> bool {
-        // Token should not be too long, not be all whitespace, and contain printable characters
-        token.len() <= 100
-            && !token.trim().is_empty()
-            && token.chars().any(|c| !c.is_whitespace())
-            && token.chars().all(|c| c.is_ascii() || c as u32 > 127) // Allow ASCII and Unicode
-    }
+    /// Derive normalization rules from a SentencePiece model's own
+    /// `normalizer_spec` config (as captured by [`Self::load_sentencepiece_model`]),
+    /// instead of asserting a fixed NFKC/whitespace policy regardless of
+    /// what the model actually specifies.
+    fn extract_normalization_rules(config: &HashMap<String, String>) -> Vec<NormalizationRule> {
+        let mut rules = Vec::new();
 
-    /// Estimate token score based on characteristics
-    fn estimate_token_score(token: &str) -> f32 {
-        // Estimate score based on token frequency heuristics
-        match token {
-            "<unk>" => -100.0,
-            "<s>" | "</s>" | "<pad>" => -1.0,
-            _ if token.starts_with('<') && token.ends_with('>') => -10.0, // Special tokens
-            _ if token.starts_with("▁") => -5.0 + (token.len() as f32 * -0.1), // SentencePiece prefix
-            _ if token.len() == 1 => -2.0,                                     // Single characters
-            _ if token.len() <= 3 => -3.0 + (token.len() as f32 * -0.2),
-            _ => -5.0 + (token.len() as f32 * -0.1), // Longer subwords get lower scores
+        if let Some(name) = config.get("normalization") {
+            if name != "identity" {
+                rules.push(NormalizationRule {
+                    rule_type: name.to_uppercase(),
+                    parameters: HashMap::new(),
+                });
+            }
         }
-    }
 
-    /// Extract normalization rules for SentencePiece
-    fn extract_normalization_rules() -> Vec<NormalizationRule> {
-        vec![
-            NormalizationRule {
-                rule_type: "NFKC".to_string(),
-                parameters: {
-                    let mut params = HashMap::new();
-                    params.insert(
-                        "pattern".to_string(),
-                        serde_json::Value::String(".*".to_string()),
-                    );
-                    params.insert(
-                        "replacement".to_string(),
-                        serde_json::Value::String("NFKC_NORMALIZED".to_string()),
-                    );
-                    params.insert("regex".to_string(), serde_json::Value::Bool(false));
-                    params
-                },
-            },
-            NormalizationRule {
+        if config.get("remove_extra_whitespaces").map(String::as_str) == Some("true") {
+            rules.push(NormalizationRule {
                 rule_type: "RemoveExtraSpaces".to_string(),
                 parameters: {
                     let mut params = HashMap::new();
@@ -866,24 +1010,50 @@ impl TokenizerConverter {
                     params.insert("regex".to_string(), serde_json::Value::Bool(true));
                     params
                 },
-            },
-        ]
+            });
+        }
+
+        rules
     }
 
-    /// Extract pre-tokenization rules for SentencePiece
-    fn extract_pre_tokenization_rules() -> Vec<PreTokenizationRule> {
-        vec![
-            PreTokenizationRule {
+    /// Derive pre-tokenization rules from a SentencePiece model's own
+    /// `normalizer_spec` config, instead of asserting the dummy-prefix and
+    /// whitespace-escaping rules unconditionally.
+    fn extract_pre_tokenization_rules(
+        config: &HashMap<String, String>,
+    ) -> Vec<PreTokenizationRule> {
+        let mut rules = Vec::new();
+
+        if config.get("add_dummy_prefix").map(String::as_str) == Some("true") {
+            rules.push(PreTokenizationRule {
                 rule_type: "AddDummyPrefix".to_string(),
                 pattern: "^".to_string(),
                 replacement: Some("▁".to_string()),
-            },
-            PreTokenizationRule {
+            });
+        }
+
+        if config.get("escape_whitespaces").map(String::as_str) == Some("true") {
+            rules.push(PreTokenizationRule {
                 rule_type: "SpaceReplacement".to_string(),
                 pattern: " ".to_string(),
                 replacement: Some("▁".to_string()),
-            },
-        ]
+            });
+        }
+
+        rules
+    }
+}
+
+/// Human-readable name for a SentencePiece `TrainerSpec.model_type` wire
+/// value (`sentencepiece_model.proto`'s `ModelType` enum: `1 = UNIGRAM, 2 =
+/// BPE, 3 = WORD, 4 = CHAR`).
+fn sentencepiece_model_type_name(model_type: u64) -> &'static str {
+    match model_type {
+        1 => "unigram",
+        2 => "bpe",
+        3 => "word",
+        4 => "char",
+        _ => "unknown",
     }
 }
 
@@ -1025,5 +1195,300 @@ mod tests {
         let ratio = BinaryUtils::get_compression_ratio(&file_path, &config)
             .expect("Operation failed in test");
         assert!(ratio > 1.0); // Should have some compression
+    }
+
+    /// Regression test: a modern (`tokenizers` >= 0.20) BPE tokenizer.json
+    /// encodes each merge as a 2-element array, not a space-joined string.
+    /// The old parser only handled the string form, so `merges` silently
+    /// came back empty for every current-format file.
+    #[test]
+    fn test_from_tokenizer_json_bpe_with_modern_array_merges() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let json_path = temp_dir.path().join("tokenizer.json");
+        let binary_path = temp_dir.path().join("tokenizer.bin");
+
+        std::fs::write(
+            &json_path,
+            serde_json::json!({
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1, "ab": 2},
+                    "merges": [["a", "b"]]
+                }
+            })
+            .to_string(),
+        )
+        .expect("Operation failed in test");
+
+        let header = TokenizerConverter::from_tokenizer_json(
+            &json_path,
+            &binary_path,
+            &BinaryConfig::default(),
+        )
+        .expect("Operation failed in test");
+        assert_eq!(header.tokenizer_type, "BPE");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+        assert_eq!(tokenizer.vocab.get("ab"), Some(&2));
+        assert_eq!(
+            tokenizer.merges,
+            Some(vec![("a".to_string(), "b".to_string())]),
+            "modern array-encoded merges must not be silently dropped"
+        );
+    }
+
+    /// The legacy `tokenizers` < 0.20 space-joined-string merge encoding
+    /// must still work.
+    #[test]
+    fn test_from_tokenizer_json_bpe_with_legacy_string_merges() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let json_path = temp_dir.path().join("tokenizer.json");
+        let binary_path = temp_dir.path().join("tokenizer.bin");
+
+        std::fs::write(
+            &json_path,
+            serde_json::json!({
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1, "ab": 2},
+                    "merges": ["a b"]
+                }
+            })
+            .to_string(),
+        )
+        .expect("Operation failed in test");
+
+        TokenizerConverter::from_tokenizer_json(&json_path, &binary_path, &BinaryConfig::default())
+            .expect("Operation failed in test");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+        assert_eq!(
+            tokenizer.merges,
+            Some(vec![("a".to_string(), "b".to_string())])
+        );
+    }
+
+    /// Regression test: Unigram tokenizer.json stores `model.vocab` as an
+    /// array of `[piece, score]` pairs, not an object. The old parser only
+    /// handled the object shape, so `vocab_obj.as_object()` returned `None`
+    /// and the conversion silently produced an *empty* vocabulary while
+    /// still returning `Ok`.
+    #[test]
+    fn test_from_tokenizer_json_unigram_array_vocab_is_not_empty() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let json_path = temp_dir.path().join("tokenizer.json");
+        let binary_path = temp_dir.path().join("tokenizer.bin");
+
+        std::fs::write(
+            &json_path,
+            serde_json::json!({
+                "model": {
+                    "type": "Unigram",
+                    "vocab": [["<unk>", 0.0], ["▁the", -1.5], ["▁a", -2.5]]
+                }
+            })
+            .to_string(),
+        )
+        .expect("Operation failed in test");
+
+        TokenizerConverter::from_tokenizer_json(&json_path, &binary_path, &BinaryConfig::default())
+            .expect("Operation failed in test");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+
+        assert_eq!(
+            tokenizer.vocab.len(),
+            3,
+            "Unigram array vocab must not come back empty"
+        );
+        assert_eq!(tokenizer.vocab.get("<unk>"), Some(&0));
+        assert_eq!(tokenizer.vocab.get("\u{2581}the"), Some(&1));
+        let scores = tokenizer.scores.expect("Unigram pieces must carry their real scores");
+        assert!((scores[&1] - (-1.5)).abs() < 1e-6);
+    }
+
+    /// A `model.vocab` that is neither an object nor an array is a genuinely
+    /// malformed file and must be rejected, not silently treated as empty.
+    #[test]
+    fn test_from_tokenizer_json_malformed_vocab_shape_is_error() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let json_path = temp_dir.path().join("tokenizer.json");
+        let binary_path = temp_dir.path().join("tokenizer.bin");
+
+        std::fs::write(
+            &json_path,
+            serde_json::json!({ "model": { "type": "BPE", "vocab": "not-a-vocab" } }).to_string(),
+        )
+        .expect("Operation failed in test");
+
+        let result = TokenizerConverter::from_tokenizer_json(
+            &json_path,
+            &binary_path,
+            &BinaryConfig::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// `normalizer`/`pre_tokenizer` (and friends) must be preserved, not
+    /// silently discarded, even though this crate's own
+    /// `NormalizationRule`/`PreTokenizationRule` types don't structurally
+    /// mirror HF's schema.
+    #[test]
+    fn test_from_tokenizer_json_preserves_normalizer_and_pre_tokenizer() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let json_path = temp_dir.path().join("tokenizer.json");
+        let binary_path = temp_dir.path().join("tokenizer.bin");
+
+        std::fs::write(
+            &json_path,
+            serde_json::json!({
+                "model": {"type": "BPE", "vocab": {"a": 0}, "merges": []},
+                "normalizer": {"type": "NFKC"},
+                "pre_tokenizer": {"type": "Whitespace"},
+                "truncation": {"max_length": 512}
+            })
+            .to_string(),
+        )
+        .expect("Operation failed in test");
+
+        TokenizerConverter::from_tokenizer_json(&json_path, &binary_path, &BinaryConfig::default())
+            .expect("Operation failed in test");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+
+        assert_eq!(
+            tokenizer.config.get("normalizer"),
+            Some(&serde_json::json!({"type": "NFKC"}))
+        );
+        assert_eq!(
+            tokenizer.config.get("pre_tokenizer"),
+            Some(&serde_json::json!({"type": "Whitespace"}))
+        );
+        assert_eq!(
+            tokenizer.config.get("truncation"),
+            Some(&serde_json::json!({"max_length": 512}))
+        );
+    }
+
+    /// Regression test for the fabricated SentencePiece protobuf "parser":
+    /// the old code never actually parsed protobuf -- it byte-scanned for
+    /// UTF-8-looking runs and invented scores from a hardcoded
+    /// length/prefix heuristic (`estimate_token_score`). A real
+    /// `ModelProto` must now round-trip its exact pieces, scores, and
+    /// types.
+    #[test]
+    fn test_from_sentencepiece_parses_real_protobuf_not_fabricated_scores() {
+        use crate::sentencepiece::proto::encode::*;
+
+        let mut model_bytes = Vec::new();
+        model_bytes.extend(length_delimited(1, &piece("<unk>", -100.0, 1)));
+        model_bytes.extend(length_delimited(1, &piece("\u{2581}hello", -3.5, 0)));
+        model_bytes.extend(length_delimited(1, &piece("<s>", 0.0, 2)));
+
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("spm.model");
+        let binary_path = temp_dir.path().join("spm.bin");
+        std::fs::write(&model_path, &model_bytes).expect("Operation failed in test");
+
+        TokenizerConverter::from_sentencepiece(&model_path, &binary_path, &BinaryConfig::default())
+            .expect("Operation failed in test");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+
+        assert_eq!(tokenizer.vocab.len(), 3);
+        // IDs are the piece's index in the model, not a scan-order counter
+        // starting at 4.
+        assert_eq!(tokenizer.vocab.get("<unk>"), Some(&0));
+        assert_eq!(tokenizer.vocab.get("\u{2581}hello"), Some(&1));
+        assert_eq!(tokenizer.vocab.get("<s>"), Some(&2));
+
+        let scores = tokenizer.scores.expect("scores must be populated from the model");
+        // Real scores from the model, not `estimate_token_score`'s invented
+        // `-2.0` (single char) / `-5.0 + len*-0.1` heuristic.
+        assert!((scores[&0] - (-100.0)).abs() < 1e-6);
+        assert!((scores[&1] - (-3.5)).abs() < 1e-6);
+        assert!((scores[&2] - 0.0).abs() < 1e-6);
+
+        // PieceType::Unknown (<unk>) and Control (<s>) become special
+        // tokens; the plain Normal piece does not.
+        assert_eq!(tokenizer.special_tokens.get("<unk>"), Some(&0));
+        assert_eq!(tokenizer.special_tokens.get("<s>"), Some(&2));
+        assert!(!tokenizer.special_tokens.contains_key("\u{2581}hello"));
+    }
+
+    /// A `.model` file that is not valid protobuf at all (e.g. random or
+    /// truncated bytes) must be rejected outright, matching the old
+    /// heuristic scanner's replacement contract: no silent partial vocab.
+    #[test]
+    fn test_from_sentencepiece_rejects_garbage_bytes() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let model_path = temp_dir.path().join("garbage.model");
+        let binary_path = temp_dir.path().join("garbage.bin");
+        // Field number 0 (top 5 bits of the first byte) is not valid
+        // protobuf; the old heuristic scanner would have happily "found"
+        // fake tokens in this data instead of rejecting it.
+        std::fs::write(&model_path, [0x01u8, 0x00, 0xFF, 0xFE]).expect("Operation failed in test");
+
+        let result = TokenizerConverter::from_sentencepiece(
+            &model_path,
+            &binary_path,
+            &BinaryConfig::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// Regression test for the `.vocab` text-format loader: a missing or
+    /// malformed score column must be an error, not silently defaulted to
+    /// `0.0` (missing) or routed through the deleted `estimate_token_score`
+    /// heuristic (missing column).
+    #[test]
+    fn test_from_sentencepiece_vocab_file_rejects_malformed_score() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let vocab_path = temp_dir.path().join("spm.vocab");
+        let binary_path = temp_dir.path().join("spm.bin");
+        std::fs::write(&vocab_path, "<unk>\t-100.0\nhello\tnot-a-number\n")
+            .expect("Operation failed in test");
+
+        let result = TokenizerConverter::from_sentencepiece(
+            &vocab_path,
+            &binary_path,
+            &BinaryConfig::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    /// A well-formed `.vocab` file parses real scores and assigns IDs by
+    /// vocabulary-entry order (skipping comments/blank lines must not skew
+    /// later IDs).
+    #[test]
+    fn test_from_sentencepiece_vocab_file_ids_follow_entry_order() {
+        let temp_dir = tempdir().expect("Operation failed in test");
+        let vocab_path = temp_dir.path().join("spm.vocab");
+        let binary_path = temp_dir.path().join("spm.bin");
+        std::fs::write(
+            &vocab_path,
+            "# a comment line\n<unk>\t-100.0\n\nhello\t-3.5\nworld\t-4.0\n",
+        )
+        .expect("Operation failed in test");
+
+        TokenizerConverter::from_sentencepiece(&vocab_path, &binary_path, &BinaryConfig::default())
+            .expect("Operation failed in test");
+
+        let serializer = BinarySerializer::new(BinaryConfig::default());
+        let (tokenizer, _) =
+            serializer.deserialize(&binary_path).expect("Operation failed in test");
+        assert_eq!(tokenizer.vocab.get("<unk>"), Some(&0));
+        assert_eq!(tokenizer.vocab.get("hello"), Some(&1));
+        assert_eq!(tokenizer.vocab.get("world"), Some(&2));
     }
 }

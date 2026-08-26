@@ -157,9 +157,9 @@ class BertModel(PreTrainedModel):
 
 class BertForSequenceClassification(PreTrainedModel):
     """BERT Model for sequence classification."""
-    
+
     def __init__(self, config: Any) -> None: ...
-    
+
     def forward(
         self,
         input_ids: Optional[Tensor] = None,
@@ -168,6 +168,97 @@ class BertForSequenceClassification(PreTrainedModel):
         labels: Optional[Tensor] = None,
         **kwargs: Any,
     ) -> Dict[str, Tensor]: ...
+
+class BertForTokenClassification(PreTrainedModel):
+    """BERT Model with a per-token classification head (e.g. NER).
+
+    Unlike `BertForSequenceClassification` (one prediction per input), this
+    predicts `num_labels` logits at *every* sequence position. Real forward
+    pass, real logits, real loss when `labels` is given.
+
+    `TokenClassificationPipeline`/`pipeline("token-classification")` wraps
+    this class directly for real end-to-end NER (real per-token logits,
+    aggregated with `aggregation_strategy='simple'`, reported at real
+    character offsets). Call this class directly instead when raw per-token
+    logits -- without aggregation or offset conversion -- are what's needed.
+    """
+
+    def __init__(self, config: Optional[Any] = None, num_labels: int = 2) -> None: ...
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str,
+        **kwargs: Any,
+    ) -> Self: ...
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        token_type_ids: Optional[Tensor] = None,
+        labels: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]: ...
+
+    def __call__(
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        token_type_ids: Optional[Tensor] = None,
+        labels: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]: ...
+
+    def save_pretrained(self, save_directory: str) -> None: ...
+
+    @property
+    def num_labels(self) -> int: ...
+
+    @property
+    def id2label(self) -> List[str]: ...
+
+class BertForQuestionAnswering(PreTrainedModel):
+    """BERT Model with an extractive question-answering (span-prediction) head.
+
+    Real forward pass producing `start_logits`/`end_logits` (one score per
+    sequence position each), and a real loss when `start_positions` /
+    `end_positions` are given (both, or neither -- HuggingFace's own
+    contract).
+
+    `QuestionAnsweringPipeline`/`pipeline("question-answering")` wraps this
+    class directly for real end-to-end extraction (real joint-argmax answer
+    span, reported at real character offsets). That pipeline requires a
+    `WordPieceTokenizer` specifically (see `QuestionAnsweringPipeline`
+    below). Call this class directly for raw start/end logits instead.
+    """
+
+    def __init__(self, config: Optional[Any] = None) -> None: ...
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str,
+        **kwargs: Any,
+    ) -> Self: ...
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        token_type_ids: Optional[Tensor] = None,
+        start_positions: Optional[Tensor] = None,
+        end_positions: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]: ...
+
+    def __call__(
+        self,
+        input_ids: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        token_type_ids: Optional[Tensor] = None,
+        start_positions: Optional[Tensor] = None,
+        end_positions: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]: ...
+
+    def save_pretrained(self, save_directory: str) -> None: ...
 
 class GPT2Model(PreTrainedModel):
     """GPT-2 Model for text generation."""
@@ -223,33 +314,76 @@ class LlamaModel(PreTrainedModel):
     ) -> Dict[str, Tensor]: ...
 
 # Tokenizers
+#
+# `encode(text, text_pair=...)` on both classes below produces a *real* pair
+# encoding, not a naive concatenation: WordPiece emits BERT's
+# `[CLS] A [SEP] B [SEP]` with 0/1 `token_type_ids`; BPE emits the
+# RoBERTa/GPT-2-family `<bos> A <eos> <eos> B <eos>` convention (read from the
+# tokenizer's own configured `bos_token`/`eos_token`) with all-zero
+# `token_type_ids` (BPE-family models do not use segment ids for pairs).
+# `batch_encode_plus`'s `text_pairs` argument uses the same per-item
+# encoding, for `WordPieceTokenizer` only -- `BPETokenizer` has no
+# `batch_encode_plus`, only single-item `encode`.
 class WordPieceTokenizer:
     """WordPiece tokenizer implementation."""
-    
+
     def __init__(
         self,
         vocab: Dict[str, int],
         unk_token: str = "[UNK]",
         max_input_chars_per_word: int = 100,
     ) -> None: ...
-    
+
     def tokenize(self, text: str) -> List[str]: ...
-    def encode(self, text: str) -> List[int]: ...
-    def decode(self, tokens: List[int]) -> str: ...
+
+    def encode(
+        self,
+        text: str,
+        text_pair: Optional[str] = None,
+        add_special_tokens: bool = True,
+        max_length: Optional[int] = None,
+        padding: bool = False,
+        truncation: bool = False,
+        return_tensors: Optional[str] = None,
+    ) -> Union[List[int], Dict[str, List[int]]]: ...
+
+    def batch_encode_plus(
+        self,
+        texts: List[str],
+        text_pairs: Optional[List[Optional[str]]] = None,
+        add_special_tokens: bool = True,
+        max_length: Optional[int] = None,
+        padding: bool = False,
+        truncation: bool = False,
+        return_tensors: Optional[str] = None,
+    ) -> Dict[str, List[List[int]]]: ...
+
+    def decode(self, tokens: List[int], skip_special_tokens: bool = True) -> str: ...
 
 class BPETokenizer:
     """Byte-Pair Encoding tokenizer implementation."""
-    
+
     def __init__(
         self,
         vocab: Dict[str, int],
         merges: List[Tuple[str, str]],
         **kwargs: Any,
     ) -> None: ...
-    
+
     def tokenize(self, text: str) -> List[str]: ...
-    def encode(self, text: str) -> List[int]: ...
-    def decode(self, tokens: List[int]) -> str: ...
+
+    def encode(
+        self,
+        text: str,
+        text_pair: Optional[str] = None,
+        add_special_tokens: bool = True,
+        max_length: Optional[int] = None,
+        padding: bool = False,
+        truncation: bool = False,
+        return_tensors: Optional[str] = None,
+    ) -> Union[List[int], Dict[str, List[int]]]: ...
+
+    def decode(self, tokens: List[int], skip_special_tokens: bool = True) -> str: ...
 
 # Auto classes
 class AutoModel:
@@ -273,34 +407,54 @@ class AutoTokenizer:
     ) -> Union[WordPieceTokenizer, BPETokenizer]: ...
 
 class AutoModelForSequenceClassification:
-    """Auto model class for sequence classification."""
-    
+    """Auto model class for sequence classification.
+
+    Resolves to a real `BertForSequenceClassification` for BERT-family
+    checkpoints (bert/roberta/distilbert/deberta -- all loaded through
+    `BertModel`/`BertConfig` here). Raises `NotImplementedError` for any other
+    inferred architecture, naming the checkpoint's inferred type: this used to
+    silently return a bare, headless encoder for a non-BERT checkpoint,
+    labelled as if it were a sequence-classification model.
+    """
+
     @classmethod
     def from_pretrained(
         cls,
         model_name_or_path: str,
         **kwargs: Any,
-    ) -> PreTrainedModel: ...
+    ) -> BertForSequenceClassification: ...
 
 class AutoModelForTokenClassification:
-    """Auto model class for token classification."""
-    
+    """Auto model class for token classification.
+
+    Resolves to a real `BertForTokenClassification` for BERT-family
+    checkpoints; raises `NotImplementedError` otherwise. See
+    `AutoModelForSequenceClassification` for why -- this used to silently
+    delegate to `AutoModel`, returning a bare encoder with no
+    token-classification head at all.
+    """
+
     @classmethod
     def from_pretrained(
         cls,
         model_name_or_path: str,
         **kwargs: Any,
-    ) -> PreTrainedModel: ...
+    ) -> BertForTokenClassification: ...
 
 class AutoModelForQuestionAnswering:
-    """Auto model class for question answering."""
-    
+    """Auto model class for question answering.
+
+    Resolves to a real `BertForQuestionAnswering` for BERT-family checkpoints;
+    raises `NotImplementedError` otherwise. See
+    `AutoModelForSequenceClassification` for why.
+    """
+
     @classmethod
     def from_pretrained(
         cls,
         model_name_or_path: str,
         **kwargs: Any,
-    ) -> PreTrainedModel: ...
+    ) -> BertForQuestionAnswering: ...
 
 class AutoModelForCausalLM:
     """Auto model class for causal language modeling."""
@@ -323,53 +477,155 @@ class AutoModelForMaskedLM:
     ) -> PreTrainedModel: ...
 
 # Pipelines
+#
+# `TextGenerationPipeline` and `TextClassificationPipeline` resolve their model
+# and tokenizer at construction, so a model without the head the task needs is a
+# TypeError from `__init__`, not a surprise at call time. Both reject keyword
+# arguments they cannot honour rather than ignoring them.
 class TextGenerationPipeline:
-    """Pipeline for text generation tasks."""
-    
+    """Text generation over a real GPT-2 language-model head."""
+
     def __init__(
         self,
-        model: PreTrainedModel,
+        model: GPT2LMHeadModel,
         tokenizer: Union[WordPieceTokenizer, BPETokenizer],
-        **kwargs: Any,
+        device: Optional[str] = None,
     ) -> None: ...
-    
+
+    # `top_k` / `top_p` default to None, not to HuggingFace's 50 / 1.0: the
+    # decoder applies one truncation strategy per step, so setting both raises.
+    # A single `str` returns List[Dict]; a list of `str` returns List[List[Dict]].
     def __call__(
         self,
-        text: str,
+        text_inputs: Union[str, List[str]],
         max_length: int = 50,
-        num_return_sequences: int = 1,
-        temperature: float = 1.0,
+        min_length: int = 0,
         do_sample: bool = True,
-        **kwargs: Any,
-    ) -> List[Dict[str, str]]: ...
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        num_return_sequences: int = 1,
+    ) -> Union[List[Dict[str, str]], List[List[Dict[str, str]]]]: ...
 
 class TextClassificationPipeline:
-    """Pipeline for text classification tasks."""
-    
+    """Sequence classification over a real BERT classification head."""
+
     def __init__(
         self,
-        model: PreTrainedModel,
+        model: BertForSequenceClassification,
         tokenizer: Union[WordPieceTokenizer, BPETokenizer],
-        **kwargs: Any,
+        device: Optional[str] = None,
     ) -> None: ...
-    
+
+    # Returns every class ranked best-first (scores are a real softmax and sum
+    # to 1); `top_k` keeps only the leading classes.
     def __call__(
         self,
-        text: str,
-        **kwargs: Any,
-    ) -> List[Dict[str, Union[str, float]]]: ...
+        text_inputs: Union[str, List[str]],
+        top_k: Optional[int] = None,
+    ) -> Union[
+        List[Dict[str, Union[str, float]]],
+        List[List[Dict[str, Union[str, float]]]],
+    ]: ...
 
+class TokenClassificationPipeline:
+    """Named-entity recognition over a real BERT token-classification head.
+
+    A model without a per-token head (i.e. not a `BertForTokenClassification`)
+    is a `TypeError` from `__init__`. The tokenizer may be either
+    `WordPieceTokenizer` or `BPETokenizer`: NER only needs
+    `Tokenizer.encode`'s single-sequence offsets, which both produce for
+    real.
+
+    `start`/`end` are Unicode **character** offsets (HuggingFace's own
+    convention, so `text[start:end]` indexes correctly in Python) -- this
+    package's internal offset convention is bytes; the conversion happens
+    once, at this pipeline's Python boundary.
+    """
+
+    def __init__(
+        self,
+        model: BertForTokenClassification,
+        tokenizer: Union[WordPieceTokenizer, BPETokenizer],
+        device: Optional[str] = None,
+    ) -> None: ...
+
+    # Only aggregation_strategy='simple' (the default) is implemented; any
+    # other value raises ValueError rather than being silently treated as
+    # 'simple'. A single `str` returns List[Dict]; a list of `str` returns
+    # List[List[Dict]]. Each Dict has keys entity_group/score/word/start/end.
+    def __call__(
+        self,
+        text_inputs: Union[str, List[str]],
+        aggregation_strategy: Optional[str] = None,
+    ) -> Union[
+        List[Dict[str, Union[str, float, int]]],
+        List[List[Dict[str, Union[str, float, int]]]],
+    ]: ...
+
+class QuestionAnsweringPipeline:
+    """Extractive question answering over a real BERT QA head.
+
+    A model without a span-prediction head (i.e. not a
+    `BertForQuestionAnswering`) is a `TypeError` from `__init__` -- and so is
+    a tokenizer that is not a `WordPieceTokenizer`: `BPETokenizer.encode_pair`
+    joins the question and context into one string with a single space and
+    reports offsets into *that* joined string, not per-sequence offsets with
+    a real separator token, so there is no reliable way to find where the
+    context begins.
+
+    `start`/`end` are Unicode **character** offsets into `context`, converted
+    from this package's native byte offsets at this pipeline's Python
+    boundary (see `TokenClassificationPipeline`).
+    """
+
+    def __init__(
+        self,
+        model: BertForQuestionAnswering,
+        tokenizer: WordPieceTokenizer,
+        device: Optional[str] = None,
+    ) -> None: ...
+
+    # max_answer_len bounds the answer span's *token* width (HuggingFace's
+    # own default is 15). Returns one Dict with keys score/start/end/answer.
+    def __call__(
+        self,
+        question: str,
+        context: str,
+        max_answer_len: int = 15,
+    ) -> Dict[str, Union[str, float, int]]: ...
+
+# `model` and `tokenizer` are model/tokenizer *objects*, not names. When either
+# is omitted it is loaded from a default checkpoint path, which must resolve
+# locally: this package has no Hugging Face Hub downloader.
 def pipeline(
     task: str,
-    model: Optional[str] = None,
-    tokenizer: Optional[str] = None,
+    model: Optional[Any] = None,
+    tokenizer: Optional[Any] = None,
+    device: Optional[str] = None,
     **kwargs: Any,
-) -> Union[TextGenerationPipeline, TextClassificationPipeline]: ...
+) -> Union[
+    TextGenerationPipeline,
+    TextClassificationPipeline,
+    TokenClassificationPipeline,
+    QuestionAnsweringPipeline,
+]: ...
 
 # Training
+#
+# `Trainer` is a real, constructible class, but `train`/`evaluate`/`predict`/
+# `push_to_hub` all raise `NotImplementedError` today, each naming exactly
+# what is missing -- see each method's docstring. `save_model` is the one
+# real method: it delegates to the wrapped model's own real
+# `save_pretrained`. This crate has real forward passes and real loss
+# functions (see `BertForSequenceClassification.forward(..., labels=...)`
+# etc.), but no backpropagation/optimizer-step path from a loss back to a
+# model's parameters exists anywhere in this workspace, so there is no real
+# gradient-descent training loop to run.
 class Trainer:
-    """Trainer class for model training."""
-    
+    """Trainer class for model training. See the module note above: most
+    methods are honest refusals, not stubs that fabricate results."""
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -377,12 +633,46 @@ class Trainer:
         train_dataset: Optional[Any] = None,
         eval_dataset: Optional[Any] = None,
         tokenizer: Optional[Any] = None,
-        **kwargs: Any,
+        data_collator: Optional[Any] = None,
+        compute_metrics: Optional[Any] = None,
+        callbacks: Optional[Any] = None,
+        optimizers: Optional[Any] = None,
     ) -> None: ...
-    
-    def train(self) -> None: ...
-    def evaluate(self) -> Dict[str, float]: ...
-    def save_model(self, output_dir: str) -> None: ...
+
+    def train(self) -> Dict[str, Any]:
+        """Always raises NotImplementedError: no backward/gradient path from a
+        loss to a model's parameters exists in this workspace. Previously
+        returned a fabricated `{"train_loss": 0.5, "total_steps": 1000}` for
+        every model, dataset, and configuration."""
+        ...
+
+    def evaluate(self, eval_dataset: Optional[Any] = None) -> Dict[str, float]:
+        """Always raises NotImplementedError: this binding defines no
+        dataset-to-model-input protocol. Previously returned a fabricated
+        `{"eval_loss": 0.45, "eval_accuracy": 0.92, "eval_samples": 100}`
+        regardless of `eval_dataset`."""
+        ...
+
+    def predict(self, test_dataset: Any) -> Dict[str, Any]:
+        """Always raises NotImplementedError, for the same reason as
+        `evaluate`. Previously returned fixed
+        `predictions=[0.1, 0.9, 0.3, 0.7]` / `label_ids=[0, 1, 0, 1]`."""
+        ...
+
+    def save_model(self, output_dir: Optional[str] = None) -> None:
+        """Real: delegates to the wrapped model's own `save_pretrained`."""
+        ...
+
+    def push_to_hub(
+        self,
+        repo_name: str,
+        commit_message: Optional[str] = None,
+        private: Optional[bool] = None,
+    ) -> str:
+        """Always raises NotImplementedError: this crate has no Hugging Face
+        Hub client. Previously returned
+        `f"https://huggingface.co/{repo_name}"` without uploading anything."""
+        ...
 
 class TrainingArguments:
     """Arguments for training configuration."""
@@ -401,7 +691,35 @@ class TrainingArguments:
     ) -> None: ...
 
 # Utilities
-def get_device() -> str: ...
-def set_seed(seed: int) -> None: ...
-def enable_grad() -> None: ...
-def no_grad() -> None: ...
+def get_device() -> str:
+    """Returns "cuda" only when built with the `cuda` feature and a CUDA
+    backend is found (always False today: this crate has no CUDA backend).
+    Returns "metal" only when built with the `metal` feature on macOS
+    (this only confirms Metal was requested at compile time, not that a
+    live device was probed -- this crate has no Metal device-probe or
+    execution path compiled in either way). Otherwise "cpu"."""
+    ...
+
+def set_seed(seed: int) -> None:
+    """Always raises NotImplementedError: every weight this crate
+    initialises is drawn from `rand::rngs::ThreadRng` (via
+    `scirs2_core::random::thread_rng()`), an OS-entropy generator with no
+    public seeding hook anywhere in scirs2-core. Previously wrote a
+    `TRUSTFORMERS_SEED` environment variable that nothing in this
+    workspace ever read -- a silent no-op that seeded nothing."""
+    ...
+
+def enable_grad() -> None:
+    """A documented no-op, not a silent one: this runtime does not consult
+    any global gradient-computation switch anywhere (no registered
+    model's forward() builds an autodiff graph at all -- see
+    `Trainer.train()`'s docstring for the same underlying reason). Exists
+    for PyTorch-idiom API compatibility; always succeeds and never
+    changes what any computation does."""
+    ...
+
+def no_grad() -> None:
+    """The same documented no-op as `enable_grad()`, for the same reason:
+    "gradients are off" is already permanently true in this runtime,
+    independent of this call."""
+    ...

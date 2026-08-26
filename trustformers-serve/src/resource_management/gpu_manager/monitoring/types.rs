@@ -455,11 +455,14 @@ impl GpuMonitoringSystem {
                                     device_metrics.utilization_percent);
                             }
 
-                            let memory_usage_percent =
-                                (device_metrics.memory_usage_mb as f32 / 24576.0) * 100.0;
-                            if memory_usage_percent > 90.0 {
-                                warn!("Device {} memory usage is high: {:.1}%", device_id,
-                                    memory_usage_percent);
+                            // Only when the sample carries the device's real
+                            // VRAM size. 0.2.1: this divided by a hardcoded
+                            // 24 GiB for every device.
+                            if let Some(memory_usage_percent) = device_metrics.memory_usage_percent() {
+                                if memory_usage_percent > 90.0 {
+                                    warn!("Device {} memory usage is high: {:.1}%", device_id,
+                                        memory_usage_percent);
+                                }
                             }
                         }
                     }
@@ -529,6 +532,7 @@ impl GpuMonitoringSystem {
     ///         shader_clock_mhz: Some(1900),
     ///     },
     ///     fan_speeds: vec![50.0],
+    ///     total_memory_mb: Some(16384),
     /// };
     ///
     /// monitoring_system.update_metrics(0, metrics).await?;
@@ -634,6 +638,10 @@ impl GpuMonitoringSystem {
                     shader_clock_mhz: metrics.clock_speeds.shader_clock_mhz,
                 },
                 fan_speeds: metrics.fan_speeds.clone(),
+                // Carried through from the sample, so memory-percentage
+                // alerts compare against this device's real VRAM. `None`
+                // propagates as "unknown", and the check is skipped.
+                total_memory_mb: metrics.total_memory_mb,
             };
             if let Err(e) = self
                 .alert_system

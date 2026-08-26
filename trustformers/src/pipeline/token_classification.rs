@@ -5,6 +5,7 @@ use crate::pipeline::{
     BasePipeline, Pipeline, PipelineOutput, TokenClassificationOutput as PipelineTokenOutput,
 };
 use crate::{AutoModel, AutoTokenizer};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -111,7 +112,7 @@ impl TokenClassificationPipeline {
             #[cfg(feature = "bert")]
             crate::automodel::AutoModelType::Bert(_model) => {
                 // Fallback for general BERT model without specific token classification head
-                self.fallback_token_classification(text, &inputs)
+                Self::fallback_token_classification(text, &inputs)
             },
             _ => Err(TrustformersError::runtime_error(
                 "Model does not support token classification",
@@ -196,8 +197,14 @@ impl TokenClassificationPipeline {
             .unwrap_or((0, &0.0));
 
         // Since we don't have token-level predictions, we'll use heuristics
-        // to assign entities to tokens that look like they might be entities
-        let words: Vec<&str> = original_text.split_whitespace().collect();
+        // to assign entities to tokens that look like they might be entities.
+        // Bounded by the real (non-padding) token count from `inputs`, so a
+        // sequence truncated/padded shorter than `original_text`'s raw word
+        // count doesn't get heuristic entities assigned past what the model
+        // actually saw.
+        let real_token_count = inputs.attention_mask.iter().filter(|&&mask| mask != 0).count();
+        let words: Vec<&str> =
+            original_text.split_whitespace().take(real_token_count.max(1)).collect();
 
         for (word_idx, word) in words.iter().enumerate() {
             // Heuristic: assign entity labels to capitalized words if the sequence is classified as having entities
@@ -228,35 +235,76 @@ impl TokenClassificationPipeline {
         Ok(token_outputs)
     }
 
-    /// Fallback token classification for general BERT models
+    /// Fallback token classification for general BERT models. Associated
+    /// (not `&self`) function since it's pure text/pattern processing --
+    /// makes it directly unit-testable without a real model/tokenizer.
     fn fallback_token_classification(
-        &self,
         text: &str,
         inputs: &crate::core::traits::TokenizedInput,
     ) -> Result<Vec<PipelineTokenOutput>> {
         // Simple pattern-based NER as fallback
         let mut results = Vec::new();
 
-        // Basic patterns for common entity types
+        // Basic patterns for common entity types, tried before the generic
+        // capitalized-word heuristic below since they identify a specific
+        // entity type rather than just "looks like a proper noun".
         let patterns = [
             (r"[A-Z][a-z]+ [A-Z][a-z]+", "B-PER"),      // Person names
             (r"[A-Z][a-z]+ Inc\.|Corp\.|LLC", "B-ORG"), // Organizations
             (r"[A-Z][a-z]+, [A-Z][A-Z]", "B-LOC"),      // Locations like "Paris, FR"
         ];
 
-        // Simple word-based detection (placeholder)
+        // Bounded by the real (non-padding) token count from `inputs`, so a
+        // sequence truncated/padded shorter than `text` doesn't get
+        // heuristic entities assigned past what the model actually saw.
+        let real_token_count = inputs.attention_mask.iter().filter(|&&mask| mask != 0).count();
+
+        let mut matched_spans: Vec<(usize, usize)> = Vec::new();
+        let mut index = 0usize;
+        for (pattern, label) in &patterns {
+            let Ok(re) = Regex::new(pattern) else {
+                continue;
+            };
+            for m in re.find_iter(text) {
+                if index >= real_token_count {
+                    break;
+                }
+                results.push(PipelineTokenOutput {
+                    entity: (*label).to_string(),
+                    score: 0.75, // A specific regex match is more confident than the word-shape fallback below
+                    index,
+                    word: m.as_str().to_string(),
+                    start: m.start(),
+                    end: m.end(),
+                });
+                matched_spans.push((m.start(), m.end()));
+                index += 1;
+            }
+        }
+
+        // Simple word-based detection (placeholder) for anything the
+        // specific patterns above didn't already tag.
         let words: Vec<&str> = text.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
+            if index >= real_token_count {
+                break;
+            }
             // Check if word looks like a proper noun
             if word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                let start = text.find(word).unwrap_or(0);
+                let end = start + word.len();
+                if matched_spans.iter().any(|&(s, e)| start < e && s < end) {
+                    continue; // already covered by a specific pattern above
+                }
                 results.push(PipelineTokenOutput {
                     entity: "B-MISC".to_string(),
                     score: 0.6, // Lower confidence for fallback
                     index: i,
                     word: word.to_string(),
-                    start: text.find(word).unwrap_or(0),
-                    end: text.find(word).unwrap_or(0) + word.len(),
+                    start,
+                    end,
                 });
+                index += 1;
             }
         }
 
@@ -813,6 +861,51 @@ mod tests {
             // The default labels in the pipeline contain these
             assert!(expected.contains(label));
         }
+    }
+
+    fn tokenized_input_of_len(n: usize) -> crate::core::traits::TokenizedInput {
+        crate::core::traits::TokenizedInput::new(vec![0u32; n], vec![1u8; n])
+    }
+
+    /// Regression test: `fallback_token_classification` used to build a
+    /// `patterns` array of person/org/location regexes and then never use
+    /// it -- every capitalized word was tagged generic "B-MISC" regardless
+    /// of matching a more specific pattern. A person-name-shaped span must
+    /// now be tagged "B-PER" (not "B-MISC"), and score higher than the
+    /// generic fallback.
+    #[test]
+    fn test_fallback_token_classification_uses_specific_patterns_before_generic_fallback() {
+        let text = "John Smith visited the office";
+        let inputs = tokenized_input_of_len(10);
+        let results = TokenClassificationPipeline::fallback_token_classification(text, &inputs)
+            .expect("fallback classification should succeed");
+
+        let person_hit = results
+            .iter()
+            .find(|r| r.word == "John Smith")
+            .expect("the person-name pattern should match \"John Smith\"");
+        assert_eq!(person_hit.entity, "B-PER");
+        assert!(
+            person_hit.score > 0.6,
+            "a specific pattern match should score above the generic fallback's 0.6"
+        );
+    }
+
+    /// Regression test: `fallback_token_classification` used to ignore
+    /// `inputs` entirely, so heuristic entities were assigned across the
+    /// full `text` regardless of how many real (non-padding) tokens the
+    /// model actually saw.
+    #[test]
+    fn test_fallback_token_classification_bounded_by_real_token_count() {
+        let text = "Alice Bob Carol Dave Eve";
+        let inputs = tokenized_input_of_len(2); // only 2 real tokens
+        let results = TokenClassificationPipeline::fallback_token_classification(text, &inputs)
+            .expect("fallback classification should succeed");
+        assert!(
+            results.len() <= 2,
+            "must not tag more entities than there are real tokens, got {}",
+            results.len()
+        );
     }
 
     #[test]

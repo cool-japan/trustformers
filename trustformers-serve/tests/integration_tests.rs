@@ -71,10 +71,23 @@ fn create_test_config() -> ServerConfig {
     config
 }
 
+/// A real, if small, model for the serving path.
+///
+/// The architecture, the weights and the forward pass are genuine; the weights
+/// are the architecture's own initialization rather than trained parameters, so
+/// the output is real model output rather than English. Nothing here fakes
+/// inference.
+fn test_executor() -> Arc<dyn trustformers_serve::batching::BatchExecutor> {
+    Arc::new(
+        trustformers_serve::batching::untrained_byte_gpt2_executor(1, 16, 8)
+            .expect("the tiny GPT-2 used by the tests must build"),
+    )
+}
+
 /// Create test server for integration tests
 async fn create_test_server() -> TestServer {
     let config = create_test_config();
-    let server = TrustformerServer::new(config);
+    let server = TrustformerServer::with_executor(config, test_executor());
 
     // Create router and convert to service that can be used by TestServer
     let router = server.create_test_router().await;
@@ -92,7 +105,7 @@ async fn create_test_server_with_auth() -> TestServer {
     let auth_service = AuthService::new(auth_config);
 
     // Create server and add auth service
-    let server = TrustformerServer::new(config).with_auth(auth_service);
+    let server = TrustformerServer::with_executor(config, test_executor()).with_auth(auth_service);
 
     let router = server.create_test_router().await;
     TestServer::new(router)
@@ -168,19 +181,33 @@ async fn test_inference_endpoints() {
     );
 }
 
+/// Regression: `/metrics` must serve real Prometheus text exposition, not a JSON
+/// blob of invented constants.
 #[tokio::test]
 async fn test_metrics_endpoint() {
     let server = create_test_server().await;
 
-    // Test metrics endpoint - returns JSON format
     let response = server.get("/metrics").await;
     response.assert_status_ok();
 
-    let body: Value = response.json();
-    // Metrics endpoint returns JSON with various service metrics
-    assert!(body.is_object());
-    // Check for at least one service metric category
-    assert!(body["batching"].is_object() || body["caching"].is_object());
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/plain"),
+        "metrics must be served as Prometheus text, got {content_type:?}"
+    );
+
+    let body = response.text();
+    assert!(body.contains("# TYPE trustformers_serve_uptime_seconds gauge"));
+    assert!(body.contains("trustformers_serve_http_requests_total"));
+    assert!(body.contains("trustformers_serve_model_configured 1"));
+    // The old fabricated counters must be gone.
+    assert!(!body.contains("tokens_issued"));
+    assert!(!body.contains("Mock"));
 }
 
 #[tokio::test]
@@ -207,6 +234,32 @@ async fn test_admin_endpoints() {
     assert!(body["enable_metrics"].is_boolean());
 }
 
+/// Regression: `/admin/stats` used to measure host resource usage
+/// (`measure_host_async`, real `sysinfo` syscalls) fresh on every request,
+/// with no upper bound on how long that could take under host load. It now
+/// reads a cached sample from a long-lived background sampler instead, so a
+/// single call is expected to answer promptly regardless of host load.
+#[tokio::test]
+async fn test_admin_stats_answers_promptly() {
+    let server = create_test_server().await;
+    let started = std::time::Instant::now();
+    let admin_future = async {
+        let response = server.get("/admin/stats").await;
+        response.assert_status_ok();
+        let stats: Value = response.json();
+        assert!(stats["resource_usage"].is_object());
+    };
+    tokio::time::timeout(Duration::from_secs(2), admin_future)
+        .await
+        .expect("/admin/stats must not still be in flight after 2 seconds");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "/admin/stats took {:?}, which should be impossible now that it reads a \
+         cached sample instead of measuring host resource usage per request",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn test_graphql_endpoints() {
     let server = create_test_server().await;
@@ -218,20 +271,38 @@ async fn test_graphql_endpoints() {
 
     let response = server.post("/graphql").json(&query).await;
 
+    // Regression: the handler used to return {"result": "Mock GraphQL response"}.
+    // It must now execute against the real async-graphql schema.
     response.assert_status_ok();
     let body: Value = response.json();
-    // GraphQL may return errors or null data if not fully implemented
-    if body["data"].is_object() && !body["data"].is_null() {
-        // If data exists, check health status
-        if body["data"]["health"].is_object() {
-            assert!(body["data"]["health"]["status"].is_string());
-        }
-    }
-    // Test passes if we get a valid GraphQL response structure
+    assert!(
+        body.get("errors").is_none(),
+        "GraphQL execution failed: {body}"
+    );
+    let health = &body["data"]["health"];
+    assert!(health.is_object(), "no health data resolved: {body}");
+    assert!(health["status"].is_string());
+    assert!(health["timestamp"].is_string());
+    assert!(!body.to_string().contains("Mock GraphQL response"));
 
-    // Test GraphQL playground endpoint
+    // A malformed query must be reported as a GraphQL error, not silently echoed.
+    let bad = server
+        .post("/graphql")
+        .json(&json!({ "query": "{ thisFieldDoesNotExist }" }))
+        .await;
+    bad.assert_status_ok();
+    let bad_body: Value = bad.json();
+    assert!(
+        bad_body["errors"].is_array(),
+        "an unknown field must produce GraphQL errors: {bad_body}"
+    );
+
+    // Test GraphQL playground endpoint: the real GraphiQL source.
     let response = server.get("/graphql/playground").await;
     response.assert_status_ok();
+    let html = response.text();
+    assert!(!html.contains("GraphQL Playground (Mock)"));
+    assert!(html.to_lowercase().contains("graphiql"));
 }
 
 #[tokio::test]
@@ -380,9 +451,24 @@ async fn test_api_documentation() {
     response.assert_status_ok();
 
     let body: Value = response.json();
-    assert_eq!(body["openapi"], "3.0.3");
+    // The real utoipa-generated document, not a hand-written stub.
+    assert!(body["openapi"].as_str().expect("openapi version present").starts_with("3."));
     assert!(body["info"].is_object());
-    assert!(body["paths"].is_object());
+    let paths = body["paths"].as_object().expect("paths present");
+    assert!(
+        !paths.is_empty(),
+        "the served specification must describe the real endpoints"
+    );
+    assert!(
+        paths.contains_key("/v1/inference"),
+        "paths: {:?}",
+        paths.keys()
+    );
+    assert_eq!(
+        body["info"]["version"],
+        Value::String(trustformers_serve::VERSION.to_string()),
+        "the spec version must track the crate version"
+    );
 
     // Test Swagger UI endpoint
     let response = server.get("/docs").await;
@@ -514,17 +600,25 @@ async fn test_rate_limiting() {
 async fn test_failover_endpoint() {
     let server = create_test_server().await;
 
-    // Test force failover endpoint
-    let response = server.post("/admin/failover").await;
+    // Regression: the endpoint used to return 200 OK and do nothing. It must now
+    // consult the HA service and report what actually happened.
 
-    // Failover endpoint may return various status codes depending on configuration
-    // Accept success, client error, or server error
-    let status = response.status_code();
-    assert!(
-        status.is_success() || status.is_client_error() || status.is_server_error(),
-        "Expected 2xx, 4xx, or 5xx status code, got {}",
-        status
-    );
+    // An empty target is a client error.
+    let response = server.post("/admin/failover").json(&json!({ "target_node": "" })).await;
+    assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+
+    // An unknown node cannot be failed over to: 409 with the real reason.
+    let response = server
+        .post("/admin/failover")
+        .json(&json!({ "target_node": "node-that-was-never-registered" }))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(body["accepted"], json!(false));
+    assert!(body["error"]
+        .as_str()
+        .expect("a real error message")
+        .contains("not healthy or not found"));
 }
 
 #[tokio::test]
@@ -554,9 +648,8 @@ async fn test_end_to_end_workflow() {
     // 3. Check metrics were updated
     let response = server.get("/metrics").await;
     response.assert_status_ok();
-    let metrics: Value = response.json();
-    // Metrics endpoint returns JSON format
-    assert!(metrics.is_object());
+    let metrics = response.text();
+    assert!(metrics.contains("trustformers_serve_http_requests_total"));
 
     // 4. Check admin stats
     let response = server.get("/admin/stats").await;
@@ -696,14 +789,25 @@ async fn test_auth_metrics_interaction() {
         .add_header("Authorization", &format!("Bearer {}", token))
         .await;
     metrics_response.assert_status_ok();
-    let metrics_json: Value = metrics_response.json();
+    let metrics_text = metrics_response.text();
 
-    // Metrics endpoint returns JSON - verify auth metrics exist
-    assert!(metrics_json["auth"].is_object());
+    // Prometheus text exposition, with the counters this process really keeps.
+    assert!(metrics_text.contains("trustformers_serve_http_requests_total"));
     println!("✅ Auth-Metrics interaction test completed");
 }
 
 /// Test interaction between streaming and monitoring services
+///
+/// Regression: `/admin/stats` used to measure host resource usage fresh on
+/// every request (`measure_host_async`, real `sysinfo` syscalls including a
+/// two-sample CPU delay); under host load that measurement has no upper
+/// bound, so this test could -- and did -- blow well past its own 5-second
+/// budget on this exact call. `/admin/stats` now reads a cached sample from
+/// a long-lived background sampler instead of measuring per request, so the
+/// call is expected to be fast at any host load. The sibling
+/// `test_isolated_streaming_monitoring` (isolated_integration_tests.rs)
+/// passes quickly but never exercises `/admin/stats`, so it could not have
+/// caught this.
 #[tokio::test]
 async fn test_streaming_monitoring_interaction() {
     // Add explicit test timeout
@@ -754,6 +858,11 @@ async fn test_streaming_monitoring_interaction() {
         let stats: Value = admin_response.json();
 
         assert!(stats["streaming_stats"].is_object());
+        // `resource_usage` stays a JSON object even before the background
+        // sampler's first sample lands (its numeric fields are `null` then,
+        // never a fabricated reading) -- see `HostSampler` in
+        // `src/server/system_stats.rs`.
+        assert!(stats["resource_usage"].is_object());
 
         println!("✅ Streaming-Monitoring interaction test completed");
     };
@@ -862,13 +971,20 @@ async fn test_load_balancing_health_interaction() {
 async fn test_gpu_memory_interaction() {
     let server = create_test_server().await;
 
-    // Test GPU status endpoint
+    // Regression: the endpoint used to answer "GPU not available in test
+    // environment" unconditionally. It must now report real discovery results:
+    // `available` must agree with the length of the discovered device list.
     let gpu_response = server.get("/admin/gpu/status").await;
-    // GPU endpoint may not be available in test environment, so check gracefully
-    if gpu_response.status_code().is_success() {
-        let gpu_status: Value = gpu_response.json();
-        assert!(gpu_status.is_object());
-    }
+    gpu_response.assert_status_ok();
+    let gpu_status: Value = gpu_response.json();
+    let gpus = gpu_status["gpus"].as_array().expect("gpus must be a list");
+    assert_eq!(
+        gpu_status["available"],
+        json!(!gpus.is_empty()),
+        "availability must reflect the discovered devices"
+    );
+    assert_eq!(gpu_status["count"], json!(gpus.len()));
+    assert!(!gpu_status.to_string().contains("test environment"));
 
     // Test memory pressure endpoint
     let memory_response = server.get("/admin/memory/pressure").await;
@@ -887,8 +1003,16 @@ async fn test_gpu_memory_interaction() {
         }
     });
 
+    // The prompt is far larger than the test model's context window, so the
+    // server must say so rather than silently truncating or claiming success.
     let response = server.post("/v1/inference").json(&large_request).await;
-    response.assert_status_ok();
+    assert_eq!(
+        response.status_code(),
+        StatusCode::BAD_REQUEST,
+        "an over-long prompt must be refused, body: {}",
+        response.text()
+    );
+    assert!(response.text().contains("context window exceeded"));
 
     // Check updated memory status
     let memory_response = server.get("/admin/memory/pressure").await;
@@ -973,11 +1097,10 @@ async fn test_comprehensive_multi_service_workflow() {
     // 6. Check final metrics show all interactions
     let final_metrics = server.get("/metrics").await;
     final_metrics.assert_status_ok();
-    let metrics_json: Value = final_metrics.json();
+    let metrics_text = final_metrics.text();
 
-    // Metrics endpoint returns JSON format
-    assert!(metrics_json.is_object());
-    assert!(metrics_json["batching"].is_object());
+    assert!(metrics_text.contains("trustformers_serve_batches_formed_total"));
+    assert!(metrics_text.contains("trustformers_serve_http_requests_total"));
 
     // 7. Check admin statistics comprehensive view
     let admin_stats = server.get("/admin/stats").await;
@@ -1009,4 +1132,134 @@ async fn test_comprehensive_multi_service_workflow() {
         "   - Total requests: {}",
         stats["server_stats"]["total_requests"]
     );
+}
+
+/// Regression: `POST /v1/inference/stream` used to return a `stream_id` and
+/// never stream anything. The stream must now carry real generated chunks and
+/// its status must be readable.
+#[tokio::test]
+async fn test_streaming_inference_produces_real_chunks() {
+    let server = create_test_server().await;
+
+    let response = server
+        .post("/v1/inference/stream")
+        .json(&json!({ "text": "Hi", "max_length": 6 }))
+        .await;
+    response.assert_status_ok();
+    let body: Value = response.json();
+
+    let stream_id = body["stream_id"].as_str().expect("stream_id present").to_string();
+    assert_eq!(body["status"], json!("streaming"));
+    assert!(body["events_url"].as_str().unwrap_or_default().contains(&stream_id));
+
+    // Poll the real status endpoint until the producer finishes.
+    let mut status = Value::Null;
+    for _ in 0..100 {
+        let poll = server.get(&format!("/v1/inference/stream/{stream_id}")).await;
+        poll.assert_status_ok();
+        status = poll.json();
+        if status["status"] != json!("streaming") {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        status["status"],
+        json!("completed"),
+        "stream did not complete: {status}"
+    );
+    let chunks = status["chunks"].as_array().expect("chunks present");
+    assert!(!chunks.is_empty(), "a real stream must deliver chunks");
+    assert_eq!(
+        status["text"].as_str().unwrap_or_default(),
+        chunks.iter().map(|c| c.as_str().unwrap_or_default()).collect::<String>(),
+        "the concatenated chunks must reproduce the generated text"
+    );
+
+    // An unknown stream id must be a 404, not a fabricated status.
+    let unknown = server.get("/v1/inference/stream/not-a-real-stream").await;
+    assert_eq!(unknown.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// Regression: `POST /inference/async` used to acknowledge jobs that were never
+/// run, and `GET /jobs/{id}/status` derived state from `job_id.len() % 3`.
+#[tokio::test]
+async fn test_async_job_is_really_executed() {
+    let server = create_test_server().await;
+
+    let response = server
+        .post("/inference/async")
+        .json(&json!({ "text": "Hi", "model": "test-model" }))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::ACCEPTED);
+    let body: Value = response.json();
+    let job_id = body["job_id"].as_str().expect("job_id present").to_string();
+
+    let mut status = Value::Null;
+    for _ in 0..100 {
+        let poll = server.get(&format!("/jobs/{job_id}/status")).await;
+        poll.assert_status_ok();
+        status = poll.json();
+        let state = status["status"].as_str().unwrap_or_default();
+        if state == "completed" || state == "failed" {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(
+        status["status"],
+        json!("completed"),
+        "the job did not run to completion: {status}"
+    );
+    let result = &status["result"];
+    assert!(result["text"].is_string());
+    assert!(!result.to_string().contains("Mock async inference result"));
+    assert!(result["processing_time_ms"].as_f64().unwrap_or(-1.0) >= 0.0);
+
+    // An id that was never submitted must be a 404.
+    let unknown = server.get("/jobs/abc/status").await;
+    assert_eq!(unknown.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// Regression: the named symptom of the streaming finding was that a client
+/// opening `GET /stream?request_id=<id>` received only keep-alive heartbeats and
+/// never a token. The SSE wire must now carry real generated token events.
+#[tokio::test]
+async fn test_sse_connection_receives_real_token_events() {
+    let server = create_test_server().await;
+
+    let response = server
+        .post("/v1/inference/stream")
+        .json(&json!({ "text": "Hi", "max_length": 6 }))
+        .await;
+    response.assert_status_ok();
+    let body: Value = response.json();
+    let stream_id = body["stream_id"].as_str().expect("stream_id present").to_string();
+
+    // Connect before the producer's grace window elapses. The stream terminates
+    // on the configured 500 ms connection timeout, so `.text()` returns.
+    let sse = tokio::time::timeout(
+        Duration::from_secs(5),
+        server.get(&format!("/stream?request_id={stream_id}")),
+    )
+    .await
+    .expect("the SSE stream must terminate on its configured timeout");
+
+    sse.assert_status_ok();
+    let events = sse.text();
+
+    assert!(
+        events.contains("token"),
+        "the SSE stream carried no token event; body was:\n{events}"
+    );
+    assert!(
+        !events.trim().is_empty() && events.lines().any(|l| l.starts_with("data:")),
+        "the SSE stream carried no data frames; body was:\n{events}"
+    );
+
+    // Whatever the wire delivered, the store must agree the stream completed.
+    let status: Value = server.get(&format!("/v1/inference/stream/{stream_id}")).await.json();
+    assert_eq!(status["status"], json!("completed"), "status: {status}");
 }

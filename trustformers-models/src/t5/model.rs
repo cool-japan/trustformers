@@ -110,6 +110,50 @@ impl Model for T5Model {
             + self.encoder.parameter_count()
             + self.decoder.parameter_count()
     }
+
+    /// Enumerate the model's live parameters under HuggingFace T5 names.
+    ///
+    /// The spelling is exactly what [`T5Model::load_weights_from_reader`] reads:
+    /// `shared.weight`, then `encoder.block.{i}.layer.{n}.…` and
+    /// `encoder.final_layer_norm.weight`, then the same for `decoder`.
+    ///
+    /// The shared embedding table appears once, under `shared.weight` — T5 feeds
+    /// the same table to both stacks, and listing it twice would violate the
+    /// trait's uniqueness requirement.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters(&mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut(&mut tensors);
+        tensors
+    }
+}
+
+impl T5Model {
+    /// Append the shared embedding table and both stacks' parameters.
+    ///
+    /// Factored out of [`Model::named_tensors`] so
+    /// [`T5ForConditionalGeneration`] can reuse it without duplicating the name
+    /// table.
+    pub(crate) fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.shared.collect_named_parameters("shared", into);
+        self.encoder.collect_named_parameters("encoder", into);
+        self.decoder.collect_named_parameters("decoder", into);
+    }
+
+    /// Mutable counterpart of [`T5Model::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.shared.collect_named_parameters_mut("shared", into);
+        self.encoder.collect_named_parameters_mut("encoder", into);
+        self.decoder.collect_named_parameters_mut("decoder", into);
+    }
 }
 
 /// T5 for conditional generation (seq2seq tasks)
@@ -444,6 +488,27 @@ impl Model for T5ForConditionalGeneration {
     fn num_parameters(&self) -> usize {
         self.transformer.num_parameters() + self.lm_head.parameter_count()
     }
+
+    /// Enumerate the transformer's parameters plus the LM head.
+    ///
+    /// T5 ties the head to the shared embedding table, and
+    /// [`T5ForConditionalGeneration::load_weights_from_reader`] reproduces that
+    /// by *copying* `shared.weight` into the head. The two are therefore
+    /// distinct tensors in this implementation and both are listed under
+    /// distinct names, as the trait's uniqueness rule requires.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.transformer.collect_named_parameters(&mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.transformer.collect_named_parameters_mut(&mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
+    }
 }
 
 /// T5 encoder or decoder stack
@@ -507,6 +572,34 @@ impl T5Stack {
             .load_weights(reader, &format!("{}.final_layer_norm", prefix))?;
 
         Ok(())
+    }
+
+    /// Append this stack's parameters under `<prefix>.block.{i}.…` and
+    /// `<prefix>.final_layer_norm.weight`, matching [`T5Stack::load_weights`].
+    ///
+    /// `embed_tokens` is deliberately skipped: it is `None` in every stack this
+    /// crate builds (the embedding table is shared and published once by
+    /// [`T5Model`] under `shared.weight`), and publishing an unshared copy would
+    /// invent a parameter the model does not separately own.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        for (index, block) in self.block.iter().enumerate() {
+            block.collect_named_parameters(&format!("{prefix}.block.{index}"), into);
+        }
+        self.final_layer_norm
+            .collect_named_parameters(&format!("{prefix}.final_layer_norm"), into);
+    }
+
+    /// Mutable counterpart of [`T5Stack::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        for (index, block) in self.block.iter_mut().enumerate() {
+            block.collect_named_parameters_mut(&format!("{prefix}.block.{index}"), into);
+        }
+        self.final_layer_norm
+            .collect_named_parameters_mut(&format!("{prefix}.final_layer_norm"), into);
     }
 
     fn forward(
@@ -603,6 +696,39 @@ impl T5Block {
             .load_weights(reader, &format!("{}.layer.{}", prefix, ff_idx))?;
 
         Ok(())
+    }
+
+    /// Append this block's parameters under `<prefix>.layer.{n}.…`.
+    ///
+    /// T5 numbers its sub-layers positionally, and the numbering differs between
+    /// the stacks: an encoder block is `layer.0` self-attention + `layer.1`
+    /// feed-forward, a decoder block is `layer.0` self-attention + `layer.1`
+    /// cross-attention + `layer.2` feed-forward. The indices here are exactly the
+    /// ones [`T5Block::load_weights`] uses.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.self_attention.collect_named_parameters(&format!("{prefix}.layer.0"), into);
+        if let Some(cross_attention) = &self.cross_attention {
+            cross_attention.collect_named_parameters(&format!("{prefix}.layer.1"), into);
+        }
+        let ff_index = if self.is_encoder { 1 } else { 2 };
+        self.feed_forward
+            .collect_named_parameters(&format!("{prefix}.layer.{ff_index}"), into);
+    }
+
+    /// Mutable counterpart of [`T5Block::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let ff_index = if self.is_encoder { 1 } else { 2 };
+        self.self_attention
+            .collect_named_parameters_mut(&format!("{prefix}.layer.0"), into);
+        if let Some(cross_attention) = &mut self.cross_attention {
+            cross_attention.collect_named_parameters_mut(&format!("{prefix}.layer.1"), into);
+        }
+        self.feed_forward
+            .collect_named_parameters_mut(&format!("{prefix}.layer.{ff_index}"), into);
     }
 
     fn forward(
@@ -1089,6 +1215,61 @@ impl T5Attention {
 
         total
     }
+
+    /// Append this attention sub-layer's parameters under `<prefix>.…`.
+    ///
+    /// `prefix` is the *sub-layer* path (`encoder.block.0.layer.0`), matching
+    /// [`T5Attention::load_weights`]: the norm lands on `<prefix>.layer_norm` and
+    /// the projections on `<prefix>.SelfAttention.…` or
+    /// `<prefix>.EncDecAttention.…` depending on which kind of attention this is.
+    ///
+    /// # Relative attention bias
+    ///
+    /// It is listed whenever this layer owns one. HuggingFace stores the table
+    /// only on block 0 of each stack, so a stack built with a bias table in every
+    /// self-attention layer will publish more `relative_attention_bias.weight`
+    /// entries than a HuggingFace checkpoint carries. That is the model's real
+    /// parameter set, and the trait requires reporting it rather than hiding
+    /// tensors that exist; the loader correspondingly treats a missing bias as
+    /// absent rather than an error.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.layer_norm.collect_named_parameters(&format!("{prefix}.layer_norm"), into);
+
+        let attn_name = if self.is_cross_attention { "EncDecAttention" } else { "SelfAttention" };
+        let attn_prefix = format!("{prefix}.{attn_name}");
+        self.q.collect_named_parameters(&format!("{attn_prefix}.q"), into);
+        self.k.collect_named_parameters(&format!("{attn_prefix}.k"), into);
+        self.v.collect_named_parameters(&format!("{attn_prefix}.v"), into);
+        self.o.collect_named_parameters(&format!("{attn_prefix}.o"), into);
+
+        if let Some(bias) = &self.relative_attention_bias {
+            bias.collect_named_parameters(&format!("{attn_prefix}.relative_attention_bias"), into);
+        }
+    }
+
+    /// Mutable counterpart of [`T5Attention::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let attn_name = if self.is_cross_attention { "EncDecAttention" } else { "SelfAttention" };
+        let attn_prefix = format!("{prefix}.{attn_name}");
+
+        self.layer_norm
+            .collect_named_parameters_mut(&format!("{prefix}.layer_norm"), into);
+        self.q.collect_named_parameters_mut(&format!("{attn_prefix}.q"), into);
+        self.k.collect_named_parameters_mut(&format!("{attn_prefix}.k"), into);
+        self.v.collect_named_parameters_mut(&format!("{attn_prefix}.v"), into);
+        self.o.collect_named_parameters_mut(&format!("{attn_prefix}.o"), into);
+
+        if let Some(bias) = &mut self.relative_attention_bias {
+            bias.collect_named_parameters_mut(
+                &format!("{attn_prefix}.relative_attention_bias"),
+                into,
+            );
+        }
+    }
 }
 
 /// T5 feed-forward module
@@ -1153,6 +1334,28 @@ impl T5DenseReluDense {
     fn parameter_count(&self) -> usize {
         self.layer_norm.parameter_count() + self.wi.parameter_count() + self.wo.parameter_count()
     }
+
+    /// Append the norm and the two projections under `<prefix>.…`, matching
+    /// [`T5DenseReluDense::load_weights`].
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.layer_norm.collect_named_parameters(&format!("{prefix}.layer_norm"), into);
+        let dense_prefix = format!("{prefix}.DenseReluDense");
+        self.wi.collect_named_parameters(&format!("{dense_prefix}.wi"), into);
+        self.wo.collect_named_parameters(&format!("{dense_prefix}.wo"), into);
+    }
+
+    /// Mutable counterpart of [`T5DenseReluDense::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let dense_prefix = format!("{prefix}.DenseReluDense");
+        self.layer_norm
+            .collect_named_parameters_mut(&format!("{prefix}.layer_norm"), into);
+        self.wi.collect_named_parameters_mut(&format!("{dense_prefix}.wi"), into);
+        self.wo.collect_named_parameters_mut(&format!("{dense_prefix}.wo"), into);
+    }
 }
 
 /// T5-specific layer normalization (no bias, RMS norm)
@@ -1189,8 +1392,22 @@ impl T5LayerNorm {
         // T5 uses RMS norm without bias
         match (&hidden_states, &self.weight) {
             (Tensor::F32(x), Tensor::F32(w)) => {
-                // Calculate RMS
-                let variance = x.mapv(|v| v * v).mean().expect("operation failed") + self.epsilon;
+                // Calculate RMS.
+                //
+                // `ArrayD::mean()` returns `None` for an empty array, and the
+                // previous revision unwrapped it with `.expect("operation
+                // failed")` — a panic in the middle of a `Result`-returning
+                // forward pass, reached by any zero-length hidden state. An
+                // empty input is a caller mistake, so it is reported as an
+                // error rather than aborting the process.
+                let mean_square = x.mapv(|v| v * v).mean().ok_or_else(|| {
+                    TrustformersError::shape_error(format!(
+                        "T5LayerNorm::forward received an empty hidden state with shape {:?}; \
+                         RMS normalisation is undefined over zero elements",
+                        x.shape()
+                    ))
+                })?;
+                let variance = mean_square + self.epsilon;
                 let x = x / variance.sqrt();
 
                 // Apply weight
@@ -1206,6 +1423,23 @@ impl T5LayerNorm {
 
     fn parameter_count(&self) -> usize {
         self.weight.len()
+    }
+
+    /// Append the single scale parameter under `<prefix>.weight`.
+    ///
+    /// T5's norm is an RMS norm with no shift term, so exactly one entry is
+    /// produced — matching what T5 checkpoints contain.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`T5LayerNorm::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
     }
 }
 
@@ -1258,6 +1492,46 @@ pub struct T5LMOutput {
 mod tests {
     use super::*;
     use trustformers_core::traits::Config;
+
+    /// Regression: `T5LayerNorm::forward` used `.expect("operation failed")` on
+    /// `ArrayD::mean()`, which is `None` for an empty array — so a zero-length
+    /// hidden state aborted the process instead of returning the `Err` the
+    /// signature promises. This test panics (rather than failing) against the
+    /// old code.
+    #[test]
+    fn t5_layer_norm_returns_an_error_for_an_empty_hidden_state() {
+        let norm = T5LayerNorm::new(4, 1e-6);
+        let empty = Tensor::zeros(&[0, 4]).expect("an empty tensor must be constructible");
+        let err = norm
+            .forward(empty)
+            .expect_err("an empty hidden state must be a structured error, not a panic");
+        assert!(
+            err.to_string().contains("empty hidden state"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn t5_layer_norm_normalises_a_non_empty_hidden_state() {
+        let norm = T5LayerNorm::new(4, 1e-6);
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).expect("input tensor must build");
+        let out = norm.forward(input).expect("a normal forward must succeed");
+        match out {
+            Tensor::F32(arr) => {
+                // rms = sqrt(mean(1,4,9,16) + eps) = sqrt(7.5 + 1e-6)
+                let rms = (7.5f32 + 1e-6).sqrt();
+                let expected = [1.0 / rms, 2.0 / rms, 3.0 / rms, 4.0 / rms];
+                for (got, want) in arr.iter().zip(expected.iter()) {
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "RMS-normalised value {got} differs from {want}"
+                    );
+                }
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
 
     fn small_t5_config() -> T5Config {
         T5Config {

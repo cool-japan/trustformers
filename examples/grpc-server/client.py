@@ -10,9 +10,10 @@ Generate Python code from proto:
 """
 
 import grpc
-import time
 import argparse
 from typing import List, Optional
+
+from google.protobuf import empty_pb2
 
 # Note: These imports assume you've generated the Python code from the proto file
 # Run: python -m grpc_tools.protoc -I./proto --python_out=. --grpc_python_out=. proto/inference.proto
@@ -63,7 +64,7 @@ class TrustformeRSClient:
     
     def list_models(self) -> List[str]:
         """List all loaded models."""
-        response = self.stub.ListModels(inference_pb2.google_dot_protobuf_dot_empty__pb2.Empty())
+        response = self.stub.ListModels(empty_pb2.Empty())
         return [(m.model_id, m.status.is_loaded) for m in response.models]
     
     def predict(self, model_id: str, text: str, **options) -> str:
@@ -173,7 +174,11 @@ def main():
     parser = argparse.ArgumentParser(description="TrustformeRS gRPC Client")
     parser.add_argument("--host", default="localhost", help="Server host")
     parser.add_argument("--port", type=int, default=50051, help="Server port")
-    parser.add_argument("--model", default="bert-base-uncased", help="Model ID")
+    # `Predict` / `BatchPredict` / `StreamPredict` all generate text, which needs
+    # a checkpoint with a language-modelling head. An encoder-only checkpoint
+    # such as `bert-base-uncased` loads fine but is refused by the generation
+    # RPCs, so the default here is a generative one.
+    parser.add_argument("--model", default="gpt2", help="Model ID (must have a language-modelling head for the generation RPCs)")
     args = parser.parse_args()
     
     # Create client

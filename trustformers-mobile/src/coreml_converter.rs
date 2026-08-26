@@ -3,11 +3,14 @@
 //! This module provides comprehensive model conversion from TrustformeRS to Core ML format,
 //! including optimization, quantization, and hardware-specific tuning.
 
+use crate::coreml_proto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use trustformers_core::error::Result;
+use trustformers_core::errors::unsupported_operation;
 use trustformers_core::Tensor;
+use trustformers_models::weight_loading::checkpoint::Checkpoint;
 
 /// Core ML model format version
 pub const COREML_VERSION: u32 = 5;
@@ -435,96 +438,277 @@ impl CoreMLModelConverter {
         ]
     }
 
-    /// Load TrustformeRS model
+    /// Load a real TrustformeRS checkpoint (safetensors or PyTorch
+    /// `.bin`/`.pt`/`.pth`, auto-detected from the file's own bytes) via
+    /// [`trustformers_models::weight_loading::checkpoint::Checkpoint`] -- the
+    /// same real parser `trustformers_models` uses to load pretrained
+    /// weights. Every tensor this returns is the checkpoint's own data;
+    /// nothing is synthesised, and a checkpoint with no tensors is a hard
+    /// error rather than a silently empty model.
     fn load_trustformers_model(&self, path: &Path) -> Result<TrustformersModel> {
-        // Placeholder for loading logic
-        Ok(TrustformersModel {
-            weights: HashMap::new(),
-            graph: Vec::new(),
-        })
+        let mut file = std::fs::File::open(path).map_err(|e| {
+            unsupported_operation(
+                format!("reading TrustformeRS checkpoint '{}'", path.display()),
+                format!("CoreMLModelConverter::load_trustformers_model: {e}"),
+            )
+        })?;
+        let checkpoint = Checkpoint::from_reader(&mut file)?;
+
+        let mut weights = HashMap::with_capacity(checkpoint.len());
+        for name in checkpoint.names() {
+            let tensor = checkpoint.get(&name).ok_or_else(|| {
+                unsupported_operation(
+                    format!("reading checkpoint tensor '{name}'"),
+                    "CoreMLModelConverter::load_trustformers_model (checkpoint listed the name \
+                     but does not hold it -- internal inconsistency in the checkpoint reader)",
+                )
+            })?;
+            weights.insert(name, tensor.clone());
+        }
+
+        if weights.is_empty() {
+            return Err(unsupported_operation(
+                format!("converting '{}' to Core ML", path.display()),
+                "CoreMLModelConverter::load_trustformers_model (the checkpoint parsed \
+                 successfully but contains no tensors; there is nothing to convert)",
+            )
+            .into());
+        }
+
+        Ok(TrustformersModel { weights })
     }
 
     /// Convert to Core ML graph
+    ///
+    /// A checkpoint carries no operation graph (see [`TrustformersModel`]),
+    /// so layers and their embedded weights are derived together, directly
+    /// from the named tensor bag, by
+    /// [`Self::derive_layers_from_weights`] -- real linear-projection
+    /// layers whose weight bytes are the checkpoint's own data, not a
+    /// synthesised topology.
     fn convert_to_coreml_graph(&self, model: TrustformersModel) -> Result<CoreMLModelGraph> {
-        let mut layers = Vec::new();
-        let mut weights = HashMap::new();
-
-        // Convert each operation
-        for op in model.graph {
-            let layer = self.convert_operation(op)?;
-            layers.push(layer);
-        }
-
-        // Convert weights
-        for (name, tensor) in model.weights {
-            let weight_blob = self.convert_weight(name.clone(), tensor)?;
-            weights.insert(name, weight_blob);
-        }
+        let (layers, weights, input_width, output_width) =
+            self.derive_layers_from_weights(&model.weights)?;
 
         Ok(CoreMLModelGraph {
             name: "TrustformersModel".to_string(),
             version: "1.0.0".to_string(),
-            inputs: self.create_input_specs(),
-            outputs: self.create_output_specs(),
+            inputs: vec![TensorSpec {
+                name: "input".to_string(),
+                shape: vec![1, input_width as i64],
+                dtype: CoreMLDataType::Float32,
+                description: Some("Model input".to_string()),
+            }],
+            outputs: vec![TensorSpec {
+                name: Self::LAYER_OUTPUT_FEATURE_NAME.to_string(),
+                shape: vec![1, output_width as i64],
+                dtype: CoreMLDataType::Float32,
+                description: Some("Model output".to_string()),
+            }],
             layers,
             weights,
             metadata: self.create_metadata(),
         })
     }
 
-    /// Convert a single operation
-    fn convert_operation(&self, op: Operation) -> Result<CoreMLLayer> {
-        let layer_type = match op.op_type.as_str() {
-            "Conv2d" => LayerType::Convolution,
-            "Linear" => LayerType::InnerProduct,
-            "BatchNorm2d" => LayerType::BatchNorm,
-            "ReLU" => LayerType::Activation,
-            "MaxPool2d" => LayerType::Pooling,
-            _ => LayerType::Custom(op.op_type),
-        };
+    /// The model's final output feature name; also the fixed `output` name
+    /// used to wire the last derived layer -- see
+    /// [`Self::derive_layers_from_weights`].
+    const LAYER_OUTPUT_FEATURE_NAME: &'static str = "output";
 
-        Ok(CoreMLLayer {
-            name: op.name,
-            layer_type,
-            inputs: op.inputs,
-            outputs: op.outputs,
-            params: self.convert_params(op.params),
-            quantization: None,
-        })
-    }
+    /// Derive a real, ordered stack of `InnerProduct`(+bias)/`Activation`
+    /// layers directly from a checkpoint's named tensors, chaining each
+    /// layer's output into the next layer's input.
+    ///
+    /// This applies the same naming/shape convention `inference.rs`'s
+    /// `MobileInferenceEngine::process_layer` uses to run a checkpoint with
+    /// no architecture graph: a 2D tensor named `<prefix>.weight` (or
+    /// `<prefix>_weight`) is a linear projection; a 1D tensor named
+    /// `<prefix>.bias`/`<prefix>_bias` whose length matches that
+    /// projection's output width is its bias; a weight name containing
+    /// `"relu"` or `"gelu"` appends the matching activation layer. Tensors
+    /// that do not follow this convention are skipped -- honestly recovering
+    /// *less* structure than a real architecture-aware exporter would,
+    /// rather than guessing and silently mislabelling an unrelated tensor as
+    /// a layer.
+    ///
+    /// # Errors
+    ///
+    /// Fails if not a single tensor matches the convention: an empty layer
+    /// stack is not a valid Core ML model, and returning one that claims
+    /// success would be exactly the "looks like it worked" failure mode this
+    /// converter exists to eliminate.
+    fn derive_layers_from_weights(
+        &self,
+        weights: &HashMap<String, Tensor>,
+    ) -> Result<(Vec<CoreMLLayer>, HashMap<String, WeightBlob>, usize, usize)> {
+        // Natural sort (numeric runs compare numerically, so `"h.2"` sorts
+        // before `"h.10"`) -- the same deterministic order
+        // `inference.rs`'s `MobileInferenceEngine` uses to run a checkpoint
+        // with no architecture graph; see `crate::inference::tensor_conversion::natural_cmp`.
+        let mut names: Vec<&String> = weights.keys().collect();
+        names.sort_by(|a, b| {
+            crate::inference::tensor_conversion::natural_cmp(a.as_str(), b.as_str())
+        });
 
-    /// Convert parameters
-    fn convert_params(&self, params: HashMap<String, String>) -> LayerParams {
-        let mut converted = HashMap::new();
+        let mut layers = Vec::new();
+        let mut blobs = HashMap::new();
+        let mut current_input = "input".to_string();
+        let mut input_width = 0usize;
+        let mut output_width = 0usize;
+        let mut layer_index = 0usize;
 
-        for (key, value) in params {
-            // Try to parse as different types
-            if let Ok(int_val) = value.parse::<i64>() {
-                converted.insert(key, ParamValue::Int(int_val));
-            } else if let Ok(float_val) = value.parse::<f32>() {
-                converted.insert(key, ParamValue::Float(float_val));
-            } else if value == "true" || value == "false" {
-                converted.insert(key, ParamValue::Bool(value == "true"));
+        for name in names {
+            let Some(weight_prefix) =
+                name.strip_suffix(".weight").or_else(|| name.strip_suffix("_weight"))
+            else {
+                continue;
+            };
+            let weight = &weights[name];
+            let shape = weight.shape();
+            if shape.len() != 2 {
+                continue;
+            }
+            // PyTorch/safetensors `nn.Linear` convention: `[out, in]`.
+            let (output_channels, input_channels) = (shape[0], shape[1]);
+
+            let bias_candidates = [
+                format!("{weight_prefix}.bias"),
+                format!("{weight_prefix}_bias"),
+            ];
+            let bias_name: Option<String> = bias_candidates.into_iter().find(|candidate| {
+                weights.get(candidate).is_some_and(|b| b.shape() == [output_channels])
+            });
+
+            let inner_product_output = format!("layer_{layer_index}_out");
+            layers.push(CoreMLLayer {
+                name: format!("linear_{layer_index}"),
+                layer_type: LayerType::InnerProduct,
+                inputs: vec![current_input.clone()],
+                outputs: vec![inner_product_output.clone()],
+                params: Self::inner_product_params(
+                    name,
+                    bias_name.clone(),
+                    input_channels,
+                    output_channels,
+                ),
+                quantization: None,
+            });
+            blobs.insert(name.clone(), self.tensor_to_weight_blob(weight)?);
+            if let Some(bias_name) = &bias_name {
+                let bias_tensor = &weights[bias_name];
+                blobs.insert(bias_name.clone(), self.tensor_to_weight_blob(bias_tensor)?);
+            }
+
+            if input_width == 0 {
+                input_width = input_channels;
+            }
+            output_width = output_channels;
+            current_input = inner_product_output;
+            layer_index += 1;
+
+            let lower_name = name.to_ascii_lowercase();
+            let activation_kind = if lower_name.contains("gelu") {
+                Some("gelu")
+            } else if lower_name.contains("relu") {
+                Some("relu")
             } else {
-                converted.insert(key, ParamValue::String(value));
+                None
+            };
+            if let Some(kind) = activation_kind {
+                let activation_output = format!("layer_{layer_index}_out");
+                layers.push(CoreMLLayer {
+                    name: format!("activation_{layer_index}"),
+                    layer_type: LayerType::Activation,
+                    inputs: vec![current_input.clone()],
+                    outputs: vec![activation_output.clone()],
+                    params: LayerParams {
+                        params: HashMap::from([(
+                            "kind".to_string(),
+                            ParamValue::String(kind.to_string()),
+                        )]),
+                    },
+                    quantization: None,
+                });
+                current_input = activation_output;
+                layer_index += 1;
             }
         }
 
-        LayerParams { params: converted }
+        if layers.is_empty() {
+            return Err(unsupported_operation(
+                "deriving a Core ML layer graph from this checkpoint",
+                "CoreMLModelConverter::derive_layers_from_weights (no tensor followed the \
+                 `<prefix>.weight` / `<prefix>_weight`, rank-2 naming convention this converter \
+                 requires to recover layer structure from a flat checkpoint; there is nothing \
+                 real to export)",
+            )
+            .into());
+        }
+
+        // Rename the last layer's output to the model's fixed output
+        // feature name so `ModelDescription.output` and the graph agree.
+        if let Some(last) = layers.last_mut() {
+            last.outputs = vec![Self::LAYER_OUTPUT_FEATURE_NAME.to_string()];
+        }
+
+        Ok((layers, blobs, input_width, output_width))
     }
 
-    /// Convert weight tensor
-    fn convert_weight(&self, name: String, tensor: Tensor) -> Result<WeightBlob> {
-        let shape = tensor.shape().to_vec();
-        let dtype = CoreMLDataType::Float32; // Default
+    /// Build an `InnerProduct` layer's [`LayerParams`], recording the real
+    /// tensor names [`Self::build_layer_spec`] (in `coreml_proto`
+    /// conversion) needs to find this layer's weight/bias bytes in the
+    /// model's `weights` map, alongside the channel counts Core ML's
+    /// `InnerProductLayerParams` requires directly.
+    fn inner_product_params(
+        weight_name: &str,
+        bias_name: Option<String>,
+        input_channels: usize,
+        output_channels: usize,
+    ) -> LayerParams {
+        let mut params = HashMap::from([
+            (
+                "weight_name".to_string(),
+                ParamValue::String(weight_name.to_string()),
+            ),
+            (
+                "input_channels".to_string(),
+                ParamValue::Int(input_channels as i64),
+            ),
+            (
+                "output_channels".to_string(),
+                ParamValue::Int(output_channels as i64),
+            ),
+        ]);
+        if let Some(bias_name) = bias_name {
+            params.insert("bias_name".to_string(), ParamValue::String(bias_name));
+        }
+        LayerParams { params }
+    }
 
-        // Compress weight data
-        let tensor_data = tensor.data()?;
-        let data = if self.config.enable_compression {
-            self.compress_weight_data(&tensor_data)?
+    /// Convert one real tensor's own values into a [`WeightBlob`]: raw
+    /// little-endian `f32` bytes normally, or raw little-endian IEEE-754
+    /// half-precision bytes when `config.enable_compression` is set -- Core
+    /// ML's own native half-precision weight encoding
+    /// (`WeightParams.float16Value`), which genuinely halves the embedded
+    /// weight size (verified in `coreml_proto`'s tests against Apple's own
+    /// `coremlcompiler`), not a relabelled copy of the uncompressed bytes.
+    fn tensor_to_weight_blob(&self, tensor: &Tensor) -> Result<WeightBlob> {
+        let shape = tensor.shape().to_vec();
+        let values = tensor.data()?;
+
+        let (dtype, data) = if self.config.enable_compression {
+            let mut bytes = Vec::with_capacity(values.len() * 2);
+            for &v in &values {
+                bytes.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+            (CoreMLDataType::Float16, bytes)
         } else {
-            // Convert f32 to bytes without compression
-            tensor_data.iter().flat_map(|&f| f.to_ne_bytes()).collect()
+            let mut bytes = Vec::with_capacity(values.len() * 4);
+            for &v in &values {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            (CoreMLDataType::Float32, bytes)
         };
 
         Ok(WeightBlob {
@@ -533,33 +717,6 @@ impl CoreMLModelConverter {
             quantization: None,
             data,
         })
-    }
-
-    /// Compress weight data
-    fn compress_weight_data(&self, data: &[f32]) -> Result<Vec<u8>> {
-        // Simple compression (would use actual compression in production)
-        let bytes: Vec<u8> = data.iter().flat_map(|&f| f.to_ne_bytes()).collect();
-        Ok(bytes)
-    }
-
-    /// Create input specifications
-    fn create_input_specs(&self) -> Vec<TensorSpec> {
-        vec![TensorSpec {
-            name: "input".to_string(),
-            shape: vec![1, 3, 224, 224],
-            dtype: CoreMLDataType::Float32,
-            description: Some("Model input".to_string()),
-        }]
-    }
-
-    /// Create output specifications
-    fn create_output_specs(&self) -> Vec<TensorSpec> {
-        vec![TensorSpec {
-            name: "output".to_string(),
-            shape: vec![1, 1000],
-            dtype: CoreMLDataType::Float32,
-            description: Some("Model output".to_string()),
-        }]
     }
 
     /// Create metadata
@@ -706,12 +863,35 @@ impl CoreMLModelConverter {
         Ok(())
     }
 
-    /// Write Core ML model
+    /// Write the Core ML model.
+    ///
+    /// `MLModelC` (the compiled, `.mlmodelc` bundle format Xcode/CoreML
+    /// actually loads at runtime) is not produced here: that bundle's
+    /// contents (`model.espresso.net`/`.shape`/`.weights`, `coremldata.bin`)
+    /// are Apple's own internal Espresso IR, not merely a repackaging of the
+    /// `.mlmodel` protobuf, and are compiled from it exclusively by Apple's
+    /// own `coremlcompiler` (confirmed on this machine, see
+    /// `coreml_proto`'s module doc comment) -- there is no public,
+    /// re-implementable spec for that on-disk layout. Emitting bytes under
+    /// the `.mlmodelc` extension without that compiler is exactly the
+    /// json-masquerading-as-a-model failure this rewrite exists to remove,
+    /// so it is refused with a structured error naming the real compiler to
+    /// run instead, rather than writing something Xcode would reject.
     fn write_coreml_model(
         &self,
         model: &CoreMLModelGraph,
         output_path: &Path,
     ) -> Result<OutputInfo> {
+        if matches!(self.config.output_format, CoreMLFormat::MLModelC) {
+            return Err(unsupported_operation(
+                "writing a compiled .mlmodelc bundle directly",
+                "CoreMLModelConverter::write_coreml_model (the .mlmodelc Espresso IR is Apple's \
+                 private compiled format; write CoreMLFormat::MLModel instead and run `xcrun \
+                 coremlcompiler compile <output>.mlmodel <dir>` to produce the .mlmodelc bundle)",
+            )
+            .into());
+        }
+
         let model_data = self.serialize_model(model)?;
 
         // Create output directory
@@ -721,21 +901,19 @@ impl CoreMLModelConverter {
 
         // Write model file
         let model_path = match self.config.output_format {
-            CoreMLFormat::MLModel => output_path.with_extension("mlmodel"),
-            CoreMLFormat::MLModelC => output_path.with_extension("mlmodelc"),
-            CoreMLFormat::MLPackage => {
-                let package_dir = output_path.with_extension("mlpackage");
-                std::fs::create_dir_all(&package_dir)?;
-                package_dir.join("Data").join("com.apple.CoreML").join("model.mlmodel")
+            CoreMLFormat::MLModel => {
+                let path = output_path.with_extension("mlmodel");
+                std::fs::write(&path, &model_data)?;
+                path
             },
+            CoreMLFormat::MLModelC => unreachable!("rejected above"),
+            CoreMLFormat::MLPackage => self.write_mlpackage(output_path, &model_data)?,
         };
-
-        std::fs::write(&model_path, &model_data)?;
 
         // Calculate size and compression
         let size_mb = model_data.len() as f32 / (1024.0 * 1024.0);
         let original_size_mb = self.calculate_original_size(model);
-        let compression_ratio = original_size_mb / size_mb;
+        let compression_ratio = if size_mb > 0.0 { original_size_mb / size_mb } else { 1.0 };
 
         Ok(OutputInfo {
             path: model_path,
@@ -744,10 +922,221 @@ impl CoreMLModelConverter {
         })
     }
 
-    /// Serialize model to binary format
+    /// Write a real `.mlpackage` bundle: the `.mlmodel` protobuf under
+    /// `Data/com.apple.CoreML/model.mlmodel`, plus the `Manifest.json` Core
+    /// ML's own package format requires to locate it (`fileFormatVersion`,
+    /// an `itemInfoEntries` map keyed by a fresh v4 UUID, and a matching
+    /// `rootModelIdentifier`) -- confirmed against `xcrun coremlcompiler
+    /// compile` on this machine by hand-constructing exactly this layout
+    /// (see `coreml_proto`'s module doc comment for the same verification
+    /// approach applied to the model bytes themselves).
+    fn write_mlpackage(&self, output_path: &Path, model_data: &[u8]) -> Result<PathBuf> {
+        let package_dir = output_path.with_extension("mlpackage");
+        let coreml_dir = package_dir.join("Data").join("com.apple.CoreML");
+        std::fs::create_dir_all(&coreml_dir)?;
+
+        let model_path = coreml_dir.join("model.mlmodel");
+        std::fs::write(&model_path, model_data)?;
+
+        let item_id = uuid::Uuid::new_v4().to_string();
+        let manifest = serde_json::json!({
+            "fileFormatVersion": "1.0.0",
+            "itemInfoEntries": {
+                item_id.clone(): {
+                    "author": "com.apple.CoreML",
+                    "description": "CoreML Model Specification",
+                    "name": "model.mlmodel",
+                    "path": "com.apple.CoreML/model.mlmodel",
+                },
+            },
+            "rootModelIdentifier": item_id,
+        });
+        std::fs::write(
+            package_dir.join("Manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        Ok(model_path)
+    }
+
+    /// Serialize the model graph as a real binary Core ML `Model` protobuf
+    /// message via [`coreml_proto`] -- not `serde_json::to_vec`, which
+    /// produces bytes Xcode/`coremltools` reject outright regardless of the
+    /// file extension they are written under.
     fn serialize_model(&self, model: &CoreMLModelGraph) -> Result<Vec<u8>> {
-        // In production, would use protobuf serialization
-        Ok(serde_json::to_vec(model)?)
+        let inputs = model
+            .inputs
+            .iter()
+            .map(|spec| coreml_proto::FeatureSpec {
+                name: spec.name.clone(),
+                shape: spec.shape.clone(),
+            })
+            .collect();
+        let outputs = model
+            .outputs
+            .iter()
+            .map(|spec| coreml_proto::FeatureSpec {
+                name: spec.name.clone(),
+                shape: spec.shape.clone(),
+            })
+            .collect();
+
+        let mut layers = Vec::with_capacity(model.layers.len());
+        for layer in &model.layers {
+            layers.push(self.encode_layer(layer, &model.weights)?);
+        }
+
+        let spec = coreml_proto::ModelSpec {
+            specification_version: COREML_VERSION as i32,
+            inputs,
+            outputs,
+            layers,
+        };
+        Ok(coreml_proto::encode_model(&spec))
+    }
+
+    /// Translate one [`CoreMLLayer`] plus its referenced [`WeightBlob`]s
+    /// into a [`coreml_proto::LayerSpec`]. `InnerProduct` layer weight/bias
+    /// tensor names are read back out of the `weight_name`/`bias_name`
+    /// params [`Self::inner_product_params`] recorded, so this stays a pure
+    /// translation with no re-derivation of layer structure.
+    fn encode_layer(
+        &self,
+        layer: &CoreMLLayer,
+        weights: &HashMap<String, WeightBlob>,
+    ) -> Result<coreml_proto::LayerSpec> {
+        match layer.layer_type {
+            LayerType::InnerProduct => {
+                let weight_name = Self::string_param(layer, "weight_name").ok_or_else(|| {
+                    unsupported_operation(
+                        format!("serializing InnerProduct layer '{}'", layer.name),
+                        "CoreMLModelConverter::encode_layer (missing internal 'weight_name' \
+                         param; every InnerProduct layer this converter derives must carry one)",
+                    )
+                })?;
+                let weight_blob = weights.get(&weight_name).ok_or_else(|| {
+                    unsupported_operation(
+                        format!("serializing InnerProduct layer '{}'", layer.name),
+                        format!(
+                            "CoreMLModelConverter::encode_layer (no weight blob named \
+                             '{weight_name}')"
+                        ),
+                    )
+                })?;
+                let input_channels = Self::int_param(layer, "input_channels").ok_or_else(|| {
+                    unsupported_operation(
+                        format!("serializing InnerProduct layer '{}'", layer.name),
+                        "CoreMLModelConverter::encode_layer (missing internal 'input_channels' \
+                         param)",
+                    )
+                })?;
+                let output_channels =
+                    Self::int_param(layer, "output_channels").ok_or_else(|| {
+                        unsupported_operation(
+                            format!("serializing InnerProduct layer '{}'", layer.name),
+                            "CoreMLModelConverter::encode_layer (missing internal \
+                             'output_channels' param)",
+                        )
+                    })?;
+                let bias = Self::string_param(layer, "bias_name")
+                    .map(|bias_name| {
+                        weights.get(&bias_name).map(Self::weight_blob_to_proto).ok_or_else(|| {
+                            unsupported_operation(
+                                format!("serializing InnerProduct layer '{}'", layer.name),
+                                format!(
+                                    "CoreMLModelConverter::encode_layer (no bias blob named \
+                                     '{bias_name}')"
+                                ),
+                            )
+                        })
+                    })
+                    .transpose()?;
+
+                Ok(coreml_proto::LayerSpec::InnerProduct(
+                    coreml_proto::InnerProductSpec {
+                        name: layer.name.clone(),
+                        input_name: layer.inputs.first().cloned().unwrap_or_default(),
+                        output_name: layer.outputs.first().cloned().unwrap_or_default(),
+                        input_channels: input_channels as u64,
+                        output_channels: output_channels as u64,
+                        weights: Self::weight_blob_to_proto(weight_blob),
+                        bias,
+                    },
+                ))
+            },
+            LayerType::Activation => {
+                let kind = match Self::string_param(layer, "kind").as_deref() {
+                    Some("gelu") => coreml_proto::ActivationKind::Gelu,
+                    Some("relu") | None => coreml_proto::ActivationKind::Relu,
+                    Some(other) => {
+                        return Err(unsupported_operation(
+                            format!("serializing Activation layer '{}'", layer.name),
+                            format!(
+                                "CoreMLModelConverter::encode_layer (unrecognised activation \
+                                 kind '{other}'; this converter only derives relu/gelu)"
+                            ),
+                        )
+                        .into());
+                    },
+                };
+                Ok(coreml_proto::LayerSpec::Activation(
+                    coreml_proto::ActivationSpec {
+                        name: layer.name.clone(),
+                        input_name: layer.inputs.first().cloned().unwrap_or_default(),
+                        output_name: layer.outputs.first().cloned().unwrap_or_default(),
+                        kind,
+                    },
+                ))
+            },
+            ref other => Err(unsupported_operation(
+                format!("serializing layer '{}'", layer.name),
+                format!(
+                    "CoreMLModelConverter::encode_layer (layer type {other:?} has no \
+                     protobuf encoding in this converter; only InnerProduct and Activation \
+                     layers are ever derived by derive_layers_from_weights)"
+                ),
+            )
+            .into()),
+        }
+    }
+
+    fn string_param(layer: &CoreMLLayer, key: &str) -> Option<String> {
+        match layer.params.params.get(key) {
+            Some(ParamValue::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn int_param(layer: &CoreMLLayer, key: &str) -> Option<i64> {
+        match layer.params.params.get(key) {
+            Some(ParamValue::Int(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Convert one [`WeightBlob`]'s already-encoded bytes into the
+    /// [`coreml_proto::WeightData`] variant matching its recorded
+    /// [`CoreMLDataType`]. `Int8`/quantized blobs are not yet representable
+    /// (Core ML's `int8RawValue` path additionally requires a
+    /// `QuantizationParams` message this converter does not yet emit) and
+    /// panic-free-fall back to treating the raw bytes as float32 would
+    /// silently corrupt the model, so callers must not reach this with a
+    /// quantized blob; [`Self::apply_quantization`] is the only writer of
+    /// `Int8`-typed blobs and is not wired into any path that reaches
+    /// `serialize_model` (`quantization: None` is what
+    /// `derive_layers_from_weights` actually produces).
+    fn weight_blob_to_proto(blob: &WeightBlob) -> coreml_proto::WeightData {
+        match blob.dtype {
+            CoreMLDataType::Float16 => coreml_proto::WeightData::F16Bytes(blob.data.clone()),
+            _ => {
+                let values: Vec<f32> = blob
+                    .data
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                coreml_proto::WeightData::F32(values)
+            },
+        }
     }
 
     /// Calculate original model size
@@ -803,18 +1192,18 @@ impl CoreMLModelConverter {
     }
 }
 
-// Placeholder structures for loading
+/// A loaded checkpoint's real tensors, keyed by their checkpoint name.
+///
+/// There is deliberately no `graph`/topology field here: a checkpoint is a
+/// flat named-tensor bag (see [`Checkpoint`]) with no operation graph to
+/// read one from, so [`CoreMLModelConverter::convert_to_coreml_graph`]
+/// derives Core ML layers directly from tensor names and shapes -- the same
+/// approach `inference.rs`'s `MobileInferenceEngine` uses to run a
+/// checkpoint without an architecture graph -- rather than from a
+/// previously-fabricated `Operation` list that no real loader ever
+/// populated.
 struct TrustformersModel {
     weights: HashMap<String, Tensor>,
-    graph: Vec<Operation>,
-}
-
-struct Operation {
-    name: String,
-    op_type: String,
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-    params: HashMap<String, String>,
 }
 
 struct OutputInfo {
@@ -1021,6 +1410,172 @@ impl Default for CoreMLConverterConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a minimal, real safetensors checkpoint (a single `[2, 4]`
+    /// `linear.weight` -- PyTorch's `[out, in]` `nn.Linear` convention --
+    /// plus its `linear.bias`) to a fresh path under `std::env::temp_dir()`.
+    fn write_test_checkpoint() -> std::path::PathBuf {
+        use safetensors::tensor::TensorView;
+        use safetensors::Dtype;
+
+        let weight_data: Vec<f32> = (0..8).map(|i| i as f32 * 0.1).collect();
+        let weight_bytes: Vec<u8> = weight_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let weight_view = TensorView::new(Dtype::F32, vec![2, 4], &weight_bytes).expect("view");
+
+        let bias_data = [0.5f32, -0.5];
+        let bias_bytes: Vec<u8> = bias_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bias_view = TensorView::new(Dtype::F32, vec![2], &bias_bytes).expect("view");
+
+        let mut tensors: HashMap<String, TensorView> = HashMap::new();
+        tensors.insert("linear.weight".to_string(), weight_view);
+        tensors.insert("linear.bias".to_string(), bias_view);
+        let bytes = safetensors::serialize(&tensors, None).expect("serialize");
+
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_coreml_converter_test_{}_{}.safetensors",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, &bytes).expect("write checkpoint");
+        path
+    }
+
+    /// End-to-end regression test for the P0 finding: `convert` used to
+    /// write `serde_json::to_vec(model)` bytes under a `.mlmodel`
+    /// extension, which Xcode/`coremltools` reject outright. This drives
+    /// the real conversion pipeline (real checkpoint -> real derived
+    /// layers -> real protobuf bytes via `coreml_proto`) end to end and
+    /// then hands the output to Apple's own `xcrun coremlcompiler` --
+    /// skipped, not failed, on a machine without Xcode's command-line
+    /// tools, since that binary is what actually defines "is this a valid
+    /// Core ML model" and this crate does not attempt to reimplement its
+    /// validator.
+    #[test]
+    fn real_mlmodel_bytes_are_accepted_by_apples_own_compiler() {
+        let coremlcompiler =
+            std::process::Command::new("xcrun").args(["--find", "coremlcompiler"]).output();
+        let Ok(found) = coremlcompiler else {
+            eprintln!("skipping: `xcrun` is not available on this host");
+            return;
+        };
+        if !found.status.success() {
+            eprintln!("skipping: `coremlcompiler` is not available on this host");
+            return;
+        }
+
+        let checkpoint_path = write_test_checkpoint();
+        let output_dir = std::env::temp_dir().join(format!(
+            "trustformers_coreml_converter_out_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+        let output_path = output_dir.join("model");
+
+        let converter = CoreMLModelConverter::new(CoreMLConverterConfig::default());
+        let result = converter.convert(&checkpoint_path, &output_path);
+        let _ = std::fs::remove_file(&checkpoint_path);
+
+        let conversion = result.expect("conversion of a real checkpoint must succeed");
+        assert!(
+            conversion.output_path.exists(),
+            "converter must actually write the .mlmodel file"
+        );
+
+        // The direct regression check: bytes written under a .mlmodel
+        // extension must not be JSON. `serde_json::to_vec` output starts
+        // with `{`; a real Model protobuf's first field
+        // (`specificationVersion`, a varint) never does.
+        let written = std::fs::read(&conversion.output_path).expect("read written model");
+        assert_ne!(
+            written.first(),
+            Some(&b'{'),
+            "the .mlmodel file must not be JSON -- got what looks like a JSON object"
+        );
+
+        let compiled_dir = output_dir.join("compiled");
+        let compile_result = std::process::Command::new("xcrun")
+            .args(["coremlcompiler", "compile"])
+            .arg(&conversion.output_path)
+            .arg(&compiled_dir)
+            .output()
+            .expect("run coremlcompiler");
+
+        let _ = std::fs::remove_dir_all(&output_dir);
+
+        assert!(
+            compile_result.status.success(),
+            "Apple's own coremlcompiler rejected the emitted .mlmodel:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&compile_result.stdout),
+            String::from_utf8_lossy(&compile_result.stderr)
+        );
+    }
+
+    /// Same real-checkpoint pipeline as
+    /// [`real_mlmodel_bytes_are_accepted_by_apples_own_compiler`], but
+    /// through the `.mlpackage` bundle writer -- a materially different
+    /// code path (`write_mlpackage`'s `Manifest.json` plus the nested
+    /// `Data/com.apple.CoreML/model.mlmodel`) that the other test does not
+    /// exercise. `coremlcompiler` accepts a `.mlpackage` directory directly.
+    #[test]
+    fn real_mlpackage_bundle_is_accepted_by_apples_own_compiler() {
+        let coremlcompiler =
+            std::process::Command::new("xcrun").args(["--find", "coremlcompiler"]).output();
+        let Ok(found) = coremlcompiler else {
+            eprintln!("skipping: `xcrun` is not available on this host");
+            return;
+        };
+        if !found.status.success() {
+            eprintln!("skipping: `coremlcompiler` is not available on this host");
+            return;
+        }
+
+        let checkpoint_path = write_test_checkpoint();
+        let output_dir = std::env::temp_dir().join(format!(
+            "trustformers_coreml_mlpackage_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&output_dir).expect("create output dir");
+        let output_path = output_dir.join("model");
+
+        let mut config = CoreMLConverterConfig::default();
+        config.output_format = CoreMLFormat::MLPackage;
+        let converter = CoreMLModelConverter::new(config);
+        let result = converter.convert(&checkpoint_path, &output_path);
+        let _ = std::fs::remove_file(&checkpoint_path);
+
+        let conversion = result.expect("mlpackage conversion of a real checkpoint must succeed");
+        assert!(conversion.output_path.exists());
+        assert!(
+            conversion.output_path.to_string_lossy().ends_with("model.mlmodel"),
+            "mlpackage layout must be Data/com.apple.CoreML/model.mlmodel, got {:?}",
+            conversion.output_path
+        );
+
+        let package_dir = output_path.with_extension("mlpackage");
+        assert!(
+            package_dir.join("Manifest.json").exists(),
+            "a real .mlpackage bundle must carry a Manifest.json"
+        );
+
+        let compiled_dir = output_dir.join("compiled");
+        let compile_result = std::process::Command::new("xcrun")
+            .args(["coremlcompiler", "compile"])
+            .arg(&package_dir)
+            .arg(&compiled_dir)
+            .output()
+            .expect("run coremlcompiler");
+
+        let _ = std::fs::remove_dir_all(&output_dir);
+
+        assert!(
+            compile_result.status.success(),
+            "Apple's own coremlcompiler rejected the emitted .mlpackage:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&compile_result.stdout),
+            String::from_utf8_lossy(&compile_result.stderr)
+        );
+    }
 
     #[test]
     fn test_converter_creation() {

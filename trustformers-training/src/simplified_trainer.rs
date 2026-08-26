@@ -4,8 +4,129 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use trustformers_core::tensor::Tensor;
+
 use crate::losses::Loss;
 use crate::metrics::{Metric, MetricCollection};
+
+/// A dataset that `SimpleTrainer` can iterate.
+///
+/// Implementors expose their length and can materialise a contiguous slice of samples as an
+/// `(inputs, targets)` tensor pair. The trainer derives the number of optimizer steps per
+/// epoch from [`TrainingDataset::num_samples`], so the training loop is genuinely bound to
+/// the data rather than to a hardcoded step count.
+pub trait TrainingDataset {
+    /// Total number of samples available.
+    fn num_samples(&self) -> usize;
+
+    /// Materialise samples `[start, start + len)` as `(inputs, targets)`.
+    ///
+    /// `len` is already clamped by the trainer so that `start + len <= num_samples()`.
+    fn batch(&self, start: usize, len: usize) -> Result<(Tensor, Tensor)>;
+}
+
+/// A model `SimpleTrainer` can run forward and update.
+///
+/// The trainer computes `d(loss)/d(outputs)` with the configured [`Loss`] and hands it back
+/// through [`TrainableModel::apply_output_gradient`], which is where the model backpropagates
+/// into its own parameters and applies the optimizer step. This keeps `SimpleTrainer`
+/// independent of any particular parameter representation while still performing a real
+/// forward/backward/update cycle.
+pub trait TrainableModel: Send + Sync {
+    /// Forward pass.
+    fn forward(&self, inputs: &Tensor) -> Result<Tensor>;
+
+    /// Backpropagate `output_grad` (`d(loss)/d(outputs)`) and apply one optimizer step.
+    fn apply_output_gradient(
+        &mut self,
+        inputs: &Tensor,
+        output_grad: &Tensor,
+        learning_rate: f64,
+    ) -> Result<()>;
+}
+
+/// Scale `tensor` down so that its L2 norm does not exceed `max_norm`.
+///
+/// Returns the tensor unchanged when it is already within the budget, which keeps the
+/// no-clipping path allocation-free apart from the clone the caller already owns.
+fn clip_by_norm(tensor: &Tensor, max_norm: f64) -> Result<Tensor> {
+    let norm = tensor.norm()? as f64;
+    if !norm.is_finite() {
+        return Err(anyhow::anyhow!(
+            "gradient norm is not finite ({norm}); refusing to take an optimizer step"
+        ));
+    }
+    if norm <= max_norm || norm == 0.0 {
+        return Ok(tensor.clone());
+    }
+    Ok(tensor.scale((max_norm / norm) as f32)?)
+}
+
+/// An in-memory dataset backed by two row-aligned tensors.
+///
+/// `inputs` and `targets` must share their leading (sample) dimension; batching slices that
+/// dimension, so no data is copied beyond the requested rows.
+#[derive(Debug, Clone)]
+pub struct TensorDataset {
+    inputs: Tensor,
+    targets: Tensor,
+}
+
+impl TensorDataset {
+    /// Build a dataset from row-aligned input and target tensors.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either tensor is scalar or when their leading dimensions differ.
+    pub fn new(inputs: Tensor, targets: Tensor) -> Result<Self> {
+        let input_shape = inputs.shape();
+        let target_shape = targets.shape();
+        if input_shape.is_empty() || target_shape.is_empty() {
+            return Err(anyhow::anyhow!(
+                "TensorDataset needs tensors with at least one (sample) dimension, \
+                 got {input_shape:?} and {target_shape:?}"
+            ));
+        }
+        if input_shape[0] != target_shape[0] {
+            return Err(anyhow::anyhow!(
+                "TensorDataset inputs and targets must agree on the sample dimension, \
+                 got {} and {}",
+                input_shape[0],
+                target_shape[0]
+            ));
+        }
+        Ok(Self { inputs, targets })
+    }
+
+    /// Borrow the full input tensor.
+    pub fn inputs(&self) -> &Tensor {
+        &self.inputs
+    }
+
+    /// Borrow the full target tensor.
+    pub fn targets(&self) -> &Tensor {
+        &self.targets
+    }
+}
+
+impl TrainingDataset for TensorDataset {
+    fn num_samples(&self) -> usize {
+        self.inputs.shape()[0]
+    }
+
+    fn batch(&self, start: usize, len: usize) -> Result<(Tensor, Tensor)> {
+        let end = start + len;
+        if end > self.num_samples() {
+            return Err(anyhow::anyhow!(
+                "batch [{start}, {end}) exceeds dataset length {}",
+                self.num_samples()
+            ));
+        }
+        let inputs = self.inputs.slice(0, start, end)?;
+        let targets = self.targets.slice(0, start, end)?;
+        Ok((inputs, targets))
+    }
+}
 
 /// Simplified trainer interface for easy model training
 pub struct SimpleTrainer<M, D, L> {
@@ -159,15 +280,17 @@ impl SimpleCallback for LoggingCallback {
         _state: &TrainingState,
         config: &SimpleTrainingConfig,
     ) -> Result<()> {
-        println!(
+        tracing::info!(
             "🚀 Starting training with config: learning_rate={}, batch_size={}, epochs={}",
-            config.learning_rate, config.batch_size, config.num_epochs
+            config.learning_rate,
+            config.batch_size,
+            config.num_epochs
         );
         Ok(())
     }
 
     fn on_epoch_begin(&mut self, epoch: u32, _state: &TrainingState) -> Result<()> {
-        println!("📚 Starting epoch {}", epoch);
+        tracing::info!("📚 Starting epoch {}", epoch);
         Ok(())
     }
 
@@ -178,16 +301,18 @@ impl SimpleCallback for LoggingCallback {
             String::new()
         };
 
-        println!(
+        tracing::info!(
             "✅ Epoch {} completed - train_loss: {:.4}{}",
-            epoch, state.train_loss, eval_info
+            epoch,
+            state.train_loss,
+            eval_info
         );
         Ok(())
     }
 
     fn on_log(&mut self, logs: &HashMap<String, f64>, state: &TrainingState) -> Result<()> {
         if matches!(self.log_level, LogLevel::Debug) {
-            println!("📊 Step {} - {:?}", state.global_step, logs);
+            tracing::debug!("📊 Step {} - {:?}", state.global_step, logs);
         }
         Ok(())
     }
@@ -195,13 +320,20 @@ impl SimpleCallback for LoggingCallback {
     fn on_train_end(&mut self, state: &TrainingState) -> Result<()> {
         if let Some(start_time) = state.start_time {
             let duration = start_time.elapsed();
-            println!("🎉 Training completed in {:.2}s", duration.as_secs_f64());
+            tracing::info!("🎉 Training completed in {:.2}s", duration.as_secs_f64());
         }
         Ok(())
     }
 }
 
-/// Progress bar callback
+/// Progress bar callback.
+///
+/// `update_progress` below writes directly to stdout with `\r`-redrawn
+/// carriage returns, not through `tracing`: a line-based logger would emit
+/// one log line per training step instead of redrawing a single bar, which
+/// defeats the purpose of a progress indicator. This is an intentional,
+/// caller-opted-in stdout writer (a caller must explicitly attach this
+/// `SimpleCallback` to see it), not incidental print debugging.
 pub struct ProgressCallback {
     total_steps: u32,
     current_step: u32,
@@ -288,13 +420,14 @@ impl SimpleCallback for EarlyStoppingCallback {
             if improved {
                 self.best_value = Some(*current_value);
                 self.patience_counter = 0;
-                println!("🎯 New best {}: {:.4}", self.monitor, current_value);
+                tracing::info!("🎯 New best {}: {:.4}", self.monitor, current_value);
             } else {
                 self.patience_counter += 1;
                 if self.patience_counter >= self.patience {
-                    println!(
+                    tracing::info!(
                         "⏹️  Early stopping triggered. No improvement in {} for {} epochs",
-                        self.monitor, self.patience
+                        self.monitor,
+                        self.patience
                     );
                     // In a real implementation, we would set a flag to stop training
                 }
@@ -353,7 +486,7 @@ impl SimpleCallback for CheckpointCallback {
 
         if should_save {
             let checkpoint_path = format!("{}/checkpoint-{}", self.save_dir, state.global_step);
-            println!("💾 Saving checkpoint to {}", checkpoint_path);
+            tracing::info!("💾 Saving checkpoint to {}", checkpoint_path);
             // In a real implementation, would save model state here
         }
 
@@ -397,8 +530,8 @@ impl SimpleCallback for MetricsCallback {
 
 impl<M, D, L> SimpleTrainer<M, D, L>
 where
-    M: Send + Sync,
-    D: Clone,
+    M: TrainableModel,
+    D: TrainingDataset + Clone,
     L: Loss + Send + Sync,
 {
     pub fn new(model: M, train_dataset: D, loss_fn: L, config: SimpleTrainingConfig) -> Self {
@@ -470,7 +603,7 @@ where
 
             // Check for early stopping
             if self.should_stop_early()? {
-                println!("Training stopped early at epoch {}", epoch);
+                tracing::info!("Training stopped early at epoch {}", epoch);
                 break;
             }
         }
@@ -497,28 +630,42 @@ where
         })
     }
 
-    fn train_epoch(&mut self) -> Result<EpochResult> {
-        let mut total_loss = 0.0;
-        let mut step_count = 0;
+    /// Number of optimizer steps in one pass over the training set.
+    fn steps_per_epoch(&self) -> usize {
+        self.train_dataset.num_samples().div_ceil(self.config.batch_size.max(1))
+    }
 
-        // Simplified training loop (in practice would iterate over actual batches)
-        let steps_per_epoch = 100; // Placeholder
+    fn train_epoch(&mut self) -> Result<EpochResult> {
+        let batch_size = self.config.batch_size.max(1);
+        let num_samples = self.train_dataset.num_samples();
+        if num_samples == 0 {
+            return Err(anyhow::anyhow!(
+                "training dataset is empty; nothing to train on"
+            ));
+        }
+
+        let mut total_loss = 0.0;
+        let mut step_count = 0usize;
+
+        // The loop length is derived from the dataset, not from a hardcoded constant.
+        let steps_per_epoch = self.steps_per_epoch();
 
         for step in 1..=steps_per_epoch {
             self.state.global_step += 1;
 
             // Call step begin callbacks
             for callback in &mut self.callbacks {
-                callback.on_step_begin(step, &self.state)?;
+                callback.on_step_begin(step as u32, &self.state)?;
             }
 
-            // Simulate training step
-            let step_loss = self.train_step()?;
+            let start = (step - 1) * batch_size;
+            let len = batch_size.min(num_samples - start);
+            let step_loss = self.train_step(start, len)?;
             total_loss += step_loss;
             step_count += 1;
 
             // Logging
-            if self.state.global_step.is_multiple_of(self.config.logging_steps) {
+            if self.state.global_step.is_multiple_of(self.config.logging_steps.max(1)) {
                 let logs = {
                     let mut logs = HashMap::new();
                     logs.insert("train_loss".to_string(), step_loss);
@@ -533,14 +680,14 @@ where
 
             // Evaluation
             if let Some(eval_steps) = self.config.eval_steps {
-                if self.state.global_step.is_multiple_of(eval_steps) {
+                if eval_steps > 0 && self.state.global_step.is_multiple_of(eval_steps) {
                     self.evaluate()?;
                 }
             }
 
             // Saving
             if let Some(save_steps) = self.config.save_steps {
-                if self.state.global_step.is_multiple_of(save_steps) {
+                if save_steps > 0 && self.state.global_step.is_multiple_of(save_steps) {
                     for callback in &mut self.callbacks {
                         callback.on_save(&self.state)?;
                     }
@@ -549,14 +696,14 @@ where
 
             // Call step end callbacks
             for callback in &mut self.callbacks {
-                callback.on_step_end(step, &self.state)?;
+                callback.on_step_end(step as u32, &self.state)?;
             }
         }
 
         let avg_train_loss = total_loss / step_count as f64;
 
-        // Run evaluation at end of epoch if we have eval dataset
-        let eval_loss = if self.eval_dataset.is_some() { Some(self.evaluate()?) } else { None };
+        // Run evaluation at end of epoch if we have an eval dataset
+        let eval_loss = self.evaluate()?;
 
         Ok(EpochResult {
             epoch: self.state.epoch,
@@ -566,46 +713,87 @@ where
         })
     }
 
-    fn train_step(&mut self) -> Result<f64> {
-        // Simplified training step - in practice would:
-        // 1. Get batch from dataset
-        // 2. Forward pass
-        // 3. Compute loss
-        // 4. Backward pass
-        // 5. Update weights
+    /// One real optimizer step over the samples `[start, start + len)`.
+    ///
+    /// Forward through the model, compute the loss **and** its gradient with the configured
+    /// [`Loss`], optionally clip the gradient to `max_grad_norm`, then let the model
+    /// backpropagate and update its parameters.
+    fn train_step(&mut self, start: usize, len: usize) -> Result<f64> {
+        let (inputs, targets) = self.train_dataset.batch(start, len)?;
 
-        // Simulate decreasing loss
-        let loss = 1.0 / (1.0 + self.state.global_step as f64 * 0.001);
-        Ok(loss)
-    }
+        let (loss, output_grad) = {
+            let model = self
+                .model
+                .read()
+                .map_err(|_| anyhow::anyhow!("model lock poisoned during forward pass"))?;
+            let predictions = model.forward(&inputs)?;
+            self.loss_fn.compute_with_gradients(&predictions, &targets)?
+        };
 
-    fn evaluate(&mut self) -> Result<f64> {
-        if self.eval_dataset.is_none() {
-            return Ok(0.0);
+        let output_grad = match self.config.max_grad_norm {
+            Some(max_norm) if max_norm > 0.0 => clip_by_norm(&output_grad, max_norm)?,
+            _ => output_grad,
+        };
+
+        {
+            let mut model = self
+                .model
+                .write()
+                .map_err(|_| anyhow::anyhow!("model lock poisoned during backward pass"))?;
+            model.apply_output_gradient(&inputs, &output_grad, self.state.learning_rate)?;
         }
 
-        // Call evaluate begin callbacks
+        Ok(loss as f64)
+    }
+
+    /// Evaluate on the eval dataset.
+    ///
+    /// Returns `None` — never a fabricated `0.0` — when no eval dataset was configured.
+    fn evaluate(&mut self) -> Result<Option<f64>> {
+        let Some(eval_dataset) = self.eval_dataset.as_ref() else {
+            return Ok(None);
+        };
+        let num_samples = eval_dataset.num_samples();
+        if num_samples == 0 {
+            return Ok(None);
+        }
+
         for callback in &mut self.callbacks {
             callback.on_evaluate_begin(&self.state)?;
         }
 
-        // Simplified evaluation - in practice would:
-        // 1. Set model to eval mode
-        // 2. Iterate over eval dataset
-        // 3. Compute metrics
-        // 4. Set model back to train mode
+        let batch_size = self.config.batch_size.max(1);
+        let mut total_loss = 0.0f64;
+        let mut weight = 0usize;
 
-        let eval_loss = 0.5 / (1.0 + self.state.epoch as f64 * 0.1);
+        {
+            let model = self
+                .model
+                .read()
+                .map_err(|_| anyhow::anyhow!("model lock poisoned during evaluation"))?;
+            let mut start = 0usize;
+            while start < num_samples {
+                let len = batch_size.min(num_samples - start);
+                let (inputs, targets) = eval_dataset.batch(start, len)?;
+                let predictions = model.forward(&inputs)?;
+                let loss = self.loss_fn.compute(&predictions, &targets)?;
+                total_loss += loss as f64 * len as f64;
+                weight += len;
+                start += len;
+            }
+        }
 
-        // Update state
+        let eval_loss = total_loss / weight as f64;
         self.state.eval_loss = Some(eval_loss);
+        if self.state.best_metric.is_none_or(|best| eval_loss < best) {
+            self.state.best_metric = Some(eval_loss);
+        }
 
-        // Call evaluate end callbacks
         for callback in &mut self.callbacks {
             callback.on_evaluate_end(&self.state)?;
         }
 
-        Ok(eval_loss)
+        Ok(Some(eval_loss))
     }
 
     fn should_stop_early(&self) -> Result<bool> {
@@ -669,8 +857,8 @@ pub struct SimpleTrainerBuilder<M, D, L> {
 
 impl<M, D, L> Default for SimpleTrainerBuilder<M, D, L>
 where
-    M: Send + Sync,
-    D: Clone,
+    M: TrainableModel,
+    D: TrainingDataset + Clone,
     L: Loss + Send + Sync,
 {
     fn default() -> Self {
@@ -680,8 +868,8 @@ where
 
 impl<M, D, L> SimpleTrainerBuilder<M, D, L>
 where
-    M: Send + Sync,
-    D: Clone,
+    M: TrainableModel,
+    D: TrainingDataset + Clone,
     L: Loss + Send + Sync,
 {
     pub fn new() -> Self {
@@ -793,19 +981,89 @@ mod tests {
     use super::*;
     use crate::losses::MSELoss;
 
-    #[derive(Clone)]
-    struct DummyDataset;
+    /// A real single-output linear model `y = x·w + b` with analytic gradients.
+    ///
+    /// Small enough to reason about by hand, but a genuine parametric model: the trainer
+    /// drives its weights through `apply_output_gradient`, so a loss curve produced with it
+    /// is the outcome of actual optimization.
+    struct LinearModel {
+        weights: Vec<f32>,
+        bias: f32,
+    }
 
-    struct DummyModel;
+    impl LinearModel {
+        fn new(num_features: usize) -> Self {
+            Self {
+                weights: vec![0.0; num_features],
+                bias: 0.0,
+            }
+        }
+    }
+
+    impl TrainableModel for LinearModel {
+        fn forward(&self, inputs: &Tensor) -> Result<Tensor> {
+            let shape = inputs.shape();
+            let (rows, cols) = (shape[0], shape[1]);
+            let data = inputs.data()?;
+            let mut out = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let mut acc = self.bias;
+                for c in 0..cols {
+                    acc += data[r * cols + c] * self.weights[c];
+                }
+                out.push(acc);
+            }
+            Ok(Tensor::from_vec(out, &[rows, 1])?)
+        }
+
+        fn apply_output_gradient(
+            &mut self,
+            inputs: &Tensor,
+            output_grad: &Tensor,
+            learning_rate: f64,
+        ) -> Result<()> {
+            let shape = inputs.shape();
+            let (rows, cols) = (shape[0], shape[1]);
+            let x = inputs.data()?;
+            let g = output_grad.data()?;
+            let lr = learning_rate as f32;
+            for r in 0..rows {
+                let dy = g[r];
+                for c in 0..cols {
+                    self.weights[c] -= lr * dy * x[r * cols + c];
+                }
+                self.bias -= lr * dy;
+            }
+            Ok(())
+        }
+    }
+
+    /// y = 3*x0 - 2*x1 + 1 over a deterministic grid.
+    fn regression_dataset(num_rows: usize) -> TensorDataset {
+        let mut inputs = Vec::with_capacity(num_rows * 2);
+        let mut targets = Vec::with_capacity(num_rows);
+        for i in 0..num_rows {
+            let x0 = (i % 7) as f32 / 7.0;
+            let x1 = ((i * 3) % 11) as f32 / 11.0;
+            inputs.push(x0);
+            inputs.push(x1);
+            targets.push(3.0 * x0 - 2.0 * x1 + 1.0);
+        }
+        TensorDataset::new(
+            Tensor::from_vec(inputs, &[num_rows, 2]).expect("inputs"),
+            Tensor::from_vec(targets, &[num_rows, 1]).expect("targets"),
+        )
+        .expect("dataset")
+    }
 
     #[test]
     fn test_simple_trainer_creation() {
-        let model = DummyModel;
-        let dataset = DummyDataset;
-        let loss_fn = MSELoss::new();
-        let config = SimpleTrainingConfig::default();
-
-        let trainer = SimpleTrainer::new(model, dataset, loss_fn, config);
+        let trainer = SimpleTrainer::new(
+            LinearModel::new(2),
+            regression_dataset(8),
+            MSELoss::new(),
+            SimpleTrainingConfig::default(),
+        );
         assert_eq!(trainer.state.epoch, 0);
         assert!(!trainer.state.is_training);
     }
@@ -813,8 +1071,8 @@ mod tests {
     #[test]
     fn test_simple_trainer_builder() {
         let result = SimpleTrainerBuilder::new()
-            .model(DummyModel)
-            .train_dataset(DummyDataset)
+            .model(LinearModel::new(2))
+            .train_dataset(regression_dataset(8))
             .loss_function(MSELoss::new())
             .learning_rate(0.001)
             .batch_size(16)
@@ -827,6 +1085,160 @@ mod tests {
         assert_eq!(trainer.config.learning_rate, 0.001);
         assert_eq!(trainer.config.batch_size, 16);
         assert_eq!(trainer.config.num_epochs, 5);
+    }
+
+    // ── Real training loop ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_training_converges_on_a_tiny_regression_problem() {
+        // Regression: `train_step` used to return `1 / (1 + step * 0.001)` regardless of the
+        // model, the data and the loss. A synthetic curve like that is monotone by
+        // construction; this test instead requires that the *model* actually learns, which
+        // it can only do if forward/backward/update are real.
+        let dataset = regression_dataset(64);
+        let config = SimpleTrainingConfig {
+            learning_rate: 0.2,
+            batch_size: 8,
+            num_epochs: 40,
+            eval_steps: None,
+            save_steps: None,
+            logging_steps: 1_000_000,
+            max_grad_norm: None,
+            ..SimpleTrainingConfig::default()
+        };
+        let mut trainer =
+            SimpleTrainer::new(LinearModel::new(2), dataset.clone(), MSELoss::new(), config);
+
+        let results = trainer.train().expect("training failed");
+        assert_eq!(results.history.len(), 40);
+
+        let first = results.history.first().expect("first epoch").train_loss;
+        let last = results.history.last().expect("last epoch").train_loss;
+        assert!(
+            last < first * 0.5,
+            "loss must fall substantially: {first} -> {last}"
+        );
+        assert!(last < 0.05, "final loss should approach zero, got {last}");
+
+        // The learned parameters must approach the generating coefficients.
+        let model = trainer.get_model();
+        let guard = model.read().expect("model lock");
+        assert!(
+            (guard.weights[0] - 3.0).abs() < 0.5,
+            "w0 should approach 3.0, got {}",
+            guard.weights[0]
+        );
+        assert!(
+            (guard.weights[1] + 2.0).abs() < 0.5,
+            "w1 should approach -2.0, got {}",
+            guard.weights[1]
+        );
+    }
+
+    #[test]
+    fn test_steps_per_epoch_follows_the_dataset() {
+        // Regression: the loop length was hardcoded to 100 regardless of the data.
+        let config = SimpleTrainingConfig {
+            batch_size: 4,
+            num_epochs: 1,
+            eval_steps: None,
+            save_steps: None,
+            logging_steps: 1_000_000,
+            ..SimpleTrainingConfig::default()
+        };
+        let mut trainer = SimpleTrainer::new(
+            LinearModel::new(2),
+            regression_dataset(10),
+            MSELoss::new(),
+            config,
+        );
+        let results = trainer.train().expect("training failed");
+        // 10 samples / batch 4 => 3 steps (4 + 4 + 2), not 100.
+        assert_eq!(
+            results.total_steps, 3,
+            "step count must come from the dataset"
+        );
+    }
+
+    #[test]
+    fn test_no_eval_dataset_yields_no_eval_loss() {
+        // Regression: `evaluate()` returned `Ok(0.0)` and the step loop wrote that into
+        // `state.eval_loss`, so `TrainingResults.final_eval_loss` reported a fabricated 0.0.
+        let config = SimpleTrainingConfig {
+            batch_size: 4,
+            num_epochs: 1,
+            eval_steps: Some(1),
+            save_steps: None,
+            logging_steps: 1_000_000,
+            ..SimpleTrainingConfig::default()
+        };
+        let mut trainer = SimpleTrainer::new(
+            LinearModel::new(2),
+            regression_dataset(8),
+            MSELoss::new(),
+            config,
+        );
+        let results = trainer.train().expect("training failed");
+        assert!(
+            results.final_eval_loss.is_none(),
+            "without an eval dataset there is no eval loss, got {:?}",
+            results.final_eval_loss
+        );
+    }
+
+    #[test]
+    fn test_eval_loss_is_computed_from_the_eval_dataset() {
+        let config = SimpleTrainingConfig {
+            learning_rate: 0.2,
+            batch_size: 8,
+            num_epochs: 20,
+            eval_steps: None,
+            save_steps: None,
+            logging_steps: 1_000_000,
+            max_grad_norm: None,
+            ..SimpleTrainingConfig::default()
+        };
+        let mut trainer = SimpleTrainer::new(
+            LinearModel::new(2),
+            regression_dataset(32),
+            MSELoss::new(),
+            config,
+        )
+        .with_eval_dataset(regression_dataset(16));
+
+        let results = trainer.train().expect("training failed");
+        let eval_loss = results.final_eval_loss.expect("eval loss must be reported");
+        assert!(eval_loss.is_finite() && eval_loss >= 0.0);
+        assert!(
+            eval_loss < 0.1,
+            "eval loss should be small after training: {eval_loss}"
+        );
+    }
+
+    #[test]
+    fn test_empty_training_dataset_is_an_error() {
+        let empty = TensorDataset::new(
+            Tensor::from_vec(Vec::<f32>::new(), &[0, 2]).expect("inputs"),
+            Tensor::from_vec(Vec::<f32>::new(), &[0, 1]).expect("targets"),
+        )
+        .expect("dataset");
+        let mut trainer = SimpleTrainer::new(
+            LinearModel::new(2),
+            empty,
+            MSELoss::new(),
+            SimpleTrainingConfig::default(),
+        );
+        assert!(
+            trainer.train().is_err(),
+            "training on an empty dataset must error, not report a synthetic loss"
+        );
+    }
+
+    #[test]
+    fn test_tensor_dataset_rejects_misaligned_tensors() {
+        let inputs = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("inputs");
+        let targets = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[3, 1]).expect("targets");
+        assert!(TensorDataset::new(inputs, targets).is_err());
     }
 
     #[test]

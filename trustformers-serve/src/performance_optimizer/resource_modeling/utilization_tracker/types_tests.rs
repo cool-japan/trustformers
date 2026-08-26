@@ -1,26 +1,8 @@
 //! Tests for utilization tracker types
 
 use super::*;
-use std::time::Duration;
 use chrono::Utc;
-
-struct Lcg {
-    state: u64,
-}
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg { state: seed }
-    }
-    fn next(&mut self) -> u64 {
-        self.state = self.state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        self.state
-    }
-    fn next_f32(&mut self) -> f32 {
-        (self.next() >> 11) as f32 / (1u64 << 53) as f32
-    }
-}
+use std::time::Duration;
 
 #[test]
 fn test_utilization_history_new_empty() {
@@ -370,14 +352,20 @@ fn test_utilization_report_clone() {
     assert!(c.gpu_utilization.is_none());
 }
 
+/// Assert at compile time that `T` still implements `Default`.
+///
+/// `RetentionPolicy` and `CompressionConfig` are unit structs, so calling
+/// `T::default()` on them is flagged by clippy as constructing a unit struct the
+/// long way round. The property these tests exist to pin down is that the
+/// `Default` implementation is still there, which this states directly.
+fn assert_implements_default<T: Default>() {}
+
 #[test]
 fn test_retention_policy_default() {
-    let rp = RetentionPolicy::default();
-    let _ = rp; // just test Default works
+    assert_implements_default::<RetentionPolicy>();
 }
 
 #[test]
 fn test_compression_config_default() {
-    let cc = CompressionConfig::default();
-    let _ = cc;
+    assert_implements_default::<CompressionConfig>();
 }

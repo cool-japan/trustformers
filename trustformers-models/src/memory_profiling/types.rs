@@ -41,21 +41,37 @@ impl Default for ProfilerConfig {
     }
 }
 
-/// Real-time memory metrics
+/// Real-time memory metrics.
+///
+/// Every field is either a measurement taken from the operating system or a
+/// count of events the caller registered with the profiler. Fields that cannot
+/// be measured on the current platform are `Option` and are `None` — they are
+/// never filled with a plausible-looking constant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetrics {
     pub timestamp: SystemTime,
+    /// Resident set size of this process, in MB.
     pub total_memory_mb: f64,
-    pub heap_memory_mb: f64,
-    pub stack_memory_mb: f64,
+    /// Virtual memory size of this process, in MB.
+    pub virtual_memory_mb: f64,
+    /// Heap usage in MB. `None` unless a heap-instrumenting allocator is in use;
+    /// the operating system does not expose this portably.
+    pub heap_memory_mb: Option<f64>,
+    /// Stack usage in MB. `None`: not exposed portably.
+    pub stack_memory_mb: Option<f64>,
+    /// GPU memory in MB. `None` when no GPU backend is available.
     pub gpu_memory_mb: Option<f64>,
+    /// Largest resident set size observed by this profiler, in MB.
     pub peak_memory_mb: f64,
+    /// Cumulative allocations registered with the profiler.
     pub allocated_objects: u64,
+    /// Cumulative deallocations registered with the profiler.
     pub deallocated_objects: u64,
+    /// Allocations currently registered as live.
     pub active_allocations: u64,
+    /// Share of the resident set not covered by tracked allocations (`0.0` when
+    /// nothing is tracked).
     pub memory_fragmentation_ratio: f64,
-    pub gc_collections: u64,
-    pub gc_time_ms: f64,
     pub memory_growth_rate_mb_per_sec: f64,
 }
 
@@ -152,7 +168,6 @@ pub struct MemoryUsageSummary {
     pub total_deallocations: u64,
     pub leaked_allocations: u64,
     pub fragmentation_events: u64,
-    pub gc_pressure_events: u64,
     pub alert_count_by_severity: HashMap<AlertSeverity, u64>,
 }
 
@@ -163,28 +178,23 @@ pub struct SystemInfo {
     pub available_system_memory_gb: f64,
     pub cpu_count: usize,
     pub os_info: String,
-    pub rust_version: String,
+    /// Rust toolchain that built this crate.
+    ///
+    /// `Some(..)` only when `TRUSTFORMERS_RUSTC_VERSION` was set at build time
+    /// (CI does this); the crate version is *not* a substitute for it.
+    pub rust_version: Option<String>,
 }
 
-/// System memory information
+/// Machine-wide memory information, in bytes.
+///
+/// `cached_memory` / `buffer_memory` are `None` on platforms that do not expose
+/// them (which is every platform `sysinfo` supports portably).
 #[derive(Debug, Clone)]
 pub struct SystemMemoryInfo {
     pub total_memory: u64,
     pub available_memory: u64,
     pub used_memory: u64,
     pub free_memory: u64,
-    pub cached_memory: u64,
-    pub buffer_memory: u64,
-}
-
-/// Process memory information
-#[derive(Debug, Clone)]
-pub struct ProcessMemoryInfo {
-    pub rss: u64,    // Resident Set Size
-    pub vms: u64,    // Virtual Memory Size
-    pub shared: u64, // Shared memory
-    pub text: u64,   // Text (code) segment
-    pub data: u64,   // Data segment
-    pub heap: u64,   // Heap size
-    pub stack: u64,  // Stack size
+    pub cached_memory: Option<u64>,
+    pub buffer_memory: Option<u64>,
 }

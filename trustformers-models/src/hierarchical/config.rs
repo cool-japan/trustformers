@@ -404,7 +404,6 @@ impl HierarchicalConfig {
 
         for level in 0..self.num_levels {
             let hidden_size = self.get_hidden_size(level);
-            let _seq_len = self.get_seq_length(level);
 
             // Attention parameters
             total += hidden_size * hidden_size * 4; // Q, K, V, O projections

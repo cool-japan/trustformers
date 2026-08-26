@@ -485,6 +485,7 @@ impl DalleTextLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -658,6 +659,7 @@ impl DalleVisionLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -897,6 +899,7 @@ impl DalleUNetBlock {
                 dropout_prob: 0.0,
                 bias: true,
                 max_seq_len: None,
+                training: false,
             };
             Some(MultiHeadAttention::new(
                 attention_config.hidden_size,

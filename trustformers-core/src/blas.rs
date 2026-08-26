@@ -32,6 +32,11 @@ pub struct BlasConfig {
     pub cache_kernels: bool,
     pub use_parallel: bool,
     pub min_size_for_blas: usize,
+    /// Tile extent used by the blocked GEMM kernels.
+    ///
+    /// This is what [`BlasOptimizer::auto_tune`] searches over, and it really
+    /// changes the loop structure: see `BlasOptimizer::sequential_gemm`.
+    pub block_size: usize,
 }
 
 impl Default for BlasConfig {
@@ -41,6 +46,7 @@ impl Default for BlasConfig {
             num_threads: None, // Use global parallel context
             auto_tune: true,
             cache_kernels: true,
+            block_size: 64,
             use_parallel: true,
             min_size_for_blas: 32, // Minimum matrix size to use BLAS
         }
@@ -283,36 +289,98 @@ impl BlasOptimizer {
         }
     }
 
-    /// Auto-tune BLAS parameters for given workload
+    /// Auto-tune GEMM parameters by benchmarking the candidate strategies.
+    ///
+    /// For every workload shape, each `(block_size, threading)` candidate is
+    /// timed against the real pure-Rust GEMM and the fastest is cached, with
+    /// `performance_score` set to the measured throughput in GFLOP/s. Nothing
+    /// is cached from a heuristic: the previous version picked a block size
+    /// from three `m*k*n` thresholds and stored `performance_score: 1.0`, so
+    /// the "tuned" configuration had never been measured at all.
     pub fn auto_tune(&mut self, workload_sizes: &[(usize, usize, usize)]) -> Result<()> {
         if !self.config.auto_tune {
             return Ok(());
         }
 
-        // Auto-tuning would measure performance for different block sizes
-        // and threading strategies for the given workload
+        const BLOCK_SIZES: [usize; 4] = [32, 64, 128, 256];
+
         for &(m, k, n) in workload_sizes {
-            let key = format!("gemm_{}x{}x{}", m, k, n);
+            if m == 0 || k == 0 || n == 0 {
+                return Err(TrustformersError::invalid_input(format!(
+                    "cannot tune a degenerate GEMM shape {}x{}x{}",
+                    m, k, n
+                )));
+            }
 
-            // Simplified auto-tuning - in practice this would benchmark different strategies
-            let optimal_block_size = if m * k * n > 1_000_000 {
-                256
-            } else if m * k * n > 100_000 {
-                128
-            } else {
-                64
-            };
+            // Deterministic operands, allocated once per shape.
+            let a = Tensor::from_vec(
+                (0..m * k).map(|i| ((i % 17) as f32) * 0.125 - 1.0).collect(),
+                &[m, k],
+            )?;
+            let b = Tensor::from_vec(
+                (0..k * n).map(|i| ((i % 13) as f32) * 0.0625 - 0.5).collect(),
+                &[k, n],
+            )?;
 
-            let use_threading = self.config.use_parallel && m * k * n > 10_000;
+            // 2*m*n*k floating-point operations per GEMM.
+            let flops = 2.0 * m as f64 * n as f64 * k as f64;
 
-            let cached_kernel = CachedKernel {
-                operation: BlasOperation::Gemm,
-                optimal_block_size,
-                use_threading,
-                performance_score: 1.0, // Would be measured
-            };
+            let mut best: Option<CachedKernel> = None;
+            for block_size in BLOCK_SIZES {
+                for use_threading in [false, true] {
+                    if use_threading && !self.config.use_parallel {
+                        continue;
+                    }
 
-            self.kernel_cache.insert(key, cached_kernel);
+                    let previous_block = self.config.block_size;
+                    let previous_parallel = self.config.use_parallel;
+                    self.config.block_size = block_size;
+                    self.config.use_parallel = use_threading;
+
+                    // Warm up, then time the real kernel.
+                    let warmup = self.pure_rust_gemm(&a, &b, 1.0, 0.0, None, m, k, n);
+                    let start = std::time::Instant::now();
+                    let measured = self.pure_rust_gemm(&a, &b, 1.0, 0.0, None, m, k, n);
+                    let elapsed = start.elapsed();
+
+                    self.config.block_size = previous_block;
+                    self.config.use_parallel = previous_parallel;
+
+                    warmup?;
+                    measured?;
+
+                    let seconds = elapsed.as_secs_f64();
+                    if seconds <= 0.0 {
+                        continue;
+                    }
+                    // GFLOP/s actually achieved by this configuration.
+                    let performance_score = flops / seconds / 1e9;
+
+                    let candidate = CachedKernel {
+                        operation: BlasOperation::Gemm,
+                        optimal_block_size: block_size,
+                        use_threading,
+                        performance_score,
+                    };
+
+                    if best
+                        .as_ref()
+                        .is_none_or(|current| performance_score > current.performance_score)
+                    {
+                        best = Some(candidate);
+                    }
+                }
+            }
+
+            let best = best.ok_or_else(|| {
+                TrustformersError::runtime_error(format!(
+                    "no GEMM configuration could be timed for shape {}x{}x{}; refusing to cache \
+                     an unmeasured one",
+                    m, k, n
+                ))
+            })?;
+
+            self.kernel_cache.insert(format!("gemm_{}x{}x{}", m, k, n), best);
         }
 
         Ok(())
@@ -342,20 +410,30 @@ impl BlasOptimizer {
         }
     }
 
+    /// GEMM via the SciRS2-backed tensor `matmul`.
+    ///
+    /// `Tensor::matmul` computes `A @ B` only, so this path can honour a plain
+    /// `alpha = 1, beta = 0, c = None` GEMM and nothing else. A request that
+    /// needs scaling or accumulation is routed to the pure-Rust kernel, which
+    /// implements the full `alpha * A @ B + beta * C` — previously the extra
+    /// arguments were silently discarded and the caller got `A @ B`.
     fn scirs2_gemm(
         &self,
         a: &Tensor,
         b: &Tensor,
-        _alpha: f32,
-        _beta: f32,
-        _c: Option<&Tensor>,
-        _m: usize,
-        _k: usize,
-        _n: usize,
+        alpha: f32,
+        beta: f32,
+        c: Option<&Tensor>,
+        m: usize,
+        k: usize,
+        n: usize,
     ) -> Result<Tensor> {
-        // This would use SciRS2's optimized GEMM
-        // For now, delegate to tensor matmul
-        a.matmul(b)
+        let is_plain_matmul = alpha == 1.0 && beta == 0.0 && c.is_none();
+        if is_plain_matmul {
+            a.matmul(b)
+        } else {
+            self.pure_rust_gemm(a, b, alpha, beta, c, m, k, n)
+        }
     }
 
     fn pure_rust_gemm(
@@ -389,6 +467,11 @@ impl BlasOptimizer {
         Tensor::from_vec(result, &[m, n])
     }
 
+    /// Row-parallel blocked GEMM.
+    ///
+    /// Rows are split across threads and each thread runs the same blocked
+    /// kernel as [`Self::sequential_gemm`], so `config.block_size` affects this
+    /// path too.
     fn parallel_gemm(
         &self,
         a_data: &[f32],
@@ -399,27 +482,35 @@ impl BlasOptimizer {
         k: usize,
         n: usize,
     ) -> Result<()> {
-        let block_size = 64; // Could be auto-tuned
-        let rows: Vec<usize> = (0..m).collect();
+        use scirs2_core::parallel_ops::*;
 
-        // Simple parallel implementation - parallel_chunk_map expects the same type
-        for i in 0..m {
-            let mut row_result = vec![0.0; n];
-            for j in 0..n {
-                let mut sum = 0.0;
-                for ki in 0..k {
-                    sum += a_data[i * k + ki] * b_data[ki * n + j];
+        let block_size = self.config.block_size.max(1);
+
+        // Each output row is independent, so rows can be split freely.
+        result.par_chunks_mut(n).enumerate().take(m).for_each(|(i, row_out)| {
+            let row_a = &a_data[i * k..(i + 1) * k];
+            for j0 in (0..n).step_by(block_size) {
+                let j_end = (j0 + block_size).min(n);
+                for p0 in (0..k).step_by(block_size) {
+                    let p_end = (p0 + block_size).min(k);
+                    for p in p0..p_end {
+                        let a_value = alpha * row_a[p];
+                        let row_b = &b_data[p * n..(p + 1) * n];
+                        for j in j0..j_end {
+                            row_out[j] += a_value * row_b[j];
+                        }
+                    }
                 }
-                row_result[j] = alpha * sum;
             }
-            for j in 0..n {
-                result[i * n + j] += row_result[j];
-            }
-        }
+        });
 
         Ok(())
     }
 
+    /// Blocked sequential GEMM: `result += alpha * A @ B`.
+    ///
+    /// Tiled over all three axes with `config.block_size`, so the tuner's
+    /// choice of block size genuinely changes the memory access pattern.
     fn sequential_gemm(
         &self,
         a_data: &[f32],
@@ -430,13 +521,24 @@ impl BlasOptimizer {
         k: usize,
         n: usize,
     ) {
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = 0.0;
-                for ki in 0..k {
-                    sum += a_data[i * k + ki] * b_data[ki * n + j];
+        let block_size = self.config.block_size.max(1);
+
+        for i0 in (0..m).step_by(block_size) {
+            let i_end = (i0 + block_size).min(m);
+            for j0 in (0..n).step_by(block_size) {
+                let j_end = (j0 + block_size).min(n);
+                for p0 in (0..k).step_by(block_size) {
+                    let p_end = (p0 + block_size).min(k);
+                    for i in i0..i_end {
+                        for p in p0..p_end {
+                            let a_value = alpha * a_data[i * k + p];
+                            let row_b = &b_data[p * n..(p + 1) * n];
+                            for j in j0..j_end {
+                                result[i * n + j] += a_value * row_b[j];
+                            }
+                        }
+                    }
                 }
-                result[i * n + j] += alpha * sum;
             }
         }
     }
@@ -656,6 +758,125 @@ pub fn optimized_dot(x: &Tensor, y: &Tensor) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `auto_tune` never measured anything — it picked a block
+    /// size from three `m*k*n` thresholds and cached
+    /// `performance_score: 1.0 // Would be measured`.
+    #[test]
+    fn test_auto_tune_measures_real_throughput() -> Result<()> {
+        let mut optimizer = BlasOptimizer::new(BlasConfig {
+            auto_tune: true,
+            use_parallel: false,
+            ..BlasConfig::default()
+        });
+
+        optimizer.auto_tune(&[(48, 48, 48)])?;
+
+        let cached = optimizer
+            .kernel_cache
+            .get("gemm_48x48x48")
+            .expect("the tuned shape must be cached");
+
+        assert_ne!(
+            cached.performance_score, 1.0,
+            "the hardcoded placeholder score must be gone"
+        );
+        assert!(
+            cached.performance_score > 0.0 && cached.performance_score.is_finite(),
+            "throughput must be a real positive GFLOP/s figure, got {}",
+            cached.performance_score
+        );
+        assert!(
+            [32, 64, 128, 256].contains(&cached.optimal_block_size),
+            "the cached block size must come from the searched set, got {}",
+            cached.optimal_block_size
+        );
+
+        Ok(())
+    }
+
+    /// Regression test: the blocked GEMM ignored `block_size` entirely, so
+    /// tuning it changed nothing. Every block size must give the same result,
+    /// and must match a naive reference.
+    #[test]
+    fn test_blocked_gemm_is_correct_for_every_block_size() -> Result<()> {
+        let (m, k, n) = (7usize, 5usize, 6usize);
+        let a_data: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.25 - 1.0).collect();
+        let b_data: Vec<f32> = (0..k * n).map(|i| (i as f32) * 0.5 - 2.0).collect();
+
+        // Naive reference.
+        let mut expected = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for p in 0..k {
+                    sum += a_data[i * k + p] * b_data[p * n + j];
+                }
+                expected[i * n + j] = 2.0 * sum;
+            }
+        }
+
+        for block_size in [1usize, 2, 3, 64, 512] {
+            let optimizer = BlasOptimizer::new(BlasConfig {
+                block_size,
+                use_parallel: false,
+                ..BlasConfig::default()
+            });
+
+            let mut result = vec![0.0f32; m * n];
+            optimizer.sequential_gemm(&a_data, &b_data, &mut result, 2.0, m, k, n);
+
+            for (index, (got, want)) in result.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "block_size {block_size}, element {index}: {got} != {want}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Regression test: `scirs2_gemm` discarded `alpha`, `beta` and `c`, so a
+    /// caller asking for `alpha * A @ B + beta * C` silently got `A @ B`.
+    #[test]
+    fn test_scirs2_gemm_honours_alpha_beta_and_c() -> Result<()> {
+        let optimizer = BlasOptimizer::new(BlasConfig {
+            backend: BlasBackend::SciRS2,
+            use_parallel: false,
+            ..BlasConfig::default()
+        });
+
+        // A = [[1, 2], [3, 4]], B = I, C = ones.
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let b = Tensor::from_vec(vec![1.0, 0.0, 0.0, 1.0], &[2, 2])?;
+        let c = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[2, 2])?;
+
+        // Plain matmul: A @ I = A.
+        let plain = optimizer.scirs2_gemm(&a, &b, 1.0, 0.0, None, 2, 2, 2)?;
+        assert_eq!(plain.data()?, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // 2*A@I + 10*C = 2A + 10.
+        let scaled = optimizer.scirs2_gemm(&a, &b, 2.0, 10.0, Some(&c), 2, 2, 2)?;
+        assert_eq!(
+            scaled.data()?,
+            vec![12.0, 14.0, 16.0, 18.0],
+            "alpha, beta and C must all be honoured"
+        );
+
+        Ok(())
+    }
+
+    /// A degenerate shape cannot be tuned and must say so.
+    #[test]
+    fn test_auto_tune_rejects_degenerate_shapes() -> Result<()> {
+        let mut optimizer = BlasOptimizer::new(BlasConfig {
+            auto_tune: true,
+            ..BlasConfig::default()
+        });
+        assert!(optimizer.auto_tune(&[(0, 4, 4)]).is_err());
+        Ok(())
+    }
 
     #[test]
     fn test_blas_config_default() {

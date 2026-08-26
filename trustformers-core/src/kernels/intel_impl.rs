@@ -42,8 +42,13 @@ pub struct IntelStats {
     pub kernel_launches: u64,
 }
 
-/// Global Intel oneAPI instance
-static INTEL_INSTANCE: OnceLock<Arc<IntelImpl>> = OnceLock::new();
+/// Global Intel oneAPI instance: `Ok` once real detection succeeds, or the
+/// (stringified, since `TrustformersError` is not `Clone`) error from the
+/// one and only detection attempt otherwise. `OnceLock` runs its init
+/// closure at most once regardless of outcome, so a failed detection is
+/// cached as a failure rather than silently retried into a fabricated
+/// fallback on every subsequent call.
+static INTEL_INSTANCE: OnceLock<std::result::Result<Arc<IntelImpl>, String>> = OnceLock::new();
 
 impl IntelImpl {
     /// Initialize Intel oneAPI with the first available device
@@ -96,48 +101,23 @@ impl IntelImpl {
         })
     }
 
-    /// Get global Intel oneAPI instance
+    /// Get the global Intel oneAPI instance.
+    ///
+    /// Returns the real, once-computed detection result. Before this fix, a
+    /// failed detection (no Intel GPU present, which is every machine today;
+    /// see `IntelUtils::detect_devices`) was silently replaced with an
+    /// "Intel CPU Fallback" `IntelDevice` reported as vendor "Intel
+    /// Corporation", a phantom accelerator. Callers now get the real error
+    /// honestly instead.
     pub fn global() -> Result<&'static Arc<IntelImpl>> {
-        INTEL_INSTANCE.get_or_init(|| {
-            Arc::new(Self::new().unwrap_or_else(|_| {
-                // Create a fallback instance with CPU emulation
-                Self::create_fallback()
-            }))
-        });
-        Ok(INTEL_INSTANCE.get().expect("Intel instance should exist after initialization"))
-    }
-
-    /// Create fallback instance when Intel GPU is not available
-    fn create_fallback() -> Self {
-        // Create a mock device for CPU fallback
-        let mock_device = IntelDevice {
-            id: 0,
-            name: "Intel CPU Fallback".to_string(),
-            vendor: "Intel Corporation".to_string(),
-            driver_version: "fallback".to_string(),
-            device_type: crate::kernels::intel_kernels::IntelDeviceType::Unknown,
-            compute_units: 1,
-            max_clock_frequency: 3000,
-            local_memory_size: 32768,
-            global_memory_size: 32 * 1024 * 1024 * 1024, // 32GB system RAM
-            max_workgroup_size: 256,
-            sub_group_sizes: vec![1],
-            extensions: vec![],
-            supports_fp16: false,
-            supports_dpas: false,
-            supports_systolic_arrays: false,
-        };
-
-        let config = IntelKernelConfig::default();
-        let kernel_manager = IntelKernel::new(config).expect(
-            "Failed to create IntelKernel for CPU fallback - this should never fail with default config"
-        );
-
-        Self {
-            kernel_manager: Arc::new(Mutex::new(kernel_manager)),
-            device: mock_device.clone(),
-            available_devices: vec![mock_device],
-            stats: Arc::new(Mutex::new(IntelStats::default())),
+        let slot =
+            INTEL_INSTANCE.get_or_init(|| Self::new().map(Arc::new).map_err(|e| e.to_string()));
+        match slot {
+            Ok(instance) => Ok(instance),
+            Err(message) => Err(TrustformersError::hardware_error(
+                message,
+                "intel_global_init",
+            )),
         }
     }
 
@@ -373,111 +353,57 @@ pub mod api {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernels::intel_kernels::IntelUtils;
     use crate::tensor::Tensor;
 
+    /// Regression test: `IntelUtils::detect_devices` used to unconditionally
+    /// fabricate a fixed "Intel Arc A770" entry regardless of whether any
+    /// Intel GPU was actually attached. There is no real oneAPI/Level-Zero
+    /// binding in this build, so honest detection on this machine (and any
+    /// machine, until a real backend is wired up) must report zero devices,
+    /// never a phantom one.
     #[test]
-    fn test_intel_initialization() {
+    fn test_detect_devices_reports_no_phantom_devices() {
+        let devices = IntelUtils::detect_devices().expect("detect_devices should not error");
+        assert!(
+            devices.is_empty(),
+            "must not report a fabricated device when no real Intel GPU runtime is wired up"
+        );
+    }
+
+    /// Regression test: `IntelImpl::global()` used to silently substitute a
+    /// fabricated "Intel CPU Fallback" `IntelDevice` (reported as vendor
+    /// "Intel Corporation") whenever real initialization failed, so every
+    /// caller believed a real Intel accelerator was present. It must now
+    /// honestly propagate the failure instead.
+    #[test]
+    fn test_intel_initialization_honestly_fails_without_real_hardware() {
         let result = api::init_intel();
-        // Should not fail even if Intel GPU is not available (uses fallback)
-        assert!(result.is_ok());
+        assert!(
+            result.is_err(),
+            "must not fabricate a fallback device when no real Intel GPU is present"
+        );
     }
 
     #[test]
-    fn test_intel_device_info() {
-        let _ = api::init_intel();
-        let info = api::intel_device_info();
-        assert!(info.is_ok());
-        let info_str = info.expect("operation failed in test");
-        assert!(info_str.contains("Intel"));
+    fn test_is_intel_available_is_false_without_real_hardware() {
+        assert!(!api::is_intel_available());
     }
 
+    /// Downstream API calls must propagate the same honest error rather
+    /// than silently computing against a fabricated device (or panicking).
     #[test]
-    fn test_intel_matmul() {
-        let _ = api::init_intel();
-
+    fn test_intel_matmul_propagates_honest_error() {
         let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
         let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
         let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
         let result = api::intel_matmul(&a, &b, &mut c);
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_intel_stats() {
-        let _ = api::init_intel();
-
-        // Reset stats
-        let _ = api::intel_reset_stats();
-
-        // Perform an operation
-        let a = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
-        let b = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
-        let mut c = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
-        let _ = api::intel_matmul(&a, &b, &mut c);
-
-        // Check stats
-        let stats = api::intel_performance_stats().expect("operation failed in test");
-        assert!(stats.total_operations > 0);
-        assert!(stats.kernel_launches > 0);
-    }
-
-    #[test]
-    fn test_intel_memory_stats() {
-        let _ = api::init_intel();
-        let stats = api::intel_memory_stats();
-        assert!(stats.is_ok());
-
-        let (_used, total) = stats.expect("operation failed in test");
-        assert!(total > 0); // Should have some memory available
-    }
-
-    #[test]
-    fn test_intel_device_listing() {
-        let _ = api::init_intel();
-        let devices = api::intel_list_devices();
-        assert!(devices.is_ok());
-
-        let device_list = devices.expect("operation failed in test");
-        assert!(!device_list.is_empty()); // Should have at least fallback device
-    }
-
-    #[test]
-    fn test_intel_precision_recommendation() {
-        let _ = api::init_intel();
-        let precision = api::intel_recommended_precision();
-        assert!(precision.is_ok());
-
-        // Should return some valid precision
-        match precision.expect("operation failed in test") {
-            IntelPrecision::FP32 | IntelPrecision::FP16 | IntelPrecision::BF16 => (),
-            other => panic!("Unexpected precision recommendation: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_intel_flash_attention() {
-        let _ = api::init_intel();
-
-        let query = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
-        let key = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
-        let value = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
-        let mut output = Tensor::zeros(&[1, 4, 64]).expect("Failed to create zero tensor");
-
-        let result = api::intel_flash_attention(&query, &key, &value, &mut output);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_intel_layer_norm() {
-        let _ = api::init_intel();
-
-        let input = Tensor::ones(&[2, 128]).expect("Failed to create ones tensor");
-        let weight = Tensor::ones(&[128]).expect("Failed to create ones tensor");
-        let bias = Tensor::zeros(&[128]).expect("Failed to create zero tensor");
-        let mut output = Tensor::zeros(&[2, 128]).expect("Failed to create zero tensor");
-
-        let result = api::intel_layer_norm(&input, &weight, Some(&bias), &mut output, 1e-5);
-        assert!(result.is_ok());
+    fn test_intel_list_devices_propagates_honest_error() {
+        assert!(api::intel_list_devices().is_err());
     }
 }

@@ -50,7 +50,6 @@ use crate::pipeline::{BasePipeline, Pipeline};
 use async_stream;
 use async_trait::async_trait;
 use futures::Stream;
-use futures::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -89,6 +88,15 @@ use trustformers_models::common_patterns::{
 ///
 /// This pipeline is designed to be thread-safe and can handle concurrent conversations
 /// through internal use of `Arc<RwLock<>>` for shared state management.
+/// Short (<= 60 characters), non-empty user messages are quoted back in
+/// conversation-repair prompts so they reference what was actually said
+/// rather than a wholly generic template; longer or empty messages fall back
+/// to a generic phrasing (`None`) rather than echoing an unwieldy quote.
+fn repair_short_quote(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    (trimmed.chars().count() <= 60 && !trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 pub struct ConversationalPipeline<M, T> {
     /// Base pipeline handling model and tokenizer operations
     base: BasePipeline<M, T>,
@@ -474,9 +482,11 @@ where
         context: &str,
         config: &ConversationalConfig,
     ) -> Result<String> {
-        // Tokenize the context
-        let tokenized = (*self.base.tokenizer).encode(context)?;
-        let input_ids = tokenized.input_ids;
+        // Validate the context tokenizes before spending compute on
+        // generation: `model.generate` below takes the raw string and
+        // re-tokenizes internally, so this discards the token ids and keeps
+        // only the fail-fast, tokenizer-specific error it surfaces.
+        let _ = (*self.base.tokenizer).encode(context)?;
 
         // Create generation config based on conversation config
         let mut gen_config = config.generation_config.clone();
@@ -615,9 +625,13 @@ where
         let repair_response = if state.health.repair_attempts
             <= config.repair_config.max_repair_attempts
         {
+            let short_quote = repair_short_quote(&input.message);
             match config.repair_config.repair_strategies.first() {
-                Some(RepairStrategy::Clarification) => {
-                    "I want to make sure I understand you correctly. Could you help me by rephrasing or providing more context?".to_string()
+                Some(RepairStrategy::Clarification) => match &short_quote {
+                    Some(quote) => format!(
+                        "I want to make sure I understand \"{quote}\" correctly. Could you help me by rephrasing or providing more context?"
+                    ),
+                    None => "I want to make sure I understand you correctly. Could you help me by rephrasing or providing more context?".to_string(),
                 },
                 Some(RepairStrategy::Rephrase) => {
                     "Let me try a different approach. What specific aspect would you like me to focus on?".to_string()
@@ -709,7 +723,13 @@ where
     pub async fn generate_streaming_response(
         &self,
         input: ConversationalInput,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>>>
+    where
+        // The model's own incremental decoder is driven on a blocking worker,
+        // which is what keeps the returned `Stream` `Send`.
+        M: 'static,
+        T: 'static,
+    {
         let conversation_id =
             input.conversation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -722,68 +742,109 @@ where
         let config = input.config_override.as_ref().unwrap_or(&self.config).clone();
         let context = self.build_enhanced_context(&state, &config, &input.message)?;
 
-        // Create a stream that generates response chunks
-        let tokenizer = self.base.tokenizer.clone();
-        let model = self.base.model.clone();
-        let chunk_size = config.streaming_config.chunk_size;
+        // Validate that the context encodes before spending a forward pass.
+        (*self.base.tokenizer).encode(&context)?;
+
+        let mut gen_config = config.generation_config.clone();
+        gen_config.strategy = GenerationStrategy::Sampling {
+            temperature: config.temperature,
+        };
+        gen_config.max_length = Some(config.max_response_tokens);
+        gen_config.do_sample = true;
+
+        let models_config = ModelsGenerationConfig {
+            max_new_tokens: gen_config.max_length.unwrap_or(512),
+            temperature: match gen_config.strategy {
+                GenerationStrategy::Sampling { temperature } => temperature,
+                GenerationStrategy::TopK { temperature, .. } => temperature,
+                GenerationStrategy::TopP { temperature, .. } => temperature,
+                _ => 1.0,
+            },
+            top_p: match gen_config.strategy {
+                GenerationStrategy::TopP { p, .. } => p,
+                _ => 0.9,
+            },
+            top_k: match gen_config.strategy {
+                GenerationStrategy::TopK { k, .. } => Some(k),
+                _ => None,
+            },
+            repetition_penalty: gen_config.repetition_penalty,
+            length_penalty: gen_config.length_penalty,
+            do_sample: gen_config.do_sample,
+            early_stopping: gen_config.early_stopping,
+            ..ModelsGenerationConfig::default()
+        };
+
+        let chunk_size = config.streaming_config.chunk_size.max(1);
         let typing_delay = config.streaming_config.typing_delay_ms;
 
+        // Real token-level streaming. `GenerativeModel::generate_stream` yields
+        // one decoding step at a time, so the first chunk is available after a
+        // single forward pass instead of after the whole response. The iterator
+        // is driven on a blocking worker and its deltas are piped over a
+        // channel, which is what makes the resulting `Stream` `Send`.
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<String>>(
+            config.streaming_config.buffer_size.max(1),
+        );
+        let model = self.base.model.clone();
+        let prompt = context.clone();
+        tokio::task::spawn_blocking(move || {
+            let steps = match model.generate_stream(&prompt, &models_config) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    let _ =
+                        sender.blocking_send(Err(crate::error::TrustformersError::runtime_error(
+                            format!("Generation failed: {e}"),
+                        )));
+                    return;
+                },
+            };
+            for step in steps {
+                let message = step.map_err(|e| {
+                    crate::error::TrustformersError::runtime_error(format!(
+                        "Generation failed: {e}"
+                    ))
+                });
+                let failed = message.is_err();
+                if sender.blocking_send(message).is_err() || failed {
+                    break;
+                }
+            }
+        });
+
         let stream = async_stream::stream! {
-            // Tokenize context and generate
-            let tokenized = match (*tokenizer).encode(&context) {
-                Ok(t) => t,
-                Err(e) => {
-                    yield Err(crate::error::TrustformersError::from(e));
-                    return;
+            let mut pending = String::new();
+            let mut pending_tokens = 0usize;
+
+            while let Some(item) = receiver.recv().await {
+                match item {
+                    Ok(delta) => {
+                        pending.push_str(&delta);
+                        pending_tokens += 1;
+                        // `chunk_size` is a token budget per emitted chunk.
+                        if pending_tokens >= chunk_size {
+                            yield Ok(std::mem::take(&mut pending));
+                            pending_tokens = 0;
+                            if typing_delay > 0 {
+                                // Opt-in pacing for UIs that want a typing
+                                // cadence; the default is 0, so raw throughput
+                                // is never deliberately slowed.
+                                tokio::time::sleep(
+                                    tokio::time::Duration::from_millis(typing_delay),
+                                )
+                                .await;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    },
                 }
-            };
+            }
 
-            let mut gen_config = config.generation_config.clone();
-            gen_config.strategy = GenerationStrategy::Sampling { temperature: config.temperature };
-            gen_config.max_length = Some(config.max_response_tokens);
-            gen_config.do_sample = true;
-
-            // In a real implementation, this would stream from the model
-            // For now, simulate streaming by chunking a generated response
-            let models_config = ModelsGenerationConfig {
-                max_new_tokens: gen_config.max_length.unwrap_or(512),
-                temperature: match gen_config.strategy {
-                    GenerationStrategy::Sampling { temperature } => temperature,
-                    GenerationStrategy::TopK { temperature, .. } => temperature,
-                    GenerationStrategy::TopP { temperature, .. } => temperature,
-                    _ => 1.0,
-                },
-                top_p: match gen_config.strategy {
-                    GenerationStrategy::TopP { p, .. } => p,
-                    _ => 0.9,
-                },
-                top_k: match gen_config.strategy {
-                    GenerationStrategy::TopK { k, .. } => Some(k),
-                    _ => None,
-                },
-                repetition_penalty: gen_config.repetition_penalty,
-                length_penalty: gen_config.length_penalty,
-                do_sample: gen_config.do_sample,
-                early_stopping: gen_config.early_stopping,
-                ..ModelsGenerationConfig::default()
-            };
-
-            let full_response = match (*model).generate(&context, &models_config) {
-                Ok(response) => response,
-                Err(e) => {
-                    yield Err(crate::error::TrustformersError::from(e));
-                    return;
-                }
-            };
-
-            // Stream response in chunks
-            let words: Vec<&str> = full_response.split_whitespace().collect();
-            for chunk in words.chunks(chunk_size) {
-                let chunk_text = chunk.join(" ") + " ";
-                yield Ok(chunk_text);
-
-                // Simulate typing delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(typing_delay)).await;
+            if !pending.is_empty() {
+                yield Ok(pending);
             }
         };
 
@@ -1081,6 +1142,36 @@ pub async fn streaming_conversational_pipeline(
 mod tests {
     use super::*;
 
+    /// Regression test for `repair_short_quote` / conversation-repair
+    /// prompts: `attempt_conversation_repair` used to ignore its `input`
+    /// argument entirely, so the clarification message never referenced
+    /// what the user actually said.
+    #[test]
+    fn test_repair_short_quote_quotes_short_messages_only() {
+        assert_eq!(
+            repair_short_quote("what do you mean"),
+            Some("what do you mean".to_string())
+        );
+        assert_eq!(
+            repair_short_quote("   "),
+            None,
+            "empty/whitespace-only message"
+        );
+        assert_eq!(repair_short_quote(""), None, "empty message");
+        let long_message = "x".repeat(61);
+        assert_eq!(
+            repair_short_quote(&long_message),
+            None,
+            "over the 60-char cutoff"
+        );
+        let boundary_message = "x".repeat(60);
+        assert_eq!(
+            repair_short_quote(&boundary_message),
+            Some(boundary_message),
+            "exactly at the 60-char cutoff must still be quoted"
+        );
+    }
+
     #[test]
     fn test_conversation_state_creation() {
         let state = ConversationState::new("test-123".to_string());
@@ -1334,7 +1425,6 @@ mod tests {
     #[test]
     #[ignore] // Temporarily ignored - requires actual model loading
     fn test_input_validation() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
@@ -1373,7 +1463,6 @@ mod tests {
     #[tokio::test]
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_conversation_backup_restore() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
@@ -1410,7 +1499,6 @@ mod tests {
     #[tokio::test]
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_health_status() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")

@@ -1,9 +1,33 @@
-// TensorRT export functionality (placeholder implementation)
-#![allow(unused_variables)] // TensorRT export
+//! TensorRT export surface.
+//!
+//! # Why there is no TensorRT engine writer here
+//!
+//! A TensorRT `.plan` file is a *serialised engine*: the output of NVIDIA's
+//! closed-source builder (`nvinfer`), which performs kernel auto-tuning against the
+//! exact GPU architecture, driver and TensorRT version present on the machine that
+//! builds it. The byte layout is deliberately unspecified, version-locked, and can
+//! only be produced by linking against NVIDIA's C++ runtime.
+//!
+//! That is impossible to produce from pure Rust, and linking the C++ runtime is
+//! barred by this workspace's pure-Rust policy. Rather than write a look-alike file,
+//! [`TensorRTExporter::export`] returns a structured
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation)
+//! error. The configuration and network description types below remain public so
+//! that callers can describe an intended engine and hand it to an external
+//! TensorRT toolchain.
 
 use super::{ExportConfig, ExportFormat, ModelExporter};
+use crate::errors::unsupported_operation;
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
+
+/// Explanation attached to every refusal to write a TensorRT engine.
+pub const TENSORRT_UNSUPPORTED_REASON: &str =
+    "a TensorRT `.plan` file is a serialised engine produced by NVIDIA's closed-source \
+     builder, which auto-tunes kernels for the exact GPU, driver and TensorRT version \
+     of the building machine; it cannot be produced in pure Rust and this crate will \
+     not write a look-alike file. Build the engine with `trtexec`/the TensorRT Python \
+     or C++ API from an ONNX model instead.";
 
 /// TensorRT engine configuration
 #[derive(Debug, Clone)]
@@ -108,359 +132,32 @@ impl TensorRTExporter {
         self
     }
 
-    fn create_tensorrt_network<M: Model>(
-        &self,
-        model: &M,
-        config: &ExportConfig,
-    ) -> Result<TensorRTNetwork> {
-        let mut layers = Vec::new();
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
-
-        // Create input tensors
-        let input_ids = TensorRTTensor {
-            name: "input_ids".to_string(),
-            dimensions: vec![-1, -1], // Dynamic batch and sequence length
-            data_type: TensorRTDataType::Int32,
-        };
-        inputs.push(input_ids);
-
-        let attention_mask = TensorRTTensor {
-            name: "attention_mask".to_string(),
-            dimensions: vec![-1, -1], // Dynamic batch and sequence length
-            data_type: TensorRTDataType::Int32,
-        };
-        inputs.push(attention_mask);
-
-        // Convert model to TensorRT layers
-        self.convert_model_to_layers(model, &mut layers, config)?;
-
-        // Create output tensor
-        let logits = TensorRTTensor {
-            name: "logits".to_string(),
-            dimensions: vec![-1, -1, 50257], // Dynamic batch, sequence, vocab_size
-            data_type: match config.precision {
-                super::ExportPrecision::FP32 => TensorRTDataType::Float32,
-                super::ExportPrecision::FP16 => TensorRTDataType::Float16,
-                super::ExportPrecision::INT8 => TensorRTDataType::Int8,
-                super::ExportPrecision::INT4 => TensorRTDataType::Int8, // TensorRT doesn't have INT4
-            },
-        };
-        outputs.push(logits);
-
-        Ok(TensorRTNetwork {
-            layers,
-            inputs,
-            outputs,
-        })
-    }
-
-    fn convert_model_to_layers<M: Model>(
-        &self,
-        model: &M,
-        layers: &mut Vec<TensorRTLayer>,
-        config: &ExportConfig,
-    ) -> Result<()> {
-        // Embedding layer
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::Embedding,
-            name: "token_embedding".to_string(),
-            inputs: vec!["input_ids".to_string()],
-            outputs: vec!["embeddings".to_string()],
-            parameters: Vec::new(), // Would contain actual embedding weights
-        });
-
-        // Positional encoding
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::PositionalEncoding,
-            name: "positional_encoding".to_string(),
-            inputs: vec!["embeddings".to_string()],
-            outputs: vec!["positioned_embeddings".to_string()],
-            parameters: Vec::new(),
-        });
-
-        // Transformer layers
-        let mut current_input = "positioned_embeddings".to_string();
-        for i in 0..12 {
-            // Assuming 12 layers
-            let layer_output = self.add_transformer_layer(layers, i, &current_input)?;
-            current_input = layer_output;
-        }
-
-        // Final layer norm
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::LayerNorm,
-            name: "final_layer_norm".to_string(),
-            inputs: vec![current_input.clone()],
-            outputs: vec!["normalized_output".to_string()],
-            parameters: Vec::new(),
-        });
-
-        // Output projection
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::FullyConnected,
-            name: "lm_head".to_string(),
-            inputs: vec!["normalized_output".to_string()],
-            outputs: vec!["logits".to_string()],
-            parameters: Vec::new(),
-        });
-
-        Ok(())
-    }
-
-    fn add_transformer_layer(
-        &self,
-        layers: &mut Vec<TensorRTLayer>,
-        layer_idx: usize,
-        input_name: &str,
-    ) -> Result<String> {
-        let layer_prefix = format!("layer_{}", layer_idx);
-
-        // Multi-head attention
-        let attention_output = format!("{}_attention_output", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::MultiHeadAttention,
-            name: format!("{}_attention", layer_prefix),
-            inputs: vec![input_name.to_string()],
-            outputs: vec![attention_output.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Residual connection after attention
-        let attention_residual = format!("{}_attention_residual", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::ElementWise,
-            name: format!("{}_attention_add", layer_prefix),
-            inputs: vec![input_name.to_string(), attention_output],
-            outputs: vec![attention_residual.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Layer norm after attention
-        let norm_output = format!("{}_norm_output", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::LayerNorm,
-            name: format!("{}_norm", layer_prefix),
-            inputs: vec![attention_residual.clone()],
-            outputs: vec![norm_output.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Feed-forward network (first linear layer)
-        let ff_intermediate = format!("{}_ff_intermediate", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::FullyConnected,
-            name: format!("{}_ff_up", layer_prefix),
-            inputs: vec![norm_output.clone()],
-            outputs: vec![ff_intermediate.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Activation function
-        let ff_activated = format!("{}_ff_activated", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::Activation,
-            name: format!("{}_activation", layer_prefix),
-            inputs: vec![ff_intermediate],
-            outputs: vec![ff_activated.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Feed-forward output projection
-        let ff_output = format!("{}_ff_output", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::FullyConnected,
-            name: format!("{}_ff_down", layer_prefix),
-            inputs: vec![ff_activated],
-            outputs: vec![ff_output.clone()],
-            parameters: Vec::new(),
-        });
-
-        // Final residual connection
-        let final_output = format!("{}_output", layer_prefix);
-        layers.push(TensorRTLayer {
-            layer_type: TensorRTLayerType::ElementWise,
-            name: format!("{}_final_add", layer_prefix),
-            inputs: vec![norm_output, ff_output],
-            outputs: vec![final_output.clone()],
-            parameters: Vec::new(),
-        });
-
-        Ok(final_output)
-    }
-
-    fn serialize_tensorrt_plan(&self, network: &TensorRTNetwork, output_path: &str) -> Result<()> {
-        // In a real implementation, this would use the TensorRT C++ API
-        // to build and serialize the engine
-
-        let plan_content = self.generate_plan_description(network)?;
-        std::fs::write(format!("{}.plan", output_path), plan_content)?;
-
-        // Also generate a JSON description for debugging
-        let json_content = self.generate_json_description(network)?;
-        std::fs::write(format!("{}_tensorrt.json", output_path), json_content)?;
-
-        Ok(())
-    }
-
-    fn generate_plan_description(&self, network: &TensorRTNetwork) -> Result<String> {
-        let mut content = String::new();
-
-        content.push_str("TensorRT Engine Plan\n");
-        content.push_str("==================\n\n");
-
-        content.push_str("Configuration:\n");
-        content.push_str(&format!(
-            "  Max Batch Size: {}\n",
-            self.config.max_batch_size
-        ));
-        content.push_str(&format!(
-            "  Max Sequence Length: {}\n",
-            self.config.max_sequence_length
-        ));
-        content.push_str(&format!(
-            "  Workspace Size: {} MB\n",
-            self.config.workspace_size
-        ));
-        content.push_str(&format!("  FP16 Enabled: {}\n", self.config.fp16_enabled));
-        content.push_str(&format!("  INT8 Enabled: {}\n", self.config.int8_enabled));
-        content.push_str(&format!(
-            "  Dynamic Shapes: {}\n",
-            self.config.dynamic_shapes
-        ));
-        content.push_str(&format!(
-            "  Optimization Level: {}\n",
-            self.config.optimization_level
-        ));
-        content.push('\n');
-
-        content.push_str("Inputs:\n");
-        for input in &network.inputs {
-            content.push_str(&format!(
-                "  {}: {:?} {:?}\n",
-                input.name, input.dimensions, input.data_type
-            ));
-        }
-        content.push('\n');
-
-        content.push_str("Outputs:\n");
-        for output in &network.outputs {
-            content.push_str(&format!(
-                "  {}: {:?} {:?}\n",
-                output.name, output.dimensions, output.data_type
-            ));
-        }
-        content.push('\n');
-
-        content.push_str("Layers:\n");
-        for layer in &network.layers {
-            content.push_str(&format!(
-                "  {} ({:?}): {} -> {}\n",
-                layer.name,
-                layer.layer_type,
-                layer.inputs.join(", "),
-                layer.outputs.join(", ")
-            ));
-        }
-
-        Ok(content)
-    }
-
-    fn generate_json_description(&self, network: &TensorRTNetwork) -> Result<String> {
-        // Simple JSON serialization (in practice, you'd use serde)
-        let mut json = String::new();
-
-        json.push_str("{\n");
-        json.push_str("  \"config\": {\n");
-        json.push_str(&format!(
-            "    \"max_batch_size\": {},\n",
-            self.config.max_batch_size
-        ));
-        json.push_str(&format!(
-            "    \"max_sequence_length\": {},\n",
-            self.config.max_sequence_length
-        ));
-        json.push_str(&format!(
-            "    \"workspace_size\": {},\n",
-            self.config.workspace_size
-        ));
-        json.push_str(&format!(
-            "    \"fp16_enabled\": {},\n",
-            self.config.fp16_enabled
-        ));
-        json.push_str(&format!(
-            "    \"int8_enabled\": {},\n",
-            self.config.int8_enabled
-        ));
-        json.push_str(&format!(
-            "    \"dynamic_shapes\": {},\n",
-            self.config.dynamic_shapes
-        ));
-        json.push_str(&format!(
-            "    \"optimization_level\": {}\n",
-            self.config.optimization_level
-        ));
-        json.push_str("  },\n");
-
-        json.push_str("  \"inputs\": [\n");
-        for (i, input) in network.inputs.iter().enumerate() {
-            json.push_str(&format!(
-                "    {{ \"name\": \"{}\", \"dimensions\": {:?}, \"data_type\": \"{:?}\" }}",
-                input.name, input.dimensions, input.data_type
-            ));
-            if i < network.inputs.len() - 1 {
-                json.push(',');
-            }
-            json.push('\n');
-        }
-        json.push_str("  ],\n");
-
-        json.push_str("  \"outputs\": [\n");
-        for (i, output) in network.outputs.iter().enumerate() {
-            json.push_str(&format!(
-                "    {{ \"name\": \"{}\", \"dimensions\": {:?}, \"data_type\": \"{:?}\" }}",
-                output.name, output.dimensions, output.data_type
-            ));
-            if i < network.outputs.len() - 1 {
-                json.push(',');
-            }
-            json.push('\n');
-        }
-        json.push_str("  ],\n");
-
-        json.push_str("  \"layers\": [\n");
-        for (i, layer) in network.layers.iter().enumerate() {
-            json.push_str(&format!("    {{ \"name\": \"{}\", \"type\": \"{:?}\", \"inputs\": {:?}, \"outputs\": {:?} }}",
-                layer.name, layer.layer_type, layer.inputs, layer.outputs));
-            if i < network.layers.len() - 1 {
-                json.push(',');
-            }
-            json.push('\n');
-        }
-        json.push_str("  ]\n");
-
-        json.push_str("}\n");
-
-        Ok(json)
+    /// The engine-builder configuration this exporter was constructed with.
+    pub fn config(&self) -> &TensorRTConfig {
+        &self.config
     }
 }
 
 impl ModelExporter for TensorRTExporter {
-    fn export<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
+    /// Always fails with a structured `UnsupportedOperation` error.
+    ///
+    /// See the [module documentation](self) for why no `.plan` file is written.
+    /// Earlier revisions of this exporter wrote an ASCII description under the
+    /// `.plan` extension and reported success; that file was never loadable by
+    /// `nvinfer`, so it is no longer produced.
+    fn export<M: Model>(&self, _model: &M, config: &ExportConfig) -> Result<()> {
         if config.format != ExportFormat::TensorRT {
             return Err(anyhow!("TensorRTExporter only supports TensorRT format"));
         }
 
-        let network = self.create_tensorrt_network(model, config)?;
-        self.serialize_tensorrt_plan(&network, &config.output_path)?;
-
-        println!("TensorRT plan exported to {}.plan", config.output_path);
-        println!(
-            "Network description saved to {}_tensorrt.json",
-            config.output_path
-        );
-
-        Ok(())
+        Err(unsupported_operation(
+            "TensorRT engine serialization",
+            format!(
+                "pure-Rust TrustformeRS build: {}",
+                TENSORRT_UNSUPPORTED_REASON
+            ),
+        )
+        .into())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
@@ -484,6 +181,55 @@ impl ModelExporter for TensorRTExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::test_support::TestModel;
+    use crate::export::ExportPrecision;
+
+    /// Regression test for the exporter that used to write an ASCII description
+    /// under the `.plan` extension and return `Ok(())`.
+    #[test]
+    fn export_refuses_to_write_a_plan_file() {
+        let dir = std::env::temp_dir().join("trustformers_tensorrt_export_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("engine");
+
+        let exporter = TensorRTExporter::new();
+        let model = TestModel::with_seed(1.0);
+        let config = ExportConfig {
+            format: ExportFormat::TensorRT,
+            output_path: output.to_string_lossy().to_string(),
+            precision: ExportPrecision::FP16,
+            ..Default::default()
+        };
+
+        let err = exporter.export(&model, &config).expect_err("must not fabricate an engine");
+        let message = err.to_string();
+        assert!(
+            message.contains("Unsupported operation"),
+            "expected a structured UnsupportedOperation error, got: {message}"
+        );
+
+        assert!(
+            !output.with_extension("plan").exists(),
+            "no .plan file may be produced"
+        );
+        assert!(
+            !dir.join("engine_tensorrt.json").exists(),
+            "no side-car description may be produced"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_rejects_non_tensorrt_formats() {
+        let exporter = TensorRTExporter::new();
+        let model = TestModel::with_seed(0.0);
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            ..Default::default()
+        };
+        assert!(exporter.export(&model, &config).is_err());
+    }
 
     #[test]
     fn test_tensorrt_exporter_creation() {

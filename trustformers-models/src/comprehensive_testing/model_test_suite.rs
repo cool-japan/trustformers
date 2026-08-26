@@ -241,15 +241,101 @@ impl ModelTestSuite {
         })
     }
 
-    /// Test input validation and error handling
+    /// Test input validation and error handling.
+    ///
+    /// Feeds the model deliberately malformed inputs — a zero-length sequence, a
+    /// rank the configured inputs never use, and a tensor full of non-finite
+    /// values — and requires that the model either rejects them with an error or
+    /// returns a finite output. A panic, or a silent NaN/Inf output, is a
+    /// failure: those are the two ways an unvalidated input corrupts a pipeline.
     fn test_input_validation<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
-        _model: &M,
+        model: &M,
     ) -> Result<TestResult> {
         let start_time = Instant::now();
 
-        // Test with various invalid inputs
-        // This is a placeholder - specific tests would depend on model requirements
+        let reference_shape = self
+            .config
+            .test_inputs
+            .first()
+            .map(|input| input.dimensions.clone())
+            .unwrap_or_else(|| vec![1, 8]);
+
+        let mut malformed: Vec<(String, Tensor)> = Vec::new();
+
+        // 1. Empty sequence.
+        let mut empty_shape = reference_shape.clone();
+        if let Some(last) = empty_shape.last_mut() {
+            *last = 0;
+        }
+        if let Ok(tensor) = Tensor::from_slice(&[], &empty_shape) {
+            malformed.push(("empty_sequence".to_string(), tensor));
+        }
+
+        // 2. Wrong rank: collapse the input to a single scalar dimension.
+        if let Ok(tensor) = Tensor::from_slice(&[1.0], &[1]) {
+            malformed.push(("rank_mismatch".to_string(), tensor));
+        }
+
+        // 3. Non-finite values in an otherwise well-shaped input.
+        let element_count: usize = reference_shape.iter().product();
+        if element_count > 0 {
+            let values = vec![f32::NAN; element_count];
+            if let Ok(tensor) = Tensor::from_slice(&values, &reference_shape) {
+                malformed.push(("non_finite_values".to_string(), tensor));
+            }
+        }
+
+        if malformed.is_empty() {
+            return Ok(TestResult {
+                name: "input_validation".to_string(),
+                passed: false,
+                error_message: Some(
+                    "could not construct any malformed input to validate against".to_string(),
+                ),
+                numerical_differences: None,
+                execution_time: start_time.elapsed(),
+            });
+        }
+
+        for (case, input) in malformed {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                model.forward(input.clone())
+            }));
+
+            match outcome {
+                // Rejecting a malformed input is the desired behaviour.
+                Ok(Err(_)) => continue,
+                Ok(Ok(output)) => {
+                    let values = match output.data() {
+                        Ok(values) => values,
+                        Err(_) => continue,
+                    };
+                    if values.iter().any(|value| !value.is_finite()) {
+                        return Ok(TestResult {
+                            name: "input_validation".to_string(),
+                            passed: false,
+                            error_message: Some(format!(
+                                "input `{case}` was accepted and produced non-finite output"
+                            )),
+                            numerical_differences: None,
+                            execution_time: start_time.elapsed(),
+                        });
+                    }
+                },
+                Err(_) => {
+                    return Ok(TestResult {
+                        name: "input_validation".to_string(),
+                        passed: false,
+                        error_message: Some(format!(
+                            "input `{case}` made the model panic instead of returning an error"
+                        )),
+                        numerical_differences: None,
+                        execution_time: start_time.elapsed(),
+                    });
+                },
+            }
+        }
 
         Ok(TestResult {
             name: "input_validation".to_string(),
@@ -311,7 +397,8 @@ impl ModelTestSuite {
                 Ok(Tensor::randn(&config.dimensions)?)
             },
             TestDataType::F16 => {
-                // Create half precision input (placeholder)
+                // `Tensor` stores f32; an F16 test input is generated at f32
+                // precision and the test exercises the same code path.
                 Ok(Tensor::randn(&config.dimensions)?)
             },
             TestDataType::I64 => {

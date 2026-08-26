@@ -1,8 +1,17 @@
-// Standard benchmarks (GLUE, SuperGLUE, etc.)
+//! Standard benchmarks (GLUE, SuperGLUE, MMLU, HellaSwag, HumanEval).
+//!
+//! Every evaluator here reads its examples from the real benchmark
+//! distribution through [`crate::evaluation::dataset_files`]. None of them
+//! synthesises inputs or labels: without
+//! [`EvaluationConfig::dataset_dir`](crate::evaluation::EvaluationConfig) they
+//! return an error, because a number labelled "GLUE CoLA accuracy" that was
+//! measured on generated sentences is not a GLUE score.
+
+use crate::evaluation::dataset_files::{self, DatasetSchema};
 use crate::evaluation::metrics::{F1Average, MetricCollection};
 use crate::evaluation::EvaluationModel;
 use crate::evaluation::{EvaluationConfig, EvaluationResult, Evaluator};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 
 /// GLUE benchmark tasks
@@ -256,8 +265,9 @@ impl GLUEEvaluator {
                 MetricCollection::new().add_accuracy().add_f1(F1Average::Binary)
             },
             GLUETask::STSB => {
-                // STSB is a regression task, so we use different metrics
-                MetricCollection::new().add_accuracy() // Placeholder - would need correlation metrics
+                // STS-B is a regression task scored by Pearson and Spearman
+                // correlation, not accuracy.
+                MetricCollection::new().add_pearson().add_spearman()
             },
             GLUETask::MNLI => MetricCollection::new().add_accuracy().add_f1(F1Average::Macro),
         }
@@ -307,92 +317,97 @@ impl GLUEEvaluator {
         })
     }
 
+    /// The on-disk layout of one GLUE task.
+    ///
+    /// Column names follow the official GLUE distribution; CoLA ships without a
+    /// header row, so its schema also carries positional indices.
+    fn task_schema(task: GLUETask) -> DatasetSchema<'static> {
+        const DEFAULT_FILES: &[&str] =
+            &["dev.tsv", "validation.tsv", "dev.jsonl", "validation.jsonl"];
+
+        match task {
+            GLUETask::CoLA => DatasetSchema {
+                subdirectory: Some("cola"),
+                file_candidates: DEFAULT_FILES,
+                // Headerless layout: source, label, notes, sentence.
+                input_fields: &[&["sentence", "3"]],
+                label_fields: &["label", "1"],
+            },
+            GLUETask::SST2 => DatasetSchema {
+                subdirectory: Some("sst2"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["sentence"]],
+                label_fields: &["label"],
+            },
+            GLUETask::MRPC => DatasetSchema {
+                subdirectory: Some("mrpc"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["#1 String", "sentence1"], &["#2 String", "sentence2"]],
+                label_fields: &["Quality", "label"],
+            },
+            GLUETask::STSB => DatasetSchema {
+                subdirectory: Some("stsb"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["sentence1"], &["sentence2"]],
+                label_fields: &["score", "label"],
+            },
+            GLUETask::QQP => DatasetSchema {
+                subdirectory: Some("qqp"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["question1"], &["question2"]],
+                label_fields: &["is_duplicate", "label"],
+            },
+            GLUETask::MNLI => DatasetSchema {
+                subdirectory: Some("mnli"),
+                file_candidates: &[
+                    "dev_matched.tsv",
+                    "dev.tsv",
+                    "validation_matched.jsonl",
+                    "validation.jsonl",
+                ],
+                input_fields: &[&["sentence1", "premise"], &["sentence2", "hypothesis"]],
+                label_fields: &["gold_label", "label"],
+            },
+            GLUETask::QNLI => DatasetSchema {
+                subdirectory: Some("qnli"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["question"], &["sentence"]],
+                label_fields: &["label"],
+            },
+            GLUETask::RTE => DatasetSchema {
+                subdirectory: Some("rte"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["sentence1"], &["sentence2"]],
+                label_fields: &["label"],
+            },
+            GLUETask::WNLI => DatasetSchema {
+                subdirectory: Some("wnli"),
+                file_candidates: DEFAULT_FILES,
+                input_fields: &[&["sentence1"], &["sentence2"]],
+                label_fields: &["label"],
+            },
+        }
+    }
+
+    /// Load a GLUE task's real dev split.
+    ///
+    /// Errors when `config.dataset_dir` is unset or the task's files are
+    /// missing. Nothing is generated.
     fn load_task_data(
         &self,
         task: GLUETask,
         config: &EvaluationConfig,
     ) -> Result<(Vec<String>, Vec<String>)> {
-        // Placeholder implementation - in practice, would load from actual GLUE datasets
-        let num_samples = config.num_samples.unwrap_or(100);
+        let root = config.require_dataset_dir(&format!("GLUE {}", task.name()))?;
+        let schema = Self::task_schema(task);
+        let examples = dataset_files::load_examples(root, &schema, config.num_samples)?;
 
-        let inputs = match task {
-            GLUETask::CoLA => {
-                // Single sentence acceptability
-                (0..num_samples)
-                    .map(|i| format!("The sentence {} is grammatically correct.", i))
-                    .collect()
-            },
-            GLUETask::SST2 => {
-                // Sentiment classification
-                (0..num_samples)
-                    .map(|i| {
-                        if i % 2 == 0 {
-                            "This movie is absolutely wonderful and entertaining.".to_string()
-                        } else {
-                            "This movie is terrible and boring.".to_string()
-                        }
-                    })
-                    .collect()
-            },
-            GLUETask::MRPC => {
-                // Paraphrase detection (sentence pairs)
-                (0..num_samples)
-                    .map(|i| {
-                        if i % 2 == 0 {
-                            "The cat sat on the mat. [SEP] A cat was sitting on the mat."
-                                .to_string()
-                        } else {
-                            "The dog ran fast. [SEP] The car was red.".to_string()
-                        }
-                    })
-                    .collect()
-            },
-            GLUETask::MNLI => {
-                // Natural language inference
-                (0..num_samples)
-                    .map(|i| match i % 3 {
-                        0 => "A man is eating pizza. [SEP] A person is consuming food.".to_string(),
-                        1 => "A man is eating pizza. [SEP] A person is sleeping.".to_string(),
-                        _ => "A man is eating pizza. [SEP] A person might be hungry.".to_string(),
-                    })
-                    .collect()
-            },
-            _ => {
-                // Generic placeholder for other tasks
-                (0..num_samples)
-                    .map(|i| format!("Input sentence {} for task {}.", i, task.name()))
-                    .collect()
-            },
-        };
-
-        let targets = match task {
-            GLUETask::CoLA
-            | GLUETask::SST2
-            | GLUETask::MRPC
-            | GLUETask::QQP
-            | GLUETask::QNLI
-            | GLUETask::RTE
-            | GLUETask::WNLI => {
-                // Binary classification
-                (0..num_samples)
-                    .map(|i| if i % 2 == 0 { "1".to_string() } else { "0".to_string() })
-                    .collect()
-            },
-            GLUETask::MNLI => {
-                // 3-way classification
-                (0..num_samples)
-                    .map(|i| match i % 3 {
-                        0 => "entailment".to_string(),
-                        1 => "contradiction".to_string(),
-                        _ => "neutral".to_string(),
-                    })
-                    .collect()
-            },
-            GLUETask::STSB => {
-                // Regression (similarity scores)
-                (0..num_samples).map(|i| format!("{:.2}", (i % 5) as f64 / 4.0 * 5.0)).collect()
-            },
-        };
+        let mut inputs = Vec::with_capacity(examples.len());
+        let mut targets = Vec::with_capacity(examples.len());
+        for example in examples {
+            inputs.push(example.input);
+            targets.push(example.target);
+        }
 
         Ok((inputs, targets))
     }
@@ -423,7 +438,7 @@ impl Evaluator for GLUEEvaluator {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
         for &task in &self.tasks {
-            println!(
+            tracing::info!(
                 "Evaluating GLUE task: {} - {}",
                 task.name(),
                 task.description()
@@ -482,6 +497,106 @@ impl SuperGLUEEvaluator {
     }
 }
 
+impl SuperGLUEEvaluator {
+    /// The on-disk layout of one SuperGLUE task (the official distribution
+    /// ships `val.jsonl` per task directory).
+    fn task_schema(task: SuperGLUETask) -> DatasetSchema<'static> {
+        const FILES: &[&str] = &["val.jsonl", "validation.jsonl", "dev.jsonl"];
+
+        match task {
+            SuperGLUETask::BoolQ => DatasetSchema {
+                subdirectory: Some("BoolQ"),
+                file_candidates: FILES,
+                input_fields: &[&["passage"], &["question"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::CB => DatasetSchema {
+                subdirectory: Some("CB"),
+                file_candidates: FILES,
+                input_fields: &[&["premise"], &["hypothesis"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::COPA => DatasetSchema {
+                subdirectory: Some("COPA"),
+                file_candidates: FILES,
+                input_fields: &[&["premise"], &["choice1"], &["choice2"], &["question"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::MultiRC => DatasetSchema {
+                subdirectory: Some("MultiRC"),
+                file_candidates: FILES,
+                input_fields: &[&["passage", "paragraph"], &["question"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::ReCoRD => DatasetSchema {
+                subdirectory: Some("ReCoRD"),
+                file_candidates: FILES,
+                input_fields: &[&["passage"], &["qas", "query"]],
+                label_fields: &["label", "answers"],
+            },
+            SuperGLUETask::RTE => DatasetSchema {
+                subdirectory: Some("RTE"),
+                file_candidates: FILES,
+                input_fields: &[&["premise"], &["hypothesis"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::WiC => DatasetSchema {
+                subdirectory: Some("WiC"),
+                file_candidates: FILES,
+                input_fields: &[&["word"], &["sentence1"], &["sentence2"]],
+                label_fields: &["label"],
+            },
+            SuperGLUETask::WSC => DatasetSchema {
+                subdirectory: Some("WSC"),
+                file_candidates: FILES,
+                input_fields: &[&["text"], &["target"]],
+                label_fields: &["label"],
+            },
+        }
+    }
+
+    fn evaluate_task(
+        &self,
+        model: &dyn EvaluationModel,
+        task: SuperGLUETask,
+        config: &EvaluationConfig,
+    ) -> Result<EvaluationResult> {
+        let root = config.require_dataset_dir(&format!("SuperGLUE {}", task.name()))?;
+        let schema = Self::task_schema(task);
+        let examples = dataset_files::load_examples(root, &schema, config.num_samples)?;
+
+        let mut predictions = Vec::with_capacity(examples.len());
+        let mut targets = Vec::with_capacity(examples.len());
+        for example in &examples {
+            predictions.push(model.forward(&example.input)?);
+            targets.push(example.target.clone());
+        }
+
+        let metrics = MetricCollection::new()
+            .add_accuracy()
+            .add_f1(F1Average::Macro)
+            .compute_all(&predictions, &targets)?;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "description".to_string(),
+            serde_json::Value::String(task.description().to_string()),
+        );
+        metadata.insert(
+            "num_examples".to_string(),
+            serde_json::Value::Number(examples.len().into()),
+        );
+
+        Ok(EvaluationResult {
+            task_name: format!("superglue_{}", task.name()),
+            metrics,
+            predictions: if config.output_predictions { predictions } else { Vec::new() },
+            targets: if config.output_predictions { targets } else { Vec::new() },
+            metadata,
+        })
+    }
+}
+
 impl Evaluator for SuperGLUEEvaluator {
     fn evaluate(
         &self,
@@ -491,13 +606,8 @@ impl Evaluator for SuperGLUEEvaluator {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
         for &task in &self.tasks {
-            println!(
-                "Evaluating SuperGLUE task: {} - {}",
-                task.name(),
-                task.description()
-            );
-            let result =
-                self.evaluate_single_task(model, &format!("superglue_{}", task.name()), config)?;
+            tracing::info!(task = task.name(), "evaluating SuperGLUE task");
+            let result = self.evaluate_task(model, task, config)?;
             suite.add_result(result);
         }
 
@@ -510,21 +620,19 @@ impl Evaluator for SuperGLUEEvaluator {
 
     fn evaluate_single_task(
         &self,
-        _model: &dyn EvaluationModel,
+        model: &dyn EvaluationModel,
         task_name: &str,
-        _config: &EvaluationConfig,
+        config: &EvaluationConfig,
     ) -> Result<EvaluationResult> {
-        // Placeholder implementation
-        let mut metrics = HashMap::new();
-        metrics.insert("accuracy".to_string(), 0.5);
+        let suffix = task_name
+            .strip_prefix("superglue_")
+            .ok_or_else(|| anyhow!("Task name must start with 'superglue_'"))?;
+        let task = SuperGLUETask::all_tasks()
+            .into_iter()
+            .find(|candidate| candidate.name() == suffix)
+            .ok_or_else(|| anyhow!("Unknown SuperGLUE task: {}", suffix))?;
 
-        Ok(EvaluationResult {
-            task_name: task_name.to_string(),
-            metrics,
-            predictions: Vec::new(),
-            targets: Vec::new(),
-            metadata: HashMap::new(),
-        })
+        self.evaluate_task(model, task, config)
     }
 }
 
@@ -617,30 +725,55 @@ impl MMLUEvaluator {
         ]
     }
 
+    /// Load one MMLU subject from the real distribution.
+    ///
+    /// MMLU ships headerless CSV files (`test/<subject>_test.csv`) with the
+    /// columns `question, A, B, C, D, answer`. Errors when the dataset
+    /// directory is unset or the subject file is missing.
     fn load_subject_data(
         &self,
         subject: &str,
         config: &EvaluationConfig,
     ) -> Result<(Vec<String>, Vec<String>)> {
-        let num_samples = config.num_samples.unwrap_or(50);
+        let root = config.require_dataset_dir(&format!("MMLU {}", subject))?;
+        let test_file = format!("{}_test.csv", subject);
+        let validation_file = format!("{}_val.csv", subject);
+        let candidates = [test_file.as_str(), validation_file.as_str()];
 
-        let questions: Vec<String> = (0..num_samples).map(|i| {
-            format!(
-                "Question {}: What is the primary concept in {}?\nA) Option A\nB) Option B\nC) Option C\nD) Option D",
-                i + 1, subject.replace("_", " ")
-            )
-        }).collect();
+        // Try the conventional `test/` and `val/` subdirectories, then the root.
+        let mut last_error = None;
+        for subdirectory in [Some("test"), Some("val"), None] {
+            let schema = DatasetSchema {
+                subdirectory,
+                file_candidates: &candidates,
+                // Headerless: question, A, B, C, D, answer.
+                input_fields: &[&["0"], &["1"], &["2"], &["3"], &["4"]],
+                label_fields: &["5"],
+            };
+            match dataset_files::load_examples(root, &schema, config.num_samples) {
+                Ok(examples) => {
+                    let mut questions = Vec::with_capacity(examples.len());
+                    let mut answers = Vec::with_capacity(examples.len());
+                    for example in examples {
+                        // Rebuild the standard multiple-choice prompt from the
+                        // real question and its four real options.
+                        let parts: Vec<&str> = example.input.split(" [SEP] ").collect();
+                        let prompt = match parts.as_slice() {
+                            [question, a, b, c, d] => {
+                                format!("{}\nA) {}\nB) {}\nC) {}\nD) {}", question, a, b, c, d)
+                            },
+                            _ => example.input.clone(),
+                        };
+                        questions.push(prompt);
+                        answers.push(example.target);
+                    }
+                    return Ok((questions, answers));
+                },
+                Err(error) => last_error = Some(error),
+            }
+        }
 
-        let answers: Vec<String> = (0..num_samples)
-            .map(|i| match i % 4 {
-                0 => "A".to_string(),
-                1 => "B".to_string(),
-                2 => "C".to_string(),
-                _ => "D".to_string(),
-            })
-            .collect();
-
-        Ok((questions, answers))
+        Err(last_error.unwrap_or_else(|| anyhow!("no MMLU data found for subject {}", subject)))
     }
 
     fn evaluate_subject(
@@ -699,7 +832,7 @@ impl Evaluator for MMLUEvaluator {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
         for subject in &self.subjects {
-            println!("Evaluating MMLU subject: {}", subject.replace("_", " "));
+            tracing::info!("Evaluating MMLU subject: {}", subject.replace("_", " "));
             let result = self.evaluate_subject(model, subject, config)?;
             suite.add_result(result);
         }
@@ -739,59 +872,56 @@ impl HellaSwagEvaluator {
         Self {}
     }
 
+    /// Load the real HellaSwag validation split.
+    ///
+    /// HellaSwag ships JSONL with `ctx` (or `ctx_a`/`ctx_b`), an `endings`
+    /// array and a `label` index. Errors when the dataset directory is unset or
+    /// the file is missing.
     fn load_data(&self, config: &EvaluationConfig) -> Result<(Vec<String>, Vec<String>)> {
-        let num_samples = config.num_samples.unwrap_or(100);
+        let root = config.require_dataset_dir("HellaSwag")?;
+        let schema = DatasetSchema {
+            subdirectory: None,
+            file_candidates: &[
+                "hellaswag_val.jsonl",
+                "validation.jsonl",
+                "val.jsonl",
+                "hellaswag/hellaswag_val.jsonl",
+            ],
+            input_fields: &[&["ctx", "ctx_a", "context"], &["endings"]],
+            label_fields: &["label"],
+        };
 
-        let contexts_and_choices: Vec<String> = (0..num_samples)
-            .map(|i| {
-                let contexts = [
-                    "A person is washing dishes. They pick up a sponge and",
-                    "Someone is walking down the street. They see a red light and",
-                    "A chef is preparing dinner. They grab a knife and",
-                    "A student is studying for exams. They open a book and",
-                ];
+        let examples = dataset_files::load_examples(root, &schema, config.num_samples)?;
 
-                let choices = [
-                    vec![
-                        "start scrubbing the plates clean.",
-                        "throw it at the wall.",
-                        "eat it like cake.",
-                        "use it as a hat.",
-                    ],
-                    vec![
-                        "stop at the crosswalk.",
-                        "start dancing wildly.",
-                        "climb a tree.",
-                        "begin singing opera.",
-                    ],
-                    vec![
-                        "carefully slice the vegetables.",
-                        "start juggling with it.",
-                        "use it as a comb.",
-                        "plant it in soil.",
-                    ],
-                    vec![
-                        "begin reading the first chapter.",
-                        "use it as a pillow.",
-                        "start eating the pages.",
-                        "throw it out the window.",
-                    ],
-                ];
+        let mut questions = Vec::with_capacity(examples.len());
+        let mut answers = Vec::with_capacity(examples.len());
+        for example in examples {
+            let (context, endings) = example
+                .input
+                .split_once(" [SEP] ")
+                .map(|(context, endings)| (context.to_string(), endings.to_string()))
+                .unwrap_or((example.input.clone(), String::new()));
 
-                let context_idx = i % contexts.len();
-                let context = contexts[context_idx];
-                let choice_set = &choices[context_idx];
+            let mut prompt = context;
+            for (index, ending) in endings.split(" | ").enumerate().take(4) {
+                let letter = [b'A', b'B', b'C', b'D'][index] as char;
+                prompt.push_str(&format!("\n{}) {}", letter, ending));
+            }
+            questions.push(prompt);
 
-                format!(
-                    "{}\nA) {}\nB) {}\nC) {}\nD) {}",
-                    context, choice_set[0], choice_set[1], choice_set[2], choice_set[3]
-                )
-            })
-            .collect();
+            // HellaSwag labels are 0-based indices; report them as letters so
+            // they line up with the model's multiple-choice answer.
+            let letter = example
+                .target
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| ["A", "B", "C", "D"].get(index).copied())
+                .unwrap_or(example.target.trim());
+            answers.push(letter.to_string());
+        }
 
-        let answers: Vec<String> = (0..num_samples).map(|_| "A".to_string()).collect();
-
-        Ok((contexts_and_choices, answers))
+        Ok((questions, answers))
     }
 }
 
@@ -803,7 +933,7 @@ impl Evaluator for HellaSwagEvaluator {
     ) -> Result<crate::evaluation::EvaluationSuite> {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
-        println!("Evaluating HellaSwag commonsense reasoning");
+        tracing::info!("Evaluating HellaSwag commonsense reasoning");
         let result = self.evaluate_single_task(model, "hellaswag", config)?;
         suite.add_result(result);
 
@@ -862,8 +992,36 @@ impl Evaluator for HellaSwagEvaluator {
     }
 }
 
+/// Runs a candidate program against a problem's unit tests.
+///
+/// HumanEval's pass@k is defined by *executing* the generated program against
+/// the problem's tests. `trustformers-core` does not ship a Python sandbox, so
+/// a caller who wants a real pass@k must supply one of these.
+pub trait CodeExecutor: Send + Sync {
+    /// Run `program` (the prompt plus the model's completion, followed by the
+    /// problem's test code) and report whether every test passed.
+    fn run(&self, program: &str, entry_point: &str) -> Result<bool>;
+}
+
+/// One HumanEval problem, as it appears in `HumanEval.jsonl`.
+#[derive(Debug, Clone)]
+pub struct HumanEvalProblem {
+    /// Problem identifier, e.g. `HumanEval/0`.
+    pub task_id: String,
+    /// The prompt shown to the model (signature plus docstring).
+    pub prompt: String,
+    /// The unit-test code appended after the completion.
+    pub test: String,
+    /// The function the tests call.
+    pub entry_point: String,
+    /// The reference solution shipped with the benchmark.
+    pub canonical_solution: String,
+}
+
 /// HumanEval benchmark evaluator for code generation
-pub struct HumanEvalEvaluator {}
+pub struct HumanEvalEvaluator {
+    executor: Option<Box<dyn CodeExecutor>>,
+}
 
 impl Default for HumanEvalEvaluator {
     fn default() -> Self {
@@ -872,74 +1030,61 @@ impl Default for HumanEvalEvaluator {
 }
 
 impl HumanEvalEvaluator {
+    /// Create an evaluator with no code executor.
+    ///
+    /// Without an executor, [`Evaluator::evaluate_single_task`] errors rather
+    /// than approximating pass@k: the previous substring heuristic scored any
+    /// syntactically plausible but semantically wrong function as a pass.
     pub fn new() -> Self {
-        Self {}
+        Self { executor: None }
     }
 
-    fn load_data(&self, config: &EvaluationConfig) -> Result<(Vec<String>, Vec<String>)> {
-        let num_samples = config.num_samples.unwrap_or(20);
-
-        let problems_and_solutions: Vec<(String, String)> = vec![
-            (
-                "def add(a, b):\n    \"\"\"\n    Add two numbers.\n    \"\"\"\n    # TODO: implement this function\n    pass".to_string(),
-                "def add(a, b):\n    \"\"\"\n    Add two numbers.\n    \"\"\"\n    return a + b".to_string()
-            ),
-            (
-                "def multiply(a, b):\n    \"\"\"\n    Multiply two numbers.\n    \"\"\"\n    # TODO: implement this function\n    pass".to_string(),
-                "def multiply(a, b):\n    \"\"\"\n    Multiply two numbers.\n    \"\"\"\n    return a * b".to_string()
-            ),
-            (
-                "def is_even(n):\n    \"\"\"\n    Check if a number is even.\n    \"\"\"\n    # TODO: implement this function\n    pass".to_string(),
-                "def is_even(n):\n    \"\"\"\n    Check if a number is even.\n    \"\"\"\n    return n % 2 == 0".to_string()
-            ),
-            (
-                "def reverse_string(s):\n    \"\"\"\n    Reverse a string.\n    \"\"\"\n    # TODO: implement this function\n    pass".to_string(),
-                "def reverse_string(s):\n    \"\"\"\n    Reverse a string.\n    \"\"\"\n    return s[::-1]".to_string()
-            ),
-            (
-                "def factorial(n):\n    \"\"\"\n    Calculate factorial of n.\n    \"\"\"\n    # TODO: implement this function\n    pass".to_string(),
-                "def factorial(n):\n    \"\"\"\n    Calculate factorial of n.\n    \"\"\"\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)".to_string()
-            ),
-        ];
-
-        let problems: Vec<String> = (0..num_samples)
-            .map(|i| {
-                let (problem, _) = &problems_and_solutions[i % problems_and_solutions.len()];
-                problem.clone()
-            })
-            .collect();
-
-        let solutions: Vec<String> = (0..num_samples)
-            .map(|i| {
-                let (_, solution) = &problems_and_solutions[i % problems_and_solutions.len()];
-                solution.clone()
-            })
-            .collect();
-
-        Ok((problems, solutions))
+    /// Supply the sandbox that runs candidate programs against the tests.
+    pub fn with_executor(mut self, executor: Box<dyn CodeExecutor>) -> Self {
+        self.executor = Some(executor);
+        self
     }
 
-    fn evaluate_code(&self, generated_code: &str, reference_solution: &str) -> bool {
-        // Simplified evaluation - in practice, you'd run the code and test it
-        // For now, we'll do a simple check if the generated code contains key elements
+    /// Load the real `HumanEval.jsonl` problem set.
+    fn load_problems(&self, config: &EvaluationConfig) -> Result<Vec<HumanEvalProblem>> {
+        let root = config.require_dataset_dir("HumanEval")?;
+        let schema = DatasetSchema {
+            subdirectory: None,
+            file_candidates: &["HumanEval.jsonl", "humaneval.jsonl", "test.jsonl"],
+            input_fields: &[&["prompt"]],
+            label_fields: &["canonical_solution"],
+        };
+        let path = dataset_files::resolve_file(root, &schema)?;
+        let records = dataset_files::load_jsonl_records(&path, config.num_samples)?;
 
-        // Extract function name from reference
-        let func_name = if let Some(start) = reference_solution.find("def ") {
-            if let Some(end) = reference_solution[start + 4..].find('(') {
-                &reference_solution[start + 4..start + 4 + end]
-            } else {
-                return false;
-            }
-        } else {
-            return false;
+        let field = |record: &serde_json::Value, name: &str| -> Result<String> {
+            record
+                .get(name)
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+                .ok_or_else(|| anyhow!("HumanEval record is missing the '{}' field", name))
         };
 
-        // Check if generated code defines the function and has reasonable content
-        generated_code.contains(&format!("def {}", func_name)) &&
-        generated_code.contains("return") &&
-        generated_code.len() > 20 && // Must be non-trivial
-        !generated_code.contains("pass") && // Should not contain placeholder
-        !generated_code.contains("TODO") // Should not contain TODO
+        records
+            .iter()
+            .map(|record| {
+                Ok(HumanEvalProblem {
+                    task_id: field(record, "task_id").unwrap_or_default(),
+                    prompt: field(record, "prompt")?,
+                    test: field(record, "test")?,
+                    entry_point: field(record, "entry_point")?,
+                    canonical_solution: field(record, "canonical_solution").unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    /// Assemble the program that the executor runs for one candidate.
+    fn assemble_program(problem: &HumanEvalProblem, completion: &str) -> String {
+        format!(
+            "{}\n{}\n\n{}\ncheck({})\n",
+            problem.prompt, completion, problem.test, problem.entry_point
+        )
     }
 }
 
@@ -951,7 +1096,7 @@ impl Evaluator for HumanEvalEvaluator {
     ) -> Result<crate::evaluation::EvaluationSuite> {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
-        println!("Evaluating HumanEval code generation");
+        tracing::info!("Evaluating HumanEval code generation");
         let result = self.evaluate_single_task(model, "humaneval", config)?;
         suite.add_result(result);
 
@@ -968,23 +1113,36 @@ impl Evaluator for HumanEvalEvaluator {
         _task_name: &str,
         config: &EvaluationConfig,
     ) -> Result<EvaluationResult> {
-        let (problems, reference_solutions) = self.load_data(config)?;
+        let executor = self.executor.as_ref().ok_or_else(|| {
+            anyhow!(
+                "HumanEval pass@k requires executing the generated code against the problem's \
+                 unit tests. trustformers-core ships no Python sandbox; supply one with \
+                 HumanEvalEvaluator::with_executor. No score is produced from a substring \
+                 heuristic."
+            )
+        })?;
 
-        let mut predictions = Vec::new();
-        let mut pass_count = 0;
+        let problems = self.load_problems(config)?;
 
-        for (problem, reference) in problems.iter().zip(reference_solutions.iter()) {
-            let generated_code = model.forward(problem)?;
-            let passes = self.evaluate_code(&generated_code, reference);
+        let mut predictions = Vec::with_capacity(problems.len());
+        let mut targets = Vec::with_capacity(problems.len());
+        let mut pass_count = 0usize;
 
-            if passes {
+        for problem in &problems {
+            let completion = model.forward(&problem.prompt)?;
+            let program = Self::assemble_program(problem, &completion);
+            if executor.run(&program, &problem.entry_point)? {
                 pass_count += 1;
             }
-
-            predictions.push(generated_code);
+            predictions.push(completion);
+            targets.push(problem.canonical_solution.clone());
         }
 
-        let pass_at_1 = pass_count as f64 / problems.len() as f64;
+        let pass_at_1 = if problems.is_empty() {
+            return Err(anyhow!("HumanEval dataset contained no problems"));
+        } else {
+            pass_count as f64 / problems.len() as f64
+        };
 
         let mut metrics = HashMap::new();
         metrics.insert("pass_at_1".to_string(), pass_at_1);
@@ -1009,7 +1167,7 @@ impl Evaluator for HumanEvalEvaluator {
             task_name: "humaneval".to_string(),
             metrics,
             predictions: if config.output_predictions { predictions } else { Vec::new() },
-            targets: if config.output_predictions { reference_solutions } else { Vec::new() },
+            targets: if config.output_predictions { targets } else { Vec::new() },
             metadata,
         })
     }
@@ -1018,6 +1176,257 @@ impl Evaluator for HumanEvalEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A model that answers with the label it is told to answer with, so tests
+    /// can distinguish "scored on the real data" from "scored on templates".
+    struct EchoModel {
+        answer: String,
+    }
+
+    impl EvaluationModel for EchoModel {
+        fn forward(&self, _input: &str) -> Result<String> {
+            Ok(self.answer.clone())
+        }
+    }
+
+    fn dataset_root(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_benchmarks_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create_dir_all failed");
+        path
+    }
+
+    /// Regression test: `load_task_data` used to generate
+    /// `"The sentence {i} is grammatically correct."` and alternating `1`/`0`
+    /// labels, and `evaluate_task` reported the resulting number as a GLUE
+    /// score. Without real data there must now be no score at all.
+    #[test]
+    fn test_glue_refuses_to_score_without_a_dataset() {
+        let evaluator = GLUEEvaluator::new().with_tasks(vec![GLUETask::SST2]);
+        let model = EchoModel {
+            answer: "1".to_string(),
+        };
+        let error = evaluator
+            .evaluate(&model, &EvaluationConfig::default())
+            .expect_err("no GLUE score may be produced from generated sentences");
+        assert!(
+            error.to_string().contains("dataset_dir"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// With a real GLUE dev.tsv the evaluator must score the model on that file.
+    #[test]
+    fn test_glue_scores_the_real_dev_split() {
+        let root = dataset_root("glue");
+        std::fs::create_dir_all(root.join("sst2")).expect("mkdir failed");
+        std::fs::write(
+            root.join("sst2/dev.tsv"),
+            "sentence	label
+first review	1
+second review	1
+third review	0
+",
+        )
+        .expect("write failed");
+
+        let evaluator = GLUEEvaluator::new().with_tasks(vec![GLUETask::SST2]);
+        let model = EchoModel {
+            answer: "1".to_string(),
+        };
+        let config = EvaluationConfig {
+            output_predictions: true,
+            ..EvaluationConfig::default()
+        }
+        .with_dataset_dir(&root);
+
+        let suite = evaluator.evaluate(&model, &config).expect("evaluation failed");
+        let result = suite
+            .results
+            .iter()
+            .find(|result| result.task_name == "glue_sst2")
+            .expect("sst2 result");
+
+        // Two of the three real labels are "1", which the model always answers.
+        let accuracy = result.metrics.get("accuracy").copied().expect("accuracy");
+        assert!(
+            (accuracy - 2.0 / 3.0).abs() < 1e-6,
+            "accuracy {accuracy} must come from the three real rows"
+        );
+        assert_eq!(result.targets, vec!["1", "1", "0"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression test: STS-B is a correlation task; it used to be scored with
+    /// accuracy.
+    #[test]
+    fn test_stsb_is_scored_with_correlations() {
+        let root = dataset_root("stsb");
+        std::fs::create_dir_all(root.join("stsb")).expect("mkdir failed");
+        std::fs::write(
+            root.join("stsb/dev.tsv"),
+            "sentence1	sentence2	score
+a	b	1.0
+c	d	2.0
+e	f	3.0
+",
+        )
+        .expect("write failed");
+
+        let evaluator = GLUEEvaluator::new().with_tasks(vec![GLUETask::STSB]);
+        let model = EchoModel {
+            answer: "2.0".to_string(),
+        };
+        let config = EvaluationConfig::default().with_dataset_dir(&root);
+
+        // A constant prediction has zero variance, so correlation is undefined
+        // and must be reported as an error rather than as an accuracy number.
+        let error = evaluator
+            .evaluate(&model, &config)
+            .expect_err("correlation of a constant prediction is undefined");
+        assert!(
+            error.to_string().contains("variance"),
+            "unexpected: {error}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression test: `SuperGLUEEvaluator::evaluate_single_task` returned a
+    /// hardcoded `accuracy: 0.5` for every task without invoking the model.
+    #[test]
+    fn test_superglue_no_longer_returns_a_constant() {
+        let evaluator = SuperGLUEEvaluator::new().with_tasks(vec![SuperGLUETask::RTE]);
+        let model = EchoModel {
+            answer: "entailment".to_string(),
+        };
+
+        let error = evaluator
+            .evaluate(&model, &EvaluationConfig::default())
+            .expect_err("no SuperGLUE score without SuperGLUE data");
+        assert!(error.to_string().contains("dataset_dir"));
+
+        let root = dataset_root("superglue");
+        std::fs::create_dir_all(root.join("RTE")).expect("mkdir failed");
+        std::fs::write(
+            root.join("RTE/val.jsonl"),
+            "{\"premise\":\"a\",\"hypothesis\":\"b\",\"label\":\"entailment\"}\n             {\"premise\":\"c\",\"hypothesis\":\"d\",\"label\":\"not_entailment\"}\n",
+        )
+        .expect("write failed");
+
+        let config = EvaluationConfig::default().with_dataset_dir(&root);
+        let result = evaluator
+            .evaluate_single_task(&model, "superglue_rte", &config)
+            .expect("evaluation failed");
+        let accuracy = result.metrics.get("accuracy").copied().expect("accuracy");
+        assert!(
+            (accuracy - 0.5).abs() < 1e-9,
+            "the model got exactly one of two real examples right, got {accuracy}"
+        );
+        // ... but it is now a measured 0.5, backed by real predictions.
+        assert_eq!(
+            result.metadata.get("num_examples"),
+            Some(&serde_json::Value::Number(2.into()))
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression test: MMLU/HellaSwag used to score models on generated
+    /// multiple-choice questions with a fixed answer key.
+    #[test]
+    fn test_mmlu_and_hellaswag_require_real_data() {
+        let model = EchoModel {
+            answer: "A".to_string(),
+        };
+        let config = EvaluationConfig::default();
+
+        assert!(MMLUEvaluator::new()
+            .with_subjects(vec!["anatomy".to_string()])
+            .evaluate(&model, &config)
+            .is_err());
+        assert!(HellaSwagEvaluator::new().evaluate(&model, &config).is_err());
+    }
+
+    #[test]
+    fn test_mmlu_scores_the_real_csv() {
+        let root = dataset_root("mmlu");
+        std::fs::create_dir_all(root.join("test")).expect("mkdir failed");
+        std::fs::write(
+            root.join("test/anatomy_test.csv"),
+            "\"Largest organ?\",Skin,Liver,Heart,Lung,A\n\"Pumps blood?\",Skin,Liver,Heart,Lung,C\n",
+        )
+        .expect("write failed");
+
+        let evaluator = MMLUEvaluator::new().with_subjects(vec!["anatomy".to_string()]);
+        let model = EchoModel {
+            answer: "A".to_string(),
+        };
+        let config = EvaluationConfig::default().with_dataset_dir(&root);
+
+        let result = evaluator
+            .evaluate_single_task(&model, "mmlu_anatomy", &config)
+            .expect("evaluation failed");
+        let accuracy = result.metrics.get("accuracy").copied().expect("accuracy");
+        assert!(
+            (accuracy - 0.5).abs() < 1e-9,
+            "one of the two real answers is A, got {accuracy}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression test: HumanEval pass@k used to be a substring heuristic that
+    /// scored any plausible-looking function as a pass.
+    #[test]
+    fn test_humaneval_requires_a_code_executor() {
+        let root = dataset_root("humaneval");
+        std::fs::write(
+            root.join("HumanEval.jsonl"),
+            "{\"task_id\":\"HumanEval/0\",\"prompt\":\"def add(a, b):\\n\",             \"test\":\"def check(f):\\n    assert f(1,2)==3\\n\",             \"entry_point\":\"add\",\"canonical_solution\":\"    return a + b\\n\"}\n",
+        )
+        .expect("write failed");
+
+        let model = EchoModel {
+            answer: "    return a + b\n".to_string(),
+        };
+        let config = EvaluationConfig::default().with_dataset_dir(&root);
+
+        let error = HumanEvalEvaluator::new()
+            .evaluate_single_task(&model, "humaneval", &config)
+            .expect_err("pass@k needs real execution");
+        assert!(
+            error.to_string().contains("with_executor"),
+            "unexpected: {error}"
+        );
+
+        // With an executor the score comes from the executor's verdict.
+        struct AlwaysFails;
+        impl CodeExecutor for AlwaysFails {
+            fn run(&self, program: &str, entry_point: &str) -> Result<bool> {
+                assert!(
+                    program.contains("return a + b"),
+                    "the completion must be assembled in"
+                );
+                assert_eq!(entry_point, "add");
+                Ok(false)
+            }
+        }
+
+        let result = HumanEvalEvaluator::new()
+            .with_executor(Box::new(AlwaysFails))
+            .evaluate_single_task(&model, "humaneval", &config)
+            .expect("evaluation failed");
+        assert_eq!(result.metrics.get("pass_at_1").copied(), Some(0.0));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn test_glue_tasks() {
@@ -1118,17 +1527,5 @@ mod tests {
 
         assert_eq!(supported.len(), 1);
         assert!(supported.contains(&"humaneval".to_string()));
-    }
-
-    #[test]
-    fn test_humaneval_code_evaluation() {
-        let evaluator = HumanEvalEvaluator::new();
-
-        let reference = "def add(a, b):\n    return a + b";
-        let good_code = "def add(a, b):\n    return a + b";
-        let bad_code = "def add(a, b):\n    pass";
-
-        assert!(evaluator.evaluate_code(good_code, reference));
-        assert!(!evaluator.evaluate_code(bad_code, reference));
     }
 }

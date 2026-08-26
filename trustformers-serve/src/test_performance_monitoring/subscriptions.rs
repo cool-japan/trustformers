@@ -10,14 +10,18 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
-/// Main subscription management system
+/// Main subscription management system.
+///
+/// 0.2.1: dropped a `subscription_templates` map and a `SubscriptionAnalytics`.
+/// The template map was never written to or read; the analytics held three
+/// empty locked structures with no method that could record into them, so the
+/// manager appeared to keep per-subscription metrics and usage statistics and
+/// kept neither.
 #[derive(Debug)]
 pub struct SubscriptionManager {
     config: SubscriptionConfig,
     user_subscriptions: RwLock<HashMap<String, UserSubscriptions>>,
-    subscription_templates: RwLock<HashMap<String, SubscriptionTemplate>>,
     notification_preferences: RwLock<HashMap<String, NotificationPreferences>>,
-    subscription_analytics: SubscriptionAnalytics,
 }
 
 /// User subscription collection
@@ -102,40 +106,19 @@ pub struct NotificationPreferences {
     pub notification_frequency: NotificationFrequency,
 }
 
-/// Subscription analytics and metrics
-#[derive(Debug)]
-pub struct SubscriptionAnalytics {
-    subscription_metrics: RwLock<HashMap<String, SubscriptionMetrics>>,
-    usage_statistics: RwLock<UsageStatistics>,
-    performance_metrics: RwLock<PerformanceMetrics>,
-}
-
-impl Default for SubscriptionAnalytics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SubscriptionAnalytics {
-    pub fn new() -> Self {
-        Self {
-            subscription_metrics: RwLock::new(HashMap::new()),
-            usage_statistics: RwLock::new(UsageStatistics::default()),
-            performance_metrics: RwLock::new(PerformanceMetrics::default()),
-        }
-    }
-}
-
 impl SubscriptionManager {
     /// Create new subscription manager
     pub fn new(config: SubscriptionConfig) -> Self {
         Self {
             config,
             user_subscriptions: RwLock::new(HashMap::new()),
-            subscription_templates: RwLock::new(HashMap::new()),
             notification_preferences: RwLock::new(HashMap::new()),
-            subscription_analytics: SubscriptionAnalytics::new(),
         }
+    }
+
+    /// The configuration this manager was built with.
+    pub fn config(&self) -> &SubscriptionConfig {
+        &self.config
     }
 
     /// Create user subscription

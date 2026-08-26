@@ -512,12 +512,13 @@ impl PipelineJitCompiler {
         // Execute pipeline
         let outputs = self.execute_compiled_code(&compiled_pipeline.compilation_result, inputs)?;
 
-        // Update statistics
         let execution_time = start_time.elapsed();
-        self.update_execution_stats(pipeline_id, execution_time);
 
-        // Update performance metrics
+        // Record the sample into the performance history *first*: real
+        // percentiles/standard-deviation in `update_execution_stats` are
+        // computed from that history, so it must already contain this run.
         self.update_performance_metrics(pipeline_id, execution_time, inputs.len());
+        self.update_execution_stats(pipeline_id, execution_time);
 
         Ok(outputs)
     }
@@ -550,7 +551,15 @@ impl PipelineJitCompiler {
         cache.insert(pipeline.id.clone(), pipeline);
     }
 
-    /// Update execution statistics
+    /// Update execution statistics.
+    ///
+    /// Percentiles and standard deviation are computed from this pipeline's
+    /// real execution-time history (`performance_tracker`, populated by
+    /// [`Self::update_performance_metrics`], which callers must invoke first —
+    /// see [`Self::execute_pipeline`]). An earlier revision multiplied the
+    /// running average by arbitrary constants (`p90 = avg * 2`,
+    /// `p95 = avg * 3`) and called the result a percentile, and never updated
+    /// `std_deviation` at all (permanently `0`); neither survives.
     fn update_execution_stats(&self, pipeline_id: &str, execution_time: Duration) {
         let mut stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
         let entry = stats.entry(pipeline_id.to_string()).or_insert_with(|| ExecutionStats {
@@ -569,12 +578,39 @@ impl PipelineJitCompiler {
         entry.min_execution_time = entry.min_execution_time.min(execution_time);
         entry.max_execution_time = entry.max_execution_time.max(execution_time);
 
-        // Update percentiles (simplified implementation)
-        entry.percentiles.p50 = entry.average_execution_time;
-        entry.percentiles.p90 = entry.average_execution_time * 2;
-        entry.percentiles.p95 = entry.average_execution_time * 3;
-        entry.percentiles.p99 = entry.max_execution_time;
-        entry.percentiles.p999 = entry.max_execution_time;
+        let mut samples: Vec<f64> = {
+            let tracker = self.performance_tracker.lock().unwrap_or_else(|p| p.into_inner());
+            tracker
+                .history
+                .get(pipeline_id)
+                .map(|history| history.iter().map(|s| s.execution_time.as_secs_f64()).collect())
+                .unwrap_or_default()
+        };
+
+        if samples.is_empty() {
+            // No history yet (e.g. this method called directly, out of the
+            // normal `execute_pipeline` order): fall back to this one sample
+            // rather than leaving stale zeroed percentiles.
+            samples.push(execution_time.as_secs_f64());
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let percentile = |fraction: f64| -> Duration {
+            let index = ((samples.len() as f64 * fraction) as usize).min(samples.len() - 1);
+            Duration::from_secs_f64(samples[index].max(0.0))
+        };
+        entry.percentiles = ExecutionPercentiles {
+            p50: percentile(0.50),
+            p90: percentile(0.90),
+            p95: percentile(0.95),
+            p99: percentile(0.99),
+            p999: percentile(0.999),
+        };
+
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance =
+            samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        entry.std_deviation = Duration::from_secs_f64(variance.sqrt().max(0.0));
     }
 
     /// Update performance metrics
@@ -628,8 +664,24 @@ impl PipelineJitCompiler {
             optimizations.push(OptimizationType::Vectorization);
         }
 
-        if self.config.enable_memory_optimization {
+        // A caller-supplied memory budget hint opts a request into memory
+        // layout optimization even when the global config default has it
+        // off, since the caller is explicitly memory-constrained.
+        if self.config.enable_memory_optimization
+            || request.optimization_hints.memory_budget.is_some()
+        {
             optimizations.push(OptimizationType::MemoryLayout);
+        }
+
+        // High/critical priority requests get vectorization even if the
+        // global config default has it off, since the caller explicitly
+        // asked for a fast compile.
+        if matches!(
+            request.priority,
+            CompilationPriority::High | CompilationPriority::Critical
+        ) && !optimizations.contains(&OptimizationType::Vectorization)
+        {
+            optimizations.push(OptimizationType::Vectorization);
         }
 
         // Add more optimization based on request characteristics
@@ -643,6 +695,11 @@ impl PipelineJitCompiler {
     pub fn get_compilation_stats(&self) -> HashMap<String, ExecutionStats> {
         let stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.clone()
+    }
+
+    /// Number of compilation requests currently queued.
+    pub fn pending_compilations(&self) -> usize {
+        self.compilation_queue.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Get performance metrics
@@ -793,49 +850,47 @@ impl PipelineJitCompiler {
         input_shapes
     }
 
-    /// Execute compiled code with given inputs
+    /// Execute compiled code with given inputs.
+    ///
+    /// # Why this always fails
+    ///
+    /// `ComputationGraph`/`GraphNode` (trustformers-core's compiler module)
+    /// carry only operator names, shapes, and cost estimates — no model
+    /// weights and no binding from a specific runtime [`Tensor`] to a specific
+    /// IR operand. `trustformers-core`'s default `InterpreterBackend` compiles
+    /// a graph by JSON-serialising that shape/cost IR (see
+    /// `trustformers_core::compiler::jit_compiler::InterpreterBackend::compile_ir`);
+    /// its `LLVMBackend`/`CraneliftBackend` (each feature-gated, neither on by
+    /// default) are themselves placeholders that emit a fixed two-byte
+    /// `[0x90, 0xc3]` NOP+RET rather than compiling anything. There is no
+    /// "run this IR against real tensors" entry point anywhere in
+    /// trustformers-core to call, for any backend.
+    ///
+    /// An earlier revision of this method noticed that gap and papered over it
+    /// by applying `tanh()` to every input element (or, if `compiled_code` was
+    /// empty, cloning the inputs unchanged) and calling the result "execution
+    /// output". That produced a real-looking `Vec<Tensor>` with no relationship
+    /// to what `compilation_result` actually described. Rather than repeat
+    /// that, or reimplement a second, independent IR interpreter for weight-
+    /// free shape metadata that structurally cannot be executed correctly,
+    /// this returns a structured error. Run pipelines through their normal
+    /// (non-JIT) `Pipeline::__call__` path instead.
     fn execute_compiled_code(
         &self,
         compilation_result: &CompilationResult,
-        inputs: &[Tensor],
+        _inputs: &[Tensor],
     ) -> Result<Vec<Tensor>, TrustformersError> {
-        // For now, implement a basic execution that processes tensors
-        // In a real implementation, this would execute the actual compiled bytecode
-
-        let mut outputs = Vec::new();
-
-        // Check if we have compiled code to execute
-        if !compilation_result.compiled_code.is_empty() {
-            // Simulate execution by applying some transformations to inputs
-            for input in inputs {
-                // Create output tensor with same shape but potentially different values
-                let mut output_data = input.data()?.to_vec();
-
-                // Apply a simple transformation to demonstrate execution
-                // In practice, this would be the actual compiled operations
-                for value in &mut output_data {
-                    *value = value.tanh(); // Apply tanh activation as example
-                }
-
-                // Create output tensor with same shape
-                let output = Tensor::from_vec(output_data, &input.shape())?;
-                outputs.push(output);
-            }
-        } else {
-            // Fallback: return modified inputs if no compiled code available
-            for input in inputs {
-                // Simple pass-through with minimal processing
-                outputs.push(input.clone());
-            }
-        }
-
-        // Ensure we have at least some outputs
-        if outputs.is_empty() && !inputs.is_empty() {
-            // Emergency fallback: clone inputs
-            outputs = inputs.to_vec();
-        }
-
-        Ok(outputs)
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "no JIT execution backend can run the {} bytes of compiled code produced for \
+                 this pipeline: trustformers-core's JIT compiler only translates the \
+                 computation graph into a shape/cost intermediate representation (no model \
+                 weights, no operand-to-tensor binding) and implements no executor for it. \
+                 Run this pipeline through its native (non-JIT) path instead.",
+                compilation_result.compiled_code.len()
+            ),
+            "jit_execution",
+        ))
     }
 }
 
@@ -867,20 +922,52 @@ impl PerformanceTracker {
         }
     }
 
-    /// Calculate performance trend
+    /// Calculate performance trend.
+    ///
+    /// `confidence` is the linear fit's real coefficient of determination
+    /// (R²): 1.0 for samples that lie exactly on the fitted line, near 0 for
+    /// samples the line barely predicts better than their own mean. An
+    /// earlier revision hardcoded `confidence: 0.8` for every trend
+    /// regardless of how well (or badly) the line actually fit; it does not
+    /// survive.
     fn calculate_trend(&self, samples: &[PerformanceSample]) -> PerformanceTrend {
-        // Simple linear regression to detect trend
+        // Linear regression via the mean-centered ("two-pass") formula rather
+        // than the textbook `n*Σxy - Σx*Σy` / `n*Σx² - (Σx)²` shortcut: for a
+        // near-constant series (e.g. every sample took the same time) that
+        // shortcut subtracts two close, large floating-point products and
+        // leaves a residual on the order of 1e-16 instead of an exact zero —
+        // enough to slip past an `EPSILON` guard and report a small but
+        // nonzero "confidence" for data with no real trend at all. Centering
+        // first keeps every term near zero, so the residual for constant data
+        // stays at the few-ULP level, well under the guard below.
         let n = samples.len() as f64;
-        let sum_x = (0..samples.len()).sum::<usize>() as f64;
-        let sum_y = samples.iter().map(|s| s.execution_time.as_secs_f64()).sum::<f64>();
-        let sum_xy = samples
-            .iter()
-            .enumerate()
-            .map(|(i, s)| i as f64 * s.execution_time.as_secs_f64())
-            .sum::<f64>();
-        let sum_xx = (0..samples.len()).map(|i| (i * i) as f64).sum::<f64>();
+        let xs: Vec<f64> = (0..samples.len()).map(|i| i as f64).collect();
+        let ys: Vec<f64> = samples.iter().map(|s| s.execution_time.as_secs_f64()).collect();
+        let mean_x = xs.iter().sum::<f64>() / n;
+        let mean_y = ys.iter().sum::<f64>() / n;
 
-        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+        let mut s_xx = 0.0;
+        let mut s_yy = 0.0;
+        let mut s_xy = 0.0;
+        for (&x, &y) in xs.iter().zip(ys.iter()) {
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            s_xx += dx * dx;
+            s_yy += dy * dy;
+            s_xy += dx * dy;
+        }
+
+        let slope = if s_xx > f64::EPSILON { s_xy / s_xx } else { 0.0 };
+
+        // R² = correlation(x, y)^2 = Sxy² / (Sxx * Syy), guarded against a
+        // zero-variance series, which would otherwise divide 0.0 / 0.0 into
+        // NaN and later panic in `Duration`-adjacent code that assumes a
+        // finite value.
+        let confidence = if s_xx > f64::EPSILON && s_yy > f64::EPSILON {
+            (s_xy * s_xy / (s_xx * s_yy)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         let direction = if slope.abs() < 0.001 {
             TrendDirection::Stable
@@ -893,7 +980,7 @@ impl PerformanceTracker {
         PerformanceTrend {
             direction,
             strength: slope.abs(),
-            confidence: 0.8, // Simplified confidence calculation
+            confidence,
             duration: Duration::from_secs(samples.len() as u64),
         }
     }
@@ -1161,5 +1248,115 @@ mod tests {
     fn test_trend_direction_enum() {
         assert_eq!(TrendDirection::Improving, TrendDirection::Improving);
         assert_ne!(TrendDirection::Improving, TrendDirection::Degrading);
+    }
+
+    // ── Honesty regression tests ──────────────────────────────────────────────
+
+    /// Regression test for `execute_compiled_code` applying `tanh()` to the
+    /// inputs (or, with empty `compiled_code`, cloning them unchanged) and
+    /// calling the result "execution output".
+    #[tokio::test]
+    async fn execute_pipeline_never_fabricates_tanh_output() {
+        let mut compiler =
+            PipelineJitCompiler::new(PipelineJitConfig::default()).expect("compiler creation");
+        let graph = ComputationGraph::new();
+        compiler
+            .compile_pipeline("test_pipeline", graph, OptimizationHints::default())
+            .await
+            .expect("compilation of an empty graph must still succeed");
+
+        let inputs = vec![Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("tensor")];
+        let err = compiler.execute_pipeline("test_pipeline", &inputs).await.expect_err(
+            "no JIT execution backend exists in this build; must not fabricate tanh(input)",
+        );
+        assert!(!err.to_string().is_empty());
+    }
+
+    /// Regression test for `update_execution_stats`' `p90 = avg * 2`,
+    /// `p95 = avg * 3` formula, and for `std_deviation` never being updated
+    /// (permanently `Duration::from_secs(0)`).
+    #[test]
+    fn update_execution_stats_computes_real_order_statistics() {
+        let compiler =
+            PipelineJitCompiler::new(PipelineJitConfig::default()).expect("compiler creation");
+
+        // Ten execution times of 1ms..10ms. Real order statistics: p50 is the
+        // 6th-smallest sample (6ms), p90/p99 are both the largest (10ms).
+        for ms in 1..=10u64 {
+            let execution_time = Duration::from_millis(ms);
+            compiler.update_performance_metrics("pipe", execution_time, 1);
+            compiler.update_execution_stats("pipe", execution_time);
+        }
+
+        let stats = compiler.get_compilation_stats();
+        let entry = stats.get("pipe").expect("stats must be recorded");
+
+        assert_eq!(entry.total_executions, 10);
+        assert_eq!(entry.average_execution_time, Duration::from_micros(5500)); // (1+..+10)/10 ms
+        assert_eq!(entry.percentiles.p50, Duration::from_millis(6));
+        assert_eq!(entry.percentiles.p90, Duration::from_millis(10));
+        assert_eq!(entry.percentiles.p99, Duration::from_millis(10));
+        assert_ne!(
+            entry.percentiles.p90,
+            entry.average_execution_time * 2,
+            "must not be the old `p90 = avg * 2` formula"
+        );
+        assert_ne!(
+            entry.percentiles.p95,
+            entry.average_execution_time * 3,
+            "must not be the old `p95 = avg * 3` formula"
+        );
+        assert!(
+            entry.std_deviation > Duration::from_millis(0),
+            "std_deviation must be computed, not left at its permanent-zero default"
+        );
+    }
+
+    /// Regression test for `calculate_trend` hardcoding `confidence: 0.8`
+    /// regardless of the input data. A perfect linear trend must report
+    /// confidence close to 1.0; a zero-variance (flat) series must report a
+    /// well-defined, finite confidence rather than propagating NaN into a
+    /// `Duration`-shaped field (which would panic downstream).
+    #[test]
+    fn calculate_trend_confidence_reflects_real_fit_quality() {
+        let mut tracker = PerformanceTracker::new();
+
+        let sample_at = |execution_time: Duration| PerformanceSample {
+            timestamp: Instant::now(),
+            execution_time,
+            throughput: 1.0,
+            memory_usage: 0,
+            cpu_utilization: 0.0,
+            gpu_utilization: None,
+        };
+
+        let perfect: Vec<PerformanceSample> =
+            (0..10u64).map(|i| sample_at(Duration::from_millis(10 + i))).collect();
+        tracker.history.insert("perfect".to_string(), perfect);
+        tracker.update_trends("perfect");
+        let perfect_confidence = tracker.trends["perfect"].confidence;
+        assert!(
+            (perfect_confidence - 1.0).abs() < 1e-6,
+            "a perfectly linear trend should have confidence near 1.0, got {perfect_confidence}"
+        );
+
+        let flat: Vec<PerformanceSample> =
+            (0..10u64).map(|_| sample_at(Duration::from_millis(10))).collect();
+        tracker.history.insert("flat".to_string(), flat);
+        tracker.update_trends("flat");
+        let flat_confidence = tracker.trends["flat"].confidence;
+        assert!(flat_confidence.is_finite(), "confidence must never be NaN");
+        // Floating-point centering leaves a few-ULP residual rather than a
+        // bit-exact zero for constant input; assert "negligible", not "==".
+        assert!(
+            flat_confidence < 1e-9,
+            "zero variance must not produce a meaningfully nonzero confidence, got {flat_confidence}"
+        );
+
+        assert_ne!(
+            perfect_confidence, 0.8,
+            "must not be the old hardcoded 0.8 regardless of fit quality"
+        );
+        assert_ne!(flat_confidence, 0.8);
     }
 }

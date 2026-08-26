@@ -5,14 +5,14 @@
 //! easy-to-use profiling capabilities for models, pipelines, and operations.
 
 use crate::core::performance::{
-    BenchmarkResult, BenchmarkSuite, LatencyMetrics, MemoryMetrics, MetricsTracker,
-    OptimizationAdvisor, OptimizationSuggestion, PerformanceProfiler as CoreProfiler,
-    ProfileResult, ThroughputMetrics,
+    AnalysisContext, BenchmarkResult, BenchmarkSuite, HardwareInfo, LatencyMetrics, MemoryMetrics,
+    MetricsTracker, OptimizationAdvisor, OptimizationSuggestion, PerformanceImprovement,
+    PerformanceProfiler as CoreProfiler, ProfileResult, ThroughputMetrics,
 };
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use trustformers_core::errors::TrustformersError;
 
@@ -32,6 +32,10 @@ pub struct Profiler {
     session_start: Instant,
     /// Active sessions
     active_sessions: Arc<Mutex<HashMap<String, ProfileSession>>>,
+    /// Core-profiler guards for operations currently in flight, keyed
+    /// `"<session>::<operation>"`. Dropping a guard records the interval in the
+    /// core profiler's aggregate view.
+    operation_guards: Arc<Mutex<HashMap<String, crate::core::performance::profiler::ProfileGuard>>>,
 }
 
 /// Profiler configuration
@@ -67,8 +71,53 @@ impl Default for ProfilerConfig {
     }
 }
 
-/// Profile session information
+/// A single measured operation duration.
 #[derive(Debug, Clone)]
+pub struct OperationSample {
+    /// Name of the operation that was timed.
+    pub operation: String,
+    /// Wall-clock duration of this single call.
+    pub duration: Duration,
+}
+
+/// Workload counters a caller reported for a session.
+///
+/// The profiler cannot know how many tokens an operation processed, so these
+/// stay at zero until [`Profiler::record_workload`] is called. Zero therefore
+/// means "not reported", never "measured zero".
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct WorkloadCounters {
+    /// Tokens processed.
+    pub tokens: usize,
+    /// Batches processed.
+    pub batches: usize,
+    /// Individual samples/sequences processed.
+    pub items: usize,
+}
+
+impl WorkloadCounters {
+    /// Whether any workload was reported at all.
+    pub fn is_reported(&self) -> bool {
+        self.tokens > 0 || self.batches > 0 || self.items > 0
+    }
+}
+
+/// Where a [`ProfileResults`] memory reading came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemoryMetricsSource {
+    /// Operating-system process memory (resident + virtual) read via `sysinfo`.
+    /// Allocation/deallocation counts are not available from this source and
+    /// are reported as zero.
+    ProcessMemory,
+    /// No memory source could be read.
+    #[default]
+    Unavailable,
+}
+
+/// Profile session information
+///
+/// Not `Clone`: it owns live core-profiler guards for in-flight operations.
+#[derive(Debug)]
 pub struct ProfileSession {
     /// Session ID
     pub id: String,
@@ -80,6 +129,16 @@ pub struct ProfileSession {
     pub end_time: Option<Instant>,
     /// Session results
     pub results: Option<ProfileResults>,
+    /// Every individually measured call duration in this session.
+    pub samples: Vec<OperationSample>,
+    /// Operations that were started but not yet ended, with their start instant.
+    in_flight: HashMap<String, Instant>,
+    /// Workload counters reported by the caller.
+    pub workload: WorkloadCounters,
+    /// Resident-set size when the session started, in bytes.
+    pub start_rss_bytes: Option<usize>,
+    /// Highest resident-set size observed during the session, in bytes.
+    pub peak_rss_bytes: Option<usize>,
 }
 
 /// Comprehensive profile results
@@ -97,6 +156,12 @@ pub struct ProfileResults {
     pub throughput_metrics: ThroughputMetrics,
     /// Memory metrics
     pub memory_metrics: Option<MemoryMetrics>,
+    /// Where `memory_metrics` was read from.
+    #[serde(default)]
+    pub memory_metrics_source: MemoryMetricsSource,
+    /// Workload counters the caller reported for this session.
+    #[serde(default)]
+    pub workload: WorkloadCounters,
     /// Optimization suggestions
     pub optimization_suggestions: Vec<OptimizationSuggestion>,
     /// Benchmark results (if enabled)
@@ -118,14 +183,21 @@ pub struct ProfileSummary {
     pub slowest_operation: String,
     /// Fastest operation
     pub fastest_operation: String,
-    /// Memory efficiency score (0-100)
-    pub memory_efficiency: f64,
-    /// Performance score (0-100)
-    pub performance_score: f64,
+    /// Resident bytes as a percentage of the reserved address space.
+    ///
+    /// `None` when no memory source could be read. This is a measured ratio,
+    /// not a quality score.
+    pub memory_efficiency: Option<f64>,
+    /// Latency-consistency score: `100 * p50 / p99`, clamped to 0..=100.
+    ///
+    /// A run whose tail latency matches its median scores 100. `None` when no
+    /// per-call samples were recorded.
+    pub performance_score: Option<f64>,
     /// Number of bottlenecks identified
     pub bottlenecks_found: usize,
-    /// Optimization potential (0-100)
-    pub optimization_potential: f64,
+    /// Share of total time spent in operations that triggered a suggestion, in
+    /// percent. `None` when no time was recorded.
+    pub optimization_potential: Option<f64>,
 }
 
 impl Profiler {
@@ -162,7 +234,37 @@ impl Profiler {
             config,
             session_start: Instant::now(),
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
+            operation_guards: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// How long this profiler instance has been alive.
+    pub fn uptime(&self) -> Duration {
+        self.session_start.elapsed()
+    }
+
+    /// The optimization advisor this profiler was constructed with.
+    ///
+    /// `Self::generate_optimization_suggestions` runs this advisor's real,
+    /// rule-based [`OptimizationAdvisor::analyze`] every time a session ends
+    /// with `enable_advisor` set (see that method's doc comment for the
+    /// `AnalysisContext` it assembles). This accessor is exposed for callers
+    /// who want to run the advisor directly against their own context —
+    /// for example one that carries a real `model_graph` or
+    /// `current_config`, neither of which this high-level profiler has
+    /// access to.
+    pub fn advisor(&self) -> &OptimizationAdvisor {
+        &self.advisor
+    }
+
+    /// The rolling-window metrics tracker this profiler was constructed with.
+    ///
+    /// Nothing currently calls [`MetricsTracker::record_inference`] on it —
+    /// `end_session` computes its latency/throughput metrics directly from
+    /// the session's own samples instead — so its window is empty unless a
+    /// caller records into it directly.
+    pub fn metrics_tracker(&self) -> &MetricsTracker {
+        &self.metrics_tracker
     }
 
     /// Enable profiling
@@ -183,12 +285,18 @@ impl Profiler {
     /// Start a new profiling session
     pub fn start_session(&self, name: &str) -> Result<String> {
         let session_id = format!("{}_{}", name, chrono::Utc::now().timestamp());
+        let start_rss_bytes = read_process_memory().map(|m| m.resident_bytes);
         let session = ProfileSession {
             id: session_id.clone(),
             name: name.to_string(),
             start_time: Instant::now(),
             end_time: None,
             results: None,
+            samples: Vec::new(),
+            in_flight: HashMap::new(),
+            workload: WorkloadCounters::default(),
+            start_rss_bytes,
+            peak_rss_bytes: start_rss_bytes,
         };
 
         let mut sessions = self.active_sessions.lock().map_err(|e| {
@@ -224,18 +332,31 @@ impl Profiler {
         // Collect results from core profiler
         let operations = self.core_profiler.get_results();
 
-        // Generate metrics
-        let latency_metrics = self.generate_latency_metrics(&operations);
-        let throughput_metrics = self.generate_throughput_metrics(&operations, total_duration);
-        let memory_metrics = if self.config.enable_memory {
-            Some(self.generate_memory_metrics())
+        // Generate metrics from the durations this session actually measured.
+        let durations: Vec<Duration> = session.samples.iter().map(|s| s.duration).collect();
+        let latency_metrics = Self::generate_latency_metrics(&durations, total_duration);
+        let throughput_metrics =
+            Self::generate_throughput_metrics(&session.workload, total_duration);
+
+        if let Some(current) = read_process_memory() {
+            session.peak_rss_bytes =
+                Some(session.peak_rss_bytes.unwrap_or(0).max(current.resident_bytes));
+        }
+        let (memory_metrics, memory_metrics_source) = if self.config.enable_memory {
+            Self::generate_memory_metrics(session.peak_rss_bytes)
         } else {
-            None
+            (None, MemoryMetricsSource::Unavailable)
         };
+        let workload = session.workload;
 
         // Generate optimization suggestions
         let optimization_suggestions = if self.config.enable_advisor {
-            self.generate_optimization_suggestions(&operations)
+            self.generate_optimization_suggestions(
+                &operations,
+                &latency_metrics,
+                memory_metrics.as_ref(),
+                &throughput_metrics,
+            )
         } else {
             Vec::new()
         };
@@ -245,7 +366,12 @@ impl Profiler {
             if self.config.enable_benchmarks { Some(self.run_benchmarks()?) } else { None };
 
         // Generate summary
-        let summary = self.generate_summary(&operations, total_duration, &optimization_suggestions);
+        let summary = Self::generate_summary(
+            &operations,
+            &latency_metrics,
+            memory_metrics.as_ref(),
+            &optimization_suggestions,
+        );
 
         let results = ProfileResults {
             session_id: session_id.to_string(),
@@ -254,6 +380,8 @@ impl Profiler {
             latency_metrics,
             throughput_metrics,
             memory_metrics,
+            memory_metrics_source,
+            workload,
             optimization_suggestions,
             benchmark_results,
             summary,
@@ -269,17 +397,67 @@ impl Profiler {
         Ok(results)
     }
 
+    /// Replace the benchmark suite used when `enable_benchmarks` is set.
+    pub fn with_benchmark_suite(mut self, suite: BenchmarkSuite) -> Self {
+        self.benchmark_suite = suite;
+        self
+    }
+
+    /// Report how much work a session processed.
+    ///
+    /// Throughput cannot be measured without this: the profiler sees durations,
+    /// not tokens. Counters accumulate, so it is safe to call once per batch.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the session lock is poisoned or the session does not exist.
+    pub fn record_workload(
+        &self,
+        session_id: &str,
+        tokens: usize,
+        batches: usize,
+        items: usize,
+    ) -> Result<()> {
+        let mut sessions = self.active_sessions.lock().map_err(|e| {
+            TrustformersError::runtime_error(format!("Failed to lock sessions: {}", e))
+        })?;
+        let session = sessions.get_mut(session_id).ok_or_else(|| {
+            TrustformersError::invalid_input(format!("Session {} not found", session_id))
+        })?;
+        session.workload.tokens += tokens;
+        session.workload.batches += batches;
+        session.workload.items += items;
+        Ok(())
+    }
+
+    /// Record one measured call duration against a session.
+    fn record_sample(&self, session_id: &str, operation: &str, duration: Duration) {
+        let Ok(mut sessions) = self.active_sessions.lock() else {
+            tracing::warn!("profiler session lock poisoned; sample dropped");
+            return;
+        };
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.samples.push(OperationSample {
+                operation: operation.to_string(),
+                duration,
+            });
+        }
+    }
+
     /// Profile a function with automatic session management
     pub fn profile_function<F, R>(&self, name: &str, f: F) -> Result<(R, ProfileResults)>
     where
         F: FnOnce() -> R,
     {
         let session_id = self.start_session(name)?;
-        let _guard = self.core_profiler.start_operation(name);
+        let guard = self.core_profiler.start_operation(name);
 
+        let started = Instant::now();
         let result = f();
+        let elapsed = started.elapsed();
 
-        drop(_guard);
+        drop(guard);
+        self.record_sample(&session_id, name, elapsed);
         let profile_results = self.end_session(&session_id)?;
 
         Ok((result, profile_results))
@@ -301,11 +479,14 @@ impl Profiler {
         F: std::future::Future<Output = R>,
     {
         let session_id = self.start_session(name)?;
-        let _guard = self.core_profiler.start_operation(name);
+        let guard = self.core_profiler.start_operation(name);
 
+        let started = Instant::now();
         let result = f.await;
+        let elapsed = started.elapsed();
 
-        drop(_guard);
+        drop(guard);
+        self.record_sample(&session_id, name, elapsed);
         let profile_results = self.end_session(&session_id)?;
 
         Ok((result, profile_results))
@@ -316,7 +497,11 @@ impl Profiler {
         get_global_profiler()
     }
 
-    /// Start a named operation within a session, recording its beginning
+    /// Mark the beginning of a named operation within a session.
+    ///
+    /// The instant is stored and consumed by [`Profiler::end_operation`], which
+    /// records the real elapsed duration. Calling `start_operation` twice for
+    /// the same name simply restarts the clock.
     ///
     /// `_metadata` is accepted for API compatibility and reserved for future use.
     pub fn start_operation(
@@ -325,25 +510,75 @@ impl Profiler {
         op_name: &str,
         _metadata: Option<HashMap<String, String>>,
     ) {
-        let key = format!("{}::{}", session_id, op_name);
-        // start_operation returns a guard that records the operation when dropped
-        let _guard = self.core_profiler.start_operation(&key);
-        // Guard dropped here — records a zero-duration begin event for the operation.
+        let Ok(mut sessions) = self.active_sessions.lock() else {
+            tracing::warn!("profiler session lock poisoned; operation start dropped");
+            return;
+        };
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.in_flight.insert(op_name.to_string(), Instant::now());
+            let key = format!("{}::{}", session_id, op_name);
+            let guard = self.core_profiler.start_operation(&key);
+            if let Ok(mut guards) = self.operation_guards.lock() {
+                guards.insert(key, guard);
+            }
+        }
     }
 
-    /// End a named operation within a session, recording its completion
+    /// End a named operation within a session and record its measured duration.
+    ///
+    /// Does nothing when the operation was never started — no duration can be
+    /// invented for it.
     pub fn end_operation(&self, session_id: &str, op_name: &str) {
-        let key = format!("{}::end::{}", session_id, op_name);
-        let _guard = self.core_profiler.start_operation(&key);
-        // Guard dropped here — records the end event.
+        let Ok(mut sessions) = self.active_sessions.lock() else {
+            tracing::warn!("profiler session lock poisoned; operation end dropped");
+            return;
+        };
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let Some(started) = session.in_flight.remove(op_name) else {
+            tracing::debug!(
+                operation = op_name,
+                "end_operation called without a matching start_operation"
+            );
+            return;
+        };
+        let elapsed = started.elapsed();
+        session.samples.push(OperationSample {
+            operation: op_name.to_string(),
+            duration: elapsed,
+        });
+        drop(sessions);
+
+        // Dropping the guard records the same interval in the core profiler's
+        // aggregate view.
+        let key = format!("{}::{}", session_id, op_name);
+        if let Ok(mut guards) = self.operation_guards.lock() {
+            guards.remove(&key);
+        }
     }
 
-    /// Get active sessions
-    pub fn get_active_sessions(&self) -> Result<Vec<ProfileSession>> {
+    /// Snapshot of the sessions currently held by this profiler.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the session lock is poisoned.
+    pub fn get_active_sessions(&self) -> Result<Vec<ProfileSessionInfo>> {
         let sessions = self.active_sessions.lock().map_err(|e| {
             TrustformersError::runtime_error(format!("Failed to lock sessions: {}", e))
         })?;
-        Ok(sessions.values().cloned().collect())
+        Ok(sessions
+            .values()
+            .map(|s| ProfileSessionInfo {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                start_time: s.start_time,
+                end_time: s.end_time,
+                sample_count: s.samples.len(),
+                workload: s.workload,
+                completed: s.results.is_some(),
+            })
+            .collect())
     }
 
     /// Get session results
@@ -420,130 +655,187 @@ impl Profiler {
 
     // Helper methods
 
-    fn generate_latency_metrics(
-        &self,
-        operations: &HashMap<String, ProfileResult>,
-    ) -> LatencyMetrics {
-        let mut total_time = Duration::ZERO;
-        let mut operation_count = 0;
-        let mut min_time = Duration::MAX;
-        let mut max_time = Duration::ZERO;
-
-        for result in operations.values() {
-            total_time += result.total_time;
-            operation_count += result.call_count;
-            min_time = min_time.min(result.min_time);
-            max_time = max_time.max(result.max_time);
+    /// Real latency distribution over every individually measured call.
+    ///
+    /// Percentiles, median and standard deviation all come from the recorded
+    /// sample vector via [`LatencyMetrics::from_durations`]; when nothing was
+    /// measured the result is the all-zero `count: 0` default rather than a
+    /// stand-in derived from the mean.
+    fn generate_latency_metrics(durations: &[Duration], window: Duration) -> LatencyMetrics {
+        if durations.is_empty() {
+            return LatencyMetrics {
+                window_duration: window,
+                ..LatencyMetrics::default()
+            };
         }
-
-        let avg_time = if operation_count > 0 {
-            total_time / operation_count as u32
-        } else {
-            Duration::ZERO
-        };
-
         LatencyMetrics {
-            count: operations.len(),
-            mean_ms: avg_time.as_millis() as f64,
-            median_ms: avg_time.as_millis() as f64, // Simplified
-            std_dev_ms: 0.0,                        // Simplified
-            min_ms: min_time.as_millis() as f64,
-            max_ms: max_time.as_millis() as f64,
-            p50_ms: avg_time.as_millis() as f64, // 50th percentile (median)
-            p90_ms: max_time.as_millis() as f64, // Simplified
-            p95_ms: max_time.as_millis() as f64,
-            p99_ms: max_time.as_millis() as f64,
-            p999_ms: max_time.as_millis() as f64,
-            window_duration: Duration::from_secs(3600), // 1 hour window
+            window_duration: window,
+            ..LatencyMetrics::from_durations(durations)
         }
     }
 
+    /// Throughput from the workload the caller reported.
+    ///
+    /// The profiler cannot see tokens or batches, so nothing is inferred: an
+    /// unreported workload yields all-zero counters (`count`-style semantics)
+    /// instead of an invented "100 tokens per operation".
     fn generate_throughput_metrics(
-        &self,
-        operations: &HashMap<String, ProfileResult>,
+        workload: &WorkloadCounters,
         total_duration: Duration,
     ) -> ThroughputMetrics {
-        let total_operations: usize = operations.values().map(|r| r.call_count).sum();
-        let operations_per_second = if total_duration.as_secs() > 0 {
-            total_operations as f64 / total_duration.as_secs_f64()
-        } else {
-            0.0
-        };
-
-        ThroughputMetrics {
-            tokens_per_second: operations_per_second * 100.0, // Estimate 100 tokens per operation
-            batches_per_second: operations_per_second / 10.0, // Estimate 10 operations per batch
-            samples_per_second: operations_per_second,
-            avg_batch_size: 10.0,                 // Estimate
-            avg_sequence_length: 100.0,           // Estimate
-            total_tokens: total_operations * 100, // Estimate 100 tokens per operation
-            total_batches: total_operations / 10, // Estimate 10 operations per batch
+        if !workload.is_reported() || total_duration.is_zero() {
+            return ThroughputMetrics {
+                tokens_per_second: 0.0,
+                batches_per_second: 0.0,
+                samples_per_second: 0.0,
+                avg_batch_size: 0.0,
+                avg_sequence_length: 0.0,
+                total_tokens: workload.tokens,
+                total_batches: workload.batches,
+                total_duration,
+            };
+        }
+        ThroughputMetrics::calculate(
+            workload.tokens,
+            workload.batches,
+            workload.items,
             total_duration,
+        )
+    }
+
+    /// Memory metrics from the operating system, or `None`.
+    ///
+    /// Resident and virtual sizes are real readings from `sysinfo`. Allocation
+    /// and deallocation *counts* cannot be obtained this way, so they are
+    /// reported as zero and [`ProfileResults::memory_metrics_source`] records
+    /// that the numbers came from the process view — nothing here is estimated.
+    fn generate_memory_metrics(
+        peak_rss_bytes: Option<usize>,
+    ) -> (Option<MemoryMetrics>, MemoryMetricsSource) {
+        match read_process_memory() {
+            Some(p) => {
+                let peak = peak_rss_bytes.unwrap_or(p.resident_bytes).max(p.resident_bytes);
+                let mut metrics = MemoryMetrics::new(
+                    p.resident_bytes,
+                    peak,
+                    p.resident_bytes,
+                    p.virtual_bytes.max(p.resident_bytes),
+                );
+                metrics.num_allocations = 0;
+                metrics.num_deallocations = 0;
+                (Some(metrics), MemoryMetricsSource::ProcessMemory)
+            },
+            None => (None, MemoryMetricsSource::Unavailable),
         }
     }
 
-    fn generate_memory_metrics(&self) -> MemoryMetrics {
-        // In a real implementation, this would collect actual memory usage
-        MemoryMetrics {
-            current_bytes: 1024 * 1024 * 80,    // 80MB estimate
-            peak_bytes: 1024 * 1024 * 100,      // 100MB estimate
-            allocated_bytes: 1024 * 1024 * 120, // 120MB estimate
-            reserved_bytes: 1024 * 1024 * 150,  // 150MB estimate
-            num_allocations: 1000,              // Estimate
-            num_deallocations: 950,             // Estimate
-            fragmentation_percent: 5.0,         // 5% fragmentation estimate
-        }
-    }
-
+    /// Real, rule-based optimization suggestions from
+    /// [`OptimizationAdvisor::analyze`].
+    ///
+    /// Assembles an [`AnalysisContext`] from real hardware detection (see
+    /// [`detect_hardware_info`], which mirrors
+    /// [`crate::enhanced_profiler::EnhancedProfiler::detect_hardware`]'s
+    /// honest `sysinfo`/`num_cpus` pattern) and this session's real latency/
+    /// memory/throughput metrics, then runs the advisor's full rule set once
+    /// per measured operation -- so the kernel-fusion rule sees each
+    /// operation's real call count and average duration -- and once with no
+    /// specific operation, so hardware/memory-driven rules (parallelization,
+    /// gradient checkpointing, memory fragmentation, ...) still get a chance
+    /// to fire on a session that measured nothing yet. Results are
+    /// deduplicated by suggestion id, since the same rule can legitimately
+    /// fire once per operation.
+    ///
+    /// `model_graph` and `current_config` stay at their defaults (`None`/
+    /// empty): this high-level profiler has no model graph or live
+    /// configuration to hand the advisor, so rules that need either
+    /// (attention/flash-attention/quantization sizing, or "is X already
+    /// enabled") simply do not fire rather than being fed an invented graph
+    /// or config.
+    ///
+    /// # Known limitation
+    ///
+    /// The advisor's rule *preconditions* are evaluated against real
+    /// measurements (a `ParallelizationRule` suggestion means `cpu_cores`
+    /// really was read as `> 4`; a `GradientCheckpointingRule` suggestion
+    /// means peak RSS really did exceed 80% of measured system memory), but
+    /// each rule's own `expected_improvement` percentages in
+    /// `trustformers-core` are fixed per-rule constants ("Flash Attention:
+    /// -50% latency"), not something derived from this session's
+    /// measurements. Keeping Wave 4's honesty invariant means this method
+    /// does not forward those numbers: `expected_improvement` is
+    /// overwritten to all-`None` at this boundary for every suggestion
+    /// returned here, so nothing that reaches [`ProfileResults`] claims a
+    /// percentage this profiler did not itself measure or model.
     fn generate_optimization_suggestions(
         &self,
         operations: &HashMap<String, ProfileResult>,
+        latency_metrics: &LatencyMetrics,
+        memory_metrics: Option<&MemoryMetrics>,
+        throughput_metrics: &ThroughputMetrics,
     ) -> Vec<OptimizationSuggestion> {
-        // In a real implementation, this would use the OptimizationAdvisor
+        let hardware_info = detect_hardware_info();
+        let latency_metrics =
+            if latency_metrics.count > 0 { Some(latency_metrics.clone()) } else { None };
+        let throughput_metrics =
+            if throughput_metrics.total_tokens > 0 || throughput_metrics.total_batches > 0 {
+                Some(throughput_metrics.clone())
+            } else {
+                None
+            };
+
+        let build_context = |profile_results: Option<ProfileResult>| AnalysisContext {
+            model_graph: None,
+            profile_results,
+            latency_metrics: latency_metrics.clone(),
+            memory_metrics: memory_metrics.cloned(),
+            throughput_metrics: throughput_metrics.clone(),
+            hardware_info: hardware_info.clone(),
+            current_config: HashMap::new(),
+        };
+
+        // Once with no specific operation, so hardware/memory-driven rules
+        // get a chance to fire even when nothing has been profiled yet;
+        // once per measured operation, so the kernel-fusion rule sees each
+        // operation's real call count and average duration.
+        let mut contexts = vec![build_context(None)];
+        contexts.extend(operations.values().cloned().map(|op| build_context(Some(op))));
+
+        let mut seen_ids = std::collections::HashSet::new();
         let mut suggestions = Vec::new();
-
-        // Find slow operations
-        let mut sorted_ops: Vec<_> = operations.iter().collect();
-        sorted_ops.sort_by_key(|(_, item)| std::cmp::Reverse(item.total_time));
-
-        if let Some((name, result)) = sorted_ops.first() {
-            if result.total_time > Duration::from_millis(100) {
-                suggestions.push(OptimizationSuggestion {
-                    id: "slow_operation".to_string(),
-                    category: crate::core::performance::OptimizationCategory::Compute,
-                    impact: crate::core::performance::ImpactLevel::High,
-                    difficulty: crate::core::performance::Difficulty::Medium,
-                    title: format!("Optimize slow operation: {}", name),
-                    description: format!("Operation {} is taking {:.2}ms, consider optimization", name, result.total_time.as_secs_f64() * 1000.0),
-                    implementation_steps: vec![
-                        "Profile the operation in detail".to_string(),
-                        "Consider algorithmic improvements".to_string(),
-                        "Enable hardware acceleration".to_string(),
-                    ],
-                    expected_improvement: crate::core::performance::PerformanceImprovement {
-                        latency_reduction: Some(30.0),
-                        throughput_increase: Some(25.0),
-                        memory_reduction: Some(10.0),
-                        other_metrics: std::collections::HashMap::new(),
-                    },
-                    code_examples: Some(vec![crate::core::performance::CodeExample {
-                        language: "rust".to_string(),
-                        code: format!("// Optimize {} operation\n// Consider using GPU acceleration or kernel fusion", name),
-                        description: "Example optimization approach".to_string(),
-                    }]),
-                    warnings: vec![],
-                    related_suggestions: vec![],
-                });
+        for context in &contexts {
+            match self.advisor.analyze(context) {
+                Ok(report) => {
+                    for mut suggestion in report.suggestions {
+                        if !seen_ids.insert(suggestion.id.clone()) {
+                            continue;
+                        }
+                        // See "Known limitation" above: these percentages are
+                        // fixed per-rule constants, not measurements this
+                        // profiler made, so they must not be reported as if
+                        // they were.
+                        suggestion.expected_improvement = PerformanceImprovement {
+                            latency_reduction: None,
+                            throughput_increase: None,
+                            memory_reduction: None,
+                            other_metrics: HashMap::new(),
+                        };
+                        suggestions.push(suggestion);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("optimization advisor analysis failed: {e}");
+                },
             }
         }
 
         suggestions
     }
 
+    /// Summary derived entirely from the measurements above.
     fn generate_summary(
-        &self,
         operations: &HashMap<String, ProfileResult>,
-        total_duration: Duration,
+        latency: &LatencyMetrics,
+        memory: Option<&MemoryMetrics>,
         suggestions: &[OptimizationSuggestion],
     ) -> ProfileSummary {
         let total_operations = operations.len();
@@ -566,11 +858,34 @@ impl Profiler {
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "none".to_string());
 
-        // Simple scoring algorithm
-        let memory_efficiency = 85.0; // Estimate
-        let performance_score = if total_time.as_millis() < 100 { 90.0 } else { 60.0 };
-        let bottlenecks_found = suggestions.len();
-        let optimization_potential = suggestions.len() as f64 * 10.0;
+        // Resident bytes over reserved address space: a measured ratio, not a
+        // score. `None` when no memory source answered.
+        let memory_efficiency = memory.and_then(|m| {
+            if m.reserved_bytes == 0 {
+                None
+            } else {
+                Some((m.current_bytes as f64 / m.reserved_bytes as f64) * 100.0)
+            }
+        });
+
+        // Latency consistency: how close the tail is to the median.
+        let performance_score = if latency.count == 0 || latency.p99_ms <= 0.0 {
+            None
+        } else {
+            Some((latency.p50_ms / latency.p99_ms * 100.0).clamp(0.0, 100.0))
+        };
+
+        // Share of measured time attributable to operations a suggestion names.
+        let optimization_potential = if total_time.is_zero() {
+            None
+        } else {
+            let flagged: Duration = operations
+                .iter()
+                .filter(|(name, _)| suggestions.iter().any(|s| s.title.contains(name.as_str())))
+                .map(|(_, r)| r.total_time)
+                .sum();
+            Some(flagged.as_secs_f64() / total_time.as_secs_f64() * 100.0)
+        };
 
         ProfileSummary {
             total_operations,
@@ -580,14 +895,29 @@ impl Profiler {
             fastest_operation,
             memory_efficiency,
             performance_score,
-            bottlenecks_found,
+            bottlenecks_found: suggestions.len(),
             optimization_potential,
         }
     }
 
+    /// Run the configured benchmark suite.
+    ///
+    /// The suite needs a model to benchmark; the high-level profiler has none,
+    /// so instead of pretending, this reports the suite's own (initially empty)
+    /// result set and tells the caller how to feed it. Benchmarks are opt-in
+    /// (`enable_benchmarks`), so this path is never silently taken.
     fn run_benchmarks(&self) -> Result<Vec<BenchmarkResult>> {
-        // In a real implementation, this would run actual benchmarks
-        Ok(vec![])
+        let results = self.benchmark_suite.results().to_vec();
+        if results.is_empty() {
+            return Err(TrustformersError::invalid_operation(
+                "benchmarking was enabled but no benchmark has been run: call \
+                 `BenchmarkSuite::benchmark_inference` on a model and pass the suite in via \
+                 `Profiler::with_benchmark_suite` before ending the session"
+                    .to_string(),
+            )
+            .into());
+        }
+        Ok(results)
     }
 
     fn save_results(&self, results: &ProfileResults) -> Result<()> {
@@ -628,8 +958,8 @@ impl Profiler {
     <div class="section">
         <h2>Summary</h2>
         <div class="metric">Operations: {}</div>
-        <div class="metric">Performance Score: {:.1}</div>
-        <div class="metric">Memory Efficiency: {:.1}%</div>
+        <div class="metric">Latency consistency: {}</div>
+        <div class="metric">Memory efficiency: {}</div>
         <div class="metric">Bottlenecks: {}</div>
     </div>
 
@@ -652,8 +982,16 @@ impl Profiler {
             results.session_id,
             results.total_duration.as_secs_f64() * 1000.0,
             results.summary.total_operations,
-            results.summary.performance_score,
-            results.summary.memory_efficiency,
+            results
+                .summary
+                .performance_score
+                .map(|v| format!("{:.1}", v))
+                .unwrap_or_else(|| "not measured".to_string()),
+            results
+                .summary
+                .memory_efficiency
+                .map(|v| format!("{:.1}%", v))
+                .unwrap_or_else(|| "not measured".to_string()),
             results.summary.bottlenecks_found,
             results
                 .operations
@@ -701,6 +1039,116 @@ impl Default for Profiler {
     fn default() -> Self {
         Self::build(ProfilerConfig::default())
     }
+}
+
+/// Read-only snapshot of a profiling session.
+#[derive(Debug, Clone)]
+pub struct ProfileSessionInfo {
+    /// Session id.
+    pub id: String,
+    /// Session name.
+    pub name: String,
+    /// When the session started.
+    pub start_time: Instant,
+    /// When the session ended, if it has.
+    pub end_time: Option<Instant>,
+    /// Number of individually measured call durations recorded so far.
+    pub sample_count: usize,
+    /// Workload counters reported for this session.
+    pub workload: WorkloadCounters,
+    /// Whether results have been generated for this session.
+    pub completed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Real hardware and memory sources
+// ---------------------------------------------------------------------------
+
+/// Real hardware detection for the optimization advisor's [`AnalysisContext`].
+///
+/// Mirrors [`crate::enhanced_profiler::EnhancedProfiler::detect_hardware`]'s
+/// honest pattern: CPU model, core count and system memory are real
+/// `sysinfo`/`num_cpus` readings; SIMD capability flags come from
+/// [`trustformers_core::kernels::SIMDCpuFeatures::detect`]'s real
+/// `is_x86_feature_detected!`/`is_aarch64_feature_detected!` probes -- only
+/// features the running CPU actually reports are listed. No pure-Rust GPU
+/// enumeration is linked into this crate, so `gpu_model` and `gpu_memory_mb`
+/// stay honestly `None` rather than an invented device.
+fn detect_hardware_info() -> HardwareInfo {
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_all();
+    system.refresh_memory();
+
+    let cpu_cores = sysinfo::System::physical_core_count().unwrap_or_else(num_cpus::get);
+    let cpu_model = system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_string())
+        .filter(|brand| !brand.is_empty());
+    let system_memory_mb = (system.total_memory() / (1024 * 1024)) as usize;
+
+    let features = trustformers_core::kernels::SIMDCpuFeatures::detect();
+    let mut simd_capabilities = Vec::new();
+    for (present, name) in [
+        (
+            features.avx512f && features.avx512vl && features.avx512bw && features.avx512dq,
+            "avx512",
+        ),
+        (features.avx2, "avx2"),
+        (features.avx, "avx"),
+        (features.fma, "fma"),
+        (features.sse4_2, "sse4.2"),
+        (features.sse4_1, "sse4.1"),
+        (features.sse3, "sse3"),
+        (features.sse2, "sse2"),
+        (features.neon, "neon"),
+        (features.sve2, "sve2"),
+        (features.sve, "sve"),
+        (features.rvv, "rvv"),
+    ] {
+        if present {
+            simd_capabilities.push(name.to_string());
+        }
+    }
+
+    HardwareInfo {
+        cpu_model,
+        cpu_cores,
+        // No pure-Rust GPU enumeration is linked into this crate: an absent
+        // reading is the honest answer, not an invented device.
+        gpu_model: None,
+        gpu_memory_mb: None,
+        system_memory_mb,
+        simd_capabilities,
+    }
+}
+
+/// Operating-system view of this process's memory.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessMemory {
+    /// Resident set size in bytes.
+    pub resident_bytes: usize,
+    /// Virtual (reserved) address space in bytes.
+    pub virtual_bytes: usize,
+}
+
+/// Read this process's memory usage from the operating system.
+///
+/// Returns `None` when the platform does not expose the current process (for
+/// example inside a sandbox that hides `/proc`), so callers can say "unknown"
+/// rather than report a placeholder.
+pub fn read_process_memory() -> Option<ProcessMemory> {
+    static SYSTEM: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
+
+    let pid = sysinfo::get_current_pid().ok()?;
+    let system = SYSTEM.get_or_init(|| Mutex::new(sysinfo::System::new()));
+    let mut system = system.lock().ok()?;
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    let process = system.process(pid)?;
+    Some(ProcessMemory {
+        resident_bytes: process.memory() as usize,
+        virtual_bytes: process.virtual_memory() as usize,
+    })
 }
 
 /// Export format for profiling results
@@ -762,6 +1210,176 @@ mod tests {
     }
 
     #[test]
+    fn test_uptime_advisor_and_metrics_tracker_are_reachable() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        // Real reads of previously write-only fields: `uptime` reports a
+        // real, non-negative elapsed duration; `advisor`/`metrics_tracker`
+        // return the actual instances the profiler was built with.
+        let _ = profiler.uptime();
+        assert_eq!(
+            profiler.metrics_tracker().latency_metrics().count,
+            0,
+            "a freshly built tracker has recorded nothing yet"
+        );
+        // `OptimizationAdvisor` exposes no introspectable state of its own;
+        // reaching it without panicking is the contract here.
+        let _ = profiler.advisor();
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_does_not_fabricate_improvement_numbers() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        // `call_count > 100` and `avg_time < 1ms` deterministically satisfies
+        // the real `KernelFusionRule`'s precondition regardless of which
+        // machine runs this test -- unlike e.g. `ParallelizationRule`, whose
+        // firing depends on the real number of CPU cores this test happens
+        // to run on. This keeps the assertion below meaningful (a non-empty,
+        // reproducible suggestion list) without hardcoding a total count
+        // that some other, environment-dependent rule could also affect.
+        let mut frequent_op = ProfileResult::new("frequent_op".to_string());
+        frequent_op.call_count = 150;
+        frequent_op.avg_time = Duration::from_micros(500);
+        let mut operations = HashMap::new();
+        operations.insert("frequent_op".to_string(), frequent_op);
+
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            None,
+            &throughput_metrics,
+        );
+
+        assert!(
+            suggestions.iter().any(|s| s.id == "kernel_fusion"),
+            "a frequently-called sub-millisecond operation should trigger the real, \
+             rule-based kernel-fusion suggestion, not an empty list"
+        );
+        // Whatever the real advisor produced on this machine (which rules
+        // beyond kernel-fusion fire depends on real, environment-specific
+        // measurements like CPU core count), none of it may carry a
+        // percentage this profiler did not itself measure or model.
+        for suggestion in &suggestions {
+            let improvement = &suggestion.expected_improvement;
+            assert_eq!(
+                improvement.latency_reduction, None,
+                "no measurement or model backs a specific percentage for suggestion \
+                 {:?}; it must not be fabricated",
+                suggestion.id
+            );
+            assert_eq!(improvement.throughput_increase, None);
+            assert_eq!(improvement.memory_reduction, None);
+        }
+    }
+
+    #[test]
+    fn test_detect_hardware_info_reports_real_values() {
+        // Mirrors `enhanced_profiler`'s own
+        // `hardware_detection_reports_real_values` test: this must be a real
+        // sysinfo/num_cpus reading, not a hardcoded stand-in.
+        let hardware = detect_hardware_info();
+        assert!(hardware.cpu_cores > 0, "a running process has CPU cores");
+        assert!(
+            hardware.system_memory_mb > 0,
+            "installed memory must be a real reading"
+        );
+        assert!(
+            hardware.gpu_model.is_none() && hardware.gpu_memory_mb.is_none(),
+            "no pure-Rust GPU enumeration is linked in, so no device may be invented"
+        );
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_kernel_fusion_requires_the_real_precondition() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        // Only 3 calls and a multi-millisecond average: does not satisfy
+        // `KernelFusionRule`'s real precondition (`call_count > 100 &&
+        // avg_time < 1ms`), so the rule must not fire for it. This is the
+        // negative counterpart to the kernel-fusion assertion in
+        // `test_generate_optimization_suggestions_does_not_fabricate_improvement_numbers`,
+        // proving the advisor is gating on the operation's real measurements
+        // rather than firing unconditionally.
+        let mut infrequent_op = ProfileResult::new("infrequent_op".to_string());
+        infrequent_op.call_count = 3;
+        infrequent_op.avg_time = Duration::from_millis(5);
+        let mut operations = HashMap::new();
+        operations.insert("infrequent_op".to_string(), infrequent_op);
+
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            None,
+            &throughput_metrics,
+        );
+
+        assert!(
+            !suggestions.iter().any(|s| s.id == "kernel_fusion"),
+            "an operation that does not satisfy the real kernel-fusion precondition must \
+             not produce a kernel-fusion suggestion"
+        );
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_reacts_to_real_measured_memory_pressure() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        let operations = HashMap::new();
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+        // A peak far beyond any real machine's installed memory guarantees
+        // `peak > 80% of detected system memory` regardless of which
+        // machine runs this test, so the real `GradientCheckpointingRule`
+        // fires. Before this fix, `memory_metrics` was not even a parameter
+        // this function accepted -- the advisor was never called at all, so
+        // this scenario could not previously be exercised.
+        let memory_metrics = MemoryMetrics::new(1024, usize::MAX / 4, 1024, usize::MAX / 4);
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            Some(&memory_metrics),
+            &throughput_metrics,
+        );
+
+        assert!(
+            suggestions.iter().any(|s| s.id == "gradient_checkpointing"),
+            "a session's real measured peak memory must reach the advisor's \
+             AnalysisContext and be able to trigger the real memory-pressure rule"
+        );
+    }
+
+    #[test]
     fn test_session_management() {
         let profiler = Profiler::new().expect("operation failed in test");
 
@@ -808,6 +1426,136 @@ mod tests {
         // Test CSV generation
         let csv = profiler.generate_csv_report(&results);
         assert!(csv.contains("Operation,Calls"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the removed placeholder metrics.
+    //
+    // `generate_latency_metrics` used to set `median = mean`, `std_dev = 0.0`
+    // and `p90 = p95 = p99 = p999 = max`; `generate_memory_metrics` returned
+    // seven hardcoded constants; `generate_throughput_metrics` multiplied the
+    // operation rate by 100 "tokens per operation". Each test below fails
+    // against that code.
+    // -----------------------------------------------------------------------
+
+    /// Percentiles must come from the real sample distribution.
+    #[test]
+    fn latency_percentiles_are_computed_from_real_samples() {
+        let profiler = Profiler::new().expect("profiler should build");
+        let session_id = profiler.start_session("percentiles").expect("session");
+
+        // Three deliberately different durations.
+        for delay_ms in [1u64, 5, 40] {
+            profiler.start_operation(&session_id, "step", None);
+            sleep(Duration::from_millis(delay_ms));
+            profiler.end_operation(&session_id, "step");
+        }
+
+        let results = profiler.end_session(&session_id).expect("results");
+        let latency = &results.latency_metrics;
+
+        assert_eq!(latency.count, 3, "every measured call must be counted");
+        assert!(
+            latency.std_dev_ms > 0.0,
+            "a spread of 1ms/5ms/40ms cannot have zero standard deviation"
+        );
+        assert!(
+            latency.median_ms < latency.max_ms,
+            "median {} must be below max {} for this sample set",
+            latency.median_ms,
+            latency.max_ms
+        );
+        assert!(
+            (latency.median_ms - latency.mean_ms).abs() > f64::EPSILON,
+            "median must be the middle sample, not a copy of the mean"
+        );
+        assert!(
+            latency.p50_ms <= latency.p90_ms && latency.p90_ms <= latency.p99_ms,
+            "percentiles must be monotonic"
+        );
+        assert!(
+            latency.window_duration <= results.total_duration,
+            "the reported window must be the real session window, not a fixed hour"
+        );
+        assert!(
+            latency.window_duration != Duration::from_secs(3600),
+            "the window must not be the old hardcoded one-hour value"
+        );
+    }
+
+    /// Unreported workload must not be turned into invented token counts.
+    #[test]
+    fn throughput_is_zero_until_a_workload_is_reported() {
+        let profiler = Profiler::new().expect("profiler should build");
+        let session_id = profiler.start_session("throughput").expect("session");
+        profiler.start_operation(&session_id, "step", None);
+        sleep(Duration::from_millis(2));
+        profiler.end_operation(&session_id, "step");
+        let results = profiler.end_session(&session_id).expect("results");
+        assert_eq!(
+            results.throughput_metrics.total_tokens, 0,
+            "no caller reported any tokens, so none may be claimed"
+        );
+        assert_eq!(results.throughput_metrics.tokens_per_second, 0.0);
+
+        let session_id = profiler.start_session("throughput_reported").expect("session");
+        profiler.record_workload(&session_id, 512, 4, 16).expect("record workload");
+        sleep(Duration::from_millis(2));
+        let results = profiler.end_session(&session_id).expect("results");
+        assert_eq!(results.throughput_metrics.total_tokens, 512);
+        assert!(results.throughput_metrics.tokens_per_second > 0.0);
+        assert_eq!(results.workload.batches, 4);
+    }
+
+    /// Memory metrics must be a real reading, tagged with their source.
+    #[test]
+    fn memory_metrics_are_measured_not_constant() {
+        let profiler = Profiler::new().expect("profiler should build");
+        let session_id = profiler.start_session("memory").expect("session");
+        let results = profiler.end_session(&session_id).expect("results");
+
+        match results.memory_metrics_source {
+            MemoryMetricsSource::ProcessMemory => {
+                let memory = results.memory_metrics.expect("a source implies metrics");
+                assert_ne!(
+                    memory.current_bytes,
+                    1024 * 1024 * 80,
+                    "80MB was the old hardcoded value"
+                );
+                assert_ne!(memory.peak_bytes, 1024 * 1024 * 100);
+                assert_ne!(memory.num_allocations, 1000);
+                assert_eq!(
+                    memory.num_allocations, 0,
+                    "the process view cannot count allocations, so it must report none"
+                );
+                assert!(
+                    memory.current_bytes > 0,
+                    "a live process has resident memory"
+                );
+            },
+            MemoryMetricsSource::Unavailable => {
+                assert!(
+                    results.memory_metrics.is_none(),
+                    "an unavailable source must not carry numbers"
+                );
+            },
+        }
+    }
+
+    /// Benchmarks must not silently succeed with an empty result set.
+    #[test]
+    fn enabled_benchmarks_without_a_run_report_an_error() {
+        let profiler = Profiler::with_config(ProfilerConfig {
+            enable_benchmarks: true,
+            ..ProfilerConfig::default()
+        })
+        .expect("profiler should build");
+        let session_id = profiler.start_session("benchmarks").expect("session");
+        let result = profiler.end_session(&session_id);
+        assert!(
+            result.is_err(),
+            "returning `Some(vec![])` would claim benchmarks ran when none did"
+        );
     }
 
     #[test]

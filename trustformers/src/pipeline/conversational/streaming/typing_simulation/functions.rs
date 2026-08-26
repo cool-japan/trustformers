@@ -2,13 +2,17 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::*;
-use std::time::{Duration, Instant};
+// Every symbol below is consumed exclusively by `mod tests`; gated so a
+// non-test build carries no unused-import warnings for test-only imports.
+#[cfg(test)]
+use std::time::Duration;
 
+#[cfg(test)]
 use super::types::{
     PerformanceTracker, TypingCharacteristics, TypingEvent, TypingEventType, TypingPattern,
     TypingPatterns, TypingPersonality,
 };
+#[cfg(test)]
 use super::types_3::TypingSimulator;
 
 #[cfg(test)]
@@ -475,6 +479,59 @@ mod tests {
         assert!(summary.efficiency_score >= 0.0 && summary.efficiency_score <= 1.0);
         assert!(summary.consistency_score >= 0.0 && summary.consistency_score <= 1.0);
         assert!(summary.adaptability_score >= 0.0 && summary.adaptability_score <= 1.0);
+        // With no recorded timings yet, every score is the neutral default.
+        assert_eq!(summary.efficiency_score, 0.5);
+        assert_eq!(summary.consistency_score, 0.5);
+        assert_eq!(summary.adaptability_score, 0.5);
+    }
+    /// Regression test: `analyze_patterns` used to return hardcoded constants
+    /// (0.85 / 0.92 / 0.78) regardless of measured performance, and
+    /// `burst_generation_times` was written nowhere. It must now derive
+    /// real, different scores from recorded timing data.
+    #[test]
+    fn test_performance_tracker_analyze_patterns_reflects_recorded_timings() {
+        let fast_tracker = PerformanceTracker::new();
+        for _ in 0..10 {
+            fast_tracker.record_burst_generation_time(std::time::Duration::from_millis(1));
+        }
+        let fast_summary = fast_tracker.analyze_patterns();
+
+        let slow_tracker = PerformanceTracker::new();
+        for _ in 0..10 {
+            slow_tracker.record_burst_generation_time(std::time::Duration::from_millis(200));
+        }
+        let slow_summary = slow_tracker.analyze_patterns();
+
+        assert!(
+            fast_summary.efficiency_score > slow_summary.efficiency_score,
+            "consistently fast bursts ({}) must score more efficient than consistently slow \
+             ones ({})",
+            fast_summary.efficiency_score,
+            slow_summary.efficiency_score
+        );
+
+        let erratic_tracker = PerformanceTracker::new();
+        for ms in [1u64, 200, 5, 150, 2, 190] {
+            erratic_tracker.record_burst_generation_time(std::time::Duration::from_millis(ms));
+        }
+        let erratic_summary = erratic_tracker.analyze_patterns();
+        assert!(
+            erratic_summary.consistency_score < fast_summary.consistency_score,
+            "widely varying burst times ({}) must score less consistent than uniform ones ({})",
+            erratic_summary.consistency_score,
+            fast_summary.consistency_score
+        );
+
+        let slow_analysis_tracker = PerformanceTracker::new();
+        slow_analysis_tracker.record_burst_generation_time(std::time::Duration::from_millis(10));
+        slow_analysis_tracker.record_analysis_time(std::time::Duration::from_millis(90));
+        let slow_analysis_summary = slow_analysis_tracker.analyze_patterns();
+        assert!(
+            slow_analysis_summary.adaptability_score < 0.5,
+            "analysis time dominating generation time must lower adaptability below the neutral \
+             default: {}",
+            slow_analysis_summary.adaptability_score
+        );
     }
     #[test]
     fn test_typing_characteristics_slow_and_careful_has_low_speed() {

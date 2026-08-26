@@ -145,7 +145,10 @@ fn test_gpu_manager_error_device_not_found() {
 
 #[test]
 fn test_gpu_manager_error_insufficient_memory() {
-    let err = GpuManagerError::InsufficientMemory { required_mb: 8192, available_mb: 4096 };
+    let err = GpuManagerError::InsufficientMemory {
+        required_mb: 8192,
+        available_mb: 4096,
+    };
     let msg = format!("{}", err);
     assert!(msg.contains("8192"));
 }

@@ -6,7 +6,7 @@ use super::types::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -50,14 +50,8 @@ pub struct RateLimiter {
 #[derive(Debug)]
 
 pub struct ChannelRateLimiter {
-    /// Channel name
-    channel_name: String,
-
     /// Token bucket for rate limiting
     token_bucket: Arc<Mutex<TokenBucket>>,
-
-    /// Channel configuration
-    config: ChannelConfig,
 
     /// Channel statistics
     stats: Arc<ChannelRateLimitStats>,
@@ -91,9 +85,6 @@ pub struct TokenBucket {
 
     /// Last refill timestamp
     last_refill: DateTime<Utc>,
-
-    /// Bucket metadata
-    metadata: HashMap<String, String>,
 }
 
 /// Priority queue for managing throttled notifications
@@ -136,32 +127,34 @@ pub struct ThrottledNotification {
 #[derive(Debug)]
 
 pub struct AdaptiveRateController {
-    /// Current load metrics
-    load_metrics: Arc<RwLock<LoadMetrics>>,
-
-    /// Rate adjustment history
-    adjustment_history: Arc<Mutex<VecDeque<RateAdjustment>>>,
-
     /// Controller configuration
     config: AdaptiveRateConfig,
 }
 
-/// Load metrics for adaptive rate control
+/// Load metrics for adaptive rate control.
+///
+/// Every field is read from live rate-limiter state or from the host; the
+/// controller refuses to produce a `LoadMetrics` at all before the limiter has
+/// admitted or throttled anything (see `AdaptiveRateController::collect_metrics`).
 #[derive(Debug, Default)]
 pub struct LoadMetrics {
-    /// Current queue depth
+    /// Combined depth of the four throttled-notification priority queues.
     pub queue_depth: usize,
 
-    /// Average processing latency
-    pub avg_latency_ms: f32,
+    /// Mean time a throttled notification has waited, in milliseconds, as
+    /// accumulated by the throttling worker. This is queueing delay, not
+    /// end-to-end delivery latency.
+    pub avg_throttling_wait_ms: f32,
 
-    /// Success rate
-    pub success_rate: f32,
+    /// Share of global rate-limit checks that were admitted rather than
+    /// throttled, over the limiter's lifetime.
+    pub admission_rate: f32,
 
-    /// System load
-    pub system_load: f32,
+    /// Host one-minute load average divided by the CPU count, when the platform
+    /// reports one. `None` where `sysinfo` cannot read a load average.
+    pub normalized_system_load: Option<f32>,
 
-    /// Last update timestamp
+    /// Timestamp at which these figures were read.
     pub last_update: DateTime<Utc>,
 }
 
@@ -597,6 +590,7 @@ impl RateLimiter {
         let adaptive_controller = self.adaptive_controller.clone();
         let global_limiter = self.global_limiter.clone();
         let channel_limiters = self.channel_limiters.clone();
+        let priority_queue = self.priority_queue.clone();
         let stats = self.stats.clone();
 
         let handle = tokio::spawn(async move {
@@ -605,11 +599,20 @@ impl RateLimiter {
             loop {
                 interval.tick().await;
 
-                // Collect current metrics
-                let metrics = adaptive_controller.collect_metrics().await;
+                // Collect current metrics from live limiter state.
+                let Some(metrics) = adaptive_controller
+                    .collect_metrics(&global_limiter, &priority_queue, &stats)
+                    .await
+                else {
+                    // The limiter has not been exercised yet; nothing to adapt to.
+                    continue;
+                };
+                let current_rate = global_limiter.current_rate_per_minute();
 
                 // Determine if rate adjustment is needed
-                if let Some(adjustment) = adaptive_controller.calculate_adjustment(&metrics).await {
+                if let Some(adjustment) =
+                    adaptive_controller.calculate_adjustment(&metrics, current_rate).await
+                {
                     // Apply adjustment to global limiter
                     global_limiter.adjust_rate(adjustment.new_rate).await;
 
@@ -654,7 +657,7 @@ impl RateLimiter {
 }
 
 impl ChannelRateLimiter {
-    pub async fn new(channel_name: String, config: ChannelConfig) -> Result<Self> {
+    pub async fn new(_channel_name: String, config: ChannelConfig) -> Result<Self> {
         let rate_limit = config.rate_limit.unwrap_or(60) as f64; // Default to 60 per minute
         let capacity = rate_limit;
         let refill_rate = rate_limit / 60.0; // Convert to tokens per second
@@ -664,13 +667,10 @@ impl ChannelRateLimiter {
             capacity,
             refill_rate,
             last_refill: Utc::now(),
-            metadata: HashMap::new(),
         };
 
         Ok(Self {
-            channel_name,
             token_bucket: Arc::new(Mutex::new(token_bucket)),
-            config,
             stats: Arc::new(ChannelRateLimitStats::default()),
         })
     }
@@ -737,7 +737,6 @@ impl GlobalRateLimiter {
             capacity,
             refill_rate,
             last_refill: Utc::now(),
-            metadata: HashMap::new(),
         };
 
         Ok(Self {
@@ -785,6 +784,27 @@ impl GlobalRateLimiter {
 
         self.stats.current_global_rate.store(new_rate as f32, Ordering::Relaxed);
     }
+
+    /// The rate the token bucket is refilling at right now, per minute.
+    pub fn current_rate_per_minute(&self) -> f64 {
+        let bucket = self.token_bucket.lock();
+        bucket.refill_rate * 60.0
+    }
+
+    /// Share of global checks admitted rather than throttled.
+    ///
+    /// `None` until the limiter has seen its first check: a limiter that has
+    /// never been asked has no admission rate, and reporting 1.0 would be
+    /// indistinguishable from a limiter that admitted everything.
+    pub fn admission_rate(&self) -> Option<f32> {
+        let admitted = self.stats.total_requests.load(Ordering::Relaxed);
+        let throttled = self.stats.total_throttled.load(Ordering::Relaxed);
+        let total = admitted + throttled;
+        if total == 0 {
+            return None;
+        }
+        Some(admitted as f32 / total as f32)
+    }
 }
 
 impl Default for PriorityQueue {
@@ -807,8 +827,6 @@ impl PriorityQueue {
 impl AdaptiveRateController {
     pub async fn new() -> Result<Self> {
         Ok(Self {
-            load_metrics: Arc::new(RwLock::new(LoadMetrics::default())),
-            adjustment_history: Arc::new(Mutex::new(VecDeque::new())),
             config: AdaptiveRateConfig {
                 enabled: true,
                 min_rate: 10.0,
@@ -819,33 +837,58 @@ impl AdaptiveRateController {
         })
     }
 
-    pub async fn collect_metrics(&self) -> LoadMetrics {
-        // In a real implementation, this would collect actual system metrics
-        LoadMetrics {
-            queue_depth: 0,
-            avg_latency_ms: 100.0,
-            success_rate: 0.95,
-            system_load: 0.6,
+    /// Read the current load from the live limiter state and the host.
+    ///
+    /// Returns `None` before the global limiter has seen its first check: with
+    /// no admissions and no throttles there is no load to describe, and the
+    /// controller must not adjust a rate on invented numbers.
+    pub async fn collect_metrics(
+        &self,
+        global_limiter: &GlobalRateLimiter,
+        priority_queue: &Mutex<PriorityQueue>,
+        stats: &RateLimitingStats,
+    ) -> Option<LoadMetrics> {
+        let admission_rate = global_limiter.admission_rate()?;
+        let queue_depth = {
+            let queue = priority_queue.lock();
+            queue.emergency_queue.len()
+                + queue.high_priority.len()
+                + queue.normal_priority.len()
+                + queue.low_priority.len()
+        };
+        Some(LoadMetrics {
+            queue_depth,
+            avg_throttling_wait_ms: stats.avg_throttling_duration_ms.load(Ordering::Relaxed),
+            admission_rate,
+            normalized_system_load: normalized_load_average(),
             last_update: Utc::now(),
-        }
+        })
     }
 
-    pub async fn calculate_adjustment(&self, metrics: &LoadMetrics) -> Option<RateAdjustment> {
-        // TODO: Added f64 type annotation to fix E0689 ambiguous numeric type
-        let current_rate: f64 = 100.0; // Placeholder - would get from actual rate limiter
-
-        // Simple adaptive logic
-        let target_rate = if metrics.success_rate < 0.9 || metrics.avg_latency_ms > 500.0 {
-            // Decrease rate if system is struggling
+    /// Propose a new rate given the measured load and the limiter's live rate.
+    pub async fn calculate_adjustment(
+        &self,
+        metrics: &LoadMetrics,
+        current_rate: f64,
+    ) -> Option<RateAdjustment> {
+        if current_rate <= 0.0 {
+            return None;
+        }
+        let overloaded = metrics.admission_rate < 0.9
+            || metrics.avg_throttling_wait_ms > 500.0
+            || metrics.normalized_system_load.is_some_and(|load| load > 1.0);
+        let headroom = metrics.admission_rate > 0.98
+            && metrics.avg_throttling_wait_ms < 100.0
+            && metrics.queue_depth == 0
+            && metrics.normalized_system_load.is_none_or(|load| load < 0.7);
+        let target_rate = if overloaded {
             current_rate * 0.8
-        } else if metrics.success_rate > 0.98 && metrics.avg_latency_ms < 100.0 {
-            // Increase rate if system is performing well
+        } else if headroom {
             current_rate * 1.2
         } else {
             return None; // No adjustment needed
         };
 
-        // TODO: Added f64 type annotation to fix E0689 ambiguous numeric type
         let clamped_rate = target_rate.clamp(self.config.min_rate, self.config.max_rate);
 
         if (clamped_rate - current_rate).abs() > current_rate * self.config.sensitivity as f64 {
@@ -854,8 +897,14 @@ impl AdaptiveRateController {
                 old_rate: current_rate,
                 new_rate: clamped_rate,
                 reason: format!(
-                    "Adaptive adjustment based on success_rate={:.2}, latency={}ms",
-                    metrics.success_rate, metrics.avg_latency_ms
+                    "Adaptive adjustment: admission_rate={:.3}, throttling_wait={}ms,                      queue_depth={}, normalized_load={}",
+                    metrics.admission_rate,
+                    metrics.avg_throttling_wait_ms,
+                    metrics.queue_depth,
+                    metrics
+                        .normalized_system_load
+                        .map(|load| format!("{:.3}", load))
+                        .unwrap_or_else(|| "unavailable".to_string())
                 ),
                 effectiveness: None,
             })
@@ -863,4 +912,17 @@ impl AdaptiveRateController {
             None
         }
     }
+}
+
+/// Host one-minute load average divided by the CPU count.
+///
+/// `None` on platforms where `sysinfo` reports no load average (it returns a
+/// zeroed record there, which is indistinguishable from a genuinely idle host).
+fn normalized_load_average() -> Option<f32> {
+    let load = sysinfo::System::load_average();
+    if load.one <= 0.0 {
+        return None;
+    }
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    Some(load.one as f32 / cpus as f32)
 }

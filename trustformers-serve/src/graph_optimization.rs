@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Graph Optimization Module
 //!
 //! Provides comprehensive computational graph optimization capabilities for improved
@@ -195,6 +192,24 @@ pub enum AttributeValue {
     Bool(bool),
     FloatArray(Vec<f64>),
     IntArray(Vec<i64>),
+}
+
+/// A scalar operand extracted from a `Constant` node during constant folding.
+#[derive(Debug, Clone, Copy)]
+enum ScalarOperand {
+    /// Integer operand.
+    Int(i64),
+    /// Floating-point operand.
+    Float(f64),
+}
+
+impl ScalarOperand {
+    fn as_f64(self) -> f64 {
+        match self {
+            ScalarOperand::Int(i) => i as f64,
+            ScalarOperand::Float(f) => f,
+        }
+    }
 }
 
 /// Computational graph
@@ -605,24 +620,28 @@ impl GraphOptimizationService {
         Ok(improvement)
     }
 
-    /// Memory layout optimization pass
-    async fn memory_layout_optimization_pass(&self, graph: &mut ComputationGraph) -> Result<f64> {
-        let mut improvement = 0.0;
-
-        // Optimize memory access patterns
-        let memory_optimizations = self.analyze_memory_patterns(graph);
-
-        for optimization in memory_optimizations {
-            if self.apply_memory_optimization(&optimization, graph).await? {
-                improvement += 0.08; // Estimate improvement
-            }
-        }
-
-        trace!(
-            "Memory layout optimization pass completed with {:.2}% improvement",
-            improvement * 100.0
-        );
-        Ok(improvement)
+    /// Memory layout optimization pass -- not implemented.
+    ///
+    /// 0.2.1: this pass never optimised anything. It called
+    /// `analyze_memory_patterns`, which returned an empty vector
+    /// unconditionally, then would have credited itself a flat `0.08`
+    /// "estimated" improvement per optimisation applied by
+    /// `apply_memory_optimization`, which returned `Ok(false)`
+    /// unconditionally. The net effect was always `Ok(0.0)` behind two layers
+    /// of machinery that suggested real analysis. Both helpers are deleted; the
+    /// pass reports the honest zero directly so the caller's pass accounting
+    /// still adds up, and the missing capability is stated rather than implied.
+    ///
+    /// Implementing it needs a memory-access model for `ComputationGraph`
+    /// (per-node live ranges and tensor layouts), which this crate does not
+    /// have.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` matches the other optimisation passes.
+    async fn memory_layout_optimization_pass(&self, _graph: &mut ComputationGraph) -> Result<f64> {
+        trace!("Memory layout optimization pass is not implemented; contributing 0.0 improvement");
+        Ok(0.0)
     }
 
     /// Validate graph structure
@@ -832,58 +851,141 @@ impl GraphOptimizationService {
     }
 
     /// Check if constant can be folded
+    ///
+    /// A node is foldable when it is one of the four scalar arithmetic
+    /// operations and every one of its inputs is a `Constant` node. A node
+    /// with no inputs is not foldable: `Iterator::all` is vacuously true on an
+    /// empty slice, which used to make every zero-input `Add`/`Mul`/`Sub`/`Div`
+    /// look like a folding candidate.
     fn can_fold_constant(&self, node: &GraphNode, graph: &ComputationGraph) -> bool {
-        // Check if all inputs are constants
-        node.inputs.iter().all(|input_id| {
-            graph
-                .nodes
-                .get(input_id)
-                .map(|input_node| input_node.operation == Operation::Constant)
-                .unwrap_or(false)
-        }) && matches!(
-            node.operation,
-            Operation::Add | Operation::Mul | Operation::Sub | Operation::Div
-        )
+        !node.inputs.is_empty()
+            && node.inputs.iter().all(|input_id| {
+                graph
+                    .nodes
+                    .get(input_id)
+                    .map(|input_node| input_node.operation == Operation::Constant)
+                    .unwrap_or(false)
+            })
+            && matches!(
+                node.operation,
+                Operation::Add | Operation::Mul | Operation::Sub | Operation::Div
+            )
     }
 
-    /// Fold constant computation
+    /// Fold a constant computation by evaluating it.
+    ///
+    /// `Add` and `Mul` reduce over all inputs; `Sub` and `Div` fold left from
+    /// the first input, matching the usual n-ary reading of `a - b - c`.
+    /// Integer inputs stay integer — folding `Int(6) / Int(4)` to `Float(1.5)`
+    /// would silently change the node's arithmetic — and mixed inputs promote
+    /// to `Float`.
+    ///
+    /// Returns `Ok(None)`, leaving the node alone, when the operation cannot be
+    /// evaluated: an input that carries no scalar `value` attribute, a
+    /// non-scalar attribute (`FloatArray`, `String`, ...), or a division by
+    /// zero.
+    ///
+    /// ## Fixed in 0.2.1
+    ///
+    /// This used to return `AttributeValue::Float(1.0)` for *any*
+    /// `Add`/`Sub`/`Mul`/`Div` node, and the caller then replaced that node
+    /// with a `Constant` carrying the 1.0 — so running the graph optimizer
+    /// over a graph with any foldable arithmetic silently rewrote the
+    /// computation to produce the wrong numbers. It was not a missing feature
+    /// dressed as a placeholder; it was a miscompilation.
     async fn fold_constant(
         &self,
         node_id: &str,
         graph: &ComputationGraph,
     ) -> Result<Option<AttributeValue>> {
-        let node = &graph.nodes[node_id];
+        let Some(node) = graph.nodes.get(node_id) else {
+            return Ok(None);
+        };
 
-        // Simplified constant folding - in practice this would evaluate the operation
-        match &node.operation {
-            Operation::Add | Operation::Mul | Operation::Sub | Operation::Div => {
-                // Return a placeholder constant value
-                Ok(Some(AttributeValue::Float(1.0)))
-            },
-            _ => Ok(None),
+        if !matches!(
+            node.operation,
+            Operation::Add | Operation::Mul | Operation::Sub | Operation::Div
+        ) {
+            return Ok(None);
         }
+
+        // Collect the scalar value of every input, bailing out on the first
+        // input that does not carry one.
+        let mut operands: Vec<ScalarOperand> = Vec::with_capacity(node.inputs.len());
+        for input_id in &node.inputs {
+            let Some(input_node) = graph.nodes.get(input_id) else {
+                return Ok(None);
+            };
+            match input_node.attributes.get("value") {
+                Some(AttributeValue::Int(i)) => operands.push(ScalarOperand::Int(*i)),
+                Some(AttributeValue::Float(f)) => operands.push(ScalarOperand::Float(*f)),
+                _ => return Ok(None),
+            }
+        }
+
+        let Some((first, rest)) = operands.split_first() else {
+            return Ok(None);
+        };
+
+        let all_int = operands.iter().all(|o| matches!(o, ScalarOperand::Int(_)));
+        if all_int {
+            let mut acc = match first {
+                ScalarOperand::Int(i) => *i,
+                ScalarOperand::Float(_) => return Ok(None),
+            };
+            for operand in rest {
+                let ScalarOperand::Int(value) = operand else {
+                    return Ok(None);
+                };
+                acc = match node.operation {
+                    Operation::Add => match acc.checked_add(*value) {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    },
+                    Operation::Sub => match acc.checked_sub(*value) {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    },
+                    Operation::Mul => match acc.checked_mul(*value) {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    },
+                    Operation::Div => match acc.checked_div(*value) {
+                        Some(v) => v,
+                        None => return Ok(None),
+                    },
+                    _ => return Ok(None),
+                };
+            }
+            return Ok(Some(AttributeValue::Int(acc)));
+        }
+
+        let mut acc = first.as_f64();
+        for operand in rest {
+            let value = operand.as_f64();
+            acc = match node.operation {
+                Operation::Add => acc + value,
+                Operation::Sub => acc - value,
+                Operation::Mul => acc * value,
+                Operation::Div => {
+                    if value == 0.0 {
+                        return Ok(None);
+                    }
+                    acc / value
+                },
+                _ => return Ok(None),
+            };
+        }
+        if !acc.is_finite() {
+            return Ok(None);
+        }
+        Ok(Some(AttributeValue::Float(acc)))
     }
 
     /// Check if arithmetic operation can be optimized
     fn can_optimize_arithmetic(&self, node: &GraphNode, _graph: &ComputationGraph) -> bool {
         // Check for identity operations, zero multiplications, etc.
         matches!(node.operation, Operation::Add | Operation::Mul)
-    }
-
-    /// Analyze memory access patterns
-    fn analyze_memory_patterns(&self, _graph: &ComputationGraph) -> Vec<MemoryOptimization> {
-        // Simplified implementation - would analyze actual memory patterns
-        vec![]
-    }
-
-    /// Apply memory optimization
-    async fn apply_memory_optimization(
-        &self,
-        _optimization: &MemoryOptimization,
-        _graph: &mut ComputationGraph,
-    ) -> Result<bool> {
-        // Simplified implementation
-        Ok(false)
     }
 
     /// Estimate performance improvement
@@ -981,13 +1083,13 @@ impl GraphOptimizationService {
     }
 }
 
-/// Memory optimization information
-#[derive(Debug, Clone)]
-struct MemoryOptimization {
-    optimization_type: String,
-    affected_nodes: Vec<String>,
-    estimated_benefit: f64,
-}
+// 0.2.1: a `MemoryOptimization { optimization_type, affected_nodes,
+// estimated_benefit }` struct lived here alongside `analyze_memory_patterns`
+// (which returned `vec![]` unconditionally) and `apply_memory_optimization`
+// (which returned `Ok(false)` unconditionally). Nothing in this crate analyses
+// a graph's memory access pattern, so the three fields could never be read and
+// the pair of methods could never do anything. All three are deleted rather
+// than left as a memory optimiser that silently finds and applies nothing.
 
 /// Summary statistics for the optimization service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1150,5 +1252,157 @@ mod tests {
         assert!(service.can_fuse_operation(&Operation::BatchNorm));
         assert!(!service.can_fuse_operation(&Operation::Input));
         assert!(!service.can_fuse_operation(&Operation::Output));
+    }
+
+    fn empty_graph() -> ComputationGraph {
+        ComputationGraph {
+            nodes: HashMap::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            metadata: GraphMetadata {
+                name: "fold_test".to_string(),
+                version: "1.0".to_string(),
+                created_at: chrono::Utc::now(),
+                optimization_history: Vec::new(),
+            },
+        }
+    }
+
+    fn constant_node(id: &str, value: AttributeValue) -> GraphNode {
+        let mut attributes = HashMap::new();
+        attributes.insert("value".to_string(), value);
+        GraphNode {
+            id: id.to_string(),
+            operation: Operation::Constant,
+            inputs: Vec::new(),
+            output_shape: vec![1],
+            data_type: DataType::Float32,
+            attributes,
+            estimated_cost: Some(0.0),
+            memory_usage: Some(8),
+        }
+    }
+
+    fn arithmetic_node(id: &str, operation: Operation, inputs: &[&str]) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            operation,
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            output_shape: vec![1],
+            data_type: DataType::Float32,
+            attributes: HashMap::new(),
+            estimated_cost: Some(1.0),
+            memory_usage: Some(8),
+        }
+    }
+
+    /// Regression: `fold_constant` used to return `Float(1.0)` for *any*
+    /// arithmetic node, and the caller replaced the node with that constant —
+    /// silently miscompiling the graph. It must now evaluate the operation.
+    #[tokio::test]
+    async fn test_fold_constant_evaluates_integer_arithmetic() {
+        let service = GraphOptimizationService::new(GraphOptimizationConfig::default());
+        let mut graph = empty_graph();
+        graph.nodes.insert("a".to_string(), constant_node("a", AttributeValue::Int(6)));
+        graph.nodes.insert("b".to_string(), constant_node("b", AttributeValue::Int(7)));
+        graph.nodes.insert(
+            "m".to_string(),
+            arithmetic_node("m", Operation::Mul, &["a", "b"]),
+        );
+
+        let folded = service
+            .fold_constant("m", &graph)
+            .await
+            .expect("folding must not error")
+            .expect("6 * 7 is foldable");
+        match folded {
+            AttributeValue::Int(v) => assert_eq!(v, 42),
+            other => panic!("integer inputs must fold to an integer, got {other:?}"),
+        }
+    }
+
+    /// Mixed integer/float inputs promote to `Float`, and subtraction folds
+    /// left. The old implementation answered `1.0` here too.
+    #[tokio::test]
+    async fn test_fold_constant_evaluates_mixed_subtraction() {
+        let service = GraphOptimizationService::new(GraphOptimizationConfig::default());
+        let mut graph = empty_graph();
+        graph.nodes.insert(
+            "a".to_string(),
+            constant_node("a", AttributeValue::Float(10.5)),
+        );
+        graph.nodes.insert("b".to_string(), constant_node("b", AttributeValue::Int(4)));
+        graph.nodes.insert(
+            "s".to_string(),
+            arithmetic_node("s", Operation::Sub, &["a", "b"]),
+        );
+
+        let folded = service
+            .fold_constant("s", &graph)
+            .await
+            .expect("folding must not error")
+            .expect("10.5 - 4 is foldable");
+        match folded {
+            AttributeValue::Float(v) => assert!((v - 6.5).abs() < 1e-9, "got {v}"),
+            other => panic!("mixed inputs must fold to a float, got {other:?}"),
+        }
+    }
+
+    /// A division by a zero constant is not foldable; the old code replaced the
+    /// node with `1.0` regardless.
+    #[tokio::test]
+    async fn test_fold_constant_refuses_division_by_zero() {
+        let service = GraphOptimizationService::new(GraphOptimizationConfig::default());
+        let mut graph = empty_graph();
+        graph.nodes.insert(
+            "a".to_string(),
+            constant_node("a", AttributeValue::Float(1.0)),
+        );
+        graph.nodes.insert(
+            "b".to_string(),
+            constant_node("b", AttributeValue::Float(0.0)),
+        );
+        graph.nodes.insert(
+            "d".to_string(),
+            arithmetic_node("d", Operation::Div, &["a", "b"]),
+        );
+
+        assert!(service
+            .fold_constant("d", &graph)
+            .await
+            .expect("folding must not error")
+            .is_none());
+    }
+
+    /// An input constant that carries no scalar `value` attribute cannot be
+    /// folded; the old code folded it to `1.0` anyway.
+    #[tokio::test]
+    async fn test_fold_constant_refuses_valueless_input() {
+        let service = GraphOptimizationService::new(GraphOptimizationConfig::default());
+        let mut graph = empty_graph();
+        let mut bare = constant_node("a", AttributeValue::Int(1));
+        bare.attributes.clear();
+        graph.nodes.insert("a".to_string(), bare);
+        graph.nodes.insert("b".to_string(), constant_node("b", AttributeValue::Int(2)));
+        graph.nodes.insert(
+            "p".to_string(),
+            arithmetic_node("p", Operation::Add, &["a", "b"]),
+        );
+
+        assert!(service
+            .fold_constant("p", &graph)
+            .await
+            .expect("folding must not error")
+            .is_none());
+    }
+
+    /// A zero-input arithmetic node is not a folding candidate. `all()` over an
+    /// empty input list is vacuously true, so it used to be one.
+    #[test]
+    fn test_can_fold_constant_rejects_zero_input_node() {
+        let service = GraphOptimizationService::new(GraphOptimizationConfig::default());
+        let graph = empty_graph();
+        let node = arithmetic_node("orphan", Operation::Add, &[]);
+        assert!(!service.can_fold_constant(&node, &graph));
     }
 }

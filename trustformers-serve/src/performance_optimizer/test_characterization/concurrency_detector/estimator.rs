@@ -6,7 +6,7 @@
 use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -22,9 +22,6 @@ pub struct SafeConcurrencyEstimator {
 
     /// Estimation history for learning
     estimation_history: Arc<Mutex<Vec<EstimationRecord>>>,
-
-    /// Safety constraints
-    safety_constraints: Arc<RwLock<EstimationSafetyConstraints>>,
 
     /// Configuration
     config: EstimationConfig,
@@ -47,7 +44,6 @@ impl SafeConcurrencyEstimator {
             algorithms: Arc::new(Mutex::new(algorithms)),
             algorithm_performance: Arc::new(Mutex::new(HashMap::new())),
             estimation_history: Arc::new(Mutex::new(Vec::new())),
-            safety_constraints: Arc::new(RwLock::new(EstimationSafetyConstraints::default())),
             config,
         })
     }
@@ -85,16 +81,28 @@ impl SafeConcurrencyEstimator {
             safety_validation: String::new(),
         };
 
-        // Run all algorithms sequentially (trait objects can't be easily cloned for parallel execution)
-        let algorithms = self.algorithms.lock();
+        // Run every algorithm under a scoped lock, then await outside it.
+        //
+        // A `parking_lot::MutexGuard` is not `Send`, so holding one across the
+        // `.await`s below made this whole future non-`Send`. That went unnoticed
+        // while the only live caller was a shadow type that never ran this code;
+        // `manager/orchestrator.rs` spawns the real analysis with
+        // `tokio::spawn`, which requires `Send`.
+        let raw_estimations: Vec<(String, TestCharacterizationResult<usize>, Duration)> = {
+            let algorithms = self.algorithms.lock();
+            algorithms
+                .iter()
+                .map(|algorithm| {
+                    let algorithm_name = algorithm.name().to_string();
+                    let estimation_start = Instant::now();
+                    let result = algorithm.estimate_safe_concurrency(&preliminary_result);
+                    (algorithm_name, result, estimation_start.elapsed())
+                })
+                .collect()
+        };
+
         let mut estimations = Vec::new();
-
-        for algorithm in algorithms.iter() {
-            let algorithm_name = algorithm.name().to_string();
-            let estimation_start = Instant::now();
-            let result = algorithm.estimate_safe_concurrency(&preliminary_result);
-            let duration = estimation_start.elapsed();
-
+        for (algorithm_name, result, duration) in raw_estimations {
             match result {
                 Ok(estimation) => {
                     estimations.push(EstimationResult {
@@ -115,8 +123,6 @@ impl SafeConcurrencyEstimator {
                 },
             }
         }
-
-        drop(algorithms);
 
         if estimations.is_empty() {
             anyhow::bail!("All estimation algorithms failed");
@@ -254,24 +260,6 @@ impl SafeConcurrencyEstimator {
 
         // Higher consensus (lower variation) = higher factor
         (1.0 - coefficient_of_variation.min(1.0)).max(0.1)
-    }
-
-    /// Generates timeout requirements based on estimations
-    fn generate_timeout_requirements(
-        &self,
-        estimations: &[EstimationResult],
-    ) -> TimeoutRequirements {
-        let max_duration = estimations
-            .iter()
-            .map(|e| e.duration)
-            .max()
-            .unwrap_or(Duration::from_millis(100));
-
-        TimeoutRequirements {
-            estimation_timeout: max_duration * 2,
-            execution_timeout: max_duration * 10,
-            cleanup_timeout: max_duration,
-        }
     }
 
     /// Updates algorithm performance metrics

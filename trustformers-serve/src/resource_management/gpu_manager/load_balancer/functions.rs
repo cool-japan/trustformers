@@ -61,11 +61,90 @@ mod tests {
         devices.insert(0, create_test_device(0, 0.8, 8192));
         devices.insert(1, create_test_device(1, 0.2, 8192));
         devices.insert(2, create_test_device(2, 0.5, 8192));
+        // `select_least_loaded` ranks devices by the live `device_loads`
+        // reading, never by `GpuDeviceInfo::utilization_percent` (a
+        // discovery-time constant that nothing updates -- see the doc
+        // comment on `select_least_loaded`), so a realistic test must
+        // populate the same telemetry a real load balancer would.
+        load_balancer
+            .update_device_load(0, 0.8)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.2)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(2, 0.5)
+            .await
+            .expect("Update load should succeed");
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
             .expect("Operation should succeed");
         assert_eq!(selected, Some(1));
+    }
+    /// Regression: a device with no live load reading must never be
+    /// preferred over one that is genuinely measured, even at a very high
+    /// load. `test_hybrid_strategy_unmonitored_device_never_wins` locks this
+    /// invariant for the `Hybrid` combinator; this exercises the dedicated
+    /// `LeastLoaded` strategy (the default) directly, which had no
+    /// regression guard of its own before this test.
+    #[tokio::test]
+    async fn test_least_loaded_never_prefers_an_unmonitored_device() {
+        let load_balancer = GpuLoadBalancer::new();
+        // Device 1 is measured at 99% utilization -- about as bad as a real
+        // device gets. Device 0 never receives an `update_device_load` call
+        // at all.
+        load_balancer
+            .update_device_load(1, 0.99)
+            .await
+            .expect("Update load should succeed");
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        devices.insert(0, create_test_device(0, 0.0, 8192));
+        devices.insert(1, create_test_device(1, 0.0, 8192));
+        let selected = load_balancer
+            .select_optimal_device(&devices, &requirements, None)
+            .await
+            .expect("Operation should succeed");
+        assert_eq!(
+            selected,
+            Some(1),
+            "an unmonitored device must not outscore a device measured at 99% utilization"
+        );
+    }
+    /// Regression: when *no* candidate device carries a live load reading at
+    /// all, `select_least_loaded` must not resolve the choice via `HashMap`
+    /// iteration order (undisclosed, and unstable across runs of the same
+    /// process). It falls back to the lowest device id -- a documented,
+    /// deterministic choice -- which this test locks in across repeated
+    /// calls and an insertion order that does not match id order.
+    #[tokio::test]
+    async fn test_least_loaded_all_unmonitored_falls_back_deterministically() {
+        let load_balancer = GpuLoadBalancer::new();
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        // Utilization is 0.0 for all three (and so plays no part in this
+        // test): `create_test_device`'s `available_memory_mb` is derived
+        // from it, and a high enough figure would make
+        // `filter_suitable_devices` reject the device before it ever reaches
+        // `select_least_loaded`, for a reason unrelated to what this test
+        // exercises.
+        devices.insert(5, create_test_device(5, 0.0, 8192));
+        devices.insert(2, create_test_device(2, 0.0, 8192));
+        devices.insert(9, create_test_device(9, 0.0, 8192));
+        for _ in 0..5 {
+            let selected = load_balancer
+                .select_optimal_device(&devices, &requirements, None)
+                .await
+                .expect("Operation should succeed");
+            assert_eq!(
+                selected,
+                Some(2),
+                "with no load data at all, the fallback must be the lowest device id, every time"
+            );
+        }
     }
     #[tokio::test]
     async fn test_round_robin_strategy() {
@@ -317,6 +396,111 @@ mod tests {
             .await
             .expect("Operation should succeed");
         assert!(selected.is_some());
+    }
+    /// Regression: `select_hybrid`'s `LeastLoaded` branch used to fall back to
+    /// `GpuDeviceInfo::utilization_percent` (a discovery-time constant 0.0) for
+    /// a device with no live load reading, so that device scored `1.0 - 0.0 =
+    /// 1.0` and won every hybrid selection over any genuinely measured device.
+    /// Device 0 here is never given a load reading at all (no
+    /// `update_device_load` call); device 1 is measured at 99% utilization,
+    /// about as bad as a real device gets. A correct hybrid must still prefer
+    /// the measured-but-heavily-loaded device over the unmonitored one.
+    #[tokio::test]
+    async fn test_hybrid_strategy_unmonitored_device_never_wins() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::Hybrid(vec![
+                LoadBalancingStrategy::LeastLoaded,
+            ]))
+            .await
+            .expect("Set strategy should succeed");
+        load_balancer
+            .update_device_load(1, 0.99)
+            .await
+            .expect("Update load should succeed");
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        // Both devices' *own records* carry utilization_percent 0.0 (the
+        // discovery default) and plenty of available memory, so both pass
+        // suitability filtering regardless of load; the 99% figure for
+        // device 1 comes only from the live `device_loads` reading set
+        // above, which is exactly the value the old fallback ignored in
+        // favor of this record's own (here, identically 0.0) utilization_percent.
+        devices.insert(0, create_test_device(0, 0.0, 8192));
+        devices.insert(1, create_test_device(1, 0.0, 8192));
+        let selected = load_balancer
+            .select_optimal_device(&devices, &requirements, None)
+            .await
+            .expect("Operation should succeed");
+        assert_eq!(
+            selected,
+            Some(1),
+            "an unmonitored device must not outscore a device measured at 99% utilization"
+        );
+    }
+    /// Regression: `select_hybrid`'s `LeastLoaded` component used to score
+    /// *every* candidate `f32::NEG_INFINITY` whenever none of them carried a
+    /// load reading. Because `-infinity + finite == -infinity`, that
+    /// silenced any real signal contributed by the other strategies mixed
+    /// into the hybrid and left the pick to `HashMap` iteration order. Here
+    /// `LeastLoaded` has nothing to say about either device (neither ever
+    /// receives `update_device_load`), while `MemoryOptimized` has a
+    /// genuine, real signal: device 1 has far more free memory. The real
+    /// signal must decide it.
+    #[tokio::test]
+    async fn test_hybrid_strategy_falls_back_to_other_components_when_unmonitored() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::Hybrid(vec![
+                LoadBalancingStrategy::LeastLoaded,
+                LoadBalancingStrategy::MemoryOptimized,
+            ]))
+            .await
+            .expect("Set strategy should succeed");
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        devices.insert(0, create_test_device(0, 0.0, 8192)); // little free memory
+        devices.insert(1, create_test_device(1, 0.0, 65536)); // much more free memory
+        let selected = load_balancer
+            .select_optimal_device(&devices, &requirements, None)
+            .await
+            .expect("Operation should succeed");
+        assert_eq!(
+            selected,
+            Some(1),
+            "a real MemoryOptimized signal must not be drowned out by an unmonitored \
+             LeastLoaded component"
+        );
+    }
+    /// Regression: when a hybrid's *only* component strategy is
+    /// `LeastLoaded` and no device is monitored, every candidate ties at the
+    /// neutral score. The tie must resolve deterministically (the lowest
+    /// device id), not via `HashMap` iteration order.
+    #[tokio::test]
+    async fn test_hybrid_all_unmonitored_least_loaded_only_is_deterministic() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::Hybrid(vec![
+                LoadBalancingStrategy::LeastLoaded,
+            ]))
+            .await
+            .expect("Set strategy should succeed");
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        devices.insert(7, create_test_device(7, 0.0, 8192));
+        devices.insert(3, create_test_device(3, 0.0, 8192));
+        devices.insert(4, create_test_device(4, 0.0, 8192));
+        for _ in 0..5 {
+            let selected = load_balancer
+                .select_optimal_device(&devices, &requirements, None)
+                .await
+                .expect("Operation should succeed");
+            assert_eq!(
+                selected,
+                Some(3),
+                "an all-tied hybrid must resolve to the lowest device id, every time"
+            );
+        }
     }
     #[tokio::test]
     async fn test_power_aware_strategy() {

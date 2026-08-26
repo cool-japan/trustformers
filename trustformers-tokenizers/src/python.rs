@@ -70,13 +70,23 @@ impl From<TokenizedInputWithOffsets> for PyTokenizedInput {
 }
 
 impl From<TokenizedInput> for PyTokenizedInput {
+    /// Carries `offset_mapping` and `special_tokens_mask` across rather than
+    /// dropping them.
+    ///
+    /// This conversion used to hardcode both to `None`, which was accurate
+    /// while no encoder produced them; `WordPieceTokenizer` and `BPETokenizer`
+    /// now populate `offset_mapping` on every `encode`/`encode_pair`, and
+    /// `WordPieceTokenizer` populates `special_tokens_mask` too, so hardcoding
+    /// `None` would report "this tokenizer has no offsets" about a value that
+    /// does have them. Encoders that genuinely produce neither still pass
+    /// `None` through, because that is what their own field holds.
     fn from(input: TokenizedInput) -> Self {
         Self {
             input_ids: input.input_ids,
             attention_mask: input.attention_mask,
             token_type_ids: input.token_type_ids,
-            offset_mapping: None,
-            special_tokens_mask: None,
+            offset_mapping: input.offset_mapping,
+            special_tokens_mask: input.special_tokens_mask,
         }
     }
 }

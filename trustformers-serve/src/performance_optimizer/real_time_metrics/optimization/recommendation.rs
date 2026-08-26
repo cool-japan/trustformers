@@ -6,7 +6,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -361,9 +361,6 @@ struct PatternCondition {
 #[derive(Debug, Clone)]
 enum ComparisonOperator {
     GreaterThan,
-    LessThan,
-    Equal,
-    Between(f64, f64),
 }
 
 #[derive(Debug, Clone)]
@@ -468,11 +465,6 @@ impl PatternBasedRecommendationAlgorithm {
 
             let condition_met = match &condition.operator {
                 ComparisonOperator::GreaterThan => metric_value > condition.threshold,
-                ComparisonOperator::LessThan => metric_value < condition.threshold,
-                ComparisonOperator::Equal => (metric_value - condition.threshold).abs() < 0.01,
-                ComparisonOperator::Between(min, max) => {
-                    metric_value >= *min && metric_value <= *max
-                },
             };
 
             if !condition_met {
@@ -558,16 +550,6 @@ impl RecommendationGenerationAlgorithm for PatternBasedRecommendationAlgorithm {
 /// based on historical data and performance outcomes.
 pub struct MLBasedRecommendationAlgorithm {
     metrics: GenerationAlgorithmMetrics,
-    model_weights: HashMap<String, f32>,
-    training_data: VecDeque<TrainingExample>,
-}
-
-#[derive(Debug, Clone)]
-struct TrainingExample {
-    input_features: Vec<f32>,
-    output_success: bool,
-    recommendation_type: String,
-    timestamp: DateTime<Utc>,
 }
 
 impl Default for MLBasedRecommendationAlgorithm {
@@ -580,8 +562,6 @@ impl MLBasedRecommendationAlgorithm {
     pub fn new() -> Self {
         Self {
             metrics: GenerationAlgorithmMetrics::default(),
-            model_weights: HashMap::new(),
-            training_data: VecDeque::new(),
         }
     }
 

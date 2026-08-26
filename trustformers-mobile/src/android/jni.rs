@@ -5,8 +5,9 @@
 
 use crate::android::device_info::AndroidDeviceInfo;
 use crate::android::engine::AndroidInferenceEngine;
+#[cfg(target_os = "android")]
+use crate::jni_codec::{bytes_to_f32_tensor, tensor_to_le_bytes};
 use crate::MobileConfig;
-use trustformers_core::Tensor;
 
 #[cfg(target_os = "android")]
 use jni::{
@@ -88,16 +89,7 @@ pub extern "system" fn Java_com_trustformers_TrustformersEngine_inference(
         Err(_) => return JObject::null().into_inner(),
     };
 
-    // Convert bytes to tensor (simplified)
-    let input_floats: Vec<f32> = input_bytes
-        .chunks(4)
-        .map(|chunk| {
-            let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            f32::from_le_bytes(bytes)
-        })
-        .collect();
-
-    let input_tensor = match Tensor::from_vec(input_floats, &[input_bytes.len() / 4]) {
+    let input_tensor = match bytes_to_f32_tensor(&input_bytes) {
         Ok(t) => t,
         Err(_) => return JObject::null().into_inner(),
     };
@@ -108,8 +100,16 @@ pub extern "system" fn Java_com_trustformers_TrustformersEngine_inference(
         Err(_) => return JObject::null().into_inner(),
     };
 
-    // Convert output tensor back to bytes (simplified)
-    let output_bytes: Vec<u8> = vec![0; 4]; // Placeholder
+    // Serialise the real computed output as a flat little-endian f32
+    // buffer -- the same layout `input_bytes` was decoded from above, so a
+    // Java caller can round-trip through `ByteBuffer.order(LITTLE_ENDIAN)`
+    // on both sides. The previous implementation discarded `output_tensor`
+    // entirely and always returned four zero bytes regardless of what
+    // inference produced.
+    let output_bytes = match tensor_to_le_bytes(&output_tensor) {
+        Ok(bytes) => bytes,
+        Err(_) => return JObject::null().into_inner(),
+    };
 
     match env.byte_array_from_slice(&output_bytes) {
         Ok(array) => array,
@@ -261,4 +261,10 @@ mod tests {
             Java_com_trustformers_TrustformersEngine_releaseEngine(0);
         }
     }
+
+    // The byte<->Tensor codec this JNI boundary uses (`bytes_to_f32_tensor`
+    // / `tensor_to_le_bytes`) is tested in `crate::jni_codec`, which -- unlike
+    // this module -- is not `#[cfg(target_os = "android")]`-gated, so its
+    // tests actually compile and run on every host this workspace builds
+    // on. See that module's doc comment.
 }

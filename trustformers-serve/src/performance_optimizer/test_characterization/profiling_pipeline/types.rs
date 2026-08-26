@@ -216,14 +216,10 @@ pub struct PipelineMetrics {
 }
 /// Data aggregation engine (placeholder)
 #[derive(Debug)]
-pub struct DataAggregationEngine {
-    config: Arc<AggregationConfig>,
-}
+pub struct DataAggregationEngine {}
 impl DataAggregationEngine {
     pub async fn new(_config: AggregationConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     pub(crate) async fn aggregate_results(
         &self,
@@ -242,25 +238,11 @@ impl DataAggregationEngine {
 }
 /// Execution scheduler
 #[derive(Debug)]
-pub struct ExecutionScheduler {
-    /// Execution queue
-    execution_queue: Arc<AsyncRwLock<VecDeque<ScheduledExecution>>>,
-    /// Running executions
-    running_executions: Arc<AsyncRwLock<HashMap<String, RunningExecution>>>,
-    /// Execution semaphore
-    execution_semaphore: Arc<Semaphore>,
-    /// Scheduler metrics
-    metrics: Arc<AsyncRwLock<SchedulerMetrics>>,
-}
+pub struct ExecutionScheduler {}
 impl ExecutionScheduler {
     /// Create a new execution scheduler
-    pub(crate) async fn new(max_parallel_executions: usize) -> Result<Self> {
-        Ok(Self {
-            execution_queue: Arc::new(AsyncRwLock::new(VecDeque::new())),
-            running_executions: Arc::new(AsyncRwLock::new(HashMap::new())),
-            execution_semaphore: Arc::new(Semaphore::new(max_parallel_executions)),
-            metrics: Arc::new(AsyncRwLock::new(SchedulerMetrics::default())),
-        })
+    pub(crate) async fn new(_max_parallel_executions: usize) -> Result<Self> {
+        Ok(Self {})
     }
 }
 /// Execution priority
@@ -289,14 +271,10 @@ pub enum ResourceIntensityLevel {
 }
 /// Profiling report generator (placeholder)
 #[derive(Debug)]
-pub struct ProfilingReportGenerator {
-    config: Arc<ReportConfig>,
-}
+pub struct ProfilingReportGenerator {}
 impl ProfilingReportGenerator {
     pub(crate) async fn new(_config: ReportConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     pub(crate) async fn generate_report(
         &self,
@@ -737,14 +715,10 @@ pub enum ImplementationEffort {
 }
 /// Profiling results processor (placeholder)
 #[derive(Debug)]
-pub struct ProfilingResultsProcessor {
-    config: Arc<ResultsProcessorConfig>,
-}
+pub struct ProfilingResultsProcessor {}
 impl ProfilingResultsProcessor {
     pub(crate) async fn new(_config: ResultsProcessorConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     pub(crate) async fn process_results(
         &self,
@@ -917,12 +891,6 @@ impl ProfileDataCollector {
     /// Start collection tasks
     async fn start_collection_tasks(&self, _context: &CollectionContext) -> Result<()> {
         let _state = self.state.write().await;
-        Ok(())
-    }
-    /// Collect data and add to buffer
-    async fn collect_and_buffer(&self, context: &CollectionContext) -> Result<()> {
-        let data = self.collect_data(context).await?;
-        self.buffer_data(data).await?;
         Ok(())
     }
     /// Update collection metrics

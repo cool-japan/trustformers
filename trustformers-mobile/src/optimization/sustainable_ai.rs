@@ -41,12 +41,37 @@ impl Default for SustainableAIConfig {
     }
 }
 
+/// Real-time grid carbon-intensity source (gCO2/kWh) and renewable-energy
+/// fraction (`0.0..=1.0`), injectable via
+/// [`CarbonFootprintTracker::with_carbon_intensity_provider`]. Implement
+/// this against a real grid-data API (e.g. WattTime, electricityMaps) to
+/// get real, location-accurate figures; without one,
+/// [`CarbonFootprintTracker`] falls back to
+/// [`CarbonFootprintTracker::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH`],
+/// a single honestly-labeled constant -- not the wall-clock-driven sine
+/// wave a previous revision used, which mimicked the *shape* of real
+/// diurnal grid variation (a sine term keyed to the hour of day) closely
+/// enough to look like measured telemetry while carrying zero actual grid
+/// information.
+pub trait CarbonIntensityProvider: std::fmt::Debug + Send + Sync {
+    /// Current grid carbon intensity in gCO2/kWh.
+    fn carbon_intensity_g_per_kwh(&self) -> f32;
+    /// Current renewable-energy fraction of the grid mix, `0.0..=1.0`.
+    fn renewable_fraction(&self) -> f32;
+}
+
 #[derive(Debug)]
 pub struct CarbonFootprintTracker {
     config: SustainableAIConfig,
     metrics: Arc<Mutex<CarbonMetrics>>,
     energy_history: Arc<Mutex<Vec<EnergyMeasurement>>>,
     location_cache: Arc<Mutex<Option<GridLocation>>>,
+    /// `None` by default: [`Self::get_current_carbon_intensity`] and
+    /// [`Self::get_renewable_fraction`] then report the honestly-labeled
+    /// [`Self::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH`] /
+    /// [`Self::GLOBAL_AVERAGE_RENEWABLE_FRACTION`] constants rather than
+    /// simulating live grid data with no real source behind it.
+    carbon_intensity_provider: Option<Arc<dyn CarbonIntensityProvider>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,13 +112,40 @@ pub struct GridLocation {
 }
 
 impl CarbonFootprintTracker {
+    /// A commonly-cited global-average grid carbon intensity (gCO2/kWh;
+    /// IEA-order-of-magnitude figure for the world electricity mix). Used
+    /// by `Self::get_current_carbon_intensity` only when no real
+    /// [`CarbonIntensityProvider`] has been injected via
+    /// [`Self::with_carbon_intensity_provider`] -- a single, clearly
+    /// documented placeholder value, not a per-hour simulation dressed up
+    /// to look like a live reading.
+    pub const GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH: f32 = 475.0;
+
+    /// A commonly-cited global-average renewable-energy fraction of grid
+    /// generation. Same fallback-only role as
+    /// [`Self::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH`].
+    pub const GLOBAL_AVERAGE_RENEWABLE_FRACTION: f32 = 0.30;
+
     pub fn new(config: SustainableAIConfig) -> Self {
         Self {
             config,
             metrics: Arc::new(Mutex::new(CarbonMetrics::default())),
             energy_history: Arc::new(Mutex::new(Vec::new())),
             location_cache: Arc::new(Mutex::new(None)),
+            carbon_intensity_provider: None,
         }
+    }
+
+    /// Inject a real [`CarbonIntensityProvider`] (e.g. wired to a live
+    /// grid-data API) so `Self::get_current_carbon_intensity`/
+    /// `Self::get_renewable_fraction` report real, location-accurate
+    /// figures instead of the honest-but-generic global-average fallback.
+    pub fn with_carbon_intensity_provider(
+        mut self,
+        provider: Arc<dyn CarbonIntensityProvider>,
+    ) -> Self {
+        self.carbon_intensity_provider = Some(provider);
+        self
     }
 
     pub fn track_operation(
@@ -146,55 +198,31 @@ impl CarbonFootprintTracker {
         Ok(impact)
     }
 
+    /// Real, injected [`CarbonIntensityProvider`] figure when one is
+    /// configured; otherwise the honestly-labeled
+    /// [`Self::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH`] constant.
+    /// Previously this ignored any notion of a real data source entirely
+    /// and computed a sine-wave function of the wall-clock hour, keyed to
+    /// hardcoded "peak hours"/"solar peak"/"night" bands -- a number that
+    /// *looked* like live grid telemetry (it varied smoothly through the
+    /// day) while never having queried any actual grid.
     fn get_current_carbon_intensity(&self) -> Result<f32> {
-        // In production, this would query real-time grid data APIs
-        // For now, we simulate based on time of day and location
-        let hour = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                trustformers_core::TrustformersError::runtime_error(
-                    "Time calculation failed".to_string(),
-                )
-            })?
-            .as_secs()
-            / 3600
-            % 24;
-
-        let base_intensity = match hour {
-            6..=9 | 18..=21 => 450.0, // Peak hours - higher fossil fuel use
-            10..=16 => 300.0,         // Solar peak - lower intensity
-            22..=23 | 0..=5 => 350.0, // Night - wind dominance
-            _ => 400.0,               // Default
-        };
-
-        // Add some variability
-        let variability = (hour as f32 * 17.0).sin() * 50.0;
-        Ok((base_intensity + variability).max(200.0).min(800.0))
+        Ok(match &self.carbon_intensity_provider {
+            Some(provider) => provider.carbon_intensity_g_per_kwh(),
+            None => Self::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH,
+        })
     }
 
+    /// Same real-provider-or-honest-constant policy as
+    /// [`Self::get_current_carbon_intensity`], replacing a previous
+    /// wall-clock-driven "solar/wind/hydro fraction" formula that invented
+    /// a plausible-looking generation mix with no real weather or grid
+    /// data behind it.
     fn get_renewable_fraction(&self) -> Result<f32> {
-        // Simulate renewable energy fraction based on time and weather
-        let hour = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                trustformers_core::TrustformersError::runtime_error(
-                    "Time calculation failed".to_string(),
-                )
-            })?
-            .as_secs()
-            / 3600
-            % 24;
-
-        let solar_fraction = match hour {
-            7..=17 => ((hour as f32 - 12.0).abs() / 6.0).cos().max(0.0) * 0.4,
-            _ => 0.0,
-        };
-
-        let wind_fraction = 0.2 + (hour as f32 * 7.0).sin().abs() * 0.3;
-        let hydro_fraction = 0.15;
-
-        let total_renewable = (solar_fraction + wind_fraction + hydro_fraction).min(0.85);
-        Ok(total_renewable)
+        Ok(match &self.carbon_intensity_provider {
+            Some(provider) => provider.renewable_fraction(),
+            None => Self::GLOBAL_AVERAGE_RENEWABLE_FRACTION,
+        })
     }
 
     fn calculate_sustainability_score(
@@ -468,37 +496,25 @@ impl RenewableEnergyScheduler {
         })
     }
 
+    /// Honestly-labeled global-average fallback (see
+    /// [`CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION`]'s doc
+    /// comment for the full rationale). Previously this computed a
+    /// wall-clock-driven "solar cosine curve + wind sine wave + fixed
+    /// hydro" formula with no real weather, grid, or location data behind
+    /// it, despite reading as though it modeled one.
     fn get_current_renewable_fraction(&self) -> Result<f32> {
-        let hour = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                trustformers_core::TrustformersError::runtime_error(
-                    "Time calculation failed".to_string(),
-                )
-            })?
-            .as_secs()
-            / 3600
-            % 24;
-
-        let solar = if (7..=17).contains(&hour) {
-            ((hour as f32 - 12.0).abs() / 5.0).cos().max(0.0) * 0.4
-        } else {
-            0.0
-        };
-
-        let wind = 0.2 + (hour as f32 * 5.0).sin().abs() * 0.25;
-        let other = 0.15;
-
-        Ok((solar + wind + other).min(0.85))
+        Ok(CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION)
     }
 
+    /// Carbon intensity derived from [`Self::get_current_renewable_fraction`]
+    /// (a higher renewable share implies a lower-carbon grid mix). Cleans
+    /// up a previous version of this formula that wrapped the same
+    /// computation in a `match` on a `SystemTime` read whose only
+    /// extracted value (`hour`) was never actually used by either match
+    /// arm -- dead code left over from an earlier revision that did use
+    /// the wall-clock hour directly.
     fn estimate_carbon_impact(&self, task: &ScheduledTask) -> Result<f32> {
-        let carbon_intensity =
-            match SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() / 3600 % 24) {
-                Ok(hour) => 200.0 + (1.0 - self.get_current_renewable_fraction()?) * 400.0,
-                Err(_) => 400.0, // Default
-            };
-
+        let carbon_intensity = 200.0 + (1.0 - self.get_current_renewable_fraction()?) * 400.0;
         Ok(task.estimated_energy * carbon_intensity / 1000.0)
     }
 
@@ -895,51 +911,19 @@ impl EnergyOptimalBatchProcessor {
         Ok(sequential_energy * batch_efficiency)
     }
 
+    /// Same honestly-labeled global-average fallback as
+    /// [`RenewableEnergyScheduler::get_current_renewable_fraction`] --
+    /// previously a third copy of the same wall-clock-driven simulation
+    /// formula.
     fn get_current_renewable_fraction(&self) -> Result<f32> {
-        // Reuse the renewable fraction calculation from scheduler
-        let hour = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                trustformers_core::TrustformersError::runtime_error(
-                    "Time calculation failed".to_string(),
-                )
-            })?
-            .as_secs()
-            / 3600
-            % 24;
-
-        let solar = if (7..=17).contains(&hour) {
-            ((hour as f32 - 12.0).abs() / 5.0).cos().max(0.0) * 0.4
-        } else {
-            0.0
-        };
-
-        let wind = 0.2 + (hour as f32 * 5.0).sin().abs() * 0.25;
-        let other = 0.15;
-
-        Ok((solar + wind + other).min(0.85))
+        Ok(CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION)
     }
 
+    /// Same honestly-labeled global-average fallback as
+    /// [`CarbonFootprintTracker::get_current_carbon_intensity`] --
+    /// previously a second copy of the same per-hour-band simulation.
     fn get_current_carbon_intensity(&self) -> Result<f32> {
-        let hour = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| {
-                trustformers_core::TrustformersError::runtime_error(
-                    "Time calculation failed".to_string(),
-                )
-            })?
-            .as_secs()
-            / 3600
-            % 24;
-
-        let base_intensity = match hour {
-            6..=9 | 18..=21 => 450.0,
-            10..=16 => 300.0,
-            22..=23 | 0..=5 => 350.0,
-            _ => 400.0,
-        };
-
-        Ok(base_intensity)
+        Ok(CarbonFootprintTracker::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH)
     }
 
     fn update_processing_stats(
@@ -998,6 +982,86 @@ mod tests {
         let impact = result.expect("Operation failed");
         assert!(impact.carbon_emission_grams >= 0.0);
         assert!(impact.sustainability_score >= 0.0 && impact.sustainability_score <= 1.0);
+    }
+
+    /// Regression test for the previous `get_current_carbon_intensity`/
+    /// `get_renewable_fraction`, which computed a sine-wave function of
+    /// the *current wall-clock hour* -- meaning the same test, run at two
+    /// different times of day, would silently observe two different
+    /// "carbon intensity" values with no real grid data behind either
+    /// one. The unconfigured default must now be the fixed, documented
+    /// global-average constant regardless of when the test runs.
+    #[test]
+    fn test_carbon_intensity_default_is_constant_not_wall_clock_driven() {
+        let tracker = CarbonFootprintTracker::new(SustainableAIConfig::default());
+
+        let first = tracker.get_current_carbon_intensity().expect("carbon intensity");
+        let second = tracker.get_current_carbon_intensity().expect("carbon intensity");
+        assert_eq!(
+            first, second,
+            "an unconfigured tracker must report a stable constant"
+        );
+        assert_eq!(
+            first,
+            CarbonFootprintTracker::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH
+        );
+
+        let renewable = tracker.get_renewable_fraction().expect("renewable fraction");
+        assert_eq!(
+            renewable,
+            CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION
+        );
+    }
+
+    /// Regression test for [`CarbonFootprintTracker::with_carbon_intensity_provider`]:
+    /// a real injected provider's figures must actually be used, not
+    /// silently ignored in favor of the fallback constant.
+    #[test]
+    fn test_injected_carbon_intensity_provider_is_actually_used() {
+        #[derive(Debug)]
+        struct FixedProvider;
+        impl CarbonIntensityProvider for FixedProvider {
+            fn carbon_intensity_g_per_kwh(&self) -> f32 {
+                12.5
+            }
+            fn renewable_fraction(&self) -> f32 {
+                0.99
+            }
+        }
+
+        let tracker = CarbonFootprintTracker::new(SustainableAIConfig::default())
+            .with_carbon_intensity_provider(Arc::new(FixedProvider));
+
+        assert_eq!(
+            tracker.get_current_carbon_intensity().expect("carbon intensity"),
+            12.5
+        );
+        assert_eq!(
+            tracker.get_renewable_fraction().expect("renewable fraction"),
+            0.99
+        );
+    }
+
+    /// Regression test for the same wall-clock-driven simulation
+    /// previously duplicated in `RenewableEnergyScheduler` and
+    /// `EnergyOptimalBatchProcessor`.
+    #[test]
+    fn test_scheduler_and_batch_processor_renewable_fraction_is_constant() {
+        let scheduler = RenewableEnergyScheduler::new(SustainableAIConfig::default());
+        assert_eq!(
+            scheduler.get_current_renewable_fraction().expect("renewable fraction"),
+            CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION
+        );
+
+        let processor = EnergyOptimalBatchProcessor::new(SustainableAIConfig::default());
+        assert_eq!(
+            processor.get_current_renewable_fraction().expect("renewable fraction"),
+            CarbonFootprintTracker::GLOBAL_AVERAGE_RENEWABLE_FRACTION
+        );
+        assert_eq!(
+            processor.get_current_carbon_intensity().expect("carbon intensity"),
+            CarbonFootprintTracker::GLOBAL_AVERAGE_CARBON_INTENSITY_G_PER_KWH
+        );
     }
 
     #[test]

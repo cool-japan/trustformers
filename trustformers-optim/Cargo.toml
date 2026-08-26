@@ -2,6 +2,7 @@
 name = "trustformers-optim"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,6 +21,7 @@ trustformers-core.workspace = true
 # Note: ndarray support provided by scirs2-core
 scirs2-core = { workspace = true, features = ["parallel"] }
 num-traits.workspace = true
+half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 oxicode.workspace = true
@@ -27,10 +29,13 @@ anyhow.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 num_cpus.workspace = true
+log.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
 approx.workspace = true
+tempfile.workspace = true
 
 [features]
 default = []

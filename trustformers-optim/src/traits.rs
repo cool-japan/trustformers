@@ -33,7 +33,7 @@
 
 use crate::common::StateMemoryStats;
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
 
@@ -71,6 +71,93 @@ pub trait StatefulOptimizer: Optimizer {
 
     /// Returns the number of parameters being optimized.
     fn num_parameters(&self) -> usize;
+
+    /// Saves the optimizer state to `path`.
+    ///
+    /// The default implementation serialises [`Self::state_dict`] with `oxicode`, so
+    /// every implementor gets checkpointing for free and all implementors share one
+    /// on-disk format. Override only to add a format of your own.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state cannot be produced, encoded, or written.
+    fn save_state(&self, path: &std::path::Path) -> Result<()> {
+        let state = self.state_dict()?;
+        let encoded = encode_state_dict(&state)?;
+        std::fs::write(path, encoded).map_err(|error| {
+            TrustformersError::io_error(format!(
+                "failed to write optimizer state to {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    /// Loads the optimizer state written by [`Self::save_state`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, is not a state dictionary this
+    /// crate wrote, or does not match this optimizer's expectations.
+    fn load_state(&mut self, path: &std::path::Path) -> Result<()> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            TrustformersError::io_error(format!(
+                "failed to read optimizer state from {}: {error}",
+                path.display()
+            ))
+        })?;
+        let state = decode_state_dict(&bytes)?;
+        self.load_state_dict(state)
+    }
+}
+
+/// Wire format of a serialised optimizer state dictionary.
+///
+/// Tensors are stored as `(name, shape, f32 payload)` triples. `f32` is the only
+/// dtype optimizer state uses in this crate.
+type WireStateDict = Vec<(String, Vec<usize>, Vec<f32>)>;
+
+/// Encodes a state dictionary for [`StatefulOptimizer::save_state`].
+///
+/// # Errors
+///
+/// Returns an error when a tensor is not `f32`-readable or encoding fails.
+pub fn encode_state_dict(state: &HashMap<String, Tensor>) -> Result<Vec<u8>> {
+    let mut wire: WireStateDict = Vec::with_capacity(state.len());
+    for (name, tensor) in state {
+        wire.push((name.clone(), tensor.shape().to_vec(), tensor.data_f32()?));
+    }
+    // Deterministic order keeps checkpoints byte-reproducible.
+    wire.sort_by(|a, b| a.0.cmp(&b.0));
+
+    oxicode::serde::encode_to_vec(&wire, oxicode::config::standard()).map_err(|error| {
+        TrustformersError::invalid_state(format!("failed to encode optimizer state: {error}"))
+    })
+}
+
+/// Decodes a state dictionary written by [`encode_state_dict`].
+///
+/// # Errors
+///
+/// Returns an error when the bytes are not a state dictionary or a payload length
+/// disagrees with its shape.
+pub fn decode_state_dict(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
+    let (wire, _): (WireStateDict, usize) =
+        oxicode::serde::decode_from_slice(bytes, oxicode::config::standard()).map_err(|error| {
+            TrustformersError::invalid_state(format!("failed to decode optimizer state: {error}"))
+        })?;
+
+    let mut state = HashMap::with_capacity(wire.len());
+    for (name, shape, values) in wire {
+        let expected: usize = shape.iter().product();
+        if values.len() != expected {
+            return Err(TrustformersError::invalid_state(format!(
+                "optimizer state entry '{name}' has {} values but shape {shape:?} needs {expected}",
+                values.len()
+            )));
+        }
+        state.insert(name, Tensor::from_vec(values, &shape)?);
+    }
+    Ok(state)
 }
 
 /// Trait for optimizers that use momentum-based updates.
@@ -684,5 +771,72 @@ mod tests {
         };
         let debug_str = format!("{:?}", stats);
         assert!(debug_str.contains("GPUMemoryStats"));
+    }
+}
+
+#[cfg(test)]
+mod state_persistence_tests {
+    use super::*;
+    use crate::adam::Adam;
+
+    /// Regression: `StatefulOptimizer` declared `state_dict`/`load_state_dict` as
+    /// required methods with no file-level counterpart, so every implementor had to
+    /// hand-roll checkpointing. The trait now ships a default round trip.
+    #[test]
+    fn save_state_and_load_state_round_trip() {
+        let mut optimizer = Adam::new(0.01, (0.9, 0.999), 1e-8, 0.0);
+        let mut param = Tensor::from_vec(vec![1.0_f32, 2.0], &[2]).expect("tensor");
+        let grad = Tensor::from_vec(vec![0.5_f32, -0.5], &[2]).expect("grad");
+        optimizer.update_named("w", &mut param, &grad).expect("step 1");
+        Optimizer::step(&mut optimizer);
+        optimizer.update_named("w", &mut param, &grad).expect("step 2");
+
+        let path = std::env::temp_dir().join(format!(
+            "trustformers-optim-state-{}.bin",
+            std::process::id()
+        ));
+        optimizer.save_state(&path).expect("save_state");
+
+        let mut restored = Adam::new(0.5, (0.1, 0.1), 1e-2, 0.9);
+        restored.load_state(&path).expect("load_state");
+        let _ = std::fs::remove_file(&path);
+
+        let original = optimizer.state_dict().expect("state_dict");
+        let round_trip = restored.state_dict().expect("state_dict");
+        assert_eq!(original.len(), round_trip.len(), "every entry must survive");
+        for (key, tensor) in &original {
+            let other = round_trip.get(key).unwrap_or_else(|| panic!("missing '{key}'"));
+            assert_eq!(other.shape(), tensor.shape(), "shape of '{key}'");
+            assert_eq!(
+                other.data_f32().expect("data"),
+                tensor.data_f32().expect("data"),
+                "payload of '{key}'"
+            );
+        }
+    }
+
+    /// Corrupt bytes must be reported, not silently ignored.
+    #[test]
+    fn decoding_rejects_corrupt_state() {
+        assert!(decode_state_dict(&[0xff, 0x00, 0x13, 0x37]).is_err());
+    }
+
+    /// A payload whose length disagrees with its shape must be rejected.
+    #[test]
+    fn decoding_rejects_a_shape_payload_mismatch() {
+        let wire: Vec<(String, Vec<usize>, Vec<f32>)> =
+            vec![("w".to_string(), vec![4], vec![1.0, 2.0])];
+        let bytes =
+            oxicode::serde::encode_to_vec(&wire, oxicode::config::standard()).expect("encode");
+        assert!(decode_state_dict(&bytes).is_err());
+    }
+
+    /// Loading must fail loudly when the file does not exist.
+    #[test]
+    fn load_state_reports_a_missing_file() {
+        let mut optimizer = Adam::new(0.01, (0.9, 0.999), 1e-8, 0.0);
+        let path = std::env::temp_dir().join("trustformers-optim-definitely-absent.bin");
+        let _ = std::fs::remove_file(&path);
+        assert!(optimizer.load_state(&path).is_err());
     }
 }

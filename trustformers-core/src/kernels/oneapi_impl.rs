@@ -3,20 +3,29 @@
 
 //! Intel oneAPI backend implementation for TrustformeRS
 //!
-//! This module provides integration with Intel's oneAPI unified programming model,
-//! supporting DPC++ (SYCL), oneDNN, oneMKL, and Intel GPU/CPU optimization.
+//! This module models the context/queue/kernel-cache API surface (DPC++
+//! (SYCL) queues, oneDNN, oneMKL, Intel GPU/CPU device selection) that a
+//! real integration with Intel's oneAPI unified programming model would
+//! expose. It does **not** link or execute a real oneAPI runtime:
+//! `--features oneapi` has zero dependencies (`oneapi = []` in
+//! `Cargo.toml`), the `extern "C"` FFI declarations further down are
+//! permanently disabled with `cfg(any())`, and every public method that
+//! would need actual SYCL/oneDNN/oneMKL execution returns a structured
+//! [`HardwareResult`] error naming exactly what is missing ("no
+//! SYCL/oneDNN/oneMKL runtime is linked") instead of fabricating output
+//! tensors, device counts, or timings. See the `HONESTY NOTE` above the
+//! `extern "C"` block for the full rationale and what wiring a real backend
+//! would require.
 
 #![allow(dead_code)] // oneAPI backend implementation with FFI bindings
-#![allow(unused_variables)] // Backend implementation with reserved parameters
 
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Intel oneAPI backend for unified CPU/GPU compute
 #[derive(Debug)]
@@ -296,7 +305,22 @@ pub enum UsmType {
     Shared,
 }
 
-// Foreign function interface for Intel oneAPI runtime
+// Foreign function interface for Intel oneAPI runtime.
+//
+// HONESTY NOTE: these symbols are declared but nothing in this workspace
+// provides them - there is no `-sys` crate, no `#[link(name = "...")]`
+// attribute, and `build.rs` links only `framework=Accelerate` on macOS.
+// `--features oneapi` has zero dependencies (`oneapi = []` in Cargo.toml),
+// so any real DPC++/SYCL runtime call here would be an unresolved symbol at
+// final link time. This block (and every call site below) is therefore
+// gated behind `cfg(any())` - permanently disabled - so the crate never
+// tries to link against a runtime that was never provided. Every public
+// method that used to call into it now returns a structured
+// `NotSupported`/hardware-unavailable error instead of silently returning
+// fabricated data. Wiring a real backend means adding a genuine `-sys`
+// binding crate, a `#[link(...)]` target, and a `build.rs` probe, then
+// replacing the `cfg(any())` gate below with a real feature check.
+#[cfg(any())]
 extern "C" {
     // SYCL Queue management
     fn sycl_queue_create(device_type: i32, device_id: i32) -> *mut SyclQueue;
@@ -432,302 +456,81 @@ pub struct ConvParams {
 }
 
 impl OneApiBackend {
-    /// Create a new Intel oneAPI backend
-    pub fn new(config: OneApiConfig) -> HardwareResult<Self> {
-        let context = Arc::new(Mutex::new(Self::initialize_context(&config)?));
-
-        let metrics = Arc::new(Mutex::new(HardwareMetrics {
-            ops_per_second: 0.0,
-            memory_bandwidth: Self::get_memory_bandwidth(&config.device_type),
-            utilization: 0.0,
-            power_consumption: 0.0,
-            temperature: None,
-            error_rate: 0.0,
-            latency: 0.0,
-            throughput: 0.0,
-        }));
-
-        let memory_manager = OneApiMemoryManager::new(config.memory_optimization);
-
-        // Initialize oneDNN and oneMKL if enabled
-        if config.enable_onednn {
-            unsafe {
-                let result = onednn_init();
-                if result != 0 {
-                    eprintln!("Warning: oneDNN initialization failed");
-                }
-            }
-        }
-
-        if config.enable_onemkl {
-            unsafe {
-                let result = onemkl_init();
-                if result != 0 {
-                    eprintln!("Warning: oneMKL initialization failed");
-                }
-            }
-        }
-
-        Ok(Self {
-            context,
-            config,
-            kernel_cache: HashMap::new(),
-            metrics,
-            memory_manager,
-        })
+    /// Create a new Intel oneAPI backend.
+    ///
+    /// Always returns `Err`: this build has no real SYCL/oneDNN/oneMKL
+    /// runtime linked (see the `extern "C"` block above), so there is no
+    /// honest way to construct a working backend. This replaces what used
+    /// to be a "successful" construction backed entirely by unresolved FFI
+    /// calls and fabricated device data.
+    pub fn new(_config: OneApiConfig) -> HardwareResult<Self> {
+        Err(compute_error(
+            "oneapi_operation",
+            "Intel oneAPI backend is not available: no SYCL/oneDNN/oneMKL runtime is linked \
+             into this build (the `oneapi` feature has no real backend binding yet)",
+        ))
     }
 
-    /// Compile a DPC++ kernel
+    /// Compile a DPC++ kernel.
+    ///
+    /// Always errors: no SYCL compiler is linked into this build (see the
+    /// `extern "C"` block above). A `OneApiBackend` can never actually be
+    /// constructed (`new` always errors), so this is unreachable from safe
+    /// code; the honest error is here in case that ever changes.
     pub fn compile_kernel(
         &mut self,
-        name: &str,
-        source: &str,
-        arg_specs: &[KernelArgSpec],
+        _name: &str,
+        _source: &str,
+        _arg_specs: &[KernelArgSpec],
     ) -> HardwareResult<String> {
-        let kernel_id = format!("{}_{}", name, arg_specs.len());
-
-        if self.kernel_cache.contains_key(&kernel_id) {
-            return Ok(kernel_id);
-        }
-
-        let start_time = Instant::now();
-
-        let source_cstring = CString::new(source)
-            .map_err(|_| compute_error("oneapi_operation", "Invalid kernel source"))?;
-
-        let options = self.get_compilation_options();
-        let options_cstring = CString::new(options)
-            .map_err(|_| compute_error("oneapi_operation", "Invalid compilation options"))?;
-
-        let kernel_handle = unsafe {
-            sycl_kernel_compile(
-                source_cstring.as_ptr(),
-                source.len(),
-                options_cstring.as_ptr(),
-            )
-        };
-
-        if kernel_handle.is_null() {
-            return Err(compute_error(
-                "oneapi_operation",
-                "Kernel compilation failed",
-            ));
-        }
-
-        let compilation_time = start_time.elapsed().as_millis() as f64;
-
-        let metadata = OneApiCompilationMetadata {
-            compilation_time_ms: compilation_time,
-            binary_size_bytes: source.len(),
-            optimization_level: 3,
-            target_device: self.config.device_type,
-            optimizations: self.get_applied_optimizations(),
-            resource_usage: ResourceUsage {
-                registers_used: 32,         // Estimated
-                shared_memory_bytes: 1024,  // Estimated
-                private_memory_bytes: 2048, // Estimated
-                work_group_size_limits: (256, 256, 64),
-            },
-        };
-
-        let kernel = OneApiKernel {
-            name: name.to_string(),
-            kernel_handle,
-            source: source.to_string(),
-            metadata,
-            arg_specs: arg_specs.to_vec(),
-        };
-
-        self.kernel_cache.insert(kernel_id.clone(), kernel);
-        Ok(kernel_id)
+        Err(compute_error(
+            "oneapi_operation",
+            "Intel oneAPI kernel compilation is not available: no SYCL runtime is linked",
+        ))
     }
 
-    /// Execute a compiled kernel
+    /// Execute a compiled kernel. Always errors (see `compile_kernel`).
     pub fn execute_kernel(
         &mut self,
-        kernel_id: &str,
-        inputs: &[Tensor],
-        global_size: &[usize],
-        local_size: Option<&[usize]>,
+        _kernel_id: &str,
+        _inputs: &[Tensor],
+        _global_size: &[usize],
+        _local_size: Option<&[usize]>,
     ) -> HardwareResult<Vec<Tensor>> {
-        let kernel = self
-            .kernel_cache
-            .get(kernel_id)
-            .ok_or_else(|| compute_error("oneapi_operation", "Kernel not found"))?;
-
-        let start_time = Instant::now();
-
-        // Set kernel arguments
-        for (i, input) in inputs.iter().enumerate() {
-            let result = unsafe {
-                sycl_kernel_set_arg(
-                    kernel.kernel_handle,
-                    i as u32,
-                    input.data()?.as_ptr() as *const u8,
-                    input.size_bytes(),
-                )
-            };
-
-            if result != 0 {
-                return Err(compute_error(
-                    "oneapi_operation",
-                    "Failed to set kernel argument",
-                ));
-            }
-        }
-
-        // Execute kernel
-        {
-            let context = self.context.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let local_ptr = local_size.map(|ls| ls.as_ptr()).unwrap_or(std::ptr::null());
-
-            let event = unsafe {
-                sycl_queue_submit(
-                    context.queue,
-                    kernel.kernel_handle,
-                    global_size.as_ptr(),
-                    local_ptr,
-                )
-            };
-
-            if event.is_null() {
-                return Err(compute_error("oneapi_operation", "Kernel execution failed"));
-            }
-
-            // Wait for completion
-            let result = unsafe { sycl_queue_wait(context.queue) };
-            if result != 0 {
-                return Err(compute_error(
-                    "oneapi_operation",
-                    "Kernel execution wait failed",
-                ));
-            }
-        } // context lock is dropped here
-
-        // Create output tensors (simplified - in practice would need proper output handling)
-        let output_tensors = self.create_output_tensors(inputs)?;
-
-        // Update metrics
-        let execution_time = start_time.elapsed();
-        let metadata = kernel.metadata.clone();
-        self.update_execution_metrics(execution_time, &metadata);
-
-        Ok(output_tensors)
+        Err(compute_error(
+            "oneapi_operation",
+            "Intel oneAPI kernel execution is not available: no SYCL runtime is linked",
+        ))
     }
 
-    /// Execute oneDNN convolution operation
+    /// Execute oneDNN convolution operation. Always errors (see
+    /// `compile_kernel`): no oneDNN runtime is linked into this build.
     pub fn execute_onednn_conv2d(
         &mut self,
-        input: &Tensor,
-        weights: &Tensor,
-        bias: Option<&Tensor>,
-        strides: &[usize],
-        padding: &[usize],
+        _input: &Tensor,
+        _weights: &Tensor,
+        _bias: Option<&Tensor>,
+        _strides: &[usize],
+        _padding: &[usize],
     ) -> HardwareResult<Tensor> {
-        if !self.config.enable_onednn {
-            return Err(compute_error("oneapi_operation", "oneDNN not enabled"));
-        }
-
-        let input_desc = self.tensor_to_onednn_desc(input);
-        let weights_desc = self.tensor_to_onednn_desc(weights);
-        let output_shape =
-            self.compute_conv_output_shape(&input.shape(), &weights.shape(), strides, padding);
-        let output_desc = TensorDesc {
-            dims: [
-                output_shape[0] as i32,
-                output_shape[1] as i32,
-                output_shape[2] as i32,
-                output_shape[3] as i32,
-                0,
-                0,
-                0,
-                0,
-            ],
-            ndims: 4,
-            data_type: 0, // Float32
-            format: 0,    // NCHW
-        };
-
-        let conv_op =
-            unsafe { onednn_create_convolution(&input_desc, &weights_desc, &output_desc) };
-
-        if conv_op.is_null() {
-            return Err(compute_error(
-                "oneapi_operation",
-                "Failed to create oneDNN convolution",
-            ));
-        }
-
-        let mut output_data = vec![0.0f32; output_shape.iter().product()];
-        let input_data = input.data()?;
-        let inputs = [input_data.as_ptr()];
-        let mut outputs = [output_data.as_mut_ptr()];
-
-        let result = unsafe { onednn_execute(conv_op, inputs.as_ptr(), outputs.as_mut_ptr()) };
-
-        if result != 0 {
-            return Err(compute_error(
-                "oneapi_operation",
-                "oneDNN convolution execution failed",
-            ));
-        }
-
-        Tensor::from_vec(output_data, &output_shape)
+        Err(compute_error(
+            "oneapi_operation",
+            "oneDNN convolution is not available: no oneDNN runtime is linked",
+        ))
     }
 
-    /// Execute oneMKL GEMM operation
+    /// Execute oneMKL GEMM operation. Always errors (see `compile_kernel`):
+    /// no oneMKL runtime is linked into this build.
     pub fn execute_onemkl_gemm(
         &mut self,
-        a: &Tensor,
-        b: &Tensor,
-        c: Option<&Tensor>,
+        _a: &Tensor,
+        _b: &Tensor,
+        _c: Option<&Tensor>,
     ) -> HardwareResult<Tensor> {
-        if !self.config.enable_onemkl {
-            return Err(compute_error("oneapi_operation", "oneMKL not enabled"));
-        }
-
-        let a_shape = a.shape();
-        let b_shape = b.shape();
-
-        if a_shape.len() != 2 || b_shape.len() != 2 || a_shape[1] != b_shape[0] {
-            return Err(compute_error(
-                "oneapi_operation",
-                "Invalid matrix dimensions for GEMM",
-            ));
-        }
-
-        let m = a_shape[0] as i32;
-        let n = b_shape[1] as i32;
-        let k = a_shape[1] as i32;
-
-        let output_shape = vec![a_shape[0], b_shape[1]];
-        let mut output_data = if let Some(c_tensor) = c {
-            c_tensor.data()?.clone()
-        } else {
-            vec![0.0f32; output_shape.iter().product()]
-        };
-
-        let context = self.context.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let result = unsafe {
-            onemkl_gemm(
-                context.queue,
-                m,
-                n,
-                k,
-                a.data()?.as_ptr(),
-                b.data()?.as_ptr(),
-                output_data.as_mut_ptr(),
-            )
-        };
-
-        if result != 0 {
-            return Err(compute_error(
-                "oneapi_operation",
-                "oneMKL GEMM execution failed",
-            ));
-        }
-
-        Tensor::from_vec(output_data, &output_shape)
+        Err(compute_error(
+            "oneapi_operation",
+            "oneMKL GEMM is not available: no oneMKL runtime is linked",
+        ))
     }
 
     /// Get backend capabilities
@@ -797,99 +600,17 @@ impl OneApiBackend {
         self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
-    // Private helper methods
-    fn initialize_context(config: &OneApiConfig) -> HardwareResult<OneApiContext> {
-        let device_type_id = match config.device_type {
-            OneApiDeviceType::CPU => 0,
-            OneApiDeviceType::GPU => 1,
-            OneApiDeviceType::FPGA => 2,
-            OneApiDeviceType::Custom => 3,
-        };
-
-        let queue = unsafe { sycl_queue_create(device_type_id, 0) };
-        if queue.is_null() {
-            return Err(compute_error(
-                "oneapi_operation",
-                "Failed to create SYCL queue",
-            ));
-        }
-
-        let device = Self::get_device_info(config.device_type)?;
-
-        Ok(OneApiContext {
-            queue,
-            device,
-            context_handle: std::ptr::null_mut(), // Simplified
-            event_pool: Vec::new(),
-        })
-    }
-
-    fn get_device_info(device_type: OneApiDeviceType) -> HardwareResult<OneApiDevice> {
-        let device_type_id = match device_type {
-            OneApiDeviceType::CPU => 0,
-            OneApiDeviceType::GPU => 1,
-            OneApiDeviceType::FPGA => 2,
-            OneApiDeviceType::Custom => 3,
-        };
-
-        let mut info = DeviceInfo {
-            device_type: device_type_id,
-            vendor_id: 0x8086, // Intel
-            device_name: [0; 256],
-            compute_units: 0,
-            max_work_group_size: 0,
-            global_memory_size: 0,
-            local_memory_size: 0,
-            supports_fp64: 0,
-            supports_fp16: 0,
-        };
-
-        let result = unsafe { sycl_get_device_info(device_type_id, 0, &mut info) };
-        if result != 0 {
-            return Err(compute_error(
-                "oneapi_operation",
-                "Failed to get device info",
-            ));
-        }
-
-        let device_name =
-            unsafe { CStr::from_ptr(info.device_name.as_ptr()).to_string_lossy().to_string() };
-
-        Ok(OneApiDevice {
-            device_type,
-            vendor: "Intel".to_string(),
-            name: device_name,
-            compute_units: info.compute_units,
-            max_work_group_size: info.max_work_group_size,
-            global_memory_size: info.global_memory_size as usize,
-            local_memory_size: info.local_memory_size as usize,
-            capabilities: OneApiCapabilities {
-                supports_fp64: info.supports_fp64 != 0,
-                supports_fp16: info.supports_fp16 != 0,
-                supports_amx: device_type == OneApiDeviceType::CPU,
-                supports_avx512: device_type == OneApiDeviceType::CPU,
-                supports_dl_boost: true,
-                supports_usm: true,
-                max_allocation_size: info.global_memory_size as usize / 4,
-                preferred_vector_width: match device_type {
-                    OneApiDeviceType::CPU => 16, // AVX-512
-                    OneApiDeviceType::GPU => 8,  // SIMD8
-                    OneApiDeviceType::FPGA => 4, // Custom
-                    OneApiDeviceType::Custom => 8,
-                },
-            },
-        })
-    }
-
-    fn get_memory_bandwidth(device_type: &OneApiDeviceType) -> f64 {
-        match device_type {
-            OneApiDeviceType::CPU => 100e9,    // 100 GB/s
-            OneApiDeviceType::GPU => 500e9,    // 500 GB/s
-            OneApiDeviceType::FPGA => 50e9,    // 50 GB/s
-            OneApiDeviceType::Custom => 200e9, // 200 GB/s
-        }
-    }
-
+    // Private helper methods.
+    //
+    // `initialize_context`/`get_device_info` (which used to call
+    // `sycl_queue_create`/`sycl_get_device_info` and, on top of that,
+    // fabricated most of `OneApiDevice`'s fields even on a "successful"
+    // call - e.g. `supports_dl_boost: true` unconditionally) are deleted
+    // rather than kept as dead code: nothing constructs a real
+    // `OneApiContext`/`OneApiDevice` anymore (see `OneApiBackend::new` and
+    // `utils::get_available_devices`), and keeping them around would only
+    // invite a future caller to wire them back up as real device data
+    // when they are not.
     fn get_compilation_options(&self) -> String {
         let mut options = vec!["-O3"];
 
@@ -941,12 +662,19 @@ impl OneApiBackend {
         optimizations
     }
 
-    fn create_output_tensors(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
-        // Simplified - in practice would need proper output shape inference
-        let output_shape = inputs[0].shape().to_vec();
-        let output_data = vec![0.0f32; output_shape.iter().product()];
-        let output_tensor = Tensor::from_vec(output_data, &output_shape)?;
-        Ok(vec![output_tensor])
+    /// Historically returned `inputs[0].shape()` filled with zeros and
+    /// called it the kernel's output - i.e. `execute_kernel` reported
+    /// success while discarding whatever the (also-fake) SYCL dispatch
+    /// "computed". `execute_kernel` no longer reaches this (it now errors
+    /// unconditionally, see above), but this is kept honest in its own
+    /// right rather than left as a working-looking zero-fill.
+    #[allow(dead_code)]
+    fn create_output_tensors(&self, _inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
+        Err(compute_error(
+            "oneapi_operation",
+            "cannot construct real kernel output tensors: no SYCL runtime is linked to read \
+             device output buffers back from",
+        ))
     }
 
     fn tensor_to_onednn_desc(&self, tensor: &Tensor) -> TensorDesc {
@@ -979,19 +707,17 @@ impl OneApiBackend {
         ]
     }
 
-    fn update_execution_metrics(
-        &mut self,
-        execution_time: Duration,
-        metadata: &OneApiCompilationMetadata,
-    ) {
-        let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let execution_ms = execution_time.as_millis() as f64;
-
-        // Simplified metrics update
-        metrics.latency = execution_ms;
-        metrics.throughput = 1000.0 / execution_ms; // Operations per second
-        metrics.utilization = 0.8; // Estimated utilization
-    }
+    // `update_execution_metrics` (execution_time, metadata) used to live
+    // here: unreachable (nothing on this backend can succeed - see `new`
+    // above), and its body fabricated `utilization = 0.8` from nothing while
+    // ignoring `metadata` entirely - a hardcoded number with no real signal
+    // behind it and no caller to receive it. Unlike `create_output_tensors`
+    // above, there was no honest replacement to give it (there is no real
+    // GPU occupancy signal to derive `utilization` from without a runtime,
+    // and `HardwareMetrics::utilization` is a plain `f64`, not an
+    // `Option<f64>`, on a struct shared by every backend, so it cannot
+    // honestly report "unknown" either), so it was deleted rather than kept
+    // fabricating a number.
 }
 
 impl OneApiMemoryManager {
@@ -1003,65 +729,47 @@ impl OneApiMemoryManager {
         }
     }
 
-    /// Allocate unified shared memory
+    /// Allocate unified shared memory.
+    ///
+    /// Always errors: no SYCL USM allocator is linked into this build (see
+    /// the `extern "C"` block gated at the top of this module). Never
+    /// dereferences `queue` since no real allocation is attempted.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that:
-    /// - The `queue` pointer is valid and points to an initialized SYCL queue
-    /// - The queue remains valid for the lifetime of the allocation
-    /// - The returned pointer is not used after deallocating via `deallocate_usm`
+    /// Kept `unsafe` to preserve the public API signature; there is
+    /// currently no actual unsafe behavior since this never touches
+    /// `queue`.
     pub unsafe fn allocate_usm(
         &mut self,
-        id: String,
-        size: usize,
-        usm_type: UsmType,
-        queue: *mut SyclQueue,
+        _id: String,
+        _size: usize,
+        _usm_type: UsmType,
+        _queue: *mut SyclQueue,
     ) -> HardwareResult<*mut u8> {
-        let ptr = unsafe {
-            match usm_type {
-                UsmType::Device => sycl_malloc_device(size, queue),
-                UsmType::Host => sycl_malloc_host(size, queue),
-                UsmType::Shared => sycl_malloc_shared(size, queue),
-            }
-        };
-
-        if ptr.is_null() {
-            return Err(compute_error("oneapi_operation", "USM allocation failed"));
-        }
-
-        let allocation = UsmAllocation {
-            id: id.clone(),
-            ptr,
-            size,
-            usm_type,
-            allocated_at: Instant::now(),
-        };
-
-        self.usm_allocations.insert(id, allocation);
-        Ok(ptr)
+        Err(compute_error(
+            "oneapi_operation",
+            "Intel oneAPI USM allocation is not available: no SYCL runtime is linked",
+        ))
     }
 
-    /// Deallocate unified shared memory
+    /// Deallocate unified shared memory. Always errors (see `allocate_usm`).
     ///
     /// # Safety
     ///
-    /// The caller must ensure that:
-    /// - The `queue` pointer is valid and points to an initialized SYCL queue
-    /// - The allocation identified by `id` was previously allocated via `allocate_usm`
-    /// - No references to the allocated memory exist after this call
-    pub unsafe fn deallocate_usm(&mut self, id: &str, queue: *mut SyclQueue) -> HardwareResult<()> {
-        if let Some(allocation) = self.usm_allocations.remove(id) {
-            unsafe {
-                sycl_free(allocation.ptr, queue);
-            }
-            Ok(())
-        } else {
-            Err(compute_error(
-                "oneapi_operation",
-                "USM allocation not found",
-            ))
-        }
+    /// Kept `unsafe` to preserve the public API signature; there is
+    /// currently no actual unsafe behavior since this never touches `queue`
+    /// or any allocation (nothing can have been allocated via
+    /// `allocate_usm`, which always errors).
+    pub unsafe fn deallocate_usm(
+        &mut self,
+        _id: &str,
+        _queue: *mut SyclQueue,
+    ) -> HardwareResult<()> {
+        Err(compute_error(
+            "oneapi_operation",
+            "Intel oneAPI USM deallocation is not available: no SYCL runtime is linked",
+        ))
     }
 }
 
@@ -1082,11 +790,11 @@ impl Default for OneApiConfig {
 
 impl Drop for OneApiContext {
     fn drop(&mut self) {
-        if !self.queue.is_null() {
-            unsafe {
-                sycl_queue_destroy(self.queue);
-            }
-        }
+        // No real SYCL runtime is linked into this build (see the
+        // `extern "C"` block above), and nothing in this module ever
+        // constructs an `OneApiContext` with a non-null `queue` anymore
+        // (`OneApiBackend::new` always errors before one would be built),
+        // so there is nothing to destroy here.
     }
 }
 
@@ -1094,39 +802,37 @@ impl Drop for OneApiContext {
 pub mod utils {
     use super::*;
 
-    /// Check if Intel oneAPI is available
+    /// Check if Intel oneAPI is available.
+    ///
+    /// Always `false`: no SYCL runtime is linked into this build (see the
+    /// `extern "C"` block gated at the top of this module). Previously this
+    /// called `sycl_get_device_count`, an unresolved symbol.
     pub fn is_oneapi_available() -> bool {
-        let cpu_count = unsafe { sycl_get_device_count(0) };
-        let gpu_count = unsafe { sycl_get_device_count(1) };
-        cpu_count > 0 || gpu_count > 0
+        false
     }
 
-    /// Get available oneAPI devices
+    /// Get available oneAPI devices.
+    ///
+    /// Always empty: no SYCL runtime is linked into this build, so there is
+    /// no real device to enumerate. Previously this called
+    /// `sycl_get_device_count` (an unresolved symbol) and, for every unit
+    /// reported, fabricated a device via `get_device_info` (vendor always
+    /// `"Intel"`, `supports_dl_boost: true` unconditionally, etc.) - a
+    /// phantom-device pattern this must not reproduce.
     pub fn get_available_devices() -> Vec<OneApiDevice> {
-        let mut devices = Vec::new();
-
-        // Check CPU devices
-        let cpu_count = unsafe { sycl_get_device_count(0) };
-        for i in 0..cpu_count {
-            if let Ok(device) = OneApiBackend::get_device_info(OneApiDeviceType::CPU) {
-                devices.push(device);
-            }
-        }
-
-        // Check GPU devices
-        let gpu_count = unsafe { sycl_get_device_count(1) };
-        for i in 0..gpu_count {
-            if let Ok(device) = OneApiBackend::get_device_info(OneApiDeviceType::GPU) {
-                devices.push(device);
-            }
-        }
-
-        devices
+        Vec::new()
     }
 
-    /// Generate optimized DPC++ kernel for matrix multiplication
+    /// Generate optimized DPC++ kernel for matrix multiplication.
+    ///
+    /// `M`/`N`/`K` are runtime parameters of the emitted kernel, not
+    /// compile-time constants baked into its body, so `m`/`n`/`k` do not
+    /// change the generated arithmetic - but they document, in the source
+    /// itself, which problem size this particular kernel text was generated
+    /// for, rather than silently discarding the caller's stated shape.
     pub fn generate_gemm_kernel(m: usize, n: usize, k: usize) -> String {
-        r#"
+        format!("\n// Generated for M={m}, N={n}, K={k}.")
+            + r#"
 #include <sycl/sycl.hpp>
 
 class GemmKernel;
@@ -1153,16 +859,25 @@ void gemm_kernel(sycl::queue& q, const float* A, const float* B, float* C,
     ).wait();
 }
 "#
-        .to_string()
     }
 
-    /// Generate optimized DPC++ kernel for convolution
+    /// Generate optimized DPC++ kernel for convolution.
+    ///
+    /// As with [`generate_gemm_kernel`], the channel counts and kernel
+    /// size are runtime parameters of the emitted kernel rather than
+    /// compile-time constants, so `input_channels`/`output_channels`/
+    /// `kernel_size` do not change the generated arithmetic - but they
+    /// document, in the source itself, which configuration this kernel text
+    /// was generated for.
     pub fn generate_conv2d_kernel(
         input_channels: usize,
         output_channels: usize,
         kernel_size: usize,
     ) -> String {
-        r#"
+        format!(
+            "\n// Generated for input_channels={input_channels}, \
+             output_channels={output_channels}, kernel_size={kernel_size}."
+        ) + r#"
 #include <sycl/sycl.hpp>
 
 class Conv2dKernel;
@@ -1202,7 +917,7 @@ void conv2d_kernel(sycl::queue& q, const float* input, const float* weights,
         }
     ).wait();
 }
-"#.to_string()
+"#
     }
 }
 
@@ -1257,5 +972,57 @@ mod tests {
         let conv_kernel = utils::generate_conv2d_kernel(64, 128, 3);
         assert!(conv_kernel.contains("Conv2dKernel"));
         assert!(conv_kernel.contains("nd_range<3>"));
+    }
+
+    /// Regression test: `m`/`n`/`k` (and the conv2d channel/kernel-size
+    /// parameters) used to be accepted and then completely ignored, so two
+    /// calls with different problem sizes produced byte-identical source
+    /// text. They must now show up in the generated source.
+    #[test]
+    fn test_kernel_generation_reflects_its_own_arguments() {
+        let small = utils::generate_gemm_kernel(4, 8, 16);
+        let large = utils::generate_gemm_kernel(400, 800, 1600);
+        assert_ne!(
+            small, large,
+            "different M/N/K must produce different source text"
+        );
+        assert!(small.contains("M=4, N=8, K=16"));
+        assert!(large.contains("M=400, N=800, K=1600"));
+
+        let small_conv = utils::generate_conv2d_kernel(3, 16, 3);
+        let large_conv = utils::generate_conv2d_kernel(64, 128, 5);
+        assert_ne!(
+            small_conv, large_conv,
+            "different channel/kernel-size arguments must produce different source text"
+        );
+        assert!(small_conv.contains("input_channels=3, output_channels=16, kernel_size=3"));
+        assert!(large_conv.contains("input_channels=64, output_channels=128, kernel_size=5"));
+    }
+
+    /// Regression test: `OneApiBackend::new()` used to "succeed" by calling
+    /// `sycl_queue_create` (an unresolved extern symbol with no providing
+    /// library) and building a context around whatever that returned. It
+    /// must now honestly report the backend as unavailable.
+    #[test]
+    fn test_oneapi_backend_new_errors_no_real_runtime() {
+        let result = OneApiBackend::new(OneApiConfig::default());
+        assert!(
+            result.is_err(),
+            "must not fabricate a working oneAPI backend"
+        );
+    }
+
+    /// Regression test: `is_oneapi_available` must not claim a SYCL runtime
+    /// is present when none is linked into this build.
+    #[test]
+    fn test_is_oneapi_available_is_honest() {
+        assert!(!utils::is_oneapi_available());
+    }
+
+    /// Regression test: device enumeration must return no phantom devices
+    /// on a machine with no real oneAPI runtime.
+    #[test]
+    fn test_get_available_devices_reports_no_phantom_devices() {
+        assert!(utils::get_available_devices().is_empty());
     }
 }

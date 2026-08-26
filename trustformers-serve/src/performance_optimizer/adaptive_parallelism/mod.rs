@@ -82,6 +82,9 @@ pub mod learning_model;
 /// Model validation strategies and frameworks
 pub mod validation;
 
+#[cfg(test)]
+mod validation_tests;
+
 // =============================================================================
 // COMPREHENSIVE RE-EXPORTS FOR BACKWARD COMPATIBILITY
 // =============================================================================
@@ -144,7 +147,9 @@ pub use learning_model::{AdaptiveLinearRegression, LearningAlgorithmExt};
 // =============================================================================
 
 // Validation strategies and frameworks
-pub use validation::{CrossValidationStrategy, HoldoutValidationStrategy, ValidationStrategy};
+pub use validation::{
+    FoldedEvaluationStrategy, HoldoutValidationStrategy, RegressionMetrics, ValidationStrategy,
+};
 
 // =============================================================================
 // CONVENIENCE FUNCTIONS

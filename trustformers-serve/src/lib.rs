@@ -109,7 +109,6 @@ pub mod rate_limit;
 pub mod rate_limiting;
 pub mod request_profiling;
 pub mod resource_management;
-pub mod resource_manager;
 pub mod server;
 pub mod serverless;
 pub mod service_mesh;
@@ -459,9 +458,9 @@ pub use request_profiling::{
 };
 pub use resource_management::{
     AlertSystem, AnalyticsEngine, CleanupEvent, CleanupManager, CleanupTask, CustomResourceManager,
-    DatabaseConnectionManager, GpuAllocation as RMGpuAllocation, GpuDeviceInfo,
-    GpuMonitoringSystem, GpuPerformanceTracker, GpuResourceManager, HealthChecker, LoadMetrics,
-    MetricsAggregator, NetworkPortManager as ModularNetworkPortManager, PerformanceAnomaly,
+    DatabaseSlotAllocator, GpuAllocation as RMGpuAllocation, GpuDeviceInfo, GpuMonitoringSystem,
+    GpuPerformanceTracker, GpuResourceManager, HealthChecker, LoadMetrics, MetricsAggregator,
+    NetworkPortManager as ModularNetworkPortManager, PerformanceAnomaly,
     PerformanceBottleneck as RMPerformanceBottleneck, PerformancePrediction,
     PortAllocation as ModularPortAllocation, ReportGenerator, ResourceAllocator,
     ResourceManagementSystem as ModularResourceManagementSystem, ResourceMonitor,
@@ -470,7 +469,20 @@ pub use resource_management::{
     TempDirectoryManager as ModularTempDirectoryManager, WorkerPool,
 };
 pub use resource_management::{NetworkPortManager, PortAllocation, PortReservationSystem};
-pub use resource_manager::{
+// The unprefixed resource-management surface. Until 0.2.1 these five names came
+// from a second module, `resource_manager`, whose sub-managers reported
+// allocations they never performed: ports were always `vec![8080]`, temporary
+// directories were `/tmp/test-…` strings that no directory backed, database
+// connection ids were synthesised, GPU device indices were echoed back
+// unchecked, and "efficiency" was the constant `0.75`. That module was deleted
+// in 0.2.1 and these names now resolve to `resource_management`, whose port
+// manager hands out distinct ports from a finite pool and errors when it is
+// exhausted, and whose directory manager creates the directories it reports.
+//
+// `ModularResourceManagementSystem` and its siblings above are the same items
+// under their historical prefixed names, kept so code written against 0.1.x
+// keeps compiling. New code should prefer the unprefixed names.
+pub use resource_management::{
     DirectoryStatus, PortUsageType, ResourceManagementSystem, TempDirectoryInfo,
     TempDirectoryManager,
 };
@@ -500,9 +512,9 @@ pub use slo::{
     SloPerformance, SloStats, SloTracker, SloWindow, TrendDirection, WindowType,
 };
 pub use speculative_decoding::{
-    DraftModel, DraftToken, ModelInfo as SpeculativeModelInfo, SpeculativeDecoder,
-    SpeculativeDecodingConfig, SpeculativeDecodingManager, SpeculativeStats, TargetModel,
-    VerificationResult,
+    validate_speculative_config, DraftModel, DraftToken, ModelInfo as SpeculativeModelInfo,
+    SpeculativeDecoder, SpeculativeDecodingConfig, SpeculativeDecodingManager, SpeculativeStats,
+    TargetModel, VerificationResult,
 };
 pub use streaming::{
     ChunkStream, SseEvent, SseHandler, StreamType, StreamingConfig, StreamingService,

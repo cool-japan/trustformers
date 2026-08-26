@@ -1,10 +1,10 @@
-use crate::llama::model::{LlamaMLP, RMSNorm, RotaryEmbedding}; // Reuse LLaMA components
+use crate::llama::model::{LlamaMLP, RMSNorm}; // Reuse LLaMA components
 use crate::mistral::config::MistralConfig;
 use crate::moe::{Expert, MoEConfig, SparseMoE};
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::{Result, TrustformersError},
+    errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -16,11 +16,10 @@ pub struct MistralAttention {
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
-    #[allow(dead_code)]
-    rotary_emb: RotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    rope_theta: f32,
     sliding_window: Option<usize>,
     #[allow(dead_code)]
     attention_dropout: f32,
@@ -51,18 +50,15 @@ impl MistralAttention {
             false,
         );
 
-        let rotary_emb =
-            RotaryEmbedding::new(head_dim, config.max_position_embeddings, config.rope_theta);
-
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
-            rotary_emb,
             num_heads: config.num_attention_heads,
             num_kv_heads: config.num_key_value_heads,
             head_dim,
+            rope_theta: config.rope_theta,
             sliding_window: config.sliding_window,
             attention_dropout: config.attention_dropout,
         })
@@ -96,66 +92,58 @@ impl MistralAttention {
             device,
         );
 
-        let rotary_emb =
-            RotaryEmbedding::new(head_dim, config.max_position_embeddings, config.rope_theta);
-
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
-            rotary_emb,
             num_heads: config.num_attention_heads,
             num_kv_heads: config.num_key_value_heads,
             head_dim,
+            rope_theta: config.rope_theta,
             sliding_window: config.sliding_window,
             attention_dropout: config.attention_dropout,
         })
     }
+}
 
-    /// Apply sliding window attention mask
-    fn apply_sliding_window_mask(
-        &self,
-        attention_scores: &Tensor,
-        seq_len: usize,
-    ) -> Result<Tensor> {
-        if let Some(window_size) = self.sliding_window {
-            // Create sliding window mask
-            let mut mask_data = vec![0.0f32; seq_len * seq_len];
-            for i in 0..seq_len {
-                for j in 0..seq_len {
-                    let distance = j.saturating_sub(i);
-                    if distance > window_size {
-                        mask_data[i * seq_len + j] = f32::NEG_INFINITY;
-                    }
-                }
-            }
-            // Reshape to [1, 1, seq_len, seq_len] for broadcasting across batch and num_heads
-            let mask = Tensor::from_vec(mask_data, &[seq_len, seq_len])?
-                .reshape(&[1, 1, seq_len, seq_len])?;
-            attention_scores.add(&mask)
-        } else {
-            Ok(attention_scores.clone())
-        }
+/// Rotate `data` (row-major, shape `[seq_len, num_heads * head_dim]`) in
+/// place using the standard "rotate-half" RoPE convention (Su et al. 2021):
+/// each head's `head_dim`-wide channel vector is split into two halves
+/// `(x1, x2)` and rotated as `(x1*cos - x2*sin, x1*sin + x2*cos)` using a
+/// position-dependent angle `pos * theta^(-2i/head_dim)`. Every head in the
+/// row is rotated independently, so `q` (with `num_heads`) and `k` (with
+/// `num_kv_heads` under GQA) must be rotated with separate calls.
+///
+/// `pub(crate)` (rather than private) solely so the regression tests in
+/// `mistral::tests` can exercise it directly.
+pub(crate) fn apply_rope_rotate_half(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    theta: f32,
+    position_ids: &[usize],
+) {
+    let half = head_dim / 2;
+    if half == 0 {
+        return;
     }
-
-    /// Apply rotary position embedding (simplified implementation)
-    fn apply_rotary_embedding(&self, tensor: &Tensor, _seq_len: usize) -> Result<Tensor> {
-        // For now, return the tensor unchanged
-        // A full implementation would apply rotary embedding based on position
-        Ok(tensor.clone())
-    }
-
-    /// Create causal mask for autoregressive attention
-    fn create_causal_mask(&self, seq_len: usize) -> Result<Tensor> {
-        let mut mask_data = vec![0.0f32; seq_len * seq_len];
-        for i in 0..seq_len {
-            for j in (i + 1)..seq_len {
-                mask_data[i * seq_len + j] = f32::NEG_INFINITY;
+    let row_width = num_heads * head_dim;
+    for (row, &pos) in position_ids.iter().enumerate() {
+        let row_off = row * row_width;
+        for h in 0..num_heads {
+            let head_off = row_off + h * head_dim;
+            for i in 0..half {
+                let freq = 1.0 / theta.powf(2.0 * i as f32 / head_dim as f32);
+                let angle = pos as f32 * freq;
+                let cos_v = angle.cos();
+                let sin_v = angle.sin();
+                let x1 = data[head_off + i];
+                let x2 = data[head_off + i + half];
+                data[head_off + i] = x1 * cos_v - x2 * sin_v;
+                data[head_off + i + half] = x1 * sin_v + x2 * cos_v;
             }
         }
-        // Reshape to [1, 1, seq_len, seq_len] for broadcasting across batch and num_heads
-        Tensor::from_vec(mask_data, &[seq_len, seq_len])?.reshape(&[1, 1, seq_len, seq_len])
     }
 }
 
@@ -163,134 +151,133 @@ impl Layer for MistralAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Real scaled dot-product attention: RoPE, grouped-query `Q @ K^T`,
+    /// causal masking combined with a sliding window (when configured), and
+    /// softmax over `V`.
+    ///
+    /// Accepts `input` shaped `[seq_len, hidden_size]` (the shape produced
+    /// by `Embedding::forward`/`MistralModel::forward`); `seq_len` is
+    /// derived from the projected `Q` width rather than assumed from a fixed
+    /// tensor rank, so this also works if a leading batch=1 axis is present.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let batch_size = input.shape()[0];
-        let seq_len = input.shape()[1];
-        eprintln!("[Mistral] Input shape: {:?}", input.shape());
-
-        // Project to Q, K, V
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
         let v = self.v_proj.forward(input)?;
-        eprintln!(
-            "[Mistral] After projection - Q: {:?}, K: {:?}, V: {:?}",
-            q.shape(),
-            k.shape(),
-            v.shape()
-        );
 
-        // Reshape for multi-head attention with grouped-query attention
-        let head_dim = self.head_dim;
-        let q = q.reshape(&[batch_size, seq_len, self.num_heads, head_dim])?;
-        let k = k.reshape(&[batch_size, seq_len, self.num_kv_heads, head_dim])?;
-        let v = v.reshape(&[batch_size, seq_len, self.num_kv_heads, head_dim])?;
-        eprintln!(
-            "[Mistral] After reshape - Q: {:?}, K: {:?}, V: {:?}",
-            q.shape(),
-            k.shape(),
-            v.shape()
-        );
-
-        // Transpose to [batch, num_heads, seq_len, head_dim]
-        let q = q.transpose(1, 2)?;
-        let k = k.transpose(1, 2)?;
-        let v = v.transpose(1, 2)?;
-        eprintln!(
-            "[Mistral] After transpose - Q: {:?}, K: {:?}, V: {:?}",
-            q.shape(),
-            k.shape(),
-            v.shape()
-        );
-
-        // Apply rotary embedding (simplified implementation)
-        let q = self.apply_rotary_embedding(&q, seq_len)?;
-        let k = self.apply_rotary_embedding(&k, seq_len)?;
-
-        // Repeat k and v heads for grouped-query attention
-        let (k, v) = if self.num_kv_heads < self.num_heads {
-            eprintln!(
-                "[Mistral GQA] Expanding {} KV heads to {} query heads (repeats={})",
-                self.num_kv_heads,
-                self.num_heads,
-                self.num_heads / self.num_kv_heads
-            );
-            let repeats = self.num_heads / self.num_kv_heads;
-            let mut k_heads = Vec::new();
-            let mut v_heads = Vec::new();
-
-            for head_idx in 0..self.num_kv_heads {
-                let k_head = k.slice_multi(&[
-                    (0, batch_size),
-                    (head_idx, head_idx + 1),
-                    (0, seq_len),
-                    (0, head_dim),
-                ])?;
-                let v_head = v.slice_multi(&[
-                    (0, batch_size),
-                    (head_idx, head_idx + 1),
-                    (0, seq_len),
-                    (0, head_dim),
-                ])?;
-                eprintln!(
-                    "[Mistral GQA] Head {} - k_head: {:?}, v_head: {:?}",
-                    head_idx,
-                    k_head.shape(),
-                    v_head.shape()
-                );
-
-                for _ in 0..repeats {
-                    k_heads.push(k_head.clone());
-                    v_heads.push(v_head.clone());
-                }
-            }
-
-            let k_repeated = Tensor::concat(&k_heads, 1)?;
-            let v_repeated = Tensor::concat(&v_heads, 1)?;
-            eprintln!(
-                "[Mistral GQA] After concat - K: {:?}, V: {:?}",
-                k_repeated.shape(),
-                v_repeated.shape()
-            );
-            (k_repeated, v_repeated)
-        } else {
-            eprintln!("[Mistral] No GQA expansion needed (num_kv_heads == num_heads)");
-            (k, v)
+        let (mut q_data, mut k_data, v_data) = match (&q, &k, &v) {
+            (Tensor::F32(qd), Tensor::F32(kd), Tensor::F32(vd)) => (
+                qd.as_slice()
+                    .ok_or_else(|| tensor_op_error("mistral_attn", "q tensor not contiguous"))?
+                    .to_vec(),
+                kd.as_slice()
+                    .ok_or_else(|| tensor_op_error("mistral_attn", "k tensor not contiguous"))?
+                    .to_vec(),
+                vd.as_slice()
+                    .ok_or_else(|| tensor_op_error("mistral_attn", "v tensor not contiguous"))?
+                    .to_vec(),
+            ),
+            _ => return Err(tensor_op_error("mistral_attn", "q, k, v must be F32")),
         };
 
-        // Compute attention scores
-        let k_transposed = k.transpose(2, 3)?;
-        eprintln!("[Mistral] K transposed shape: {:?}", k_transposed.shape());
-        let scores = q.matmul(&k_transposed)?;
-        eprintln!("[Mistral] Attention scores shape: {:?}", scores.shape());
-        let scale = (head_dim as f32).sqrt();
-        let scaled_scores = scores.div_scalar(scale)?;
+        if self.num_heads == 0
+            || self.num_kv_heads == 0
+            || !self.num_heads.is_multiple_of(self.num_kv_heads)
+        {
+            return Err(tensor_op_error(
+                "mistral_attn",
+                "num_heads must be a positive multiple of num_kv_heads",
+            ));
+        }
+        let q_width = self.num_heads * self.head_dim;
+        let kv_width = self.num_kv_heads * self.head_dim;
+        if q_width == 0 || !q_data.len().is_multiple_of(q_width) {
+            return Err(tensor_op_error(
+                "mistral_attn",
+                "q size inconsistent with num_heads * head_dim",
+            ));
+        }
+        let seq_len = q_data.len() / q_width;
+        if k_data.len() != seq_len * kv_width || v_data.len() != seq_len * kv_width {
+            return Err(tensor_op_error(
+                "mistral_attn",
+                "k/v size inconsistent with num_kv_heads * head_dim",
+            ));
+        }
+        if let Some(w) = self.sliding_window {
+            if w == 0 {
+                return Err(tensor_op_error(
+                    "mistral_attn",
+                    "sliding_window must be > 0",
+                ));
+            }
+        }
 
-        // Apply sliding window attention mask
-        let masked_scores = self.apply_sliding_window_mask(&scaled_scores, seq_len)?;
-        eprintln!(
-            "[Mistral] After sliding window mask: {:?}",
-            masked_scores.shape()
+        let position_ids: Vec<usize> = (0..seq_len).collect();
+        apply_rope_rotate_half(
+            &mut q_data,
+            self.num_heads,
+            self.head_dim,
+            self.rope_theta,
+            &position_ids,
+        );
+        apply_rope_rotate_half(
+            &mut k_data,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rope_theta,
+            &position_ids,
         );
 
-        // Apply causal mask
-        let causal_mask = self.create_causal_mask(seq_len)?;
-        eprintln!("[Mistral] Causal mask shape: {:?}", causal_mask.shape());
-        let final_scores = masked_scores.add(&causal_mask)?;
-        eprintln!("[Mistral] Final scores shape: {:?}", final_scores.shape());
+        let group = self.num_heads / self.num_kv_heads;
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        // A window >= seq_len never excludes any causally-valid key, so this
+        // single code path (shared with the tested `tasks::apply_sliding_window_mask`)
+        // covers both plain causal attention and real sliding-window attention.
+        let effective_window = self.sliding_window.unwrap_or(seq_len.max(1));
 
-        // Apply softmax
-        let attention_weights = final_scores.softmax(-1)?;
+        let mut out = vec![0f32; seq_len * q_width];
+        for h in 0..self.num_heads {
+            let kv_h = h / group;
+            let mut scores = vec![0f32; seq_len * seq_len];
+            for i in 0..seq_len {
+                let q_off = i * q_width + h * self.head_dim;
+                for j in 0..seq_len {
+                    let k_off = j * kv_width + kv_h * self.head_dim;
+                    let dot: f32 =
+                        (0..self.head_dim).map(|d| q_data[q_off + d] * k_data[k_off + d]).sum();
+                    scores[i * seq_len + j] = dot * scale;
+                }
+            }
+            crate::mistral::tasks::apply_sliding_window_mask(
+                &mut scores,
+                seq_len,
+                effective_window,
+            );
 
-        // Apply attention to values
-        let attention_output = attention_weights.matmul(&v)?;
+            for i in 0..seq_len {
+                let row = &scores[i * seq_len..(i + 1) * seq_len];
+                let max_val = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut weights = vec![0f32; seq_len];
+                let mut sum = 0f32;
+                for (j, &s) in row.iter().enumerate() {
+                    let e = (s - max_val).exp();
+                    weights[j] = e;
+                    sum += e;
+                }
+                let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                let out_off = i * q_width + h * self.head_dim;
+                for (j, &w) in weights.iter().enumerate() {
+                    let wn = w * inv_sum;
+                    let v_off = j * kv_width + kv_h * self.head_dim;
+                    for d in 0..self.head_dim {
+                        out[out_off + d] += wn * v_data[v_off + d];
+                    }
+                }
+            }
+        }
 
-        // Transpose back and reshape
-        let attention_output = attention_output.transpose(1, 2)?;
-        let attention_output =
-            attention_output.reshape(&[batch_size, seq_len, self.num_heads * head_dim])?;
-
-        // Apply output projection
-        self.o_proj.forward(attention_output)
+        let attended = Tensor::from_vec(out, &[seq_len, q_width])?;
+        self.o_proj.forward(attended)
     }
 }
 
@@ -347,6 +334,70 @@ impl MistralDecoderLayer {
             input_layernorm,
             post_attention_layernorm,
         })
+    }
+}
+
+impl MistralAttention {
+    /// Append the four projections under `<prefix>.…`.
+    ///
+    /// Mistral uses HuggingFace's LLaMA-style spelling — `q_proj`, `k_proj`,
+    /// `v_proj`, `o_proj` — which is what
+    /// [`MistralForCausalLM::load_from_path`] looks up. `k_proj` / `v_proj` are
+    /// narrower than `q_proj` under grouped-query attention; the shapes come
+    /// straight from the live layers, so that asymmetry is preserved.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters(&format!("{prefix}.o_proj"), into);
+    }
+
+    /// Mutable counterpart of [`MistralAttention::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters_mut(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters_mut(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters_mut(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters_mut(&format!("{prefix}.o_proj"), into);
+    }
+}
+
+impl MistralDecoderLayer {
+    /// Append this decoder layer's parameters under `<prefix>.…`, in the order
+    /// [`MistralForCausalLM::load_from_path`] binds them.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.self_attn.collect_named_parameters(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters(&format!("{prefix}.post_attention_layernorm"), into);
+    }
+
+    /// Mutable counterpart of [`MistralDecoderLayer::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.self_attn
+            .collect_named_parameters_mut(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.post_attention_layernorm"), into);
     }
 }
 
@@ -493,6 +544,51 @@ impl Model for MistralModel {
         // Total
         embedding_params + (per_layer_params * num_layers) + final_norm_params
     }
+
+    /// Enumerate the backbone's live parameters under HuggingFace Mistral names.
+    ///
+    /// Mistral shares LLaMA's checkpoint layout: `model.embed_tokens.weight`,
+    /// `model.layers.{i}.…`, `model.norm.weight` — the names
+    /// [`MistralForCausalLM::load_from_path`] looks up.
+    ///
+    /// Order is embeddings, layers in index order, final norm.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters(&mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut(&mut tensors);
+        tensors
+    }
+}
+
+impl MistralModel {
+    /// Append every backbone parameter under the `model.` namespace.
+    ///
+    /// Factored out of [`Model::named_tensors`] so [`MistralForCausalLM`] can
+    /// reuse it without duplicating the name table.
+    pub(crate) fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.embed_tokens.collect_named_parameters("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter().enumerate() {
+            layer.collect_named_parameters(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters("model.norm", into);
+    }
+
+    /// Mutable counterpart of [`MistralModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.embed_tokens.collect_named_parameters_mut("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            layer.collect_named_parameters_mut(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters_mut("model.norm", into);
+    }
 }
 
 /// Mistral for causal language modeling (with LM head)
@@ -544,6 +640,25 @@ impl Model for MistralForCausalLM {
         let lm_head_params = config.hidden_size * config.vocab_size;
 
         model_params + lm_head_params
+    }
+
+    /// Enumerate the backbone (already `model.`-prefixed) plus `lm_head.weight`.
+    ///
+    /// The layout of a HuggingFace `MistralForCausalLM` checkpoint, and the
+    /// names [`MistralForCausalLM::load_from_path`] binds. The head is a
+    /// separate `Linear` here, so it is listed as its own tensor.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters(&mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters_mut(&mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
     }
 }
 
@@ -655,9 +770,10 @@ impl MistralForCausalLM {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -681,7 +797,12 @@ impl MistralForCausalLM {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
 
-            println!("Attempting to download {}", file_url);
+            tracing::info!("Attempting to download {}", file_url);
+
+            // Convert path to string once for both commands
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
 
             // Try using curl first
             let curl_result = Command::new("curl")
@@ -689,51 +810,45 @@ impl MistralForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
 
             match curl_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {}", file_name);
+                    tracing::info!("Successfully downloaded {}", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with curl: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("curl not available: {}", e);
+                    tracing::info!("curl not available: {}", e);
                 },
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {} with wget", file_name);
+                    tracing::info!("Successfully downloaded {} with wget", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with wget: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("wget not available: {}", e);
+                    tracing::info!("wget not available: {}", e);
                 },
             }
 
@@ -746,7 +861,7 @@ impl MistralForCausalLM {
             }
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded model {} from HuggingFace Hub",
             model_name
         );

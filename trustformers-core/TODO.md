@@ -7,7 +7,7 @@ It provides core tensor operations, hardware acceleration, layer abstractions, a
 building blocks required by model implementations in trustformers-models and other crates.
 
 **Key Responsibilities:**
-- Multi-backend tensor abstraction (CPU, CUDA, ROCm, Metal, Vulkan, XLA, TPU, RISC-V)
+- Multi-backend tensor abstraction — CPU (real), CUDA (real, hardware-verified), Metal (real, hardware-verified); ROCm/Vulkan feature-gated and experimental (real scaffolding, not hardware-verified here); XLA/oneAPI/RISC-V present as honest no-op facades (structured errors / scalar fallback, no real backend linked); TPU not implemented at all (see "Hardware Acceleration" below for specifics, corrected 2026-08-24)
 - Hardware acceleration infrastructure
 - Core layers (Linear, Embedding, LayerNorm, Attention, FFN)
 - Memory management and optimization
@@ -22,7 +22,7 @@ building blocks required by model implementations in trustformers-models and oth
 ## Current Status
 
 ### Implementation Status
-✅ **STABLE** - Version 0.1.4 (initial stable release 0.1.0 on 2026-03-21)
+✅ **STABLE** - Version 0.2.1 (initial stable release 0.1.0 on 2026-03-21)
 ✅ **ZERO COMPILATION ERRORS** - Clean compilation across all backends
 ✅ **COMPREHENSIVE TEST COVERAGE** - ~2,353 tests with 100% pass rate
 ✅ **ALL TODOS COMPLETED** - Zero stubs (todo!/unimplemented!) remaining (verified 2026-07-01)
@@ -30,13 +30,13 @@ building blocks required by model implementations in trustformers-models and oth
 ✅ **MEMORY-SAFE** - Zero-copy operations and efficient memory management
 
 ### Code Quality Metrics
-- **Test Count:** ~2,353 unit tests, all passing (0 failing)
-- **Stubs:** 0 (no todo! or unimplemented! macros; verified 2026-07-01)
-- **Public API Items:** ~4,533
-- **SLoC:** 155,280
+- **Test Count:** ~2,353 as of 2026-07-01 (stale — root `TODO.md`'s 2026-08-18 pass measured 3,390/3,390 for this crate; not independently re-run this pass, see root `TODO.md` for the current workspace-level baseline).
+- **Stubs:** 0 (no todo! or unimplemented! macros; verified 2026-07-01, not re-verified since)
+- **Public API Items:** ~4,533 (not re-verified since 2026-07-01)
+- **SLoC:** 178,532 (`tokei`, verified 2026-08-24 — up from 153,689 on 2026-07-09, largely from real Metal RAII and Metal/CUDA GPU-path work landed since)
 - **Code Coverage:** Extensive coverage across modules
-- **Clippy Warnings:** 3855+ warnings resolved historically; 0 clippy and 0 rustdoc warnings workspace-wide as of 2026-07-01
-- **File Size Compliance:** All files <2000 lines (verified 2026-07-01)
+- **Clippy Warnings:** 3855+ warnings resolved historically; 0 clippy and 0 rustdoc warnings workspace-wide as of 2026-07-01, not re-verified since
+- **File Size Compliance:** 0 files exceed 2000 lines as of 2026-08-24 (`gpu_ops/cuda/oxicuda/mod.rs`, previously flagged at 2,187 lines on 2026-07-09, is 1,474 lines today — resolved, see Housekeeping below).
 - **Documentation:** Comprehensive rustdoc for all public APIs
 
 ---
@@ -199,173 +199,29 @@ building blocks required by model implementations in trustformers-models and oth
   - Event-based synchronization
 
 #### ROCm/HIP Backend (AMD GPUs)
-- ✅ **AMD GPU Support**
-  - Full ROCm/HIP integration
-  - Portable across AMD GPU architectures
-  - Compatible with MI series (MI100, MI200, MI300)
-
-- ✅ **Custom HIP Kernels**
-  - Fused operations optimized for AMD architecture
-  - Wavefront-aware kernel design
-  - LDS (Local Data Share) utilization
-
-- ✅ **rocBLAS Integration**
-  - Optimized matrix operations
-  - Batched GEMM support
-  - Mixed-precision computations
-
-- ✅ **Memory Management**
-  - Efficient HIP memory APIs
-  - Asynchronous memory operations
-  - HIP managed memory
+> **Corrected 2026-08-24** — the checklist below (originally all ✅) overclaimed against the real source. Verified against `src/gpu_ops/rocm.rs`, `src/kernels/rocm_impl.rs`, `src/kernels/rocm_kernels.rs`, and the `rocm = ["dep:libloading"]` feature in `Cargo.toml`: the `rocm` feature depends only on `libloading` — no `hip-sys`/rocBLAS crate. `rocm_impl.rs`'s own doc comment describes itself as providing "actual ROCm/HIP runtime API bindings to replace the simulated implementations in `rocm_kernels.rs`" — it `dlopen`s `libamdhip64.so`/`.so.5`/`.so.6` at runtime and calls the real HIP C ABI through raw function pointers **if** that library and an AMD GPU are present on the host. This has not been run against real ROCm/AMD-GPU hardware in this environment (none available) and is not covered by the workspace's default-feature test baseline. Whether `rocm_kernels.rs`'s older simulated path is still reachable from any call site, or fully superseded by `rocm_impl.rs`, was not traced this pass. Treat as experimental and hardware-unverified, not "full ROCm/HIP integration."
 
 #### Metal Backend (Apple Silicon)
-- ✅ **MPS Integration**
-  - Metal Performance Shaders framework
-  - Neural network operations
-  - Optimized for M-series chips (M1, M2, M3, M4)
-
-- ✅ **Unified Memory**
-  - Efficient CPU-GPU memory sharing
-  - Zero-copy between CPU and GPU
-  - Automatic data migration
-
-- ✅ **Custom Metal Shaders**
-  - Metal Shading Language (MSL) kernels
-  - Optimized for Apple GPU architecture
-  - Tile-based rendering utilization
-
-- ✅ **Flash Attention**
-  - MPS graph-based implementation
-  - Memory-efficient attention computation
-  - Platform: macOS 10.15+, iOS 13+
+- ✅ **Real, hardware-verified on this machine** (Apple Silicon): device-resident matmul, GELU, LayerNorm, and attention run via `oxicuda-metal` (Pure Rust), **not** the Metal Performance Shaders (MPS) framework this section previously described — the `scirs2-core` MPS dependency was dropped. See root `README.md`'s CUDA/Metal runtime-verification note and `trustformers-core/src/gpu_ops/metal/` for the current implementation. `Tensor::Metal` now stores a refcounted `MetalBufferHandle` (RAII; added 2026-08-24) instead of a bare `BufferId`; `trustformers-models`'s own call sites (`gpt2/model/{model_blocks,model_core,model_ops}.rs`) were converted to match during Wave 5 — see the Housekeeping note below, corrected 2026-08-25.
+- Custom Metal compute kernels exist and are exercised by the tests above; "MSL kernels" / "tile-based rendering utilization" language in the previous version of this list described GPU-rendering concepts not applicable to this crate's compute-only use and has been removed rather than kept as decoration.
 
 #### Intel oneAPI Backend
-- ✅ **DPC++ SYCL**
-  - Data Parallel C++ kernel compilation
-  - Cross-architecture support (CPU, GPU, FPGA)
-  - USM (Unified Shared Memory)
-
-- ✅ **oneDNN Integration**
-  - Deep Neural Network Library
-  - Optimized convolutions, pooling, normalization
-  - Primitive caching for performance
-
-- ✅ **oneMKL**
-  - Math Kernel Library for linear algebra
-  - Optimized BLAS and LAPACK operations
-  - Intel CPU optimizations (AVX-512, AMX)
-
-- ✅ **Multi-Device Support**
-  - CPU: Intel Xeon, Core
-  - GPU: Intel Arc, Iris Xe, Data Center GPUs
-  - FPGA: Programmable acceleration
+> **Corrected 2026-08-24** — every ✅ below was fabricated. Verified: `oneapi = []` in `Cargo.toml` (zero dependencies — no SYCL/DPC++/oneDNN/oneMKL crate of any kind). `src/kernels/oneapi_impl.rs` declares `extern "C"` bindings to a SYCL/oneDNN/oneMKL runtime that nothing links; every public method (`compile_kernel`, `execute_kernel`, convolution, GEMM, USM allocation, ...) returns a structured error naming exactly what isn't linked (e.g. `"Intel oneAPI backend is not available: no SYCL/oneDNN/oneMKL runtime is linked"`) rather than a fabricated result — so the code itself never lies, even though this checklist did. No DPC++/SYCL compilation, no oneDNN, no oneMKL, no FPGA support exist in this crate today.
 
 #### Google XLA (Accelerated Linear Algebra)
-- ✅ **HLO Compilation**
-  - High-Level Operations IR
-  - Platform-specific code generation
-  - Automatic fusion and optimization
-
-- ✅ **Multi-Platform**
-  - CPU backend with LLVM
-  - GPU backend with NVPTX/AMDGPU
-  - TPU backend for Google Cloud
-
-- ✅ **Shape Inference**
-  - Automatic output shape computation
-  - Static shape optimization
-  - Dynamic shape support
-
-- ✅ **Optimization Passes**
-  - Operation fusion (element-wise, reduce-window)
-  - Buffer assignment and liveness analysis
-  - Layout optimization for hardware
+> **Corrected 2026-08-24** — every ✅ below was fabricated. Verified: `xla = []` in `Cargo.toml` (zero dependencies). `src/kernels/xla_impl.rs` declares `extern "C"` bindings to an XLA runtime that nothing links; every public method returns a structured "no XLA runtime is linked" error rather than a fabricated result. No HLO compilation, shape inference, operation fusion, or multi-platform (CPU/GPU/TPU) code generation exist in this crate today.
 
 #### TPU Backend (Google Cloud TPU)
-- ✅ **Multi-Generation Support**
-  - TPU v2: 180 teraflops, 64GB HBM
-  - TPU v3: 420 teraflops, 128GB HBM
-  - TPU v4: 275 teraflops per chip, scalable pods
-  - TPU v5e: Cost-optimized for inference and training
-  - TPU v5p: High-performance training
-
-- ✅ **Systolic Array Optimization**
-  - Matrix multiplication acceleration
-  - Pipelined data flow
-  - 2D mesh architecture
-
-- ✅ **BFloat16**
-  - Native bfloat16 precision
-  - Dynamic range of FP32 with FP16 storage
-  - Mixed-precision training
-
-- ✅ **HBM Management**
-  - High Bandwidth Memory (up to 128GB per chip)
-  - Efficient memory layout
-  - Sharding across TPU cores
+> **Corrected 2026-08-24** — every ✅ below was fabricated, and there isn't even an empty `tpu` feature flag in `Cargo.toml` (checked: none exists) or a TPU-specific module under `src/`. Root `README.md` states this plainly: "TPU is a placeholder, not implemented." The hardware-spec figures below (teraflops/HBM per generation) were never backed by any code in this crate and are deleted rather than kept as reference numbers for a feature that doesn't exist.
 
 #### RISC-V Vector Extensions (RVV)
-- ✅ **RVV 1.0 Compliance**
-  - Full specification support
-  - Vector-length agnostic programming
-  - Scalable vector operations
-
-- ✅ **Vector Length Support**
-  - VLEN: 128, 256, 512, 1024 bits
-  - Automatic adaptation to hardware VLEN
-  - Efficient code generation
-
-- ✅ **LMUL (Length Multiplier)**
-  - Vector register grouping (LMUL=1,2,4,8)
-  - Trade-off between vector length and registers
-  - Optimized for different workloads
-
-- ✅ **Vector Operations**
-  - Arithmetic: add, sub, mul, div, fma
-  - Logical: and, or, xor, not
-  - Shift: sll, srl, sra
-  - Reduction: sum, max, min
-  - Permutation: vrgather, vslide
+> **Corrected 2026-08-24** — every ✅ below was fabricated. Verified: `riscv = []` in `Cargo.toml` (zero dependencies). `src/kernels/riscv_impl.rs`'s own module doc comment is honest about this (unlike the oneAPI/XLA files above, which needed a doc-comment fix too — see root `TODO.md` P1): it models RVV register allocation and can emit `vsetvli`/`vle`/`vse`/... assembly text for inspection, but nothing here executes real RVV instructions (no `core::arch::asm!` anywhere in the module) — actual results always come from a scalar-CPU fallback (`RiscVBackend::simulate_vector_execution`) that computes correct results using ordinary Rust arithmetic, not RVV-accelerated. No RVV 1.0 hardware compliance, VLEN adaptation, or LMUL register grouping exist as real, hardware-executed behavior.
 
 #### Vulkan Compute
-- ✅ **Cross-Platform Support**
-  - Windows, Linux, macOS (via MoltenVK), Android
-  - Multiple GPU vendors: NVIDIA, AMD, Intel, ARM Mali, Qualcomm Adreno
-  - Unified API across platforms
+> **Corrected 2026-08-24** — this checklist overclaimed. Verified: `vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]` in `Cargo.toml` — real Vulkan compute crates, unlike ROCm/oneAPI/XLA above. `src/kernels/vulkan_impl.rs` does real, `#[cfg(feature = "vulkan")]`-gated `vulkano` device/instance/pipeline/descriptor-set setup (imports the real API, not a facade) — but several of its actual compute operations return a structured `TrustformersError::not_implemented` rather than a computed result (verified by reading the file: multiple sites, plus one `// For now, return placeholder values` comment and a `_placeholder: ()` struct field). So: real GPU-setup scaffolding, incomplete compute coverage. Not hardware-tested in this environment (no Vulkan-capable discrete GPU exercised this pass). Cross-platform vendor/OS coverage claims below were not independently verified and are removed rather than repeated.
 
-- ✅ **Compute Shaders**
-  - GLSL-based compute kernels
-  - SPIR-V compilation
-  - Descriptor sets for resource binding
-
-- ✅ **Memory Management**
-  - Vulkan buffer objects
-  - Device memory allocation
-  - Host-visible and device-local memory
-  - Transfer queues for data movement
-
-- ✅ **Synchronization**
-  - Fences for CPU-GPU sync
-  - Semaphores for GPU-GPU sync
-  - Pipeline barriers
-
-#### Flash Attention (All Backends)
-- ✅ **Implementation Coverage**
-  - CUDA: Custom fused kernels with shared memory tiling
-  - ROCm: HIP kernels optimized for AMD architecture
-  - Metal: MPS graph operations for Apple Silicon
-  - Vulkan: Compute shader implementation
-
-- ✅ **Memory Efficiency**
-  - O(N) memory complexity (vs O(N²) naive attention)
-  - IO-aware algorithm design
-  - Tiling for L2 cache optimization
-
-- ✅ **Performance**
-  - Fused softmax and dropout
-  - Reduced memory bandwidth usage
-  - Faster than standard attention on all supported hardware
+#### Flash Attention
+> **Corrected 2026-08-24** — the previous "All Backends" framing implied CUDA/ROCm/Metal/Vulkan all ship a working flash-attention kernel. Verified real and tested: **CUDA** (custom fused kernels, part of the `oxicuda` resident-attention chain documented in the "0.2.0 Release Scope" section below) and **Metal** (via `oxicuda-metal`, see above — not MPS graph operations, that framework is no longer used). **ROCm** and **Vulkan** flash attention are not confirmed real given the backend-level findings above (ROCm: hardware/runtime-dependent dlopen path, not independently checked for a flash-attention-specific kernel; Vulkan: several compute paths return `not_implemented`) — do not assume either has a working flash-attention kernel without checking the current source directly.
 
 ---
 
@@ -845,8 +701,11 @@ if debugger.is_breakpoint_hit() {
 ## Known Limitations
 
 ### Hardware Backend Limitations
-- **Metal Flash Attention:** Requires macOS 10.15+ or iOS 13+
-- **TPU Backend:** Requires Google Cloud TPU access and authentication
+- **Metal Flash Attention:** Requires macOS 10.15+ or iOS 13+; runs on `oxicuda-metal`, not MPS (see "Metal Backend" above)
+- **TPU Backend:** Not implemented — there is no `tpu` feature flag and no TPU-specific module in this crate (corrected 2026-08-24; the previous wording, "requires Google Cloud TPU access and authentication," wrongly implied a real backend gated only on credentials)
+- **XLA / Intel oneAPI Backends:** `xla`/`oneapi` features exist but pull zero dependencies; every operation returns a structured "no runtime linked" error (see "Google XLA" / "Intel oneAPI Backend" above)
+- **RISC-V RVV Backend:** `riscv` feature runs a scalar-CPU simulation, not real RVV instructions (see "RISC-V Vector Extensions" above)
+- **ROCm / Vulkan Backends:** feature-gated and experimental; not hardware-verified in this environment (see their sections above)
 - **Some Features:** Platform-specific driver/SDK requirements
 
 ### Numerical Precision
@@ -859,7 +718,10 @@ if debugger.is_breakpoint_hit() {
 - **Small Tensors:** Overhead may dominate for very small tensors on GPU
 
 ### Housekeeping
-- **Stray Backup Files:** 6 `.bak2` files remain under `src/` from prior refactors and are not compiled/live code — `layers/sdpa.rs.bak2`, `layers/flash_attention.rs.bak2`, `layers/linear.rs.bak2`, `kernels/simd/matrix_ops.rs.bak2`, `gpu_ops/metal/metalbackend_matmul_f32_group.rs.bak2`, `tensor/math_ops/linear_algebra.rs.bak2` (found 2026-07-01) — safe to delete
+- ~~**Stray Backup Files:** 6 `.bak2` files remain under `src/`~~ — **resolved, verified 2026-08-24**: zero `.bak2` files found under `src/` today.
+- ~~**Orphaned Module:** `src/quantization/int2.rs` ... never declared in `quantization/mod.rs`~~ — **resolved, verified 2026-08-24**: `quantization/mod.rs` now has `pub mod int2;`; the module is reachable and part of the compiled public API. (The "INT2 and sub-byte quantization" checkbox under Future Enhancements below was not re-verified against this — check before ticking it.)
+- ~~**File Size Policy:** `gpu_ops/cuda/oxicuda/mod.rs` grew to 2,187 lines~~ — **resolved, verified 2026-08-24**: the file is 1,474 lines today, under the 2,000-line policy limit (functionality was carved out into `attention.rs`/`batched.rs`, both already tracked above).
+- ~~**New, 2026-08-24**: `gpu_ops/metal/types.rs` gained a real RAII `MetalBufferHandle`... `trustformers-models/src/gpt2/model/{model_blocks.rs,model_core.rs,model_ops.rs}` has not been converted to match: `cargo check -p trustformers-models --features metal,gpt2` fails with 15 compiler errors today (5 `MetalTensorData{buffer_id:...}` construction-literal sites, 10 bare `.buffer_id` field reads)~~ — **resolved, corrected 2026-08-25**: the conversion was completed during Wave 5 (`models-hard` package). Re-verified today via the most recent available gate evidence (Wave 6c's own verification pass): `cargo check`/`cargo nextest run -p trustformers-models --features metal,gpt2` compiles with zero `error[E...]` hits and runs 1,897 tests (1,895 passed; the 2 failures are unrelated environmental proptest wall-clock timeouts in `models_property_tests`, not a compile error). Root `TODO.md`'s P0 section, which used to carry the same "15 compiler errors" claim as its #2 entry, is corrected in this same pass.
 
 ---
 
@@ -1025,9 +887,9 @@ cargo doc -p trustformers-core --all-features --no-deps
 
 ---
 
-**Last Updated:** 2026-07-06 - v0.2.0 Development
-**Version:** 0.2.0
+**Last Updated:** 2026-07-09 - v0.2.1 Development
+**Version:** 0.2.1
 **Status:** Stable — production-ready core infrastructure
 **Test Coverage:** ~2,353 tests, 100% pass rate, 0 stubs
 **Public API:** ~4,533 items
-**SLoC:** 155,280
+**SLoC:** 153,689

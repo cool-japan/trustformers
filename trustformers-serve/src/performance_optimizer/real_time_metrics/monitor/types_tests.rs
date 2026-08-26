@@ -1,6 +1,8 @@
 //! Tests for real-time metrics monitor types
 
 use super::types::*;
+use super::types_baseline::BaselineManager;
+use crate::performance_optimizer::real_time_metrics::types::data_structures::TimestampedMetrics;
 use chrono::Utc;
 use std::collections::HashMap;
 
@@ -442,4 +444,73 @@ fn test_thread_configuration_creation() {
     };
     assert_eq!(config.buffer_size, 1024);
     assert_eq!(config.retry_config.max_attempts, 3);
+}
+
+// =============================================================================
+// 0.2.1 REGRESSION: the baseline that had measured nothing
+// =============================================================================
+
+/// Regression: `PerformanceBaseline::default` used to describe a fully
+/// established baseline that had never seen a sample -- throughput 100.0,
+/// latency 50ms, `sample_count: 1000`, `confidence_level: 0.95`,
+/// `quality_score: 0.9` and `validation_status: Valid`.
+///
+/// `BaselineManager::new` installs that default and
+/// `ParallelPerformanceMonitor::get_monitoring_status` publishes
+/// `get_validation_status()`, so a monitor that had just started reported a
+/// *valid* baseline backed by a thousand imaginary samples.
+#[tokio::test]
+async fn a_fresh_baseline_claims_no_samples_and_is_not_valid() {
+    let manager = BaselineManager::new(BaselineConfig::default())
+        .await
+        .expect("manager constructs");
+    let baseline = manager.get_current_baseline().await;
+
+    assert_eq!(baseline.sample_count, 0, "nothing has been observed yet");
+    assert_eq!(baseline.sample_size, 0);
+    assert_eq!(baseline.confidence_level, 0.0);
+    assert_eq!(baseline.quality_score, 0.0);
+    assert_eq!(baseline.throughput_baseline, 0.0);
+    assert_eq!(baseline.baseline_throughput, 0.0);
+    assert!(
+        matches!(
+            manager.get_validation_status().await,
+            BaselineValidationStatus::Pending
+        ),
+        "an unmeasured baseline is not a validated one"
+    );
+}
+
+/// Regression: `VariabilityBounds::default` handed an unmeasured baseline a
+/// full set of limits (throughput 80..120, CPU 0.3..0.7, error rate 0..5%),
+/// which `check_deviation` then judged live metrics against.
+#[tokio::test]
+async fn a_fresh_baseline_carries_no_variability_bounds() {
+    let manager = BaselineManager::new(BaselineConfig::default())
+        .await
+        .expect("manager constructs");
+    let bounds = manager.get_current_baseline().await.variability_bounds;
+
+    assert_eq!(bounds.throughput_lower, 0.0);
+    assert_eq!(bounds.throughput_upper, 0.0);
+    assert_eq!(bounds.cpu_lower, 0.0);
+    assert_eq!(bounds.cpu_upper, 0.0);
+    assert_eq!(bounds.error_rate_upper, 0.0);
+}
+
+/// The sample count must reflect what was actually fed in.
+#[tokio::test]
+async fn observed_samples_are_counted() {
+    let manager = BaselineManager::new(BaselineConfig::default())
+        .await
+        .expect("manager constructs");
+    let samples: Vec<TimestampedMetrics> = (0..7).map(|_| TimestampedMetrics::default()).collect();
+    manager.update_baseline(&samples).await.expect("update succeeds");
+
+    let baseline = manager.get_current_baseline().await;
+    assert_eq!(baseline.sample_count, 7);
+    assert!(
+        baseline.confidence_level > 0.0,
+        "seven real samples carry some confidence"
+    );
 }

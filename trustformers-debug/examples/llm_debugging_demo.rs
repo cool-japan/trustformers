@@ -36,8 +36,18 @@ async fn main() -> Result<()> {
         println!("   Risk Level: {:?}", safety.risk_level);
     }
     if let Some(factuality) = &safe_response.factuality_analysis {
-        println!("   Factuality Score: {:.2}", factuality.factuality_score);
-        println!("   Verified Claims: {}", factuality.verified_claims);
+        println!(
+            "   Factuality Score: {}",
+            format_optional_score(factuality.factuality_score)
+        );
+        println!(
+            "   Claim-like Sentences: {}",
+            factuality.claim_like_sentences
+        );
+        println!(
+            "   Uncertainty Density: {}",
+            format_optional_score(factuality.uncertainty_density)
+        );
     }
     println!("   Recommendations: {:?}", safe_response.recommendations);
 
@@ -173,16 +183,16 @@ async fn main() -> Result<()> {
     println!("📈 Batch Analysis Results:");
     println!("   Batch Size: {}", batch_report.batch_size);
     println!(
-        "   Average Overall Score: {:.2}",
-        batch_report.batch_metrics.average_overall_score
+        "   Average Overall Score: {}",
+        format_optional_score(batch_report.batch_metrics.average_overall_score)
     );
     println!(
-        "   Average Safety Score: {:.2}",
-        batch_report.batch_metrics.average_safety_score
+        "   Average Safety Score: {}",
+        format_optional_score(batch_report.batch_metrics.average_safety_score)
     );
     println!(
-        "   Average Factuality Score: {:.2}",
-        batch_report.batch_metrics.average_factuality_score
+        "   Average Factuality Score: {}",
+        format_optional_score(batch_report.batch_metrics.average_factuality_score)
     );
     println!(
         "   Flagged Responses: {}",
@@ -201,29 +211,29 @@ async fn main() -> Result<()> {
 
     println!("🏥 LLM Health Report:");
     println!(
-        "   Overall Health Score: {:.2}/1.0",
-        health_report.overall_health_score
+        "   Overall Health Score: {}/1.0",
+        format_optional_score(health_report.overall_health_score)
     );
     println!("   Component Health:");
     println!(
-        "     Safety: {:.2} ({:?})",
-        health_report.safety_health.score, health_report.safety_health.status
+        "     Safety: {}",
+        format_component_health(&health_report.safety_health)
     );
     println!(
-        "     Factuality: {:.2} ({:?})",
-        health_report.factuality_health.score, health_report.factuality_health.status
+        "     Factuality: {}",
+        format_component_health(&health_report.factuality_health)
     );
     println!(
-        "     Alignment: {:.2} ({:?})",
-        health_report.alignment_health.score, health_report.alignment_health.status
+        "     Alignment: {}",
+        format_component_health(&health_report.alignment_health)
     );
     println!(
-        "     Bias: {:.2} ({:?})",
-        health_report.bias_health.score, health_report.bias_health.status
+        "     Bias: {}",
+        format_component_health(&health_report.bias_health)
     );
     println!(
-        "     Performance: {:.2} ({:?})",
-        health_report.performance_health.score, health_report.performance_health.status
+        "     Performance: {}",
+        format_component_health(&health_report.performance_health)
     );
     println!(
         "   Critical Issues: {}",
@@ -317,7 +327,12 @@ async fn main() -> Result<()> {
     );
 
     if let Some(alignment) = &contextual_analysis.alignment_analysis {
-        println!("   Alignment Score: {:.2}", alignment.alignment_score);
+        match alignment.alignment_score {
+            Some(score) => println!("   Alignment Score: {:.2}", score),
+            // No alignment scorer exists in this crate; the analyzer reports
+            // an honest absence rather than a stand-in number.
+            None => println!("   Alignment Score: not available (no alignment scoring model)"),
+        }
         println!("   Objective Scores:");
         for (objective, score) in &alignment.objective_scores {
             println!("     {:?}: {:.2}", objective, score);
@@ -364,13 +379,17 @@ fn print_analysis_summary(analysis: &LLMAnalysisReport, title: &str) {
 
     if let Some(factuality) = &analysis.factuality_analysis {
         println!(
-            "Factuality: {:.2} (Claims: {})",
-            factuality.factuality_score, factuality.verified_claims
+            "Factuality: {} (Claim-like sentences: {})",
+            format_optional_score(factuality.factuality_score),
+            factuality.claim_like_sentences
         );
     }
 
     if let Some(alignment) = &analysis.alignment_analysis {
-        println!("Alignment: {:.2}", alignment.alignment_score);
+        match alignment.alignment_score {
+            Some(score) => println!("Alignment: {:.2}", score),
+            None => println!("Alignment: not available (no alignment scoring model)"),
+        }
     }
 
     if !analysis.recommendations.is_empty() {
@@ -411,4 +430,23 @@ async fn demonstrate_macros() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Render a component's health summary, distinguishing "not measured" from a
+/// real score. Analyzers without a scoring model (alignment, bias, dialog
+/// quality) report `None` rather than a stand-in number.
+fn format_component_health(summary: &trustformers_debug::llm_debugging::HealthSummary) -> String {
+    match (summary.score, summary.status.as_ref()) {
+        (Some(score), Some(status)) => format!("{score:.2} ({status:?}) trend={}", summary.trend),
+        _ => "not measured (no scoring model for this component)".to_string(),
+    }
+}
+
+/// Render an optional score, saying so when the analyzer produced none rather
+/// than printing a stand-in number.
+fn format_optional_score(score: Option<f32>) -> String {
+    match score {
+        Some(value) => format!("{value:.2}"),
+        None => "not measured".to_string(),
+    }
 }

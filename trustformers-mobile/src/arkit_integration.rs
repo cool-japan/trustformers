@@ -6,7 +6,6 @@
 
 use crate::{
     device_info::{MobileDeviceInfo, PerformanceScores},
-    inference::InferenceEngine,
     mobile_performance_profiler::{MobilePerformanceProfiler, MobileProfilerConfig},
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use trustformers_core::error::{CoreError, Result};
+use trustformers_core::errors::unsupported_operation;
+use trustformers_core::TrustformersError;
 
 /// ARKit-powered inference engine for augmented reality applications
 pub struct ARKitInferenceEngine {
@@ -249,6 +250,18 @@ struct ARSessionManager {
     tracking_state: TrackingState,
     world_map: Option<ARWorldMap>,
     relocalization_enabled: bool,
+    /// When the current run started, for [`ARSessionManager::get_session_duration`].
+    /// `None` while the session is stopped.
+    session_start: Option<Instant>,
+    /// Wall-clock time accumulated across every run started/stopped so
+    /// far -- so `get_session_duration` still reports a real figure after
+    /// `stop()`, rather than resetting to zero the instant the session
+    /// ends.
+    accumulated_duration: Duration,
+    /// Real count of frames actually passed to
+    /// [`ARSessionManager::record_frame_processed`] by
+    /// `ARKitIntegration::process_frame`.
+    frames_processed: u64,
 }
 
 /// AR session state
@@ -804,8 +817,9 @@ impl ARKitInferenceEngine {
 
         // Verify ARKit availability
         if !Self::is_arkit_available(&device_info) {
-            return Err(TrustformersError::UnsupportedOperation(
-                "ARKit not available on this device".into(),
+            return Err(unsupported_operation(
+                "ARKit-based inference",
+                "this device (requires iOS 11+ and an A9 or newer processor)",
             )
             .into());
         }
@@ -877,6 +891,7 @@ impl ARKitInferenceEngine {
     /// Process AR frame
     pub fn process_frame(&mut self, frame: ARFrame) -> Result<ARProcessingResult> {
         let start_time = Instant::now();
+        self.session_manager.record_frame_processed();
 
         // Update world tracking
         self.world_tracking.update_camera_transform(frame.camera_transform);
@@ -1048,19 +1063,31 @@ impl ARSessionManager {
             tracking_state: TrackingState::NotAvailable,
             world_map: None,
             relocalization_enabled: false,
+            session_start: None,
+            accumulated_duration: Duration::ZERO,
+            frames_processed: 0,
         })
     }
 
     fn start(&mut self) -> Result<()> {
         self.session_state = ARSessionState::Running;
         self.tracking_state = TrackingState::Normal;
+        self.session_start = Some(Instant::now());
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
         self.session_state = ARSessionState::NotStarted;
         self.tracking_state = TrackingState::NotAvailable;
+        if let Some(start) = self.session_start.take() {
+            self.accumulated_duration += start.elapsed();
+        }
         Ok(())
+    }
+
+    /// Record that one real frame was handed to `ARKitIntegration::process_frame`.
+    fn record_frame_processed(&mut self) {
+        self.frames_processed += 1;
     }
 
     fn get_tracking_state(&self) -> TrackingState {
@@ -1085,12 +1112,21 @@ impl ARSessionManager {
         Ok(())
     }
 
+    /// Real elapsed wall-clock time: every completed run's duration plus,
+    /// if a session is currently active, the time elapsed since it started.
+    /// Previously a hardcoded `Duration::from_secs(120)` regardless of
+    /// whether a session had ever even been started.
     fn get_session_duration(&self) -> Duration {
-        Duration::from_secs(120) // Placeholder
+        self.accumulated_duration
+            + self.session_start.map(|start| start.elapsed()).unwrap_or_default()
     }
 
+    /// Real count of frames [`ARKitIntegration::process_frame`] has
+    /// actually run through [`Self::record_frame_processed`]. Previously a
+    /// hardcoded `7200` regardless of how many frames (if any) had been
+    /// processed.
     fn get_frames_processed(&self) -> u64 {
-        7200 // Placeholder
+        self.frames_processed
     }
 }
 
@@ -1235,13 +1271,32 @@ impl WorldTrackingEngine {
     }
 }
 
-// Stub implementations for detection models
+// No real object-detection/pose-estimation model is bound into this crate
+// (that would mean shipping and running an actual YOLO/ARKit-body-tracking
+// network on the captured frame -- real, substantial work this pass does
+// not fabricate a shortcut for). `YOLODetectionModel`/`ARKitPoseModel` are
+// named after what a real implementation would eventually bind to, but
+// today are honest gap markers: every per-frame method reports the gap
+// with a structured error instead of a confident, empty-but-plausible
+// result (a previous revision returned `Ok(Vec::new())` / `Ok(Pose {
+// joints: Vec::new(), confidence: 0.8, .. })` for *every* frame, which a
+// caller cannot distinguish from "genuinely no objects/person detected in
+// this frame" -- fabrication with extra steps, not an honest empty
+// result). `get_supported_classes` remains a capability *declaration*
+// (what a bound model would eventually support), not a per-frame result,
+// so it is left as-is; `set_confidence_threshold` remains a no-op for the
+// same reason -- there is no live model whose threshold it could
+// meaningfully adjust.
 struct YOLODetectionModel;
 struct ARKitPoseModel;
 
 impl DetectionModel for YOLODetectionModel {
     fn detect(&self, _frame: &ARFrame) -> Result<Vec<Detection>> {
-        Ok(Vec::new())
+        Err(TrustformersError::not_implemented(
+            "real object detection (no YOLO/vision model backend is bound into this crate)"
+                .to_string(),
+        )
+        .into())
     }
 
     fn get_supported_classes(&self) -> Vec<String> {
@@ -1253,29 +1308,30 @@ impl DetectionModel for YOLODetectionModel {
 
 impl PoseModel for ARKitPoseModel {
     fn estimate_pose(&self, _frame: &ARFrame) -> Result<Pose> {
-        Ok(Pose {
-            joints: Vec::new(),
-            confidence: 0.8,
-            pose_3d: None,
-            person_id: Some(1),
-        })
+        Err(TrustformersError::not_implemented(
+            "real body pose estimation (no pose-estimation model backend is bound into this \
+             crate)"
+                .to_string(),
+        )
+        .into())
     }
 
     fn estimate_hand_pose(&self, _frame: &ARFrame) -> Result<Vec<HandPose>> {
-        Ok(Vec::new())
+        Err(TrustformersError::not_implemented(
+            "real hand pose estimation (no pose-estimation model backend is bound into this \
+             crate)"
+                .to_string(),
+        )
+        .into())
     }
 
     fn estimate_face_pose(&self, _frame: &ARFrame) -> Result<FacePose> {
-        Ok(FacePose {
-            landmarks: Vec::new(),
-            orientation: Vec3 {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            expression: None,
-            confidence: 0.8,
-        })
+        Err(TrustformersError::not_implemented(
+            "real face pose estimation (no pose-estimation model backend is bound into this \
+             crate)"
+                .to_string(),
+        )
+        .into())
     }
 }
 

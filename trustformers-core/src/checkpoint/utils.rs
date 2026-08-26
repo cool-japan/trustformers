@@ -78,19 +78,81 @@ pub fn save_checkpoint(
     checkpoint.save(path)
 }
 
-/// Get checkpoint metadata without loading weights
+/// Read a checkpoint's metadata without loading its weights.
+///
+/// For safetensors this parses the JSON header only, so a multi-gigabyte file
+/// costs one small read. Formats whose header this crate cannot parse report
+/// `weight_count: None` and an empty metadata map — never a guess.
 pub fn get_checkpoint_info(path: &Path) -> Result<CheckpointInfo> {
     let format = detect_format(path)?;
-    let file_size = std::fs::metadata(path)?.len();
+    let file_size_bytes = std::fs::metadata(path)?.len();
 
-    // For now, return basic info
-    // In a real implementation, we'd parse headers to get weight count
+    let (weight_count, metadata) = match format {
+        CheckpointFormat::SafeTensors => read_safetensors_header(path)?,
+        // GGUF/PyTorch/TensorFlow/JAX headers are not parsed here; reporting a
+        // count for them would be a guess.
+        _ => (None, Default::default()),
+    };
+
     Ok(CheckpointInfo {
         format,
-        file_size_bytes: file_size,
-        weight_count: None,
-        metadata: Default::default(),
+        file_size_bytes,
+        weight_count,
+        metadata,
     })
+}
+
+/// Parse a safetensors header: `[u64 header_len][header_len JSON bytes]`.
+///
+/// Returns the number of weight tensors and the `__metadata__` map.
+fn read_safetensors_header(
+    path: &Path,
+) -> Result<(Option<usize>, std::collections::HashMap<String, String>)> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+
+    let mut length_bytes = [0u8; 8];
+    file.read_exact(&mut length_bytes)?;
+    let header_len = u64::from_le_bytes(length_bytes);
+
+    // Guard against a corrupt length claiming a header larger than the file.
+    let file_len = file.seek(SeekFrom::End(0))?;
+    if header_len == 0 || header_len.saturating_add(8) > file_len {
+        return Err(anyhow!(
+            "safetensors header length {} is invalid for a {}-byte file",
+            header_len,
+            file_len
+        ));
+    }
+    file.seek(SeekFrom::Start(8))?;
+
+    let header_len = usize::try_from(header_len)
+        .map_err(|_| anyhow!("safetensors header length {} exceeds usize", header_len))?;
+    let mut header_bytes = vec![0u8; header_len];
+    file.read_exact(&mut header_bytes)?;
+
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|error| anyhow!("safetensors header is not valid JSON: {}", error))?;
+    let object = header
+        .as_object()
+        .ok_or_else(|| anyhow!("safetensors header is not a JSON object"))?;
+
+    let mut metadata = std::collections::HashMap::new();
+    if let Some(serde_json::Value::Object(entries)) = object.get("__metadata__") {
+        for (key, value) in entries {
+            let rendered = match value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            metadata.insert(key.clone(), rendered);
+        }
+    }
+
+    // Every key except `__metadata__` names a tensor.
+    let weight_count = object.keys().filter(|key| key.as_str() != "__metadata__").count();
+
+    Ok((Some(weight_count), metadata))
 }
 
 #[derive(Debug)]
@@ -266,6 +328,60 @@ pub fn shard_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `get_checkpoint_info` returned `weight_count: None`
+    /// and empty metadata for every format, including safetensors, whose
+    /// header carries both.
+    #[test]
+    fn test_safetensors_info_reports_the_real_weight_count() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_ckpt_info_{}.safetensors",
+            std::process::id()
+        ));
+
+        // Header: two tensors plus a metadata block.
+        let header = serde_json::json!({
+            "__metadata__": {"format": "pt", "producer": "trustformers-test"},
+            "encoder.weight": {"dtype": "F32", "shape": [2, 2], "data_offsets": [0, 16]},
+            "encoder.bias": {"dtype": "F32", "shape": [2], "data_offsets": [16, 24]},
+        });
+        let header_bytes = serde_json::to_vec(&header)?;
+        let mut file_bytes = (header_bytes.len() as u64).to_le_bytes().to_vec();
+        file_bytes.extend_from_slice(&header_bytes);
+        // 24 bytes of tensor payload.
+        file_bytes.extend_from_slice(&[0u8; 24]);
+        std::fs::write(&path, &file_bytes)?;
+
+        let info = get_checkpoint_info(&path)?;
+        assert_eq!(info.format, CheckpointFormat::SafeTensors);
+        assert_eq!(
+            info.weight_count,
+            Some(2),
+            "the two tensors in the header must be counted"
+        );
+        assert_eq!(info.metadata.get("format").map(String::as_str), Some("pt"));
+        assert_eq!(info.file_size_bytes, file_bytes.len() as u64);
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    /// A corrupt header length must be an error, not a silent zero count.
+    #[test]
+    fn test_safetensors_info_rejects_a_corrupt_header() {
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_ckpt_bad_{}.safetensors",
+            std::process::id()
+        ));
+        // Claims a 1 GiB header inside a 16-byte file.
+        let mut bytes = (1_073_741_824u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &bytes).expect("write failed");
+
+        assert!(get_checkpoint_info(&path).is_err());
+
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn test_format_detection_by_extension() {

@@ -18,7 +18,7 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-08-24 (SLoC figure near the end of this file refreshed to 48,359 via `tokei`; this crate had no wave-4 work item, so the rest is unreviewed since 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure
@@ -307,7 +307,7 @@ export default {
 
 - ✅ **Debugging Tools**
   - Debug mode with comprehensive logging
-  - Performance profiler
+  - Performance profiler (real operation timing + real WASM memory growth + real battery level when the Battery Status API is present; see "Performance Monitoring" below for what it does NOT measure and why)
   - Memory leak detection
   - Visual regression testing
 
@@ -322,9 +322,9 @@ export default {
 - ✅ **Adaptive Features**
   - Device capability detection
   - Adaptive model selection based on hardware
-  - Battery usage optimization
+  - Battery usage optimization (real: `mobile.rs`'s `BatteryInfo`/`BatteryStatus` genuinely drive `ModelSize` selection via the browser's Battery Status API)
   - Network-aware loading (WiFi vs cellular)
-  - Thermal state monitoring
+  - ~~Thermal state monitoring~~ - removed as of the Wave 6 honesty pass: no standard browser API exposes device thermal state to a web page. `device_capability::DeviceCapabilityDetector::get_thermal_state()` honestly reports `"unknown"` (not a fabricated `"normal"`); `performance_profiler.rs` no longer estimates temperatures or thermal state from usage telemetry at all (see "Performance Monitoring" below) - there was no real thermal-state monitoring to preserve.
 
 - ✅ **Progressive Web App**
   - Service Worker integration
@@ -488,17 +488,19 @@ const optimized = await autoQuantize(model, {
 
 **Real-time analytics and optimization**
 
-- ✅ **Profiling**
-  - Operation-level timing
-  - Memory usage tracking
-  - GPU utilization monitoring
-  - Bottleneck detection
+> **Honesty pass (Wave 6, 2026-08-25).** Before this pass, `performance_profiler.rs` fabricated most of what it reported: `estimate_cpu_usage`/`estimate_gpu_usage` were `50.0 + (Date::now() % 100.0) / 2.0`-style formulas (not measurements of anything); `get_battery_level` returned a hardcoded `0.8` even on the branch where the real Battery API was detected; `cache_hit_rate` was a hardcoded `0.85` on every sample; GPU memory/FLOPs/memory-bandwidth/cache-hits/input-output-shape were constant lookup tables keyed only by operation type; CPU/GPU temperatures and "thermal state" were built from those same fabricated numbers (one branch even checked for a `navigator.thermalState` property that is not a real browser API) and fed a `check_thermal_throttling` detector that logged "Thermal throttling detected" and switched optimization strategy on entirely invented data; the "ML-powered" strategy-improvement estimate was a hardcoded per-transition-pair multiplier table (e.g. `2.5` for CPU→GPU) multiplied by factors derived from the same fabricated CPU/GPU usage. None of this is recoverable as real measurement: no standard browser API exposes CPU/GPU utilization, GPU memory usage, or device temperature/thermal-throttling state to a web page (WebGPU deliberately omits utilization/memory queries to resist fingerprinting). Below reflects what the profiler does now.
 
-- ✅ **Adaptive Optimization**
-  - ML-powered performance estimation
-  - Automatic strategy switching
-  - Thermal-aware optimization
-  - Power consumption monitoring
+- ✅ **Profiling** (real measurements only)
+  - Operation-level wall-clock timing (`duration_ms`, real)
+  - Real WASM linear-memory growth per operation (`wasm_memory_growth_bytes`, via `get_wasm_memory_usage()`) and real peak WASM memory (`memory_peak`)
+  - Bottleneck detection (slow-operation classification now uses the caller-supplied real `operation_type`, e.g. `GPUKernel`, instead of a fabricated CPU/GPU time split that could never actually produce a GPU classification)
+  - ❌ Removed (not measurable from a web page, and not kept as a permanently-`None` placeholder): CPU/GPU utilization monitoring, GPU memory/FLOPs/memory-bandwidth/cache-hit tracking, per-operation input/output shape (would require changing `start_operation`'s signature to accept shape data it does not currently receive)
+
+- ✅ **Adaptive Optimization** (strategy switching is real; the "how much better" estimate is not claimed)
+  - Automatic strategy switching - real: triggered by caller-supplied `latency_ms`/`throughput`/`memory_mb`/`accuracy` crossing real thresholds in `check_and_trigger_adaptation`
+  - `AdaptationRecord.improvement_ratio`/`.confidence_score` are `Option`, always `None` as of this pass: the profiler never runs the same workload under two strategies to compare and has no trained model, so there is no real basis for a numeric "improvement" or "confidence" at switch time
+  - ❌ Removed: "ML-powered performance estimation" (was a hardcoded multiplier table, not a model), thermal-aware optimization / `check_thermal_throttling` (no real thermal signal existed to trigger it), power consumption monitoring (no browser API; was derived from the fabricated CPU/GPU usage above)
+  - Real battery level, when available: `PerformanceProfiler::refresh_battery_status()` reads the browser's Battery Status API (`navigator.getBattery()`) the same way `device_capability::DeviceCapabilityDetector` does, and caches it for `sample_resources`/`get_power_recommendations` (renamed from `get_thermal_recommendations`, which is gone along with the fabricated thermal branch it used to emit)
 
 ---
 
@@ -546,7 +548,15 @@ This crate has **no dependency on the native `wgpu` crate**. WebGPU support is i
 - Some WebGPU features limited by web-sys 0.3.95 API availability
 - Large models may require quantization for browser deployment
 - `WebGPUBackend`/`SimpleGpuOps` (the dispatch path behind `GpuTensor`) currently execute the CPU fallback for matmul/add/relu/softmax/layer_norm/attention by documented design — use `WebGPUOps` directly for guaranteed end-to-end GPU dispatch today (see "WebGPU Notes")
-- 0 `todo!()`/`unimplemented!()` macros in source, but several documented simplifications remain (none block compilation or panic): a no-op cache-clear recovery action (`src/error.rs`), fixed-bytes-per-element quantization stats (`src/optimization/quantization/quantizer.rs`), hardcoded device-capability probes (`src/device_capability/detector.rs`), fixed-constant (non-bit-width-aware) basic quantization math (`src/optimization/quantization/algorithms/basic.rs`), synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`), and default (non-queried) device capabilities (`src/compute/webgpu/mod.rs`)
+- 0 `todo!()`/`unimplemented!()` macros in source. Several previously-documented simplifications were fixed this release: `RecoveryAction::ClearCache` now really clears the browser's Cache Storage instead of being a no-op (`src/error.rs`); quantization stats and the `apply_dynamic/static/post_training_quantization` math are now real, bit-width-aware affine quantize/dequantize instead of a fixed-constant multiplier (`src/optimization/quantization/quantizer.rs`, `algorithms/basic.rs`); and device-capability probes now query the real browser APIs instead of returning hardcoded/default values (`detect_webgl_support`/`get_screen_orientation` in `src/device_capability/detector.rs`, `compute::webgpu::get_device_capabilities()` in `src/compute/webgpu/mod.rs`). One simplification remains: synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`)
+- **Wave 6 honesty pass (2026-08-25)**: this crate was never covered by Waves 1-5 (highest marker-hit count in the workspace census) and had six live fabrication clusters, all fixed this pass:
+  - `performance_profiler.rs` - see the "Performance Monitoring" section above for the full account (fabricated CPU/GPU/temperature/thermal/power telemetry and a hardcoded "ML-powered" improvement estimate removed; real WASM-memory and Battery-API measurements kept/added).
+  - `storage/indexeddb.rs` - `store_model` used to store payloads over 1MiB raw while labeling the record `CompressionType::Gzip` (and checksummed that mislabeled payload); `get_model` silently returned `Gzip`/`Brotli` records unchanged. Now: real DEFLATE via `oxiarc_deflate` (`CompressionType::Deflate`), real SHA-256 checksums (`ModelStorage::calculate_checksum`) with a legacy-byte-sum-compatible read path (`verify_checksum`) so old records stay readable, `Gzip` kept only as a documented legacy marker (never written, read back as-is since it never really held compressed bytes), and `Brotli` returns a structured error rather than a silent passthrough.
+  - `runtime/edge_caching.rs` - `prefetch()` used to insert 1KiB of zero bytes under each queued key after a fake 50-150ms delay, so a subsequent `get()` returned fabricated data as a real cache hit. `EdgeCacheManager` has no origin-fetch machinery of its own (only opaque keys, no URLs/fetch callback), so `prefetch()` now drains the queue and reports how many entries were left un-prefetched, without touching the cache or its statistics.
+  - `export/coreml.rs` - `to_mlmodel_json()` (renamed `export_coreml_json()`) produces a JSON intermediate representation of the exported graph, not a real `.mlmodel`. This was already true before the rename; the method name and module doc comment previously implied otherwise. **Deferred**: a real `.mlmodel`/`.mlpackage` protobuf encoder (Core ML's actual on-disk format; see `CoreML.proto` in Apple's `coremltools`) is not implemented and is out of scope for one wave.
+  - `storage/model_splitting.rs` - `ModelLoadingSession::load_by_priority` used to run a `setTimeout` sized "100ms per MB" per chunk and drive `loading_progress` to 100% while `loaded_components`/`loaded_size` stayed untouched. The chunk bytes are already resident (populated by `split_model`), so loading is real synchronous work now: each chunk is actually decompressed and checksum-verified (`resolve_chunk_data`), `loaded_components`/`loaded_size` are updated as chunks are materialized, and progress is derived from real state - no invented delay, and a corrupted chunk now fails instead of being reported loaded.
+  - `storage/progressive_loader.rs` - `ChunkMetadata.checksum` used to be `format!("chunk_{i}")` (the chunk index restated as a string) and nothing ever verified it. `ChunkLoader::split_into_chunks` only ever computes byte *ranges* from a byte count - it never holds the chunk's actual bytes - so no real checksum could be computed here; the field was deleted rather than kept as a fabricated-but-unverified placeholder. (Real per-chunk integrity checking lives in `model_splitting::ModelChunk`, which does hold the bytes at split time.)
+  - `multi_model_manager.rs` - `warmup_model` used to transition `WarmingUp -> Ready` and set `warmup_completed = true` with no code (and therefore no actual inference) between the two status writes. It now runs a real minimal forward pass (a single token id 0 in a `[1, 1]` tensor) through the model's actual loaded weights, and only reports `warmup_completed = true` on genuine success; on failure the model is left `ModelStatus::Error` and the error propagates to `load_model`'s caller. `LoadedModel.gpu_memory_usage` (previously a hardcoded `0`) is now `Option<usize>`, `None` - no browser API measures GPU memory usage.
 
 ---
 
@@ -580,12 +590,7 @@ Two workspace-wide tracks land in 0.2.0: (1) **OxiCUDA GPU migration** — movin
   - **Refinement needed:** this is a browser-spec tracking task, not implementation. Define: which WebNN API level (currently at CR status)? Target browsers?
 
 ### Correctness & De-Simplification
-- [~] Wire real GPU dispatch for matmul/add/relu only (planned 2026-07-05)
-  - Goal: WebGPUBackend::dispatch_add/dispatch_relu/dispatch_matmul and SimpleGpuOps::matmul actually run on the GPU instead of silently falling back to CPU.
-  - Design: port WebGPUOps's existing, complete buffer/bind-group/dispatch/mapAsync-readback sequence (a genuine working reference for exactly these 3 ops) into SimpleGpuOps. PRIMARY DESIGN DECISION, flag prominently: dispatch is currently kept synchronous specifically because GpuTensor holds an Rc<RefCell<WebGPUBackend>> and real GPU readback is fundamentally async (mapAsync is a JS Promise) — holding a RefCell borrow across an .await panics at runtime if re-entered. Resolve via eager pipeline creation (like WebGPUOps::initialize() does) or by cloning device/queue/pipeline out of a short borrow_mut() before awaiting. layer_norm/attention are EXPLICITLY OUT OF SCOPE for this item — zero existing bind-group reference exists for either, deferred to backlog.
-  - Files: trustformers-wasm/src/compute/webgpu/backend.rs, simple_ops.rs, gpu_tensor.rs.
-  - Tests: needs wasm-pack test --chrome --headless or the existing tests/*.js Playwright suite (nothing here is natively testable). webgpu is a non-default Cargo feature — tests need --features webgpu explicitly.
-  - Risk: the RefCell-across-await hazard is real and will produce a runtime panic (not a compile error) if ported naively — budget for a design iteration inside the implementation pass itself.
+- [x] Wire real GPU dispatch for matmul/add/relu — **done, verified 2026-08-18**: `trustformers-wasm/src/compute/gpu_tensor.rs` dispatches all three under `#[cfg(feature = "webgpu")]` (`backend.borrow_mut().dispatch_matmul(...)` at `:139`, `backend.borrow().dispatch_add(...)` at `:167`, `backend.borrow().dispatch_relu(...)` at `:196`), each with a CPU fallback. This item had been sitting open after the work landed; the real remaining WASM GPU gap is the broader kernel set (`layer_norm`/`attention`, explicitly out of scope for this item from the start), not these three ops.
 - [x] Implement real cache clearing for RecoveryAction::ClearCache (planned 2026-07-05)
   - Goal: the ClearCache recovery action (triggered on OOM/storage-quota errors) actually clears something instead of Ok(())-no-op.
   - Design: self-contained fix using the browser Cache Storage API directly (window.caches().keys() -> caches.delete(key) for each) — matches the existing style of the sibling ReduceMemoryUsage arm right next to it. (3 other real cache-clearing mechanisms exist elsewhere in the crate but deliberately NOT wired through here, to avoid coupling this fix to optional feature flags.)
@@ -735,9 +740,9 @@ full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "inde
 
 ---
 
-**Last Updated:** 2026-07-06
-**Version:** 0.1.4
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Stable
 **Test Suite:** ~130 tests, 100% pass rate (workspace-wide `cargo nextest run --workspace --all-features` on 2026-07-01: 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings)
-**SLoC:** 55,721
+**SLoC:** 48,359 (`tokei`, verified 2026-08-24; was 55,721 on 2026-07-09 — not investigated, no wave-4 work item touched this crate)
 **Key Features:** WebGPU backend (web-sys/js-sys based, no wgpu crate, real CPU fallback), Web Workers, IndexedDB caching, BERT WASM model, React/Vue/Angular/Web Components, streaming inference, SIMD, WebNN, GGUF quantization, kernel fusion, memory coalescing, progressive loading, Core ML export

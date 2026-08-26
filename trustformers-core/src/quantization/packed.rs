@@ -27,10 +27,10 @@ impl std::fmt::Display for QuantError {
         match self {
             QuantError::IndexOutOfBounds { idx, max } => {
                 write!(f, "index {idx} out of bounds (max {max})")
-            }
+            },
             QuantError::ValueOutOfRange { val, min, max } => {
                 write!(f, "value {val} out of range [{min}, {max}]")
-            }
+            },
             QuantError::InvalidGroupSize => write!(f, "invalid group size"),
             QuantError::EmptyTensor => write!(f, "tensor is empty"),
         }
@@ -127,7 +127,11 @@ impl PackedBuffer {
         let num_bytes = total_bits.div_ceil(8);
         // Fill with the offset representation of min_val (i.e. unsigned zero).
         let data = vec![0u8; num_bytes];
-        Self { data, bit_width, num_elements }
+        Self {
+            data,
+            bit_width,
+            num_elements,
+        }
     }
 
     /// Pack a slice of signed integers into a new `PackedBuffer`.
@@ -157,15 +161,16 @@ impl PackedBuffer {
 
     /// Unpack all stored values as signed integers.
     pub fn unpack(&self) -> Vec<i64> {
-        (0..self.num_elements)
-            .map(|i| self.get_unchecked(i))
-            .collect()
+        (0..self.num_elements).map(|i| self.get_unchecked(i)).collect()
     }
 
     /// Get the signed value at position `idx`.
     pub fn get(&self, idx: usize) -> Result<i64, QuantError> {
         if idx >= self.num_elements {
-            return Err(QuantError::IndexOutOfBounds { idx, max: self.num_elements.saturating_sub(1) });
+            return Err(QuantError::IndexOutOfBounds {
+                idx,
+                max: self.num_elements.saturating_sub(1),
+            });
         }
         Ok(self.get_unchecked(idx))
     }
@@ -173,7 +178,10 @@ impl PackedBuffer {
     /// Set the signed value at position `idx`.
     pub fn set(&mut self, idx: usize, val: i64) -> Result<(), QuantError> {
         if idx >= self.num_elements {
-            return Err(QuantError::IndexOutOfBounds { idx, max: self.num_elements.saturating_sub(1) });
+            return Err(QuantError::IndexOutOfBounds {
+                idx,
+                max: self.num_elements.saturating_sub(1),
+            });
         }
         let min = self.bit_width.min_val();
         let max = self.bit_width.max_val();
@@ -259,7 +267,10 @@ pub struct Int2QuantConfig {
 
 impl Default for Int2QuantConfig {
     fn default() -> Self {
-        Self { group_size: 128, symmetric: true }
+        Self {
+            group_size: 128,
+            symmetric: true,
+        }
     }
 }
 
@@ -321,7 +332,10 @@ pub fn dequantize_int2(
     for (i, &q) in values.iter().enumerate() {
         let group_idx = i / config.group_size;
         if group_idx >= scales.len() {
-            return Err(QuantError::IndexOutOfBounds { idx: group_idx, max: scales.len().saturating_sub(1) });
+            return Err(QuantError::IndexOutOfBounds {
+                idx: group_idx,
+                max: scales.len().saturating_sub(1),
+            });
         }
         let scale = scales[group_idx];
         let zp = zero_points[group_idx];
@@ -391,7 +405,10 @@ pub fn dequantize_int3(
     for (i, &q) in values.iter().enumerate() {
         let group_idx = i / group_size;
         if group_idx >= scales.len() {
-            return Err(QuantError::IndexOutOfBounds { idx: group_idx, max: scales.len().saturating_sub(1) });
+            return Err(QuantError::IndexOutOfBounds {
+                idx: group_idx,
+                max: scales.len().saturating_sub(1),
+            });
         }
         let scale = scales[group_idx];
         let zp = zero_points[group_idx];
@@ -405,12 +422,7 @@ pub fn dequantize_int3(
 // ---------------------------------------------------------------------------
 
 /// Compute scale and zero_point for a group of f32 values.
-fn compute_scale_zero_point(
-    group: &[f32],
-    min_q: i64,
-    max_q: i64,
-    symmetric: bool,
-) -> (f32, f32) {
+fn compute_scale_zero_point(group: &[f32], min_q: i64, max_q: i64, symmetric: bool) -> (f32, f32) {
     let fmin = group.iter().cloned().fold(f32::INFINITY, f32::min);
     let fmax = group.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
@@ -611,11 +623,14 @@ mod tests {
     #[test]
     fn test_int2_quantization_round_trip() {
         let tensor: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 128.0).collect();
-        let config = Int2QuantConfig { group_size: 64, symmetric: true };
+        let config = Int2QuantConfig {
+            group_size: 64,
+            symmetric: true,
+        };
         let (packed, scales, zero_points) =
             quantize_int2(&tensor, &config).expect("quantize_int2 failed");
-        let reconstructed =
-            dequantize_int2(&packed, &scales, &zero_points, &config).expect("dequantize_int2 failed");
+        let reconstructed = dequantize_int2(&packed, &scales, &zero_points, &config)
+            .expect("dequantize_int2 failed");
 
         assert_eq!(reconstructed.len(), tensor.len());
         // With only 2-bit precision the error is large; just check reconstruction is finite.
@@ -634,8 +649,8 @@ mod tests {
         let group_size = 32;
         let (packed, scales, zero_points) =
             quantize_int3(&tensor, group_size).expect("quantize_int3 failed");
-        let reconstructed =
-            dequantize_int3(&packed, &scales, &zero_points, group_size).expect("dequantize_int3 failed");
+        let reconstructed = dequantize_int3(&packed, &scales, &zero_points, group_size)
+            .expect("dequantize_int3 failed");
 
         assert_eq!(reconstructed.len(), tensor.len());
         // Verify max absolute error is within theoretical INT3 bound.
@@ -645,7 +660,10 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f32, f32::max);
         // Theoretical max error ≈ scale/2 per group. With 128 elements and range 2.0, scale ≈ 2/7 ≈ 0.286
-        assert!(max_err < 0.3_f32, "INT3 max error {max_err} exceeds threshold");
+        assert!(
+            max_err < 0.3_f32,
+            "INT3 max error {max_err} exceeds threshold"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -676,7 +694,13 @@ mod tests {
     #[test]
     fn test_int2_invalid_group_size() {
         let tensor = vec![0.5_f32; 16];
-        let config = Int2QuantConfig { group_size: 0, symmetric: true };
-        assert_eq!(quantize_int2(&tensor, &config), Err(QuantError::InvalidGroupSize));
+        let config = Int2QuantConfig {
+            group_size: 0,
+            symmetric: true,
+        };
+        assert_eq!(
+            quantize_int2(&tensor, &config),
+            Err(QuantError::InvalidGroupSize)
+        );
     }
 }

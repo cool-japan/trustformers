@@ -52,14 +52,14 @@ impl fmt::Display for MergeError {
         match self {
             MergeError::DimensionMismatch { a, b } => {
                 write!(f, "Dimension mismatch: {} vs {}", a, b)
-            }
+            },
             MergeError::InvalidWeights(msg) => {
                 write!(f, "Invalid weights: {}", msg)
-            }
+            },
             MergeError::EmptyModels => write!(f, "No models provided for merge"),
             MergeError::TrimFractionOutOfRange => {
                 write!(f, "trim_fraction must be in [0, 1)")
-            }
+            },
         }
     }
 }
@@ -187,19 +187,14 @@ pub fn dare_merge(
 // ─── TIES ─────────────────────────────────────────────────────────────────────
 
 /// Sign election method used in the TIES disjoint-merge step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TiesElectMethod {
     /// Elect the sign held by the majority of models.
+    #[default]
     MajoritySign,
     /// Elect the sign of the model with the greatest absolute delta magnitude
     /// at each position.
     GreaterMagnitude,
-}
-
-impl Default for TiesElectMethod {
-    fn default() -> Self {
-        TiesElectMethod::MajoritySign
-    }
 }
 
 /// Configuration for TIES (Trim, Elect Sign, disjoint Merge) model merging.
@@ -267,10 +262,8 @@ pub fn ties_merge(
         .collect();
 
     // 2. Trim: zero out the trim_fraction smallest-|delta| per model
-    let trimmed: Vec<Vec<f32>> = deltas
-        .iter()
-        .map(|d| trim_delta(d, config.trim_fraction))
-        .collect();
+    let trimmed: Vec<Vec<f32>> =
+        deltas.iter().map(|d| trim_delta(d, config.trim_fraction)).collect();
 
     // 3. Elect sign
     let elected_signs: Vec<f32> = match config.elect_method {
@@ -364,14 +357,9 @@ fn elect_majority_sign(trimmed: &[Vec<f32>], param_len: usize) -> Vec<f32> {
 fn elect_greater_magnitude_sign(trimmed: &[Vec<f32>], param_len: usize) -> Vec<f32> {
     (0..param_len)
         .map(|i| {
-            let pos_mass: f32 = trimmed
-                .iter()
-                .map(|v| if v[i] > 0.0 { v[i] } else { 0.0 })
-                .sum();
-            let neg_mass: f32 = trimmed
-                .iter()
-                .map(|v| if v[i] < 0.0 { v[i].abs() } else { 0.0 })
-                .sum();
+            let pos_mass: f32 = trimmed.iter().map(|v| if v[i] > 0.0 { v[i] } else { 0.0 }).sum();
+            let neg_mass: f32 =
+                trimmed.iter().map(|v| if v[i] < 0.0 { v[i].abs() } else { 0.0 }).sum();
             if pos_mass >= neg_mass {
                 1.0
             } else {
@@ -384,17 +372,11 @@ fn elect_greater_magnitude_sign(trimmed: &[Vec<f32>], param_len: usize) -> Vec<f
 // ─── Linear ───────────────────────────────────────────────────────────────────
 
 /// Configuration for linear (weighted average) model merging.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LinearMergeConfig {
     /// Per-model weights.  Must sum to approximately 1.0 (within 1e-4).
     /// Must have the same length as the `models` slice passed to [`linear_merge`].
     pub weights: Vec<f32>,
-}
-
-impl Default for LinearMergeConfig {
-    fn default() -> Self {
-        Self { weights: vec![] }
-    }
 }
 
 /// Merge models using a simple weighted average.
@@ -408,10 +390,7 @@ impl Default for LinearMergeConfig {
 /// Returns [`MergeError::EmptyModels`] when `models` is empty.
 /// Returns [`MergeError::InvalidWeights`] when weight count mismatches models or sum ≠ 1.
 /// Returns [`MergeError::DimensionMismatch`] when models have different lengths.
-pub fn linear_merge(
-    models: &[&[f32]],
-    config: &LinearMergeConfig,
-) -> Result<Vec<f32>, MergeError> {
+pub fn linear_merge(models: &[&[f32]], config: &LinearMergeConfig) -> Result<Vec<f32>, MergeError> {
     if models.is_empty() {
         return Err(MergeError::EmptyModels);
     }
@@ -515,11 +494,7 @@ pub fn slerp_merge(
         return Ok(result);
     }
 
-    let dot: f64 = model_a
-        .iter()
-        .zip(model_b.iter())
-        .map(|(&a, &b)| a as f64 * b as f64)
-        .sum();
+    let dot: f64 = model_a.iter().zip(model_b.iter()).map(|(&a, &b)| a as f64 * b as f64).sum();
 
     let cos_omega = (dot / (norm_a * norm_b)).clamp(-1.0, 1.0);
     let omega = cos_omega.acos();
@@ -561,7 +536,11 @@ mod tests {
             assert!(
                 (ai - bi).abs() <= tol,
                 "{}: index {} differs: {} vs {} (tol {})",
-                msg, i, ai, bi, tol
+                msg,
+                i,
+                ai,
+                bi,
+                tol
             );
         }
     }
@@ -602,9 +581,10 @@ mod tests {
         let kept = result.iter().filter(|&&v| v.abs() > 1e-7).count();
         // Should be roughly 10% ± 5%
         assert!(
-            kept >= 50 && kept <= 150,
+            (50..=150).contains(&kept),
             "expected ~10% kept, got {} / {}",
-            kept, n
+            kept,
+            n
         );
     }
 
@@ -634,7 +614,8 @@ mod tests {
                 assert!(
                     (rs - no * 2.0).abs() < 1e-5,
                     "rescaled should be 2x: {} vs {}",
-                    rs, no
+                    rs,
+                    no
                 );
             } else {
                 // dropped position: both should be 0
@@ -656,7 +637,12 @@ mod tests {
     fn test_dare_deterministic() {
         let base = vec![0.0f32; 50];
         let fine: Vec<f32> = (0..50).map(|i| i as f32 * 0.1).collect();
-        let cfg = DareMergeConfig { drop_rate: 0.7, rescale: true, seed: 123, merge_coefficient: 0.5 };
+        let cfg = DareMergeConfig {
+            drop_rate: 0.7,
+            rescale: true,
+            seed: 123,
+            merge_coefficient: 0.5,
+        };
         let r1 = dare_merge(&base, &fine, &cfg).expect("ok");
         let r2 = dare_merge(&base, &fine, &cfg).expect("ok");
         assert_eq!(r1, r2, "dare must be deterministic");
@@ -681,18 +667,22 @@ mod tests {
     #[test]
     fn test_ties_sign_election_majority() {
         let base = vec![0.0f32; 1];
-        let m1 = vec![5.0f32];  // delta = +5
+        let m1 = vec![5.0f32]; // delta = +5
         let m2 = vec![-1.0f32]; // delta = -1
-        let m3 = vec![3.0f32];  // delta = +3
+        let m3 = vec![3.0f32]; // delta = +3
         let cfg = TiesMergeConfig {
             trim_fraction: 0.0,
             elect_method: TiesElectMethod::MajoritySign,
             merge_coefficient: 1.0,
         };
-        let result = ties_merge(&base, &[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg)
-            .expect("ok");
+        let result =
+            ties_merge(&base, &[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg).expect("ok");
         // 2 positives vs 1 negative → elected sign positive → merged = avg(+5, +3) = +4
-        assert!(result[0] > 0.0, "majority positive should win: {}", result[0]);
+        assert!(
+            result[0] > 0.0,
+            "majority positive should win: {}",
+            result[0]
+        );
     }
 
     // 8. TIES sign election (GreaterMagnitude)
@@ -700,18 +690,22 @@ mod tests {
     fn test_ties_sign_election_greater_magnitude() {
         let base = vec![0.0f32; 1];
         let m1 = vec![-10.0f32]; // delta = -10 (dominant magnitude)
-        let m2 = vec![1.0f32];   // delta = +1
-        let m3 = vec![2.0f32];   // delta = +2
+        let m2 = vec![1.0f32]; // delta = +1
+        let m3 = vec![2.0f32]; // delta = +2
         let cfg = TiesMergeConfig {
             trim_fraction: 0.0,
             elect_method: TiesElectMethod::GreaterMagnitude,
             merge_coefficient: 1.0,
         };
-        let result = ties_merge(&base, &[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg)
-            .expect("ok");
+        let result =
+            ties_merge(&base, &[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg).expect("ok");
         // Negative mass = 10, positive mass = 3 → negative sign elected
         // Only m1 agrees → merged = -10
-        assert!(result[0] < 0.0, "greater magnitude negative should win: {}", result[0]);
+        assert!(
+            result[0] < 0.0,
+            "greater magnitude negative should win: {}",
+            result[0]
+        );
     }
 
     // 9. TIES: empty models error
@@ -728,7 +722,10 @@ mod tests {
     fn test_ties_trim_fraction_out_of_range() {
         let base = vec![1.0f32];
         let model = vec![2.0f32];
-        let cfg = TiesMergeConfig { trim_fraction: 1.5, ..Default::default() };
+        let cfg = TiesMergeConfig {
+            trim_fraction: 1.5,
+            ..Default::default()
+        };
         let err = ties_merge(&base, &[model.as_slice()], &cfg).expect_err("should fail");
         assert!(matches!(err, MergeError::TrimFractionOutOfRange));
     }
@@ -750,7 +747,9 @@ mod tests {
     fn test_linear_merge_weighted() {
         let m1 = vec![0.0f32, 0.0, 0.0];
         let m2 = vec![4.0f32, 8.0, 12.0];
-        let cfg = LinearMergeConfig { weights: vec![0.5, 0.5] };
+        let cfg = LinearMergeConfig {
+            weights: vec![0.5, 0.5],
+        };
         let result = linear_merge(&[m1.as_slice(), m2.as_slice()], &cfg).expect("ok");
         assert_vec_approx(&result, &[2.0, 4.0, 6.0], 1e-5, "linear 50/50");
     }
@@ -762,9 +761,16 @@ mod tests {
         let m2 = vec![0.0f32];
         let m3 = vec![3.0f32];
         // weights 0.5, 0.25, 0.25 → 0.5*6 + 0.25*0 + 0.25*3 = 3.75
-        let cfg = LinearMergeConfig { weights: vec![0.5, 0.25, 0.25] };
-        let result = linear_merge(&[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg).expect("ok");
-        assert!((result[0] - 3.75).abs() < 1e-5, "expected 3.75 got {}", result[0]);
+        let cfg = LinearMergeConfig {
+            weights: vec![0.5, 0.25, 0.25],
+        };
+        let result =
+            linear_merge(&[m1.as_slice(), m2.as_slice(), m3.as_slice()], &cfg).expect("ok");
+        assert!(
+            (result[0] - 3.75).abs() < 1e-5,
+            "expected 3.75 got {}",
+            result[0]
+        );
     }
 
     // 14. Linear merge: weights don't sum to 1 → error
@@ -772,7 +778,9 @@ mod tests {
     fn test_linear_merge_weights_sum_error() {
         let m1 = vec![1.0f32];
         let m2 = vec![2.0f32];
-        let cfg = LinearMergeConfig { weights: vec![0.3, 0.3] }; // sum = 0.6
+        let cfg = LinearMergeConfig {
+            weights: vec![0.3, 0.3],
+        }; // sum = 0.6
         let err = linear_merge(&[m1.as_slice(), m2.as_slice()], &cfg).expect_err("should fail");
         assert!(matches!(err, MergeError::InvalidWeights(_)));
     }
@@ -819,8 +827,16 @@ mod tests {
         let result = slerp_merge(&a, &b, &cfg).expect("ok");
 
         let expected = (std::f32::consts::PI / 4.0).cos(); // ~0.7071
-        assert!((result[0] - expected).abs() < 1e-5, "x component: {}", result[0]);
-        assert!((result[1] - expected).abs() < 1e-5, "y component: {}", result[1]);
+        assert!(
+            (result[0] - expected).abs() < 1e-5,
+            "x component: {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - expected).abs() < 1e-5,
+            "y component: {}",
+            result[1]
+        );
     }
 
     // 19. SLERP dimension mismatch
@@ -871,6 +887,11 @@ mod tests {
         };
         let result = ties_merge(&base, &[model.as_slice()], &cfg).expect("ok");
         // Single model: delta = [2, -3, 1], elected signs per position, same-sign avg = delta itself
-        assert_vec_approx(&result, &model, 1e-5, "single model no-trim should equal model");
+        assert_vec_approx(
+            &result,
+            &model,
+            1e-5,
+            "single model no-trim should equal model",
+        );
     }
 }

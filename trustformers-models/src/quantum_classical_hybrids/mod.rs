@@ -8,6 +8,9 @@ pub mod quantum_optimizer;
 pub mod quantum_rnn;
 pub mod quantum_training;
 pub mod quantum_transformer;
+pub mod statevector;
+#[cfg(test)]
+mod statevector_tests;
 
 pub use config::*;
 pub use model::*;
@@ -19,3 +22,4 @@ pub use quantum_optimizer::*;
 pub use quantum_rnn::*;
 pub use quantum_training::*;
 pub use quantum_transformer::*;
+pub use statevector::*;

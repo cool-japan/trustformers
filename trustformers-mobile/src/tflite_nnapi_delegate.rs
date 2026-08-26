@@ -780,10 +780,11 @@ pub struct TfLiteNNAPIDelegate;
 
 #[cfg(not(all(target_os = "android", feature = "tflite-nnapi")))]
 impl TfLiteNNAPIDelegate {
-    pub fn new(_config: ()) -> Result<Self, CoreError> {
-        Err(TrustformersError::runtime_error(
-            "TensorFlow Lite NNAPI delegate only available on Android".into(),
-        ))
+    pub fn new(_config: ()) -> Result<Self> {
+        Err(trustformers_core::TrustformersError::runtime_error(
+            "TensorFlow Lite NNAPI delegate only available on Android".to_string(),
+        )
+        .into())
     }
 }
 

@@ -1,14 +1,25 @@
-// Memory profiling and tracking utilities
+//! Memory profiling and tracking utilities.
+//!
+//! Host memory figures come from `sysinfo` on every supported platform. Values
+//! this crate cannot measure (GPU memory without a GPU backend, per-allocation
+//! records without an instrumented allocator) are reported as `None`/empty
+//! rather than filled in with plausible-looking numbers.
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// Memory tracker for monitoring GPU and CPU memory usage
 #[derive(Debug, Clone)]
 pub struct MemoryTracker {
     config: MemoryTrackerConfig,
     active_sessions: HashMap<String, MemorySession>,
+    /// Allocations explicitly registered by the caller, keyed by address.
+    live_allocations: HashMap<u64, AllocationInfo>,
+    /// Count of deallocations reported via [`MemoryTracker::record_deallocation`].
+    total_deallocations: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,17 +57,32 @@ pub struct MemorySnapshot {
     pub timestamp: String,
     pub checkpoint: String,
     pub cpu_usage: MemoryUsage,
-    pub gpu_usage: MemoryUsage,
+    /// GPU memory usage, when a GPU backend is available to report it.
+    ///
+    /// `None` means no GPU memory reporter is wired up; it is never a measured
+    /// zero and never a placeholder figure.
+    pub gpu_usage: Option<MemoryUsage>,
+    /// Live allocation records, only populated when the caller registers them
+    /// via [`MemoryTracker::record_allocation`]. Empty means "nothing was
+    /// registered", not "no allocations exist".
     pub allocations: Vec<AllocationInfo>,
 }
 
 /// Memory usage information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryUsage {
+    /// Bytes currently in use.
     pub allocated_bytes: u64,
+    /// Highest `allocated_bytes` seen so far by the observer that produced this.
     pub peak_bytes: u64,
+    /// Bytes still available.
     pub available_bytes: u64,
-    pub fragmentation_ratio: f64,
+    /// Heap fragmentation ratio, when the platform exposes it.
+    ///
+    /// `None` on every currently supported platform: neither `/proc/meminfo`
+    /// nor the macOS/Windows memory APIs report allocator fragmentation, so no
+    /// value is invented.
+    pub fragmentation_ratio: Option<f64>,
 }
 
 /// Information about a memory allocation
@@ -107,19 +133,8 @@ impl Default for MemorySnapshot {
             timestamp: chrono::Utc::now().to_rfc3339(),
             checkpoint: "default".to_string(),
             cpu_usage: MemoryUsage::default(),
-            gpu_usage: MemoryUsage::default(),
+            gpu_usage: None,
             allocations: Vec::new(),
-        }
-    }
-}
-
-impl Default for MemoryUsage {
-    fn default() -> Self {
-        Self {
-            allocated_bytes: 0,
-            peak_bytes: 0,
-            available_bytes: 0,
-            fragmentation_ratio: 0.0,
         }
     }
 }
@@ -160,16 +175,15 @@ impl Default for MemoryTracker {
 
 impl MemoryTracker {
     pub fn new() -> Self {
-        Self {
-            config: MemoryTrackerConfig::default(),
-            active_sessions: HashMap::new(),
-        }
+        Self::with_config(MemoryTrackerConfig::default())
     }
 
     pub fn with_config(config: MemoryTrackerConfig) -> Self {
         Self {
             config,
             active_sessions: HashMap::new(),
+            live_allocations: HashMap::new(),
+            total_deallocations: 0,
         }
     }
 
@@ -238,6 +252,8 @@ impl MemoryTracker {
     /// Clear all tracking data
     pub fn clear(&mut self) -> Result<()> {
         self.active_sessions.clear();
+        self.live_allocations.clear();
+        self.total_deallocations = 0;
         Ok(())
     }
 
@@ -249,11 +265,8 @@ impl MemoryTracker {
             MemoryUsage::default()
         };
 
-        let gpu_usage = if self.config.track_gpu_memory {
-            self.get_gpu_memory_usage()?
-        } else {
-            MemoryUsage::default()
-        };
+        let gpu_usage =
+            if self.config.track_gpu_memory { self.get_gpu_memory_usage()? } else { None };
 
         let allocations = if self.config.track_allocations {
             self.get_current_allocations()?
@@ -270,111 +283,79 @@ impl MemoryTracker {
         })
     }
 
-    /// Get current CPU memory usage
+    /// Get current CPU memory usage from the host, via `sysinfo`.
+    ///
+    /// `allocated_bytes` is this process's resident set size when it can be
+    /// read, otherwise system-wide used memory; `available_bytes` is the
+    /// system's available memory. Both are real readings on Linux, macOS and
+    /// Windows.
     fn get_cpu_memory_usage(&self) -> Result<MemoryUsage> {
-        // Simplified implementation - in practice would use system APIs
-        #[cfg(target_os = "linux")]
-        {
-            self.get_linux_memory_info()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            self.get_macos_memory_info()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            self.get_windows_memory_info()
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        {
-            Ok(MemoryUsage {
-                allocated_bytes: 0,
-                peak_bytes: 0,
-                available_bytes: 8 * 1024 * 1024 * 1024, // 8GB default
-                fragmentation_ratio: 0.0,
-            })
-        }
-    }
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+        );
+        system.refresh_memory();
 
-    #[cfg(target_os = "linux")]
-    fn get_linux_memory_info(&self) -> Result<MemoryUsage> {
-        // Read from /proc/meminfo
-        let meminfo = std::fs::read_to_string("/proc/meminfo")?;
-        let mut mem_total = 0;
-        let mut mem_available = 0;
+        let available_bytes = system.available_memory();
+        let system_used = system.used_memory();
 
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                mem_total =
-                    line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
-                        * 1024; // Convert from KB to bytes
-            } else if line.starts_with("MemAvailable:") {
-                mem_available =
-                    line.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
-                        * 1024; // Convert from KB to bytes
-            }
-        }
-
-        let allocated_bytes = mem_total.saturating_sub(mem_available);
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let allocated_bytes =
+            system.process(pid).map(|process| process.memory()).unwrap_or(system_used);
 
         Ok(MemoryUsage {
             allocated_bytes,
-            peak_bytes: allocated_bytes, // Simplified
-            available_bytes: mem_available,
-            fragmentation_ratio: 0.0, // Would require more detailed analysis
+            // A single reading is its own high-water mark; the session-level
+            // peak is tracked by `MemoryTracker`.
+            peak_bytes: allocated_bytes,
+            available_bytes,
+            fragmentation_ratio: None,
         })
     }
 
-    #[cfg(target_os = "macos")]
-    fn get_macos_memory_info(&self) -> Result<MemoryUsage> {
-        // Simplified implementation for macOS
-        Ok(MemoryUsage {
-            allocated_bytes: 4 * 1024 * 1024 * 1024, // 4GB estimated
-            peak_bytes: 4 * 1024 * 1024 * 1024,
-            available_bytes: 4 * 1024 * 1024 * 1024,
-            fragmentation_ratio: 0.1,
-        })
+    /// Get current GPU memory usage.
+    ///
+    /// No GPU memory reporter is compiled into `trustformers-core`, so this
+    /// returns `None` rather than a placeholder figure. Wire a backend-specific
+    /// reporter here when one becomes available.
+    fn get_gpu_memory_usage(&self) -> Result<Option<MemoryUsage>> {
+        Ok(None)
     }
 
-    #[cfg(target_os = "windows")]
-    fn get_windows_memory_info(&self) -> Result<MemoryUsage> {
-        // Simplified implementation for Windows
-        Ok(MemoryUsage {
-            allocated_bytes: 4 * 1024 * 1024 * 1024, // 4GB estimated
-            peak_bytes: 4 * 1024 * 1024 * 1024,
-            available_bytes: 4 * 1024 * 1024 * 1024,
-            fragmentation_ratio: 0.1,
-        })
-    }
-
-    /// Get current GPU memory usage
-    fn get_gpu_memory_usage(&self) -> Result<MemoryUsage> {
-        // Placeholder implementation - would integrate with CUDA/ROCm APIs
-        Ok(MemoryUsage {
-            allocated_bytes: 2 * 1024 * 1024 * 1024, // 2GB estimated
-            peak_bytes: 2 * 1024 * 1024 * 1024,
-            available_bytes: 6 * 1024 * 1024 * 1024, // 6GB available
-            fragmentation_ratio: 0.05,
-        })
-    }
-
-    /// Get current memory allocations
+    /// Get the allocation records registered with this tracker.
+    ///
+    /// TrustformeRS does not install a global allocator shim, so allocations
+    /// are only visible if the caller reports them through
+    /// [`Self::record_allocation`]. Nothing is invented here.
     fn get_current_allocations(&self) -> Result<Vec<AllocationInfo>> {
-        // Placeholder implementation - would require custom allocator integration
-        Ok(vec![
-            AllocationInfo {
-                address: 0x1000000,
-                size_bytes: 1024 * 1024, // 1MB
-                allocation_type: AllocationType::Tensor,
-                stack_trace: vec!["tensor_alloc".to_string()],
-            },
-            AllocationInfo {
-                address: 0x2000000,
-                size_bytes: 512 * 1024, // 512KB
-                allocation_type: AllocationType::Weight,
-                stack_trace: vec!["weight_alloc".to_string()],
-            },
-        ])
+        Ok(self.live_allocations.values().cloned().collect())
+    }
+
+    /// Register a live allocation so it appears in subsequent snapshots.
+    ///
+    /// `address` must be the real address of the allocation.
+    pub fn record_allocation(&mut self, allocation: AllocationInfo) {
+        self.live_allocations.insert(allocation.address, allocation);
+    }
+
+    /// Remove a previously registered allocation.
+    ///
+    /// Returns `true` when a record for `address` was present.
+    pub fn record_deallocation(&mut self, address: u64) -> bool {
+        let removed = self.live_allocations.remove(&address).is_some();
+        if removed {
+            self.total_deallocations += 1;
+        }
+        removed
+    }
+
+    /// Number of allocations currently registered with the tracker.
+    pub fn live_allocation_count(&self) -> usize {
+        self.live_allocations.len()
     }
 
     /// Compute allocation summary from snapshots
@@ -413,8 +394,12 @@ impl MemoryTracker {
 
         AllocationSummary {
             total_allocations,
-            total_deallocations: 0, // Would track in real implementation
-            peak_active_allocations: total_allocations,
+            total_deallocations: self.total_deallocations,
+            peak_active_allocations: snapshots
+                .iter()
+                .map(|snapshot| snapshot.allocations.len())
+                .max()
+                .unwrap_or(0),
             allocation_type_breakdown: type_breakdown,
             largest_allocation,
             average_allocation_size,
@@ -521,6 +506,92 @@ mod tests {
         let usage = MemoryUsage::default();
         assert_eq!(usage.allocated_bytes, 0);
         assert_eq!(usage.peak_bytes, 0);
+    }
+
+    /// Regression test: on macOS/Windows the tracker used to return a literal
+    /// 4 GiB for allocated/peak/available with `fragmentation_ratio: 0.1`.
+    /// The readings must now come from the host and vary with it.
+    #[test]
+    fn test_cpu_memory_reading_is_real() -> Result<()> {
+        let tracker = MemoryTracker::new();
+        let usage = tracker.get_cpu_memory_usage()?;
+
+        const FABRICATED: u64 = 4 * 1024 * 1024 * 1024;
+        assert!(
+            usage.allocated_bytes > 0,
+            "the process must report a non-zero resident set"
+        );
+        assert!(
+            usage.allocated_bytes != FABRICATED || usage.available_bytes != FABRICATED,
+            "allocated/available must not both be the old hardcoded 4 GiB"
+        );
+        assert!(
+            usage.available_bytes > 0,
+            "available memory must be a real reading"
+        );
+        assert!(
+            usage.fragmentation_ratio.is_none(),
+            "fragmentation is not measurable here and must not be invented"
+        );
+
+        // This test process is far smaller than 4 GiB resident.
+        assert!(
+            usage.allocated_bytes < FABRICATED,
+            "resident set {} looks like the old placeholder",
+            usage.allocated_bytes
+        );
+        Ok(())
+    }
+
+    /// Regression test: `get_current_allocations` used to return two invented
+    /// records at addresses 0x1000000 / 0x2000000.
+    #[test]
+    fn test_allocations_are_only_what_was_registered() -> Result<()> {
+        let mut tracker = MemoryTracker::with_config(MemoryTrackerConfig {
+            track_allocations: true,
+            ..Default::default()
+        });
+
+        assert!(
+            tracker.get_current_allocations()?.is_empty(),
+            "no allocation may be reported before one is registered"
+        );
+
+        let buffer = [0u8; 4096];
+        let address = buffer.as_ptr() as u64;
+        tracker.record_allocation(AllocationInfo {
+            address,
+            size_bytes: buffer.len() as u64,
+            allocation_type: AllocationType::Buffer,
+            stack_trace: Vec::new(),
+        });
+
+        let allocations = tracker.get_current_allocations()?;
+        assert_eq!(allocations.len(), 1);
+        assert_eq!(allocations[0].address, address);
+        assert_ne!(
+            allocations[0].address, 0x1000000,
+            "the old fabricated address must not reappear"
+        );
+
+        assert!(tracker.record_deallocation(address));
+        assert!(tracker.get_current_allocations()?.is_empty());
+        assert_eq!(tracker.live_allocation_count(), 0);
+        Ok(())
+    }
+
+    /// Regression test: GPU memory used to be a fixed 2 GiB used / 6 GiB free.
+    #[test]
+    fn test_gpu_memory_is_reported_as_unavailable() -> Result<()> {
+        let tracker = MemoryTracker::new();
+        assert!(
+            tracker.get_gpu_memory_usage()?.is_none(),
+            "no GPU reporter is compiled in, so no GPU figure may be produced"
+        );
+
+        let snapshot = tracker.take_current_snapshot("test")?;
+        assert!(snapshot.gpu_usage.is_none());
+        Ok(())
     }
 
     #[test]

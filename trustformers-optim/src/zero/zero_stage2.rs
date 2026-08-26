@@ -90,13 +90,13 @@ impl<T: Optimizer> ZeROStage2<T> {
         let target_bucket_size = self.config.bucket_size_mb * 1024 * 1024; // Convert to bytes
         let num_buckets = total_gradient_memory.div_ceil(target_bucket_size);
 
-        println!("ZeRO Stage 2: Setting up gradient partitioning");
-        println!(
+        tracing::info!("ZeRO Stage 2: Setting up gradient partitioning");
+        tracing::debug!(
             "  Total gradient memory: {} MB",
             total_gradient_memory / 1024 / 1024
         );
-        println!("  Target bucket size: {} MB", self.config.bucket_size_mb);
-        println!("  Number of buckets: {}", num_buckets);
+        tracing::debug!("  Target bucket size: {} MB", self.config.bucket_size_mb);
+        tracing::debug!("  Number of buckets: {}", num_buckets);
 
         Ok(())
     }
@@ -292,7 +292,7 @@ impl<T: Optimizer> ZeROStage2<T> {
             self.comm_streams.push(format!("stream_{}", i));
         }
 
-        println!(
+        tracing::info!(
             "ZeRO Stage 2: Communication overlap enabled with {} streams",
             self.comm_streams.len()
         );
@@ -380,7 +380,7 @@ impl<T: Optimizer> ZeROStage2<T> {
             .any(|&size| size > target_size * 2 || size < target_size / 2);
 
         if needs_rebalancing {
-            println!("ZeRO Stage 2: Rebalancing gradient buckets");
+            tracing::info!("ZeRO Stage 2: Rebalancing gradient buckets");
             // Rebalancing logic would go here
             // For now, just log that rebalancing is needed
         }

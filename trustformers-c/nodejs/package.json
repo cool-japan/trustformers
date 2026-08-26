@@ -1,6 +1,6 @@
 {
   "name": "@trustformers/c-bindings",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Node.js bindings for TrustformeRS C API - High-performance transformer library",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

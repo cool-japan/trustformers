@@ -290,17 +290,56 @@ impl JaxArray {
         })
     }
 
-    /// Convert to different data type
-    pub fn astype(&self, new_dtype: JaxDType) -> Self {
-        Self {
-            data: self.data.clone(), // In real implementation, would convert data
+    /// Convert to a different data type, actually converting the stored values.
+    ///
+    /// # Errors
+    ///
+    /// [`JaxArray`] stores every element as `i32` regardless of its logical
+    /// [`JaxDType`] (see the `data` field), so a target dtype whose values an
+    /// `i32` slot cannot honestly hold -- every floating-point and complex
+    /// variant -- has no real conversion to perform here: reinterpreting an
+    /// integer bit pattern as a float would silently corrupt the value, and
+    /// the complex variants need two components per element that this
+    /// storage has no room for. Refuses those instead of returning a `Self`
+    /// whose `dtype` claims a representation `data` doesn't have.
+    ///
+    /// Every integer and `Bool` target actually converts the stored values,
+    /// through the target width, with Rust's own `as`-cast
+    /// truncation/wrap-around semantics (e.g. `Int32 -> Int8` keeps only the
+    /// low 8 bits of each value, matching how a real narrowing cast would
+    /// behave); widening targets (`Int32 -> Int64`, `UInt16 -> UInt32`, ...)
+    /// are value-preserving no-ops on the stored bits, since every value
+    /// already originated from this same `i32` storage.
+    pub fn astype(&self, new_dtype: JaxDType) -> Result<Self> {
+        let data = match new_dtype {
+            JaxDType::Bool => self.data.iter().map(|&v| i32::from(v != 0)).collect(),
+            JaxDType::Int8 => self.data.iter().map(|&v| i32::from(v as i8)).collect(),
+            JaxDType::Int16 => self.data.iter().map(|&v| i32::from(v as i16)).collect(),
+            JaxDType::Int32 | JaxDType::Int64 => self.data.clone(),
+            JaxDType::UInt8 => self.data.iter().map(|&v| i32::from(v as u8)).collect(),
+            JaxDType::UInt16 => self.data.iter().map(|&v| i32::from(v as u16)).collect(),
+            JaxDType::UInt32 | JaxDType::UInt64 => self.data.clone(),
+            JaxDType::Float16
+            | JaxDType::Float32
+            | JaxDType::Float64
+            | JaxDType::Complex64
+            | JaxDType::Complex128 => {
+                return Err(anyhow!(
+                    "astype({new_dtype:?}): JaxArray stores its data as i32 and has no \
+                     floating-point or complex representation to convert into"
+                ));
+            },
+        };
+
+        Ok(Self {
+            data,
             shape: self.shape.clone(),
             dtype: new_dtype,
             device: self.device.clone(),
             name: self.name.clone(),
             is_sharded: self.is_sharded,
             sharding: self.sharding.clone(),
-        }
+        })
     }
 
     /// Move array to different device
@@ -401,16 +440,26 @@ impl JaxBatch {
         }
     }
 
-    /// Convert to different data type
-    pub fn astype(&self, dtype: JaxDType) -> Self {
-        Self {
-            input_ids: self.input_ids.astype(dtype),
-            attention_mask: self.attention_mask.as_ref().map(|a| a.astype(dtype)),
-            token_type_ids: self.token_type_ids.as_ref().map(|a| a.astype(dtype)),
-            position_ids: self.position_ids.as_ref().map(|a| a.astype(dtype)),
-            special_tokens_mask: self.special_tokens_mask.as_ref().map(|a| a.astype(dtype)),
+    /// Convert every array in the batch to a different data type.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`JaxArray::astype`]'s error for any array field: see its
+    /// docs for exactly which target dtypes this can and cannot honestly
+    /// represent.
+    pub fn astype(&self, dtype: JaxDType) -> Result<Self> {
+        Ok(Self {
+            input_ids: self.input_ids.astype(dtype)?,
+            attention_mask: self.attention_mask.as_ref().map(|a| a.astype(dtype)).transpose()?,
+            token_type_ids: self.token_type_ids.as_ref().map(|a| a.astype(dtype)).transpose()?,
+            position_ids: self.position_ids.as_ref().map(|a| a.astype(dtype)).transpose()?,
+            special_tokens_mask: self
+                .special_tokens_mask
+                .as_ref()
+                .map(|a| a.astype(dtype))
+                .transpose()?,
             sequence_lengths: self.sequence_lengths.clone(),
-        }
+        })
     }
 
     /// Shard batch across devices
@@ -710,36 +759,63 @@ impl<T: Tokenizer + Clone> JaxTokenizer<T> {
 }
 
 /// XLA-compiled JAX tokenizer for high performance
+///
+/// Pure Rust has no XLA backend to compile against, so `compiled` does not
+/// mean "this went through XLA JIT compilation" — `encode_batch_compiled`
+/// runs the exact same interpreted [`JaxTokenizer::encode_batch_to_arrays`]
+/// logic as the uncompiled path. What `compiled` honestly tracks is whether
+/// the caller *requested* the compiled path via [`JaxConfig::use_xla`]: a
+/// tokenizer built from a config with `use_xla: false` reports
+/// `is_compiled() == false` and `encode_batch_compiled` refuses to run,
+/// rather than silently claiming a compilation that never happened.
 pub struct JaxCompiledTokenizer<T: Tokenizer> {
-    tokenizer: Arc<T>,
     config: JaxConfig,
     compiled: bool,
+    /// Built once here (not per call) so `encode_batch_compiled` does not
+    /// re-clone the wrapped tokenizer and re-wrap it in a fresh `Arc` on
+    /// every batch — the previous per-call `JaxTokenizer::new(...)` did
+    /// exactly that redundant work on every single invocation.
+    inner: JaxTokenizer<T>,
 }
 
 impl<T: Tokenizer + Clone> JaxCompiledTokenizer<T> {
-    /// Create a new compiled tokenizer
+    /// Create a new compiled tokenizer.
+    ///
+    /// `compiled` reflects `config.use_xla` rather than being unconditionally
+    /// `true`: see the type-level doc comment for why that is the honest
+    /// value here.
     pub fn new(tokenizer: Arc<T>, config: JaxConfig) -> Result<Self> {
-        // In real implementation, would compile with XLA
+        let compiled = config.use_xla;
+        let inner = JaxTokenizer::new((*tokenizer).clone(), config.clone());
         Ok(Self {
-            tokenizer,
             config,
-            compiled: true,
+            compiled,
+            inner,
         })
     }
 
     /// Encode batch with compiled function
     pub fn encode_batch_compiled(&self, texts: &[String]) -> Result<JaxBatch> {
         if !self.compiled {
-            return Err(anyhow!("Tokenizer not compiled"));
+            return Err(anyhow!(
+                "Tokenizer was built with use_xla: false, so the compiled path was never requested"
+            ));
         }
 
-        // Use the same logic as the regular tokenizer for now
-        // In real implementation, would use compiled XLA function
-        let jax_tokenizer = JaxTokenizer::new((*self.tokenizer).clone(), self.config.clone());
-        jax_tokenizer.encode_batch_to_arrays(texts)
+        self.inner.encode_batch_to_arrays(texts)
+    }
+
+    /// Get configuration
+    pub fn config(&self) -> &JaxConfig {
+        &self.config
     }
 
     /// Check if compiled
+    ///
+    /// Reports whether the compiled path was requested via
+    /// [`JaxConfig::use_xla`] at construction time, not whether real XLA JIT
+    /// compilation occurred (pure Rust has no XLA backend to compile
+    /// against). See the type-level doc comment.
     pub fn is_compiled(&self) -> bool {
         self.compiled
     }
@@ -773,8 +849,8 @@ impl JaxDataset {
     }
 
     /// Create batch iterator
-    pub fn batch_iter(&self, batch_size: usize) -> JaxDataIterator<'_> {
-        JaxDataIterator::new(&self.texts, batch_size, self.config.clone())
+    pub fn batch_iter(&self, batch_size: usize) -> JaxDataIterator {
+        JaxDataIterator::new(self.texts.clone(), batch_size, self.config.clone())
     }
 
     /// Shuffle dataset
@@ -820,9 +896,15 @@ impl JaxDataset {
     }
 }
 
-/// Iterator for JAX data loading
-pub struct JaxDataIterator<'a> {
-    texts: &'a [String],
+/// Iterator for JAX data loading.
+///
+/// Owns its texts (rather than borrowing from the source [`JaxDataset`]) so
+/// [`JaxDataIterator::map`] and [`JaxDataIterator::filter`] have somewhere to
+/// write transformed/reduced data: a borrowed `&[String]` can only ever
+/// re-expose the original dataset's own strings, never a mapped or filtered
+/// view of them.
+pub struct JaxDataIterator {
+    texts: Vec<String>,
     batch_size: usize,
     current_index: usize,
     // reason: stored from the constructor; reserved for planned per-batch JAX
@@ -831,8 +913,8 @@ pub struct JaxDataIterator<'a> {
     config: JaxConfig,
 }
 
-impl<'a> JaxDataIterator<'a> {
-    fn new(texts: &'a [String], batch_size: usize, config: JaxConfig) -> Self {
+impl JaxDataIterator {
+    fn new(texts: Vec<String>, batch_size: usize, config: JaxConfig) -> Self {
         Self {
             texts,
             batch_size,
@@ -841,27 +923,46 @@ impl<'a> JaxDataIterator<'a> {
         }
     }
 
-    /// Apply transformation function
-    pub fn map<F>(self, _func: F) -> Self
+    /// Apply `func` to every text, in place, replacing each with `func`'s result.
+    ///
+    /// Intended to be called before pulling any batches (mirroring
+    /// `tf.data.Dataset.map`'s pipeline-construction usage in
+    /// [`crate::tensorflow::TfDataIterator::map`]): it rewrites the whole
+    /// backing `Vec`, so calling it after [`Iterator::next`] has already
+    /// advanced the cursor still transforms every text (already-yielded
+    /// ones included), it just cannot un-yield a batch the caller already
+    /// received.
+    pub fn map<F>(mut self, func: F) -> Self
     where
         F: Fn(&str) -> String,
     {
-        // In real implementation, would apply the function
+        for text in &mut self.texts {
+            *text = func(text);
+        }
         self
     }
 
-    /// Filter samples
-    pub fn filter<F>(self, _predicate: F) -> Self
+    /// Keep only the texts for which `predicate` returns `true`, in place.
+    ///
+    /// Same before-you-start-iterating usage contract as [`Self::map`]:
+    /// removing texts shifts every later index down, so filtering after the
+    /// cursor has advanced can skip or (harmlessly) re-visit boundary
+    /// elements rather than cleanly resuming where the caller left off.
+    pub fn filter<F>(mut self, predicate: F) -> Self
     where
         F: Fn(&str) -> bool,
     {
-        // In real implementation, would filter samples
+        self.texts.retain(|text| predicate(text));
         self
     }
 }
 
-impl<'a> Iterator for JaxDataIterator<'a> {
-    type Item = &'a [String];
+impl Iterator for JaxDataIterator {
+    // Batches are materialized (not borrowed): once `texts` is owned by the
+    // iterator itself, `next(&mut self)` has no outside lifetime left to
+    // hand a `&[String]` batch out with (the standard `Iterator` trait
+    // cannot lend data borrowed from `&mut self` across the call).
+    type Item = Vec<String>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_index >= self.texts.len() {
@@ -869,7 +970,7 @@ impl<'a> Iterator for JaxDataIterator<'a> {
         }
 
         let end_index = (self.current_index + self.batch_size).min(self.texts.len());
-        let batch = &self.texts[self.current_index..end_index];
+        let batch = self.texts[self.current_index..end_index].to_vec();
         self.current_index = end_index;
 
         Some(batch)
@@ -1020,6 +1121,72 @@ mod tests {
         assert_eq!(reshaped.size(), 6);
     }
 
+    /// Regression: `astype` used to clone the raw `i32` data unchanged and
+    /// just relabel `dtype`, so a narrowing target's out-of-range values
+    /// were never actually truncated. `300` doesn't fit in an `i8`
+    /// (range -128..=127); a real narrowing cast wraps it to `44`
+    /// (`300 % 256 = 44`).
+    #[test]
+    fn astype_int8_truncates_out_of_range_values() {
+        let array = JaxArray::new(vec![300, -1, 5], vec![3], JaxDType::Int32, JaxDevice::Cpu);
+        let converted = array.astype(JaxDType::Int8).expect("int8 must be representable");
+        assert_eq!(converted.dtype, JaxDType::Int8);
+        // 300 -> 44 (wraps), -1 stays -1 (fits i8), 5 is unchanged.
+        assert_eq!(converted.data, vec![44, -1, 5]);
+    }
+
+    /// `Bool` conversion must coerce to exactly 0 or 1, not pass values
+    /// through unchanged.
+    #[test]
+    fn astype_bool_coerces_to_zero_or_one() {
+        let array = JaxArray::new(vec![0, 5, -3], vec![3], JaxDType::Int32, JaxDevice::Cpu);
+        let converted = array.astype(JaxDType::Bool).expect("bool must be representable");
+        assert_eq!(converted.data, vec![0, 1, 1]);
+    }
+
+    /// A widening integer conversion is value-preserving: the stored bits
+    /// don't need to change at all.
+    #[test]
+    fn astype_widening_int_preserves_values() {
+        let array = JaxArray::new(vec![-7, 42], vec![2], JaxDType::Int32, JaxDevice::Cpu);
+        let converted = array.astype(JaxDType::Int64).expect("widening must succeed");
+        assert_eq!(converted.data, vec![-7, 42]);
+        assert_eq!(converted.dtype, JaxDType::Int64);
+    }
+
+    /// `JaxArray` stores `i32` only: converting to a floating-point or
+    /// complex dtype has no honest representation and must be refused, not
+    /// silently mislabeled.
+    #[test]
+    fn astype_refuses_float_and_complex_targets() {
+        let array = JaxArray::new(vec![1, 2, 3], vec![3], JaxDType::Int32, JaxDevice::Cpu);
+        for dtype in [
+            JaxDType::Float16,
+            JaxDType::Float32,
+            JaxDType::Float64,
+            JaxDType::Complex64,
+            JaxDType::Complex128,
+        ] {
+            assert!(
+                array.astype(dtype).is_err(),
+                "astype({dtype:?}) must be refused, not fabricated"
+            );
+        }
+    }
+
+    /// `JaxBatch::astype` must propagate a per-array failure instead of
+    /// silently succeeding with a partially-converted batch.
+    #[test]
+    fn batch_astype_propagates_array_conversion_errors() {
+        let tokenizer = create_test_char_tokenizer();
+        let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer);
+        let batch = jax_tokenizer.encode_to_arrays("hi").expect("encode must succeed");
+
+        assert!(batch.astype(JaxDType::Float32).is_err());
+        let converted = batch.astype(JaxDType::Int64).expect("int64 must be representable");
+        assert_eq!(converted.input_ids.dtype, JaxDType::Int64);
+    }
+
     #[test]
     fn test_jax_tokenizer() {
         let tokenizer = create_test_char_tokenizer();
@@ -1066,6 +1233,82 @@ mod tests {
         assert_eq!(batches[1].len(), 1);
     }
 
+    /// Regression: `map` used to discard its closure and return `self`
+    /// unchanged. Uses a non-idempotent transform (appending a marker) so a
+    /// no-op implementation cannot accidentally pass.
+    #[test]
+    fn map_transforms_every_text_in_every_batch() {
+        let texts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let dataset = JaxDataset::new(texts, JaxConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.batch_iter(2).map(|s| format!("{s}!")).collect();
+
+        let all: Vec<String> = batches.into_iter().flatten().collect();
+        assert_eq!(
+            all,
+            vec!["a!".to_string(), "b!".to_string(), "c!".to_string()]
+        );
+    }
+
+    /// `map` must compose: a second `.map()` sees the first one's output.
+    #[test]
+    fn map_composes_left_to_right() {
+        let texts = vec!["x".to_string()];
+        let dataset = JaxDataset::new(texts, JaxConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset
+            .batch_iter(1)
+            .map(|s| format!("{s}1"))
+            .map(|s| format!("{s}2"))
+            .collect();
+
+        assert_eq!(batches, vec![vec!["x12".to_string()]]);
+    }
+
+    /// Regression: `filter` used to discard its predicate and return `self`
+    /// unchanged (every sample kept regardless of the predicate).
+    #[test]
+    fn filter_actually_removes_samples_that_fail_the_predicate() {
+        let texts = vec![
+            "keep".to_string(),
+            "drop".to_string(),
+            "keep".to_string(),
+            "drop".to_string(),
+        ];
+        let dataset = JaxDataset::new(texts, JaxConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.batch_iter(10).filter(|s| s == "keep").collect();
+
+        let all: Vec<String> = batches.into_iter().flatten().collect();
+        assert_eq!(all, vec!["keep".to_string(), "keep".to_string()]);
+    }
+
+    /// A predicate that rejects everything must yield zero batches, not an
+    /// empty-batch placeholder or the untouched original data.
+    #[test]
+    fn filter_rejecting_everything_yields_no_batches() {
+        let texts = vec!["a".to_string(), "b".to_string()];
+        let dataset = JaxDataset::new(texts, JaxConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.batch_iter(10).filter(|_| false).collect();
+        assert!(batches.is_empty());
+    }
+
+    /// `map` then `filter` must compose in the order called: this drops the
+    /// samples that were originally "b" (post-map "B") using a predicate
+    /// that only makes sense against the *mapped* text.
+    #[test]
+    fn map_then_filter_compose_in_call_order() {
+        let texts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let dataset = JaxDataset::new(texts, JaxConfig::default());
+
+        let batches: Vec<Vec<String>> =
+            dataset.batch_iter(10).map(|s| s.to_uppercase()).filter(|s| s != "B").collect();
+
+        let all: Vec<String> = batches.into_iter().flatten().collect();
+        assert_eq!(all, vec!["A".to_string(), "C".to_string()]);
+    }
+
     #[test]
     fn test_compiled_tokenizer() {
         let tokenizer = create_test_char_tokenizer();
@@ -1077,6 +1320,35 @@ mod tests {
         let texts = vec!["hello".to_string()];
         let batch = compiled.encode_batch_compiled(&texts).expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
+    }
+
+    /// Regression: `is_compiled()` used to be hardcoded `true` regardless of
+    /// the config passed to `JaxCompiledTokenizer::new`, so a tokenizer built
+    /// from `use_xla: false` still (falsely) reported itself as compiled and
+    /// `encode_batch_compiled` would run instead of refusing. This test would
+    /// fail against the old code, which asserted true unconditionally.
+    #[test]
+    fn test_compiled_tokenizer_is_honest_about_use_xla_false() {
+        let tokenizer = create_test_char_tokenizer();
+        let config = JaxConfig {
+            use_xla: false,
+            ..JaxConfig::default()
+        };
+        let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer).with_config(config);
+
+        let compiled = jax_tokenizer.jit_compile().expect("Operation failed in test");
+        assert!(
+            !compiled.is_compiled(),
+            "a tokenizer built with use_xla: false must not report itself as compiled"
+        );
+        assert!(!compiled.config().use_xla);
+
+        let texts = vec!["hello".to_string()];
+        let result = compiled.encode_batch_compiled(&texts);
+        assert!(
+            result.is_err(),
+            "encode_batch_compiled must refuse to run the compiled path that was never requested"
+        );
     }
 
     #[test]

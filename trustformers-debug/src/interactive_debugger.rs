@@ -335,13 +335,26 @@ impl InteractiveDebugger {
         }
     }
 
-    /// Evaluate an expression
-    async fn evaluate_expression(&self, _expr: &str) -> Result<DebuggerResponse> {
-        // Simplified expression evaluation - in a real implementation,
-        // this would parse and evaluate the expression
-        Ok(DebuggerResponse::ExpressionEvaluated(
-            "Expression evaluation not implemented".to_string(),
-        ))
+    /// Evaluate a numeric watch expression against the current debugger
+    /// state (`state.variables`).
+    ///
+    /// Supports `+ - * / ( )`, numeric literals, and identifiers that
+    /// resolve to a currently-tracked variable whose `value` string parses
+    /// as `f64`. This is intentionally a minimal calculator, not a general
+    /// interpreter -- but every result it returns is a real evaluation of
+    /// the given expression against real debugger state. An expression this
+    /// evaluator cannot parse, or one that references an unknown variable
+    /// or a non-numeric one, returns [`DebuggerResponse::Error`] rather
+    /// than a fabricated "not implemented" success -- so a client UI never
+    /// displays a made-up value as if it were the real evaluated result.
+    async fn evaluate_expression(&self, expr: &str) -> Result<DebuggerResponse> {
+        let variables = self.state.read().variables.clone();
+        match ExpressionEvaluator::new(expr, &variables).evaluate() {
+            Ok(value) => Ok(DebuggerResponse::ExpressionEvaluated(format_eval_result(
+                value,
+            ))),
+            Err(message) => Ok(DebuggerResponse::Error(message)),
+        }
     }
 
     /// Jump to a specific step in history (time-travel debugging)
@@ -509,6 +522,422 @@ impl Default for DebuggerState {
             variables: IndexMap::new(),
             step_mode: StepMode::Continue,
             session_start: Utc::now(),
+        }
+    }
+}
+
+/// Formats a numeric evaluation result the way a debugger watch expression
+/// display should: integral values print without a trailing `.0` (`"3"`,
+/// not `"3.0"`), everything else prints with full `f64` precision.
+fn format_eval_result(value: f64) -> String {
+    if value.fract() == 0.0 && value.is_finite() && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
+/// A minimal recursive-descent parser/evaluator for numeric watch
+/// expressions over [`InteractiveDebugger`]'s tracked variables.
+///
+/// Grammar (standard precedence, left-associative `+ - * /`, right-assoc
+/// unary `-`):
+/// ```text
+/// expr   := term (('+' | '-') term)*
+/// term   := unary (('*' | '/') unary)*
+/// unary  := '-' unary | atom
+/// atom   := NUMBER | IDENT | '(' expr ')'
+/// ```
+struct ExpressionEvaluator<'a> {
+    tokens: Vec<Token>,
+    pos: usize,
+    variables: &'a IndexMap<String, VariableValue>,
+    source: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Number(f64),
+    Ident(String),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+}
+
+impl<'a> ExpressionEvaluator<'a> {
+    fn new(expr: &'a str, variables: &'a IndexMap<String, VariableValue>) -> Self {
+        Self {
+            tokens: Vec::new(),
+            pos: 0,
+            variables,
+            source: expr,
+        }
+    }
+
+    /// Parse and evaluate the expression, returning either the numeric
+    /// result or a human-readable error describing exactly what went wrong
+    /// (unknown variable, non-numeric variable, malformed syntax, division
+    /// by zero, or trailing unparsed input).
+    fn evaluate(mut self) -> Result<f64, String> {
+        self.tokenize()?;
+        if self.tokens.is_empty() {
+            return Err("empty expression".to_string());
+        }
+        let value = self.parse_expr()?;
+        if self.pos != self.tokens.len() {
+            return Err(format!(
+                "unexpected trailing input in expression {:?} at token {}",
+                self.source, self.pos
+            ));
+        }
+        Ok(value)
+    }
+
+    fn tokenize(&mut self) -> Result<(), String> {
+        let chars: Vec<char> = self.source.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                ' ' | '\t' | '\n' | '\r' => {
+                    i += 1;
+                },
+                '+' => {
+                    self.tokens.push(Token::Plus);
+                    i += 1;
+                },
+                '-' => {
+                    self.tokens.push(Token::Minus);
+                    i += 1;
+                },
+                '*' => {
+                    self.tokens.push(Token::Star);
+                    i += 1;
+                },
+                '/' => {
+                    self.tokens.push(Token::Slash);
+                    i += 1;
+                },
+                '(' => {
+                    self.tokens.push(Token::LParen);
+                    i += 1;
+                },
+                ')' => {
+                    self.tokens.push(Token::RParen);
+                    i += 1;
+                },
+                c if c.is_ascii_digit() || c == '.' => {
+                    let start = i;
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                        i += 1;
+                    }
+                    let text: String = chars[start..i].iter().collect();
+                    let value = text.parse::<f64>().map_err(|_| {
+                        format!("invalid number literal {text:?} in {:?}", self.source)
+                    })?;
+                    self.tokens.push(Token::Number(value));
+                },
+                c if c.is_alphabetic() || c == '_' => {
+                    let start = i;
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        i += 1;
+                    }
+                    let text: String = chars[start..i].iter().collect();
+                    self.tokens.push(Token::Ident(text));
+                },
+                other => {
+                    return Err(format!(
+                        "unsupported character {other:?} in expression {:?}",
+                        self.source
+                    ));
+                },
+            }
+        }
+        Ok(())
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<Token> {
+        let tok = self.tokens.get(self.pos).cloned();
+        if tok.is_some() {
+            self.pos += 1;
+        }
+        tok
+    }
+
+    fn parse_expr(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_term()?;
+        loop {
+            match self.peek() {
+                Some(Token::Plus) => {
+                    self.advance();
+                    value += self.parse_term()?;
+                },
+                Some(Token::Minus) => {
+                    self.advance();
+                    value -= self.parse_term()?;
+                },
+                _ => break,
+            }
+        }
+        Ok(value)
+    }
+
+    fn parse_term(&mut self) -> Result<f64, String> {
+        let mut value = self.parse_unary()?;
+        loop {
+            match self.peek() {
+                Some(Token::Star) => {
+                    self.advance();
+                    value *= self.parse_unary()?;
+                },
+                Some(Token::Slash) => {
+                    self.advance();
+                    let divisor = self.parse_unary()?;
+                    if divisor == 0.0 {
+                        return Err(format!("division by zero in expression {:?}", self.source));
+                    }
+                    value /= divisor;
+                },
+                _ => break,
+            }
+        }
+        Ok(value)
+    }
+
+    fn parse_unary(&mut self) -> Result<f64, String> {
+        if matches!(self.peek(), Some(Token::Minus)) {
+            self.advance();
+            return Ok(-self.parse_unary()?);
+        }
+        self.parse_atom()
+    }
+
+    fn parse_atom(&mut self) -> Result<f64, String> {
+        match self.advance() {
+            Some(Token::Number(n)) => Ok(n),
+            Some(Token::Ident(name)) => {
+                let var = self.variables.get(&name).ok_or_else(|| {
+                    format!(
+                        "unknown variable {name:?} referenced in expression {:?}",
+                        self.source
+                    )
+                })?;
+                var.value.trim().parse::<f64>().map_err(|_| {
+                    format!(
+                        "variable {name:?} has non-numeric value {:?} and cannot be used in an \
+                         arithmetic expression",
+                        var.value
+                    )
+                })
+            },
+            Some(Token::LParen) => {
+                let value = self.parse_expr()?;
+                match self.advance() {
+                    Some(Token::RParen) => Ok(value),
+                    _ => Err(format!(
+                        "missing closing ')' in expression {:?}",
+                        self.source
+                    )),
+                }
+            },
+            other => Err(format!(
+                "unexpected token {other:?} in expression {:?}",
+                self.source
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod expression_evaluator_tests {
+    use super::*;
+
+    fn var(name: &str, value: &str) -> VariableValue {
+        VariableValue {
+            name: name.to_string(),
+            value: value.to_string(),
+            type_name: "f64".to_string(),
+            size_bytes: None,
+            shape: None,
+            is_tensor: false,
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_numeric_literal() {
+        let vars = IndexMap::new();
+        let result = ExpressionEvaluator::new("42", &vars).evaluate();
+        assert_eq!(result, Ok(42.0));
+    }
+
+    #[test]
+    fn test_basic_arithmetic_precedence() {
+        let vars = IndexMap::new();
+        // 2 + 3 * 4 = 14, not 20 -- confirms real operator precedence.
+        assert_eq!(
+            ExpressionEvaluator::new("2 + 3 * 4", &vars).evaluate(),
+            Ok(14.0)
+        );
+    }
+
+    #[test]
+    fn test_parentheses_override_precedence() {
+        let vars = IndexMap::new();
+        assert_eq!(
+            ExpressionEvaluator::new("(2 + 3) * 4", &vars).evaluate(),
+            Ok(20.0)
+        );
+    }
+
+    #[test]
+    fn test_unary_minus() {
+        let vars = IndexMap::new();
+        assert_eq!(
+            ExpressionEvaluator::new("-5 + 3", &vars).evaluate(),
+            Ok(-2.0)
+        );
+    }
+
+    #[test]
+    fn test_variable_lookup_resolves_real_value() {
+        let mut vars = IndexMap::new();
+        vars.insert("loss".to_string(), var("loss", "0.485"));
+        let result = ExpressionEvaluator::new("loss", &vars).evaluate();
+        assert_eq!(result, Ok(0.485));
+    }
+
+    #[test]
+    fn test_variable_in_arithmetic_expression() {
+        let mut vars = IndexMap::new();
+        vars.insert("grad_norm".to_string(), var("grad_norm", "2.5"));
+        let result = ExpressionEvaluator::new("grad_norm * 2", &vars).evaluate();
+        assert_eq!(result, Ok(5.0));
+    }
+
+    #[test]
+    fn test_unknown_variable_is_a_real_error_not_a_placeholder() {
+        let vars = IndexMap::new();
+        let result = ExpressionEvaluator::new("undefined_var", &vars).evaluate();
+        assert!(result.is_err());
+        assert!(result.expect_err("should be an error").contains("unknown variable"));
+    }
+
+    #[test]
+    fn test_non_numeric_variable_is_a_real_error() {
+        let mut vars = IndexMap::new();
+        vars.insert("model_name".to_string(), var("model_name", "gpt2"));
+        let result = ExpressionEvaluator::new("model_name", &vars).evaluate();
+        assert!(result.is_err());
+        assert!(result.expect_err("should be an error").contains("non-numeric"));
+    }
+
+    #[test]
+    fn test_division_by_zero_is_a_real_error() {
+        let vars = IndexMap::new();
+        let result = ExpressionEvaluator::new("1 / 0", &vars).evaluate();
+        assert!(result.is_err());
+        assert!(result.expect_err("should be an error").contains("division by zero"));
+    }
+
+    #[test]
+    fn test_malformed_expression_is_a_real_error() {
+        let vars = IndexMap::new();
+        assert!(ExpressionEvaluator::new("(1 + 2", &vars).evaluate().is_err());
+        assert!(ExpressionEvaluator::new("1 +", &vars).evaluate().is_err());
+        assert!(ExpressionEvaluator::new("1 2", &vars).evaluate().is_err());
+        assert!(ExpressionEvaluator::new("1 $ 2", &vars).evaluate().is_err());
+    }
+
+    #[test]
+    fn test_format_eval_result_integral_vs_fractional() {
+        assert_eq!(format_eval_result(3.0), "3");
+        assert_eq!(format_eval_result(3.5), "3.5");
+        assert_eq!(format_eval_result(-2.0), "-2");
+    }
+}
+
+#[cfg(test)]
+mod evaluate_expression_integration_tests {
+    use super::*;
+
+    fn make_debug_config() -> DebugConfig {
+        DebugConfig::default()
+    }
+
+    #[tokio::test]
+    async fn test_process_command_returns_error_for_unknown_variable_not_fake_success() {
+        let debugger = InteractiveDebugger::new(&make_debug_config());
+        let response = debugger
+            .process_command(DebuggerCommand::EvaluateExpression(
+                "nonexistent".to_string(),
+            ))
+            .await
+            .expect("process_command should not itself error");
+
+        // The old implementation returned `ExpressionEvaluated("Expression
+        // evaluation not implemented")` here -- a client would have
+        // displayed that placeholder text as the evaluated value.
+        match response {
+            DebuggerResponse::Error(message) => {
+                assert!(message.contains("unknown variable"));
+            },
+            other => panic!("expected DebuggerResponse::Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_command_evaluates_real_arithmetic() {
+        let debugger = InteractiveDebugger::new(&make_debug_config());
+        let response = debugger
+            .process_command(DebuggerCommand::EvaluateExpression(
+                "(2 + 3) * 4".to_string(),
+            ))
+            .await
+            .expect("process_command should not error");
+
+        match response {
+            DebuggerResponse::ExpressionEvaluated(value) => assert_eq!(value, "20"),
+            other => panic!("expected DebuggerResponse::ExpressionEvaluated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_command_evaluates_expression_over_real_tracked_variable() {
+        let debugger = InteractiveDebugger::new(&make_debug_config());
+        {
+            let mut state = debugger.state.write();
+            state.variables.insert(
+                "batch_size".to_string(),
+                VariableValue {
+                    name: "batch_size".to_string(),
+                    value: "32".to_string(),
+                    type_name: "usize".to_string(),
+                    size_bytes: None,
+                    shape: None,
+                    is_tensor: false,
+                    metadata: HashMap::new(),
+                },
+            );
+        }
+
+        let response = debugger
+            .process_command(DebuggerCommand::EvaluateExpression(
+                "batch_size * 2".to_string(),
+            ))
+            .await
+            .expect("process_command should not error");
+
+        match response {
+            DebuggerResponse::ExpressionEvaluated(value) => assert_eq!(value, "64"),
+            other => panic!("expected DebuggerResponse::ExpressionEvaluated, got {other:?}"),
         }
     }
 }

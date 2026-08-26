@@ -1,8 +1,7 @@
 use crate::bert::config::BertConfig;
-use crate::bert::layers::{BertEmbeddings, BertEncoder, BertPooler};
-use crate::weight_loading::{WeightDataType, WeightFormat, WeightLoadingConfig};
+use crate::bert::layers::{BertEmbeddings, BertEncoder, BertLayerNames, BertPooler};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
-use std::collections::HashMap;
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -88,8 +87,46 @@ impl BertModel {
 
         let encoder_output = self.encoder.forward(embeddings, attention_mask_tensor)?;
 
-        // Temporarily disable pooler to test main tensor flow
-        let pooler_output = None;
+        // Run the real pooler over the `[CLS]` token.
+        //
+        // This used to read `let pooler_output = None; // Temporarily disable
+        // pooler to test main tensor flow`, which made every downstream
+        // consumer of `pooler_output` dead code: `BertForSequenceClassification`
+        // (and any other head that pools) could never run at all, because its
+        // forward pass errors out with "requires pooler output". The pooler
+        // parameters were nevertheless allocated, counted by
+        // `num_parameters()`, published by `named_tensors()` and bound by
+        // `load_from_checkpoint()` -- so a checkpoint's `pooler.dense.*`
+        // weights were loaded and then never used.
+        //
+        // `BertPooler` consumes a 2-D `[seq_len, hidden]` tensor and returns
+        // `[1, hidden]`, while the encoder emits `[1, seq_len, hidden]`; the
+        // reshape below bridges the two. A model whose pooler was dropped at
+        // load time (`add_pooling_layer=False` checkpoints, see
+        // `load_from_checkpoint`) still reports `None`, which is what
+        // HuggingFace does too.
+        let pooler_output = match &self.pooler {
+            Some(pooler) => {
+                let hidden_states = match &encoder_output {
+                    Tensor::F32(arr) => Tensor::F32(
+                        arr.to_shape(IxDyn(&[seq_len, hidden_size]))
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?
+                            .to_owned(),
+                    ),
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Unsupported tensor type for BERT pooling",
+                            "BertModel::forward_with_embeddings",
+                        ))
+                    },
+                };
+                Some(trustformers_core::traits::Layer::forward(
+                    pooler,
+                    hidden_states,
+                )?)
+            },
+            None => None,
+        };
 
         Ok(BertModelOutput {
             last_hidden_state: encoder_output,
@@ -118,18 +155,7 @@ impl Model for BertModel {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        // Load BERT weights from pretrained model
-        // This implementation handles HuggingFace format BERT models
-
-        // Create a temporary file to write the reader data
-        // In a production environment, you might want to stream directly
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::weight_load_error(format!("Failed to read model data: {}", e))
-        })?;
-
-        // Parse the model weights
-        self.load_weights_from_buffer(&buffer)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &<BertModel as Model>::Config {
@@ -144,299 +170,187 @@ impl Model for BertModel {
 
         embeddings_params + encoder_params + pooler_params
     }
+
+    /// Enumerate the encoder's live parameters under HuggingFace `BertModel`
+    /// names.
+    ///
+    /// The spelling comes from the same [`BertLayerNames::bert`] table
+    /// [`BertModel::load_from_checkpoint`] binds through, so a file written from
+    /// these names reloads. The `bert.` prefix that task checkpoints carry is
+    /// *not* applied — this is the bare encoder, which HuggingFace exports
+    /// unprefixed; the loader detects either spelling.
+    ///
+    /// The pooler is listed only when this model actually has one:
+    /// `load_from_checkpoint` drops it for `add_pooling_layer=False` checkpoints
+    /// rather than keeping a randomly-initialised projection, and inventing a
+    /// name for a parameter that no longer exists would be worse than omitting
+    /// it.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters("", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut("", &mut tensors);
+        tensors
+    }
+}
+
+/// Namespace every entry appended to `into` since `from` under `prefix`.
+///
+/// The encoder's own collectors spell HuggingFace's *unprefixed* `BertModel`
+/// names; the task wrappers in [`crate::bert::tasks`] nest that same encoder
+/// under `bert.`. Rewriting the names afterwards keeps one name table instead of
+/// threading a prefix argument through every sub-collector, and it leaves the
+/// tensor references untouched — only the `String` changes, so the published
+/// parameters stay live.
+fn namespace_from<T>(prefix: &str, from: usize, into: &mut [(String, T)]) {
+    if prefix.is_empty() {
+        return;
+    }
+    for (name, _) in into.iter_mut().skip(from) {
+        *name = format!("{prefix}.{name}");
+    }
 }
 
 impl BertModel {
-    /// Load BERT weights from a buffer containing model data
-    fn load_weights_from_buffer(&mut self, buffer: &[u8]) -> Result<()> {
-        // Create weight loading configuration
-        let _config = WeightLoadingConfig {
-            format: Some(WeightFormat::HuggingFaceBin),
-            lazy_loading: false,
-            memory_mapped: false,
-            streaming: false,
-            device: "cpu".to_string(),
-            dtype: WeightDataType::Float32,
-            quantization: None,
-            cache_dir: None,
-            verify_checksums: false,
-            distributed: None,
-        };
-
-        // Extract weights from the buffer
-        let weights = self.extract_bert_weights(buffer)?;
-
-        // Load weights into model components
-        self.load_embeddings_weights(&weights)?;
-        self.load_encoder_weights(&weights)?;
-        self.load_pooler_weights(&weights)?;
-
-        Ok(())
+    /// Append every encoder parameter to `into`, namespaced under `prefix`.
+    ///
+    /// `prefix` is `""` for the bare `BertModel` export (HuggingFace writes
+    /// `embeddings.…` / `encoder.layer.N.…` at the root) and `"bert"` for the
+    /// task wrappers, whose checkpoints nest the encoder under `bert.`. Both
+    /// spellings are accepted on the way back in by
+    /// [`BertModel::load_from_checkpoint`], which probes for the prefix.
+    pub(crate) fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        let start = into.len();
+        let names = BertLayerNames::bert();
+        self.embeddings.collect_named_parameters(true, into);
+        self.encoder.collect_named_parameters(&names, into);
+        if let Some(pooler) = &self.pooler {
+            pooler.collect_named_parameters(into);
+        }
+        namespace_from(prefix, start, into);
     }
 
-    /// Extract BERT weights from model buffer
-    fn extract_bert_weights(&self, buffer: &[u8]) -> Result<HashMap<String, Tensor>> {
-        let mut weights = HashMap::new();
-
-        // Common BERT layer names and their expected dimensions
-        let bert_layer_specs = vec![
-            // Embeddings
-            (
-                "embeddings.word_embeddings.weight",
-                vec![self.config.vocab_size, self.config.hidden_size],
-            ),
-            (
-                "embeddings.position_embeddings.weight",
-                vec![self.config.max_position_embeddings, self.config.hidden_size],
-            ),
-            (
-                "embeddings.token_type_embeddings.weight",
-                vec![self.config.type_vocab_size, self.config.hidden_size],
-            ),
-            ("embeddings.LayerNorm.weight", vec![self.config.hidden_size]),
-            ("embeddings.LayerNorm.bias", vec![self.config.hidden_size]),
-        ];
-
-        // Add encoder layers
-        for layer_idx in 0..self.config.num_hidden_layers {
-            let layer_specs = vec![
-                // Attention layers
-                (
-                    format!("encoder.layer.{}.attention.self.query.weight", layer_idx),
-                    vec![self.config.hidden_size, self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.self.query.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.self.key.weight", layer_idx),
-                    vec![self.config.hidden_size, self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.self.key.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.self.value.weight", layer_idx),
-                    vec![self.config.hidden_size, self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.self.value.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.output.dense.weight", layer_idx),
-                    vec![self.config.hidden_size, self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.attention.output.dense.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!(
-                        "encoder.layer.{}.attention.output.LayerNorm.weight",
-                        layer_idx
-                    ),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!(
-                        "encoder.layer.{}.attention.output.LayerNorm.bias",
-                        layer_idx
-                    ),
-                    vec![self.config.hidden_size],
-                ),
-                // Feed-forward layers
-                (
-                    format!("encoder.layer.{}.intermediate.dense.weight", layer_idx),
-                    vec![self.config.intermediate_size, self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.intermediate.dense.bias", layer_idx),
-                    vec![self.config.intermediate_size],
-                ),
-                (
-                    format!("encoder.layer.{}.output.dense.weight", layer_idx),
-                    vec![self.config.hidden_size, self.config.intermediate_size],
-                ),
-                (
-                    format!("encoder.layer.{}.output.dense.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.output.LayerNorm.weight", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-                (
-                    format!("encoder.layer.{}.output.LayerNorm.bias", layer_idx),
-                    vec![self.config.hidden_size],
-                ),
-            ];
-
-            for (name, shape) in layer_specs {
-                if let Ok(tensor) = self.extract_tensor_from_buffer(buffer, &name, &shape) {
-                    weights.insert(name, tensor);
-                }
-            }
+    /// Mutable counterpart of [`BertModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let start = into.len();
+        let names = BertLayerNames::bert();
+        self.embeddings.collect_named_parameters_mut(true, into);
+        self.encoder.collect_named_parameters_mut(&names, into);
+        if let Some(pooler) = &mut self.pooler {
+            pooler.collect_named_parameters_mut(into);
         }
+        namespace_from(prefix, start, into);
+    }
+}
 
-        // Add base layer specs
-        for (name, shape) in bert_layer_specs {
-            if let Ok(tensor) = self.extract_tensor_from_buffer(buffer, name, &shape) {
-                weights.insert(name.to_string(), tensor);
-            }
-        }
+impl BertModel {
+    /// Checkpoint namespaces a base BERT encoder legitimately does not consume.
+    ///
+    /// HuggingFace ships the pretraining and task heads inside the same
+    /// checkpoint as the encoder, so `bert-base-uncased` carries
+    /// `cls.predictions.*` next to `embeddings.*`. Loading the *encoder alone*
+    /// therefore leaves them behind; the task wrappers in
+    /// [`crate::bert::tasks`] bind their own head from the same checkpoint
+    /// instead of relying on this list.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &[
+        "cls.",
+        "classifier.",
+        "qa_outputs.",
+        "lm_head.",
+        "mlm_head.",
+        "nsp_head.",
+    ];
 
-        // Pooler weights (optional)
-        if let Ok(tensor) = self.extract_tensor_from_buffer(
-            buffer,
-            "pooler.dense.weight",
-            &[self.config.hidden_size, self.config.hidden_size],
-        ) {
-            weights.insert("pooler.dense.weight".to_string(), tensor);
-        }
-        if let Ok(tensor) =
-            self.extract_tensor_from_buffer(buffer, "pooler.dense.bias", &[self.config.hidden_size])
-        {
-            weights.insert("pooler.dense.bias".to_string(), tensor);
-        }
+    /// Non-parameter buffers HuggingFace stores alongside BERT's weights.
+    ///
+    /// `position_ids` / `token_type_ids` are registered buffers, not learnable
+    /// parameters, and they repeat under whatever task prefix the checkpoint
+    /// uses — so they are matched by suffix rather than by namespace.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] = &[
+        "embeddings.position_ids",
+        "embeddings.token_type_ids",
+        "attention.self.position_embeddings.weight",
+    ];
 
-        Ok(weights)
+    /// The unused-tensor policy for a bare BERT encoder load.
+    pub(crate) fn unused_tensor_policy() -> UnusedTensors<'static> {
+        UnusedTensors::new(Self::ALLOWED_UNUSED_PREFIXES, Self::ALLOWED_UNUSED_SUFFIXES)
     }
 
-    /// Extract a specific tensor from the model buffer
-    fn extract_tensor_from_buffer(
-        &self,
-        buffer: &[u8],
-        name: &str,
-        expected_shape: &[usize],
-    ) -> Result<Tensor> {
-        // Simple heuristic-based tensor extraction
-        // In a real implementation, you'd want to properly parse the pickle format
-
-        let total_elements: usize = expected_shape.iter().product();
-        let expected_size = total_elements * 4; // Assume float32
-
-        if buffer.len() < expected_size {
-            return Err(TrustformersError::weight_load_error(format!(
-                "Buffer too small for tensor {}",
-                name
-            )));
-        }
-
-        // Look for tensor data that matches our expected pattern
-        // This is a simplified approach - a full implementation would parse the pickle format
-        for offset in (0..buffer.len().saturating_sub(expected_size)).step_by(4) {
-            if offset + expected_size <= buffer.len() {
-                let tensor_data = &buffer[offset..offset + expected_size];
-                let float_data: Vec<f32> = tensor_data
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
-
-                // Validate that the data looks reasonable for model weights
-                if float_data.iter().any(|&x| x.is_finite() && x.abs() < 10.0)
-                    && float_data.iter().any(|&x| x != 0.0)
-                {
-                    if let Ok(tensor) = Tensor::from_vec(float_data, expected_shape) {
-                        return Ok(tensor);
-                    }
-                }
-            }
-        }
-
-        // Fallback: create a small random tensor for testing
-        let random_data: Vec<f32> = (0..total_elements)
-            .map(|_| (fastrand::f32() - 0.5) * 0.02) // Small random values typical for model weights
-            .collect();
-
-        Tensor::from_vec(random_data, expected_shape).map_err(|e| {
-            TrustformersError::weight_load_error(format!(
-                "Failed to create fallback tensor for {}: {}",
-                name, e
-            ))
-        })
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// The stream may hold a safetensors file or a PyTorch `.bin` archive; the
+    /// container is detected and parsed for real by
+    /// [`Checkpoint::from_reader`]. Every parameter of the model is then bound by
+    /// name, and the load fails — listing the offenders — if the checkpoint is
+    /// missing any of them or carries tensors this architecture does not know.
+    ///
+    /// A previous revision scanned the raw bytes for a run of floats that "looked
+    /// reasonable", fell back to `fastrand`-generated values when the scan found
+    /// nothing, then discarded every tensor it had produced and returned `Ok(())`.
+    /// Loading a checkpoint left the model randomly initialised while reporting
+    /// success. None of that survives: weights are either bound or an error is
+    /// returned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed, when the checkpoint does not
+    /// look like a BERT checkpoint, when a tensor has the wrong shape, or when
+    /// any parameter is missing.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
     }
 
-    /// Load embeddings weights into the model
-    fn load_embeddings_weights(&mut self, weights: &HashMap<String, Tensor>) -> Result<()> {
-        // Load word embeddings
-        if let Some(word_emb) = weights.get("embeddings.word_embeddings.weight") {
-            // In a real implementation, you'd set the weights on the embeddings layer
-            // For now, we just validate that the weight exists
-            println!("Loaded word embeddings: {:?}", word_emb.shape());
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// # Errors
+    ///
+    /// See [`BertModel::load_pretrained_report`].
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        // `BertForSequenceClassification` and friends nest the encoder under
+        // `bert.`; the plain `BertModel` export does not.
+        let prefix =
+            checkpoint.detect_prefix(&["", "bert."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+        let names = BertLayerNames::bert();
+
+        self.embeddings.load_weights(&mut binder, &self.config, true)?;
+        self.encoder.load_weights(&mut binder, &names, &self.config)?;
+
+        // The pooler is optional in HuggingFace exports (`add_pooling_layer=False`).
+        // When the checkpoint has no pooler, drop ours rather than leaving a
+        // randomly-initialised projection in place pretending to be trained.
+        if checkpoint.contains(&format!("{prefix}pooler.dense.weight")) {
+            let pooler = match self.pooler.as_mut() {
+                Some(pooler) => pooler,
+                None => {
+                    self.pooler = Some(BertPooler::new_with_device(&self.config, self.device)?);
+                    self.pooler.as_mut().ok_or_else(|| {
+                        TrustformersError::model_error(
+                            "BERT pooler could not be created for the checkpoint".to_string(),
+                        )
+                    })?
+                },
+            };
+            pooler.load_weights(&mut binder, &self.config)?;
+        } else {
+            self.pooler = None;
         }
 
-        // Load position embeddings
-        if let Some(pos_emb) = weights.get("embeddings.position_embeddings.weight") {
-            println!("Loaded position embeddings: {:?}", pos_emb.shape());
-        }
-
-        // Load token type embeddings
-        if let Some(token_type_emb) = weights.get("embeddings.token_type_embeddings.weight") {
-            println!("Loaded token type embeddings: {:?}", token_type_emb.shape());
-        }
-
-        // Load LayerNorm weights
-        if let Some(ln_weight) = weights.get("embeddings.LayerNorm.weight") {
-            println!(
-                "Loaded embeddings LayerNorm weight: {:?}",
-                ln_weight.shape()
-            );
-        }
-
-        if let Some(ln_bias) = weights.get("embeddings.LayerNorm.bias") {
-            println!("Loaded embeddings LayerNorm bias: {:?}", ln_bias.shape());
-        }
-
-        Ok(())
-    }
-
-    /// Load encoder weights into the model
-    fn load_encoder_weights(&mut self, weights: &HashMap<String, Tensor>) -> Result<()> {
-        for layer_idx in 0..self.config.num_hidden_layers {
-            // Load attention weights
-            let attention_weights = vec![
-                format!("encoder.layer.{}.attention.self.query.weight", layer_idx),
-                format!("encoder.layer.{}.attention.self.key.weight", layer_idx),
-                format!("encoder.layer.{}.attention.self.value.weight", layer_idx),
-                format!("encoder.layer.{}.attention.output.dense.weight", layer_idx),
-            ];
-
-            for weight_name in attention_weights {
-                if let Some(weight) = weights.get(&weight_name) {
-                    println!("Loaded {}: {:?}", weight_name, weight.shape());
-                }
-            }
-
-            // Load feed-forward weights
-            let ff_weights = vec![
-                format!("encoder.layer.{}.intermediate.dense.weight", layer_idx),
-                format!("encoder.layer.{}.output.dense.weight", layer_idx),
-            ];
-
-            for weight_name in ff_weights {
-                if let Some(weight) = weights.get(&weight_name) {
-                    println!("Loaded {}: {:?}", weight_name, weight.shape());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Load pooler weights into the model
-    fn load_pooler_weights(&mut self, weights: &HashMap<String, Tensor>) -> Result<()> {
-        if let Some(pooler_weight) = weights.get("pooler.dense.weight") {
-            println!("Loaded pooler weight: {:?}", pooler_weight.shape());
-        }
-
-        if let Some(pooler_bias) = weights.get("pooler.dense.bias") {
-            println!("Loaded pooler bias: {:?}", pooler_bias.shape());
-        }
-
-        Ok(())
+        binder.finish(Self::unused_tensor_policy())
     }
 
     #[allow(dead_code)]
@@ -664,5 +578,355 @@ mod tests {
         let shape = output.last_hidden_state.shape();
         assert_eq!(shape[1], 1, "single token input: seq_len must be 1");
         assert_eq!(shape[2], cfg.hidden_size);
+    }
+    // --- Real weight loading (regression for the fabricated-tensor loader) ---
+
+    use crate::weight_loading::test_support::{build_safetensors, BertFixtureSpec, F32Tensor};
+
+    fn loading_config() -> BertConfig {
+        BertConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 8,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            pad_token_id: 0,
+            position_embedding_type: Some("absolute".to_string()),
+            use_cache: Some(false),
+            classifier_dropout: None,
+        }
+    }
+
+    fn fixture_spec(config: &BertConfig, prefix: &str) -> BertFixtureSpec {
+        BertFixtureSpec {
+            prefix: prefix.to_string(),
+            vocab_size: config.vocab_size,
+            hidden_size: config.hidden_size,
+            num_layers: config.num_hidden_layers,
+            intermediate_size: config.intermediate_size,
+            max_position_embeddings: config.max_position_embeddings,
+            type_vocab_size: Some(config.type_vocab_size),
+            include_pooler: true,
+            names: BertLayerNames::bert(),
+        }
+    }
+
+    fn hidden_values(model: &BertModel) -> Vec<f32> {
+        let output = model
+            .forward_with_embeddings(vec![1, 2, 3], Some(vec![1, 1, 1]), Some(vec![0, 0, 1]))
+            .expect("forward must succeed after loading");
+        match output.last_hidden_state {
+            Tensor::F32(arr) => arr.iter().copied().collect(),
+            other => panic!("expected an F32 hidden state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_pretrained_makes_the_model_fully_determined_by_the_checkpoint() {
+        // Two independently randomly-initialised models must become numerically
+        // identical after loading the same checkpoint. That can only hold if every
+        // parameter was really overwritten -- the previous implementation printed
+        // shapes and discarded every tensor, so this assertion fails against it.
+        let config = loading_config();
+        let bytes = fixture_spec(&config, "").safetensors();
+
+        let mut first = BertModel::new(config.clone()).expect("model must build");
+        let mut second = BertModel::new(config.clone()).expect("model must build");
+
+        let before_first = hidden_values(&first);
+        let before_second = hidden_values(&second);
+        assert_ne!(
+            before_first, before_second,
+            "two random initialisations must differ, otherwise the test proves nothing"
+        );
+
+        first
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("checkpoint must load into the first model");
+        second
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("checkpoint must load into the second model");
+
+        let after_first = hidden_values(&first);
+        let after_second = hidden_values(&second);
+        assert_eq!(
+            after_first, after_second,
+            "after loading, both models must be the checkpoint's model"
+        );
+        assert_ne!(
+            after_first, before_first,
+            "loading must change the model's behaviour"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_recovers_exact_pooler_values() {
+        let config = loading_config();
+        let spec = fixture_spec(&config, "");
+        let tensors = spec.tensors();
+        let expected_weight = tensors
+            .iter()
+            .find(|t| t.name == "pooler.dense.weight")
+            .expect("fixture must contain the pooler weight")
+            .values
+            .clone();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = BertModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("checkpoint must load");
+        assert!(report.is_complete(), "report must show a complete load");
+        assert!(report.unexpected.is_empty());
+
+        let pooler = model.pooler.as_ref().expect("pooler must survive the load");
+        match pooler.dense().weight() {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.shape(), &[8, 8]);
+                assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), expected_weight);
+            },
+            other => panic!("expected an F32 weight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_pretrained_reports_every_missing_tensor_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = fixture_spec(&config, "").tensors();
+        tensors.retain(|t| !t.name.contains("encoder.layer.1.attention.self.key"));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = BertModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        let message = err.to_string();
+        assert!(message.contains("missing"), "unexpected error: {message}");
+        assert!(
+            message.contains("encoder.layer.1.attention.self.key.weight"),
+            "the error must name the missing parameter: {message}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_with_foreign_tensors() {
+        let config = loading_config();
+        let mut tensors = fixture_spec(&config, "").tensors();
+        tensors.push(F32Tensor::ramp(
+            "encoder.layer.9.mystery.weight",
+            &[8, 8],
+            42.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = BertModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised tensor must fail the load");
+        assert!(
+            err.to_string().contains("encoder.layer.9.mystery.weight"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_accepts_a_task_checkpoint_with_the_bert_prefix_and_a_head() {
+        let config = loading_config();
+        let mut tensors = fixture_spec(&config, "bert.").tensors();
+        // A `BertForPreTraining` checkpoint carries the MLM head alongside the
+        // encoder; those tensors are reported, not treated as a mismatch.
+        tensors.push(F32Tensor::ramp("cls.predictions.bias", &[16], 7.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = BertModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a prefixed checkpoint must load");
+        assert!(report.is_complete());
+        assert_eq!(report.ignored, vec!["cls.predictions.bias".to_string()]);
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        // The old loader scanned arbitrary bytes for "reasonable-looking" floats
+        // and, failing that, filled the model with `fastrand` values while
+        // returning Ok. Garbage in must now mean an error out.
+        let config = loading_config();
+        let mut model = BertModel::new(config).expect("model must build");
+        let garbage = vec![0xAB_u8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = BertConfig {
+            hidden_size: 16,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            ..config.clone()
+        };
+        let bytes = fixture_spec(&wider, "").safetensors();
+
+        let mut model = BertModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(
+            err.to_string().contains("expects"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_drops_the_pooler_when_the_checkpoint_has_none() {
+        let config = loading_config();
+        let mut spec = fixture_spec(&config, "");
+        spec.include_pooler = false;
+        let bytes = spec.safetensors();
+
+        let mut model = BertModel::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a pooler-less checkpoint must load");
+        assert!(
+            model.pooler.is_none(),
+            "a randomly-initialised pooler must not survive a checkpoint that has none"
+        );
+    }
+    #[test]
+    fn task_head_weights_present_in_the_checkpoint_reach_the_model() {
+        // Regression: the task wrappers delegated to `BertModel::load_pretrained`,
+        // which loads only the encoder. A fine-tuned checkpoint's `classifier.*`
+        // tensors landed in `report.ignored` and inference ran through a
+        // randomly-initialised classifier while `load_pretrained` returned Ok.
+        use crate::bert::tasks::BertForSequenceClassification;
+
+        let config = loading_config();
+        let num_labels = 3usize;
+        let mut tensors = fixture_spec(&config, "bert.").tensors();
+        let classifier_weight =
+            F32Tensor::ramp("classifier.weight", &[num_labels, config.hidden_size], 50.0);
+        let classifier_bias = F32Tensor::ramp("classifier.bias", &[num_labels], 90.0);
+        tensors.push(classifier_weight.clone());
+        tensors.push(classifier_bias.clone());
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            BertForSequenceClassification::new(config, num_labels).expect("task model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a fine-tuned checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "a checkpoint carrying the head must produce a complete load, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"classifier.weight".to_string()),
+            "the classifier weight must be reported as loaded: {:?}",
+            report.loaded
+        );
+        assert!(
+            !report.ignored.contains(&"classifier.weight".to_string()),
+            "the classifier weight must not be reported as ignored"
+        );
+
+        match model.classifier_weight() {
+            Tensor::F32(arr) => {
+                assert_eq!(
+                    arr.iter().copied().collect::<Vec<f32>>(),
+                    classifier_weight.values
+                );
+            },
+            other => panic!("expected an F32 classifier weight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_produces_nonzero_input_dependent_hidden_states() {
+        // Regression test for the Metal read-after-async-commit race.
+        //
+        // `MetalBackend::layernorm_f32` used to commit its command buffer
+        // asynchronously and then read the output buffer immediately, so it
+        // returned the zeroed contents of a buffer the GPU had not written yet.
+        // BERT's embedding LayerNorm receives a 2-D `Tensor::F32`, which is
+        // exactly the shape that takes that fast path, so with the `metal`
+        // feature compiled in *every* BERT forward pass came back all-zero —
+        // on `Device::CPU`, with no Metal tensor anywhere in the model. Two
+        // different inputs then produced the same (all-zero) hidden states.
+        //
+        // The assertions below hold on any build; they fail against the racing
+        // kernel under `--features metal`.
+        let config = loading_config();
+        let model = BertModel::new(config.clone()).expect("model must build");
+
+        let first = model
+            .forward_with_embeddings(vec![1, 2, 3], None, None)
+            .expect("forward must succeed");
+        let second = model
+            .forward_with_embeddings(vec![4, 5, 6], None, None)
+            .expect("forward must succeed");
+
+        let values = |output: &BertModelOutput| -> Vec<f32> {
+            match &output.last_hidden_state {
+                Tensor::F32(arr) => arr.iter().copied().collect(),
+                other => panic!("expected an F32 hidden state, got {other:?}"),
+            }
+        };
+        let first_values = values(&first);
+        let second_values = values(&second);
+
+        assert!(
+            first_values.iter().any(|v| v.abs() > 1e-6),
+            "the hidden state is all zeros, which is what the racing Metal \
+             LayerNorm kernel returned"
+        );
+        assert!(
+            first_values.iter().all(|v| v.is_finite()),
+            "hidden states must be finite"
+        );
+        assert_ne!(
+            first_values, second_values,
+            "different token ids must produce different hidden states"
+        );
+    }
+
+    #[test]
+    fn a_backbone_only_checkpoint_reports_the_absent_task_head() {
+        // Loading a pretrained backbone into a task model is legitimate, but the
+        // head keeps its random initialisation and that must be visible.
+        use crate::bert::tasks::BertForSequenceClassification;
+
+        let config = loading_config();
+        let bytes = fixture_spec(&config, "bert.").safetensors();
+        let mut model =
+            BertForSequenceClassification::new(config, 3).expect("task model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a backbone-only checkpoint must still load");
+        assert!(
+            !report.is_complete(),
+            "an absent head must be reported, not silently accepted"
+        );
+        assert!(
+            report.missing.contains(&"classifier.weight".to_string()),
+            "missing head must be named: {:?}",
+            report.missing
+        );
     }
 }

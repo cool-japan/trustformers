@@ -203,6 +203,56 @@ pub trait Model: Send + Sync {
     /// }
     /// ```
     fn num_parameters(&self) -> usize;
+
+    /// Enumerates the model's parameters as `(name, tensor)` pairs.
+    ///
+    /// This is the canonical way to read a model's weights without knowing its
+    /// concrete type. Names should follow the checkpoint convention used by the
+    /// model family (for example `encoder.layer.0.attention.self.query.weight`),
+    /// because downstream tooling keys off them.
+    ///
+    /// # Contract
+    ///
+    /// * Every returned name must be unique.
+    /// * The returned tensors must be the *live* parameters of the model, not
+    ///   copies that were synthesised on the fly.
+    /// * The order should be stable across calls on an unmodified model so that
+    ///   serialised artifacts are reproducible.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default returns an empty vector, so that existing implementations keep
+    /// compiling. **Model implementations that want to be exportable must override
+    /// it**: every exporter in [`crate::export`] refuses to write a file for a model
+    /// that exposes no named tensors, rather than inventing weights. The same is
+    /// true for the checkpoint writers and weight converters.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use trustformers_core::traits::Model;
+    ///
+    /// fn total_bytes<M: Model>(model: &M) -> usize {
+    ///     model
+    ///         .named_tensors()
+    ///         .iter()
+    ///         .map(|(_, tensor)| tensor.size_bytes())
+    ///         .sum()
+    /// }
+    /// ```
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        Vec::new()
+    }
+
+    /// Mutable counterpart of [`Model::named_tensors`].
+    ///
+    /// Used by weight loaders to copy checkpoint tensors into a live model. The
+    /// same contract applies: unique names, live parameters, stable order. The
+    /// default returns an empty vector, which makes weight loading fail loudly
+    /// instead of silently doing nothing.
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        Vec::new()
+    }
 }
 
 /// A building block for neural network architectures.
@@ -268,6 +318,40 @@ pub trait Layer: Send + Sync {
     /// - Numerical errors during computation
     /// - Resource allocation failures
     fn forward(&self, input: Self::Input) -> Result<Self::Output>;
+
+    /// Performs the forward computation **without taking ownership** of the input.
+    ///
+    /// # Why this exists
+    ///
+    /// Attention projects one hidden-state tensor into query, key and value. With
+    /// an owning-only API that is three deep copies of a `[batch, seq, hidden]`
+    /// tensor per attention block, per forward pass — pure waste, because none of
+    /// the projection code needs to own its input. Layers that can compute from a
+    /// borrow override this method; the attention layers call it.
+    ///
+    /// # Contract
+    ///
+    /// An override **must** produce exactly the same output as
+    /// [`Layer::forward`] for the same input. The two are checked against each
+    /// other in the layer test suites.
+    ///
+    /// # Default Implementation
+    ///
+    /// Clones the input and delegates to [`Layer::forward`], so every existing
+    /// implementation keeps working unchanged. A type that overrides
+    /// `forward_ref` must therefore implement `forward` in terms of
+    /// `forward_ref` (or independently) — never the other way round, which would
+    /// recurse forever.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`Layer::forward`].
+    fn forward_ref(&self, input: &Self::Input) -> Result<Self::Output>
+    where
+        Self::Input: Clone,
+    {
+        self.forward(input.clone())
+    }
 }
 
 /// Configuration trait for models and components.
@@ -622,8 +706,23 @@ pub struct TokenizedInput {
     /// Used to identify tokens like `[CLS]`, `[SEP]`, `[PAD]` etc.
     pub special_tokens_mask: Option<Vec<u8>>,
 
-    /// Optional offset mapping showing character positions of tokens in original text.
-    /// Each tuple contains (start_pos, end_pos) character offsets.
+    /// Optional offset mapping showing where each token sits in the original text.
+    ///
+    /// Each tuple is a `(start, end)` **byte** offset into that text, so
+    /// `&text[start..end]` is the substring the token came from. Byte offsets —
+    /// not character (code point) offsets — are the in-tree convention:
+    /// every producer of this field emits byte spans, and the tokenizer tests
+    /// assert the round trip against `text.as_bytes()`.
+    ///
+    /// Callers that need character offsets (Python's `str` indexing, for
+    /// instance) convert at the boundary with
+    /// `trustformers_tokenizers::byte_offsets_to_char_offsets`, whose inverse is
+    /// `char_offsets_to_byte_offsets`. Converting anywhere other than the
+    /// boundary risks a double conversion, which is silent for ASCII and wrong
+    /// for everything else.
+    ///
+    /// Special tokens that correspond to no input text (`[CLS]`, `[SEP]`, and
+    /// friends) carry `(0, 0)`.
     pub offset_mapping: Option<Vec<(usize, usize)>>,
 
     /// Optional overflowing tokens when text exceeds max length.

@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! # Cache Management for Memory Cleanup
 //!
 //! This module provides specialized cache management functionality for memory
@@ -280,9 +277,53 @@ impl DefaultCacheManager {
         }
     }
 
-    /// Add a cache entry
+    /// The configuration this manager was built with.
+    ///
+    /// 0.2.1: the `config` field was stored by both constructors and only ever
+    /// read for `default_eviction_strategy`; `max_cache_size` and `default_ttl`
+    /// were configuration that did nothing at all -- a manager built with
+    /// `with_config` behaved identically to one built with `new()`. Both are
+    /// honoured by [`Self::add_entry`] now, and this accessor makes the rest
+    /// visible; `maintenance_interval` and `min_eviction_interval` still have
+    /// no consumer because nothing in this module drives a maintenance loop.
+    pub fn config(&self) -> &CacheManagerConfig {
+        &self.config
+    }
+
+    /// Add a cache entry, honouring the configured TTL and size ceiling.
+    ///
+    /// When the new entry would push the cache past `max_cache_size`, entries
+    /// are evicted by the configured strategy first -- the ceiling is enforced,
+    /// not merely recorded.
     pub fn add_entry(&self, key: String, size: u64) {
-        let metadata = CacheEntryMetadata::new(key.clone(), size);
+        let mut metadata = CacheEntryMetadata::new(key.clone(), size);
+        metadata.ttl = self.config.default_ttl;
+
+        if let Some(max_cache_size) = self.config.max_cache_size {
+            let current_size = self.get_cache_size();
+            if current_size + size > max_cache_size {
+                let overflow = (current_size + size) - max_cache_size;
+                let victims = {
+                    let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+                    self.select_entries_for_eviction(overflow, &entries)
+                };
+                let mut freed = 0u64;
+                for victim in victims {
+                    if victim == key {
+                        continue;
+                    }
+                    if let Some(victim_size) = self.remove_entry(&victim) {
+                        freed += victim_size;
+                    }
+                }
+                if freed > 0 {
+                    debug!(
+                        "Evicted {freed} bytes to stay within the configured {max_cache_size}-byte \
+                         cache ceiling"
+                    );
+                }
+            }
+        }
 
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(key, metadata);

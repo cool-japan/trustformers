@@ -85,6 +85,54 @@ impl Embedding {
         Ok(())
     }
 
+    /// Returns a reference to the embedding table.
+    ///
+    /// Shape `[num_embeddings, embedding_dim]` — the same layout HuggingFace
+    /// checkpoints use for `*.word_embeddings.weight` and friends, so it can be
+    /// exposed directly through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors).
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
+    }
+
+    /// Returns a mutable reference to the embedding table.
+    ///
+    /// `Embedding` caches nothing derived from the table, so unlike
+    /// [`crate::layers::Linear::weight_mut`] this needs no invalidation.
+    pub fn weight_mut(&mut self) -> &mut Tensor {
+        &mut self.weight
+    }
+
+    /// Append the embedding table to `into` under `<prefix>.weight`.
+    ///
+    /// See [`crate::layers::Linear::collect_named_parameters`] for the rationale.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`Embedding::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
+    }
+
+    /// Number of rows in the embedding table (the vocabulary size).
+    pub fn num_embeddings(&self) -> usize {
+        self.num_embeddings
+    }
+
+    /// Width of a single embedding vector.
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
     /// Forward pass with explicit token IDs
     pub fn forward_ids(&self, input_ids: &[u32]) -> Result<Tensor> {
         self.forward(input_ids.to_vec())
@@ -160,26 +208,6 @@ impl Layer for Embedding {
 
                 // Return as Metal tensor if device is Metal
                 let result_tensor = Tensor::F32(output.into_dyn());
-
-                #[cfg(debug_assertions)]
-                {
-                    // Debug: Check CPU values before GPU upload (only in debug builds)
-                    if matches!(self.device, Device::Metal(_)) {
-                        if let Tensor::F32(ref arr) = result_tensor {
-                            let data: Vec<f32> = arr.iter().cloned().collect();
-                            eprintln!(
-                                "🔍 Embedding lookup (CPU) first 10: {:?}",
-                                &data[..10.min(data.len())]
-                            );
-                            eprintln!(
-                                "🔍 Embedding stats: min={:.4}, max={:.4}, mean={:.4}",
-                                data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                                data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-                                data.iter().sum::<f32>() / data.len() as f32
-                            );
-                        }
-                    }
-                }
 
                 if matches!(self.device, Device::Metal(_)) {
                     let metal_result = result_tensor.to_device_enum(&self.device)?;

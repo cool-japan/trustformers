@@ -22,6 +22,32 @@ use scirs2_core::ndarray::{arr0, ArrayD, Axis, IxDyn, Zip};
 /// upcast to F32, run the reduction there, and round the result back to F16/BF16 so
 /// the output dtype matches the input dtype. Results that are not F32 (e.g. integer
 /// index tensors) are returned as-is by the caller via a dedicated match arm.
+/// Validate, de-duplicate and order reduction axes.
+///
+/// Axis-list reductions in this module peel one axis at a time and therefore
+/// require the axes to be applied in *descending* order so that removing one
+/// axis does not shift the index of the next. Callers used to be silently
+/// required to pass an already-ascending list (the code just did `.rev()`), and
+/// nothing validated the values, so `max_axes(&[2, 0])` or an axis >= `ndim`
+/// panicked inside `ndarray`.
+fn ordered_reduction_axes(ndim: usize, axes: &[usize], op: &str) -> Result<Vec<usize>> {
+    let mut ordered: Vec<usize> = Vec::with_capacity(axes.len());
+    for &axis in axes {
+        if axis >= ndim {
+            return Err(TrustformersError::shape_error(format!(
+                "{}: axis {} is out of bounds for a {}-dimensional tensor",
+                op, axis, ndim
+            )));
+        }
+        if !ordered.contains(&axis) {
+            ordered.push(axis);
+        }
+    }
+    // Descending: reduce the highest axis first so lower indices stay valid.
+    ordered.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(ordered)
+}
+
 fn run_half_in_f32<F>(input: &Tensor, op: F) -> Result<Tensor>
 where
     F: Fn(&Tensor) -> Result<Tensor>,
@@ -345,36 +371,17 @@ impl Tensor {
     pub fn sum_axes(&self, axes: &[usize]) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "sum_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // Reverse to maintain axis indices
-                    if axis >= result.ndim() {
-                        return Err(TrustformersError::tensor_op_error(
-                            &format!(
-                                "Axis {} is out of bounds for tensor with {} dimensions",
-                                axis,
-                                result.ndim()
-                            ),
-                            "sum_axes",
-                        ));
-                    }
+                for &axis in &ordered {
                     result = result.sum_axis(Axis(axis));
                 }
                 Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "sum_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    if axis >= result.ndim() {
-                        return Err(TrustformersError::tensor_op_error(
-                            &format!(
-                                "Axis {} is out of bounds for tensor with {} dimensions",
-                                axis,
-                                result.ndim()
-                            ),
-                            "sum_axes",
-                        ));
-                    }
+                for &axis in &ordered {
                     result = result.sum_axis(Axis(axis));
                 }
                 Ok(Tensor::F64(result))
@@ -406,9 +413,10 @@ impl Tensor {
                         let sum_val = a.sum();
                         Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), sum_val)))
                     } else {
-                        // Sum along specified axes
+                        // Sum along specified axes (validated + ordered descending)
+                        let ordered = ordered_reduction_axes(a.ndim(), &axes, "sum")?;
                         let mut result = a.clone();
-                        for &axis in axes.iter().rev() {
+                        for &axis in &ordered {
                             result = result.sum_axis(Axis(axis));
                         }
                         Ok(Tensor::F32(result))
@@ -426,9 +434,10 @@ impl Tensor {
                         let sum_val = a.sum();
                         Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), sum_val)))
                     } else {
-                        // Sum along specified axes
+                        // Sum along specified axes (validated + ordered descending)
+                        let ordered = ordered_reduction_axes(a.ndim(), &axes, "sum")?;
                         let mut result = a.clone();
-                        for &axis in axes.iter().rev() {
+                        for &axis in &ordered {
                             result = result.sum_axis(Axis(axis));
                         }
                         Ok(Tensor::F64(result))
@@ -461,19 +470,9 @@ impl Tensor {
     pub fn mean_axes(&self, axes: &[usize]) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "mean_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // Reverse to maintain axis indices
-                    if axis >= result.ndim() {
-                        return Err(TrustformersError::tensor_op_error(
-                            &format!(
-                                "Axis {} is out of bounds for tensor with {} dimensions",
-                                axis,
-                                result.ndim()
-                            ),
-                            "mean_axes",
-                        ));
-                    }
+                for &axis in &ordered {
                     result = result.mean_axis(Axis(axis)).ok_or_else(|| {
                         crate::errors::compute_error(
                             "mean_axes",
@@ -484,18 +483,9 @@ impl Tensor {
                 Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "mean_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    if axis >= result.ndim() {
-                        return Err(TrustformersError::tensor_op_error(
-                            &format!(
-                                "Axis {} is out of bounds for tensor with {} dimensions",
-                                axis,
-                                result.ndim()
-                            ),
-                            "mean_axes",
-                        ));
-                    }
+                for &axis in &ordered {
                     result = result.mean_axis(Axis(axis)).ok_or_else(|| {
                         crate::errors::compute_error(
                             "mean_axes",
@@ -663,24 +653,18 @@ impl Tensor {
     pub fn max_axes(&self, axes: &[usize]) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "max_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // reverse to maintain axis indices
-                    // Apply max reduction along the specified axis
-                    let reduced =
-                        result.fold_axis(Axis(axis), f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                    result = reduced;
+                for &axis in &ordered {
+                    result = result.fold_axis(Axis(axis), f32::NEG_INFINITY, |acc, &x| acc.max(x));
                 }
                 Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "max_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // reverse to maintain axis indices
-                    // Apply max reduction along the specified axis
-                    let reduced =
-                        result.fold_axis(Axis(axis), f64::NEG_INFINITY, |acc, &x| acc.max(x));
-                    result = reduced;
+                for &axis in &ordered {
+                    result = result.fold_axis(Axis(axis), f64::NEG_INFINITY, |acc, &x| acc.max(x));
                 }
                 Ok(Tensor::F64(result))
             },
@@ -696,22 +680,18 @@ impl Tensor {
     pub fn min_axes(&self, axes: &[usize]) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "min_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // reverse to maintain axis indices
-                    // Apply min reduction along the specified axis
-                    let reduced = result.fold_axis(Axis(axis), f32::INFINITY, |acc, &x| acc.min(x));
-                    result = reduced;
+                for &axis in &ordered {
+                    result = result.fold_axis(Axis(axis), f32::INFINITY, |acc, &x| acc.min(x));
                 }
                 Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
+                let ordered = ordered_reduction_axes(a.ndim(), axes, "min_axes")?;
                 let mut result = a.clone();
-                for &axis in axes.iter().rev() {
-                    // reverse to maintain axis indices
-                    // Apply min reduction along the specified axis
-                    let reduced = result.fold_axis(Axis(axis), f64::INFINITY, |acc, &x| acc.min(x));
-                    result = reduced;
+                for &axis in &ordered {
+                    result = result.fold_axis(Axis(axis), f64::INFINITY, |acc, &x| acc.min(x));
                 }
                 Ok(Tensor::F64(result))
             },

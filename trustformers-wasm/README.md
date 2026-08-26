@@ -2,7 +2,7 @@
 
 WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with WebGPU hardware acceleration.
 
-**Version:** 0.2.0 | **Status:** Stable | **Tests:** ~130 | **SLoC:** 55,721 | **Last Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~130 as of 2026-07-09, not independently re-run this pass | **SLoC:** 48,359 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from 55,721 likely reflects measurement scope rather than code change; not investigated) | **Last Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
 
 ## Features
 
@@ -46,7 +46,7 @@ async function run() {
     await init();
 
     const tf = new TrustformersWasm();
-    console.log('Version:', tf.version);  // "0.2.0"
+    console.log('Version:', tf.version);  // "0.2.1"
 
     // Create and manipulate tensors
     const tensor = WasmTensor.new([1, 2, 3, 4], [2, 2]);
@@ -92,7 +92,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.2.0"
+console.log(tf.version);     // "0.2.1"
 console.log(tf.initialized); // true
 ```
 
@@ -316,7 +316,7 @@ Workspace-wide (`cargo nextest run --workspace --all-features`, 2026-07-01): 18,
 - SIMD requires WASM SIMD128 browser support
 - Memory typically capped at 2-4GB (use `memory64` + quantization for large models)
 - `WebGPUBackend`/`SimpleGpuOps` (the dispatch path behind `GpuTensor`) currently execute the CPU fallback for matmul/add/relu/softmax/layer_norm/attention by documented design — use `WebGPUOps` (`compute::webgpu_simple`) directly for guaranteed end-to-end GPU dispatch today (see "WebGPU Notes")
-- 0 `todo!()`/`unimplemented!()` macros in source, but several documented simplifications remain (none block compilation or panic): a no-op cache-clear recovery action (`src/error.rs`), fixed-bytes-per-element quantization stats (`src/optimization/quantization/quantizer.rs`), hardcoded device-capability probes (`src/device_capability/detector.rs`), fixed-constant (non-bit-width-aware) basic quantization math (`src/optimization/quantization/algorithms/basic.rs`), synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`), and default (non-queried) device capabilities (`src/compute/webgpu/mod.rs`)
+- 0 `todo!()`/`unimplemented!()` macros in source. Several previously-documented simplifications were fixed this release: `RecoveryAction::ClearCache` now really clears the browser's Cache Storage instead of being a no-op (`src/error.rs`); quantization stats and the `apply_dynamic/static/post_training_quantization` math are now real, bit-width-aware affine quantize/dequantize instead of a fixed-constant multiplier (`src/optimization/quantization/quantizer.rs`, `algorithms/basic.rs`); and device-capability probes now query the real browser APIs instead of returning hardcoded/default values (`detect_webgl_support`/`get_screen_orientation` in `src/device_capability/detector.rs`, `compute::webgpu::get_device_capabilities()` in `src/compute/webgpu/mod.rs`). One simplification remains: synthesized `blob:`/`data:` URLs in place of `URL.createObjectURL()` (`src/storage/model_splitting.rs`, `src/compute/threads.rs`)
 
 ## License
 

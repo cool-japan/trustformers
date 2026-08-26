@@ -160,6 +160,44 @@ impl Gemma2RotaryEmbedding {
     }
 }
 
+/// Apply RoPE to `data` (row-major, shape `[seq_len, num_heads * head_dim]`)
+/// in place, rotating every one of the `num_heads` blocks in each row
+/// independently so multi-head (and GQA, where `q` and `k` have a different
+/// head count) tensors are fully rotated.
+///
+/// `position_ids[row]` gives the absolute position of `row`; a future
+/// cache-aware caller can continue a sequence by passing positions offset by
+/// the cache length instead of always starting at 0.
+fn rotate_heads_rope(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    theta: f64,
+    position_ids: &[usize],
+) {
+    let half = head_dim / 2;
+    if half == 0 {
+        return;
+    }
+    let row_width = num_heads * head_dim;
+    for (row, &pos) in position_ids.iter().enumerate() {
+        let row_off = row * row_width;
+        for h in 0..num_heads {
+            let head_off = row_off + h * head_dim;
+            for i in 0..half {
+                let freq = 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64);
+                let angle = (pos as f64 * freq) as f32;
+                let cos_v = angle.cos();
+                let sin_v = angle.sin();
+                let x1 = data[head_off + i];
+                let x2 = data[head_off + i + half];
+                data[head_off + i] = x1 * cos_v - x2 * sin_v;
+                data[head_off + i + half] = x1 * sin_v + x2 * cos_v;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GEGLU MLP
 // ---------------------------------------------------------------------------
@@ -228,6 +266,24 @@ impl Layer for Gemma2GegluMlp {
 }
 
 // ---------------------------------------------------------------------------
+// Attention scaling
+// ---------------------------------------------------------------------------
+
+/// Derive the attention scaling factor from `query_pre_attn_scalar`, per
+/// Gemma-2's published formula: `scale = query_pre_attn_scalar ^ -0.5`.
+///
+/// `query_pre_attn_scalar` is the raw HuggingFace `config.json` value (see
+/// [`Gemma2Config::query_pre_attn_scalar`](super::config::Gemma2Config)'s doc
+/// comment); it must **not** be used directly as the scale, and it is not
+/// always `head_dim` -- Gemma-2-27B deliberately sets it to `144` despite
+/// `head_dim=128`. Callers must ensure `query_pre_attn_scalar > 0.0` (raising
+/// zero or a negative number to the `-0.5` power yields infinity or NaN);
+/// [`Gemma2Attention::new`] enforces this before calling.
+pub fn attention_scale_from_query_pre_attn_scalar(query_pre_attn_scalar: f64) -> f32 {
+    (query_pre_attn_scalar as f32).powf(-0.5)
+}
+
+// ---------------------------------------------------------------------------
 // Attention
 // ---------------------------------------------------------------------------
 
@@ -238,7 +294,6 @@ impl Layer for Gemma2GegluMlp {
 /// - Soft-capping of attention scores (`tanh(score / 50.0) * 50.0`)
 /// - Alternating local (sliding window) and global attention
 /// - Causal masking
-#[allow(dead_code)]
 pub struct Gemma2Attention {
     q_proj: Linear,
     k_proj: Linear,
@@ -252,11 +307,26 @@ pub struct Gemma2Attention {
     is_local: bool,
     sliding_window: usize,
     attention_logit_softcapping: f64,
+    /// Multiplier applied to raw `Q @ K^T` scores before soft-capping:
+    /// `attention_scale_from_query_pre_attn_scalar(config.query_pre_attn_scalar)`,
+    /// i.e. `query_pre_attn_scalar ^ -0.5`. This is *not* simply
+    /// `config.query_pre_attn_scalar` used directly (that field holds the
+    /// raw HF `config.json` value, not the scale -- see its doc comment).
+    scale: f32,
     device: Device,
 }
 
 impl Gemma2Attention {
     pub fn new(config: &Gemma2Config, layer_idx: usize, device: Device) -> Result<Self> {
+        if config.query_pre_attn_scalar.is_nan() || config.query_pre_attn_scalar <= 0.0 {
+            // Raised to the -0.5 power below; zero, negative, or NaN would
+            // silently produce an infinite or NaN attention scale instead of
+            // a clear construction-time error.
+            return Err(tensor_op_error(
+                "gemma2_attn",
+                "query_pre_attn_scalar must be > 0",
+            ));
+        }
         let q_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_attention_heads * config.head_dim,
@@ -295,6 +365,7 @@ impl Gemma2Attention {
             is_local: Gemma2Config::is_local_layer(layer_idx),
             sliding_window: config.sliding_window,
             attention_logit_softcapping: config.attention_logit_softcapping,
+            scale: attention_scale_from_query_pre_attn_scalar(config.query_pre_attn_scalar),
             device,
         })
     }
@@ -313,40 +384,133 @@ impl Layer for Gemma2Attention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Real scaled dot-product attention: RoPE, `Q @ K^T`, attention-logit
+    /// soft-capping (`tanh(s/cap)*cap`), causal masking (plus a sliding
+    /// window on local layers), softmax, and `@ V`.
+    ///
+    /// Order matches the published Gemma-2 architecture: scale → soft-cap →
+    /// mask → softmax.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
-        let _v = self.v_proj.forward(input)?;
+        let v = self.v_proj.forward(input)?;
 
-        // Apply RoPE (simplified: just use the projections as-is for a mock impl)
-        let (q_data, _k_data) = match (&q, &k) {
-            (Tensor::F32(qd), Tensor::F32(kd)) => {
-                let mut qv = qd
-                    .as_slice()
+        let (mut q_data, mut k_data, v_data) = match (&q, &k, &v) {
+            (Tensor::F32(qd), Tensor::F32(kd), Tensor::F32(vd)) => (
+                qd.as_slice()
                     .ok_or_else(|| tensor_op_error("gemma2_attn", "q not contiguous"))?
-                    .to_vec();
-                let mut kv = kd
-                    .as_slice()
+                    .to_vec(),
+                kd.as_slice()
                     .ok_or_else(|| tensor_op_error("gemma2_attn", "k not contiguous"))?
-                    .to_vec();
-                // Infer seq_len: total elements = num_heads * seq_len * head_dim
-                let total_q = qv.len();
-                let seq_len = total_q / (self.num_heads * self.head_dim).max(1);
-                if seq_len > 0 {
-                    self.rotary_emb.apply(&mut qv, &mut kv, seq_len);
-                }
-                (qv, kv)
-            },
-            _ => return Err(tensor_op_error("gemma2_attn", "q and k must be F32")),
+                    .to_vec(),
+                vd.as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma2_attn", "v not contiguous"))?
+                    .to_vec(),
+            ),
+            _ => return Err(tensor_op_error("gemma2_attn", "q, k, v must be F32")),
         };
 
-        // The full attention computation is represented by the projection result
-        // for this mock implementation. In a real deployment weights would be loaded.
-        let q_shape = match &q {
-            Tensor::F32(arr) => arr.shape().to_vec(),
-            _ => vec![q_data.len()],
+        if self.num_heads == 0
+            || self.num_kv_heads == 0
+            || !self.num_heads.is_multiple_of(self.num_kv_heads)
+        {
+            return Err(tensor_op_error(
+                "gemma2_attn",
+                "num_heads must be a positive multiple of num_kv_heads",
+            ));
+        }
+        let q_width = self.num_heads * self.head_dim;
+        let kv_width = self.num_kv_heads * self.head_dim;
+        if q_width == 0 || !q_data.len().is_multiple_of(q_width) {
+            return Err(tensor_op_error(
+                "gemma2_attn",
+                "q size inconsistent with num_heads * head_dim",
+            ));
+        }
+        let seq_len = q_data.len() / q_width;
+        if k_data.len() != seq_len * kv_width || v_data.len() != seq_len * kv_width {
+            return Err(tensor_op_error(
+                "gemma2_attn",
+                "k/v size inconsistent with num_kv_heads * head_dim",
+            ));
+        }
+
+        // Sliding window only applies on local layers; a misconfigured
+        // window of 0 would mask every key (including self), producing an
+        // empty softmax, so reject it explicitly instead of emitting NaN.
+        let window = if self.is_local {
+            if self.sliding_window == 0 {
+                return Err(tensor_op_error(
+                    "gemma2_attn",
+                    "sliding_window must be > 0 on a local attention layer",
+                ));
+            }
+            Some(self.sliding_window)
+        } else {
+            None
         };
-        let attended = Tensor::from_vec(q_data, &q_shape)?;
+
+        let position_ids: Vec<usize> = (0..seq_len).collect();
+        rotate_heads_rope(
+            &mut q_data,
+            self.num_heads,
+            self.head_dim,
+            self.rotary_emb.rope_theta,
+            &position_ids,
+        );
+        rotate_heads_rope(
+            &mut k_data,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rope_theta,
+            &position_ids,
+        );
+
+        let group = self.num_heads / self.num_kv_heads;
+        let scale = self.scale;
+        let mut out = vec![0f32; seq_len * q_width];
+
+        for h in 0..self.num_heads {
+            let kv_h = h / group;
+            for i in 0..seq_len {
+                let q_off = i * q_width + h * self.head_dim;
+                // Causal (+ sliding window) key positions for query i.
+                let mut scores = Vec::with_capacity(i + 1);
+                let mut key_positions = Vec::with_capacity(i + 1);
+                for j in 0..=i {
+                    if let Some(w) = window {
+                        if i - j >= w {
+                            continue;
+                        }
+                    }
+                    let k_off = j * kv_width + kv_h * self.head_dim;
+                    let dot: f32 =
+                        (0..self.head_dim).map(|d| q_data[q_off + d] * k_data[k_off + d]).sum();
+                    let scaled = dot * scale;
+                    scores.push(soft_cap(scaled, self.attention_logit_softcapping));
+                    key_positions.push(j);
+                }
+                let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut weights = vec![0f32; scores.len()];
+                let mut sum = 0f32;
+                for (idx, &s) in scores.iter().enumerate() {
+                    let e = (s - max_val).exp();
+                    weights[idx] = e;
+                    sum += e;
+                }
+                let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                let out_off = i * q_width + h * self.head_dim;
+                for (idx, &j) in key_positions.iter().enumerate() {
+                    let wn = weights[idx] * inv_sum;
+                    let v_off = j * kv_width + kv_h * self.head_dim;
+                    for d in 0..self.head_dim {
+                        out[out_off + d] += wn * v_data[v_off + d];
+                    }
+                }
+            }
+        }
+
+        let attended = Tensor::from_vec(out, &[seq_len, q_width])?;
         self.o_proj.forward(attended)
     }
 }
@@ -500,18 +664,25 @@ impl Model for Gemma2Model {
         self.norm.forward(hidden_states)
     }
 
-    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("Gemma2: failed to read weights: {}", e))
-        })?;
-        if buffer.is_empty() {
-            return Err(TrustformersError::invalid_input_simple(
-                "Gemma2: pretrained weight data is empty".to_string(),
-            ));
-        }
-        // Weight parsing would be performed here in a production implementation.
-        Ok(())
+    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+        // `Model::load_pretrained(&mut dyn Read)` is a legacy interface with
+        // no defined weight format (see the note on
+        // `WeightLoader::load_weights_into_model` in
+        // `trustformers_core::utils::weight_loading`: an earlier revision of
+        // this trait method serialised tensors into an invented envelope
+        // that no model could parse, so the weights never actually reached
+        // the model). `Gemma2Model` has no weight-loading path implemented
+        // at all (unlike e.g. `GemmaModel`/`MistralModel`/`QwenModel`, which
+        // provide a real `load_from_path`/`load_from_huggingface` on their
+        // `*ForCausalLM` wrapper). Silently returning `Ok(())` here would
+        // leave the model's freshly-initialised (effectively random)
+        // weights in place while claiming the load succeeded, so report
+        // this honestly as unsupported instead.
+        Err(TrustformersError::not_implemented(
+            "Gemma2Model::load_pretrained: no weight-loading implementation exists for Gemma2 \
+             yet; there is no `load_from_path`/`load_from_huggingface` to delegate to"
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -572,7 +743,9 @@ mod tests {
             sliding_window: 16,
             attention_logit_softcapping: 50.0,
             final_logit_softcapping: 30.0,
-            query_pre_attn_scalar: 0.5,
+            // Raw HF-style value (== head_dim, the typical convention), not
+            // a precomputed scale -- see `Gemma2Config::query_pre_attn_scalar`.
+            query_pre_attn_scalar: 4.0,
             model_type: "gemma2-test".to_string(),
         }
     }
@@ -856,6 +1029,24 @@ mod tests {
         assert!(params > 0, "model must have a positive parameter count");
     }
 
+    /// Regression: `load_pretrained` must NOT silently report success while
+    /// leaving the model's random initial weights untouched. It previously
+    /// read the buffer, checked it was non-empty, and returned `Ok(())`
+    /// without parsing anything (a fabricated success). It must now report
+    /// a structured "not implemented" error instead.
+    #[test]
+    fn test_gemma2_model_load_pretrained_reports_not_implemented_instead_of_fake_success() {
+        use trustformers_core::traits::Model;
+        let cfg = tiny_config();
+        let mut model = Gemma2Model::new(cfg).expect("model must build");
+        let mut data: &[u8] = b"not a real checkpoint, but not empty either";
+        let result = model.load_pretrained(&mut data);
+        assert!(
+            result.is_err(),
+            "load_pretrained must fail rather than silently succeed with no weights loaded"
+        );
+    }
+
     #[test]
     fn test_gemma2_decoder_layer_is_local_reflects_layer_idx() {
         let cfg = tiny_config();
@@ -899,6 +1090,62 @@ mod tests {
         );
     }
 
+    // -- rotate_heads_rope (multi-head RoPE primitive) --
+    //
+    // Regression coverage for the bug class where RoPE only rotated the
+    // first `head_dim`-wide block of a multi-head row and left every other
+    // head positionally blind.
+
+    #[test]
+    fn test_rotate_heads_rope_rotates_every_head() {
+        let head_dim = 4;
+        let num_heads = 2;
+        let mut data = vec![1.0f32; num_heads * head_dim]; // seq_len=1
+        let original = data.clone();
+        rotate_heads_rope(&mut data, num_heads, head_dim, 10000.0, &[7]);
+        let head0_changed = data[0..head_dim]
+            .iter()
+            .zip(&original[0..head_dim])
+            .any(|(a, b)| (a - b).abs() > 1e-4);
+        let head1_changed = data[head_dim..2 * head_dim]
+            .iter()
+            .zip(&original[head_dim..2 * head_dim])
+            .any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(head0_changed, "head 0 must rotate at a non-zero position");
+        assert!(
+            head1_changed,
+            "head 1 must ALSO rotate at a non-zero position, not just head 0"
+        );
+    }
+
+    #[test]
+    fn test_rotate_heads_rope_position_zero_is_identity() {
+        let head_dim = 4;
+        let mut data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let original = data.clone();
+        rotate_heads_rope(&mut data, 1, head_dim, 10000.0, &[0]);
+        for (a, b) in data.iter().zip(original.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "position 0 must be an identity rotation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rotate_heads_rope_differs_by_position() {
+        let head_dim = 4;
+        let mut at_pos0 = vec![1.0f32; head_dim];
+        let mut at_pos5 = vec![1.0f32; head_dim];
+        rotate_heads_rope(&mut at_pos0, 1, head_dim, 10000.0, &[0]);
+        rotate_heads_rope(&mut at_pos5, 1, head_dim, 10000.0, &[5]);
+        let differs = at_pos0.iter().zip(at_pos5.iter()).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(
+            differs,
+            "RoPE must rotate differently at different positions"
+        );
+    }
+
     #[test]
     fn test_gemma2_model_forward_f32_input() {
         let cfg = tiny_config();
@@ -909,6 +1156,194 @@ mod tests {
         assert_eq!(
             out_len, cfg.hidden_size,
             "f32 input must produce correct output shape"
+        );
+    }
+
+    // -- attention_scale_from_query_pre_attn_scalar / query_pre_attn_scalar --
+    //
+    // Regression coverage for `Gemma2Config::query_pre_attn_scalar` holding
+    // the raw HuggingFace `config.json` value (the denominator the scale is
+    // derived from via `^-0.5`) rather than a precomputed scale. Before this
+    // fix, `Gemma2Attention` used `config.query_pre_attn_scalar` directly as
+    // the multiplicative scale; deserializing a real Gemma-2 `config.json`
+    // (which carries `"query_pre_attn_scalar": 256` for 2B/9B) into that
+    // field would then have scaled every attention score by 256 instead of
+    // by `256^-0.5 == 1/16` -- a 4096x error with no error returned.
+
+    #[test]
+    fn test_attention_scale_matches_hf_formula_for_2b_9b() {
+        // Published HF config value for Gemma-2 2B/9B: query_pre_attn_scalar
+        // == head_dim == 256, so scale == 256^-0.5 == 1/16.
+        let scale = attention_scale_from_query_pre_attn_scalar(256.0);
+        assert!(
+            (scale - 0.0625).abs() < 1e-6,
+            "expected 0.0625, got {scale}"
+        );
+    }
+
+    #[test]
+    fn test_attention_scale_27b_diverges_from_naive_head_dim_formula() {
+        // Gemma-2-27B deliberately sets query_pre_attn_scalar=144 despite
+        // head_dim=128, so the correct scale must differ from the naive (and
+        // for 27B, wrong) `head_dim^-0.5` formula.
+        let correct = attention_scale_from_query_pre_attn_scalar(144.0);
+        let naive_head_dim_scale = 1.0_f32 / 128.0_f32.sqrt();
+        assert!(
+            (correct - naive_head_dim_scale).abs() > 1e-3,
+            "27B's scale must differ from head_dim^-0.5: correct={correct}, naive={naive_head_dim_scale}"
+        );
+        assert!(
+            (correct - 1.0 / 12.0_f32).abs() < 1e-4,
+            "144^-0.5 must equal 1/12, got {correct}"
+        );
+    }
+
+    #[test]
+    fn test_gemma2_attention_rejects_non_positive_query_pre_attn_scalar() {
+        let mut cfg = tiny_config();
+        cfg.query_pre_attn_scalar = 0.0;
+        let result = Gemma2Attention::new(&cfg, 0, Device::CPU);
+        assert!(
+            result.is_err(),
+            "query_pre_attn_scalar=0 must be rejected at construction rather than silently \
+             producing an infinite/NaN scale"
+        );
+    }
+
+    #[test]
+    fn test_gemma2_attention_scale_field_reflects_raw_hf_config_value() {
+        // Constructing with the real HF raw value (256.0, as it would
+        // appear if a real Gemma-2 `config.json` were deserialized) must
+        // derive the correct scale (1/16), not use 256.0 as the scale
+        // itself.
+        let mut cfg = tiny_config();
+        cfg.query_pre_attn_scalar = 256.0;
+        let attn = Gemma2Attention::new(&cfg, 0, Device::CPU).expect("attention must build");
+        assert!(
+            (attn.scale - 0.0625).abs() < 1e-6,
+            "derived scale must be 256^-0.5 = 0.0625, got {}",
+            attn.scale
+        );
+    }
+
+    fn scale_regression_config() -> Gemma2Config {
+        Gemma2Config {
+            vocab_size: 8,
+            hidden_size: 2,
+            num_hidden_layers: 2,
+            num_attention_heads: 1,
+            num_key_value_heads: 1,
+            intermediate_size: 4,
+            head_dim: 2,
+            max_position_embeddings: 8,
+            rope_theta: 10000.0,
+            rms_norm_eps: 1e-6,
+            sliding_window: 16,
+            attention_logit_softcapping: 1.0e6, // near-identity soft-cap for this test's small scores
+            final_logit_softcapping: 30.0,
+            query_pre_attn_scalar: 256.0, // the real HF raw value for 2B/9B
+            model_type: "gemma2-scale-test".to_string(),
+        }
+    }
+
+    /// End-to-end regression test through the public `Layer::forward` API:
+    /// with `query_pre_attn_scalar` set to the real HF raw value (256.0),
+    /// the attention output must match a hand-derived reference computed
+    /// with the CORRECT scale (`256^-0.5 == 1/16`), not the value the old
+    /// (buggy) code would have produced by using 256.0 directly as the
+    /// scale (which saturates softmax toward a one-hot distribution).
+    #[test]
+    fn test_gemma2_attention_forward_uses_derived_scale_not_raw_query_pre_attn_scalar() {
+        let cfg = scale_regression_config();
+        let mut attn = Gemma2Attention::new(&cfg, 1, Device::CPU).expect("global attention layer");
+        assert!(
+            !attn.is_local(),
+            "layer 1 must be global so a sliding window can't affect this test"
+        );
+
+        // Identity Q/K/V/O projections make Q == K == V == the raw input,
+        // so the whole computation is hand-traceable.
+        let identity =
+            Tensor::from_vec(vec![1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("identity tensor");
+        attn.q_proj.set_weight(identity.clone()).expect("set q_proj weight");
+        attn.k_proj.set_weight(identity.clone()).expect("set k_proj weight");
+        attn.v_proj.set_weight(identity.clone()).expect("set v_proj weight");
+        attn.o_proj.set_weight(identity).expect("set o_proj weight");
+
+        // token0 = [1, 0] at position 0, token1 = [0, 1] at position 1.
+        let input = Tensor::from_vec(vec![1.0_f32, 0.0, 0.0, 1.0], &[2, 2]).expect("input tensor");
+        let output = attn.forward(input).expect("attention forward");
+        let out_data = match output {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32 output"),
+        };
+
+        // --- Independent reference, computed directly from the published
+        // equations (not by calling this module's internal helpers) ---
+        //
+        // RoPE with head_dim=2, theta=10000 has a single frequency of 1.0.
+        // Position 0 is an identity rotation; position 1 rotates [0,1] by
+        // angle=1.0 radian via (x1,x2) -> (x1*cos - x2*sin, x1*sin + x2*cos).
+        let angle = 1.0_f32;
+        let (sin_a, cos_a) = (angle.sin(), angle.cos());
+        let q1_rot = [0.0 * cos_a - 1.0 * sin_a, 0.0 * sin_a + 1.0 * cos_a];
+        let k0_rot = [1.0_f32, 0.0_f32];
+        let k1_rot = q1_rot; // identical input and rotation to q1
+
+        let correct_scale = attention_scale_from_query_pre_attn_scalar(cfg.query_pre_attn_scalar);
+        assert!(
+            (correct_scale - 0.0625).abs() < 1e-6,
+            "sanity: 256^-0.5 must be 1/16, got {correct_scale}"
+        );
+
+        let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+        let s0 = dot(q1_rot, k0_rot) * correct_scale;
+        let s1 = dot(q1_rot, k1_rot) * correct_scale;
+        let m = s0.max(s1);
+        let (e0, e1) = ((s0 - m).exp(), (s1 - m).exp());
+        let (w0, w1) = (e0 / (e0 + e1), e1 / (e0 + e1));
+        // V is never rotated: V0=[1,0], V1=[0,1] (the raw input rows).
+        let expected_row1 = [w0, w1];
+
+        // Sanity: the reference itself must not already be a saturated
+        // ~[0, 1] distribution, or this test couldn't tell the fix apart
+        // from the bug it targets.
+        assert!(
+            expected_row1[1] < 0.9,
+            "sanity: reference must not be saturated, got {expected_row1:?}"
+        );
+
+        // Row 0 attends only to itself (causal, single-key softmax): its
+        // output is exactly V[0] regardless of scale, so it only checks
+        // basic wiring, not the scale itself.
+        assert!(
+            (out_data[0] - 1.0).abs() < 1e-4,
+            "row0[0]: got {}",
+            out_data[0]
+        );
+        assert!(
+            (out_data[1] - 0.0).abs() < 1e-4,
+            "row0[1]: got {}",
+            out_data[1]
+        );
+
+        // Row 1 is the discriminating check. If `forward` used the raw
+        // `query_pre_attn_scalar` (256.0) directly as the scale instead of
+        // `256^-0.5`, the pre-softmax scores would be ~4096x larger,
+        // saturating softmax toward `[~0, ~1]` instead of matching
+        // `expected_row1`.
+        assert!(
+            (out_data[2] - expected_row1[0]).abs() < 1e-3,
+            "row1[0]: expected {}, got {}",
+            expected_row1[0],
+            out_data[2]
+        );
+        assert!(
+            (out_data[3] - expected_row1[1]).abs() < 1e-3,
+            "row1[1]: expected {}, got {} (a value near 1.0 indicates the raw \
+             query_pre_attn_scalar was used directly as the scale)",
+            expected_row1[1],
+            out_data[3]
         );
     }
 }

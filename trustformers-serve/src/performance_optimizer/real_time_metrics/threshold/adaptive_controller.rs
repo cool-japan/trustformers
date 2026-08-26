@@ -366,19 +366,17 @@ impl AdaptiveThresholdController {
         history: &Arc<TokioMutex<VecDeque<ThresholdAdaptation>>>,
         stats: &Arc<AdaptationStats>,
     ) {
-        let mut history_guard = history.lock().await;
+        // Effectiveness is only ever set by whoever observes what an adaptation
+        // did to the subsequent alert stream. Nothing in this loop sees that
+        // stream, so an unscored adaptation stays unscored: it is skipped here
+        // rather than assigned a substitute score that would then be averaged
+        // into `avg_effectiveness` and read as a measurement.
+        let history_guard = history.lock().await;
         let mut effectiveness_sum = 0.0;
         let mut confidence_sum = 0.0;
         let mut count = 0;
 
-        for adaptation in history_guard.iter_mut() {
-            if adaptation.effectiveness.is_none() {
-                // Calculate effectiveness based on subsequent alert patterns
-                // This is a simplified calculation - in practice, this would be more sophisticated
-                let effectiveness = 0.7; // Placeholder effectiveness score
-                adaptation.effectiveness = Some(effectiveness);
-            }
-
+        for adaptation in history_guard.iter() {
             if let Some(effectiveness) = adaptation.effectiveness {
                 effectiveness_sum += effectiveness;
                 confidence_sum += adaptation.confidence;

@@ -1,4 +1,5 @@
 use crate::llama::config::LlamaConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     device::Device,
@@ -64,6 +65,27 @@ impl RMSNorm {
     pub fn parameter_count(&self) -> usize {
         self.weight.len()
     }
+
+    /// Append the single scale parameter under `<prefix>.weight`.
+    ///
+    /// RMSNorm has no shift term, so exactly one entry is produced — matching
+    /// what LLaMA checkpoints actually contain.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`RMSNorm::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
+    }
 }
 
 /// Rotary Position Embedding (RoPE)
@@ -90,89 +112,103 @@ impl RotaryEmbedding {
     /// Each pair `(x[i], x[i + half_dim])` is rotated by angle `pos / base^(2i/dim)`.
     ///
     /// `q` and `k` are expected to have shape `[seq_len, num_heads * head_dim]`
-    /// or `[batch, seq_len, num_heads * head_dim]`.  The rotation is applied
-    /// to the first `self.dim` values in each head.
+    /// or `[batch, seq_len, num_heads * head_dim]`, where `head_dim == self.dim`.
+    /// **Every** head block is rotated, not just the first: rotating only the
+    /// leading `self.dim` columns would leave every head above index 0 without
+    /// any positional information at all. Under GQA `q` and `k` carry different
+    /// head counts, so each tensor is rotated independently.
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let mut rotated_q = q_arr.clone();
-                let mut rotated_k = k_arr.clone();
+        let half = self.dim / 2;
+        // freqs[i] = 1 / base^(2i / dim)  for i in 0..half
+        let freqs: Vec<f32> = (0..half)
+            .map(|i| 1.0_f32 / self.base.powf(2.0 * i as f32 / self.dim as f32))
+            .collect();
+        // One (sin, cos) table shared by both tensors and every head.
+        let mut table = Vec::with_capacity(position_ids.len() * half);
+        for &pos in position_ids {
+            for &freq in &freqs {
+                let angle = pos as f32 * freq;
+                table.push((angle.sin(), angle.cos()));
+            }
+        }
 
-                // q_arr / k_arr shape: [seq_len, total_dim]  (2-D, no batch)
-                // or [batch, seq_len, total_dim] (3-D).
-                // position_ids has length seq_len.
-                let ndim = self.dim;
-                let half = ndim / 2;
+        let rotated_q = self.rotate(q, position_ids.len(), &table, "query")?;
+        let rotated_k = self.rotate(k, position_ids.len(), &table, "key")?;
+        Ok((rotated_q, rotated_k))
+    }
 
-                // Validate that we can rotate: total_dim must be >= ndim
-                let total_dim = {
-                    let s = q_arr.shape();
-                    s[s.len() - 1]
+    /// Rotate every `self.dim`-wide head block of one tensor.
+    fn rotate(
+        &self,
+        tensor: &Tensor,
+        positions: usize,
+        table: &[(f32, f32)],
+        role: &str,
+    ) -> Result<Tensor> {
+        let half = self.dim / 2;
+        match tensor {
+            Tensor::F32(arr) => {
+                let shape = arr.shape().to_vec();
+                let (batch, seq_len, width) = match shape.len() {
+                    2 => (1usize, shape[0], shape[1]),
+                    3 => (shape[0], shape[1], shape[2]),
+                    _ => {
+                        return Err(tensor_op_error(
+                            "RotaryEmbedding::apply_rotary_emb",
+                            format!(
+                                "expected [seq, features] or [batch, seq, features] for the {role} tensor, got {shape:?}"
+                            ),
+                        ))
+                    },
                 };
-                if total_dim < ndim {
+                if self.dim == 0 || width < self.dim || !width.is_multiple_of(self.dim) {
                     return Err(tensor_op_error(
                         "RotaryEmbedding::apply_rotary_emb",
                         format!(
-                            "tensor last dim {} is smaller than rope dim {}",
-                            total_dim, ndim
+                            "{role} width {width} is not a positive multiple of the rope dim {}",
+                            self.dim
+                        ),
+                    ));
+                }
+                if seq_len != positions {
+                    return Err(tensor_op_error(
+                        "RotaryEmbedding::apply_rotary_emb",
+                        format!(
+                            "{role} has {seq_len} positions but {positions} position ids were given"
                         ),
                     ));
                 }
 
-                // Pre-compute (cos, sin) for each position × each frequency pair
-                // freqs[i] = 1 / base^(2i / ndim)  for i in 0..half
-                let freqs: Vec<f32> = (0..half)
-                    .map(|i| 1.0_f32 / self.base.powf(2.0 * i as f32 / ndim as f32))
-                    .collect();
-
-                // Rotate in-place.  We iterate over positions provided by
-                // position_ids. For 2-D tensors the first axis is seq_len;
-                // for 3-D tensors position_ids still indexes along seq_len.
-                let shape = q_arr.shape().to_vec();
-                let rank = shape.len();
-
-                for (seq_idx, &pos) in position_ids.iter().enumerate() {
-                    for i in 0..half {
-                        let j = i + half; // companion dimension
-
-                        let cos_val = (pos as f32 * freqs[i]).cos();
-                        let sin_val = (pos as f32 * freqs[i]).sin();
-
-                        if rank == 2 {
-                            // shape: [seq_len, total_dim]
-                            let qi = rotated_q[[seq_idx, i]];
-                            let qj = rotated_q[[seq_idx, j]];
-                            rotated_q[[seq_idx, i]] = qi * cos_val - qj * sin_val;
-                            rotated_q[[seq_idx, j]] = qi * sin_val + qj * cos_val;
-
-                            let ki = rotated_k[[seq_idx, i]];
-                            let kj = rotated_k[[seq_idx, j]];
-                            rotated_k[[seq_idx, i]] = ki * cos_val - kj * sin_val;
-                            rotated_k[[seq_idx, j]] = ki * sin_val + kj * cos_val;
-                        } else if rank == 3 {
-                            // shape: [batch, seq_len, total_dim]
-                            for b in 0..shape[0] {
-                                let qi = rotated_q[[b, seq_idx, i]];
-                                let qj = rotated_q[[b, seq_idx, j]];
-                                rotated_q[[b, seq_idx, i]] = qi * cos_val - qj * sin_val;
-                                rotated_q[[b, seq_idx, j]] = qi * sin_val + qj * cos_val;
-
-                                let ki = rotated_k[[b, seq_idx, i]];
-                                let kj = rotated_k[[b, seq_idx, j]];
-                                rotated_k[[b, seq_idx, i]] = ki * cos_val - kj * sin_val;
-                                rotated_k[[b, seq_idx, j]] = ki * sin_val + kj * cos_val;
+                let heads = width / self.dim;
+                let mut data: Vec<f32> = arr.iter().copied().collect();
+                for b in 0..batch {
+                    for t in 0..seq_len {
+                        let row = (b * seq_len + t) * width;
+                        for head in 0..heads {
+                            let base = row + head * self.dim;
+                            for i in 0..half {
+                                let (sin_val, cos_val) = table[t * half + i];
+                                let x = data[base + i];
+                                let y = data[base + i + half];
+                                data[base + i] = x * cos_val - y * sin_val;
+                                data[base + i + half] = x * sin_val + y * cos_val;
                             }
                         }
-                        // ranks other than 2/3 leave the values unchanged
                     }
                 }
 
-                Ok((Tensor::F32(rotated_q), Tensor::F32(rotated_k)))
+                let rotated = ArrayD::from_shape_vec(IxDyn(&shape), data).map_err(|e| {
+                    tensor_op_error(
+                        "RotaryEmbedding::apply_rotary_emb",
+                        format!("shape error while rebuilding the {role} tensor: {e}"),
+                    )
+                })?;
+                Ok(Tensor::F32(rotated))
             },
             _ => Err(tensor_op_error(
                 "RotaryEmbedding::apply_rotary_emb",
@@ -273,6 +309,34 @@ impl LlamaMLP {
         self.gate_proj.parameter_count()
             + self.up_proj.parameter_count()
             + self.down_proj.parameter_count()
+    }
+
+    /// Append the three SwiGLU projections under `<prefix>.…`.
+    ///
+    /// `gate_proj` / `up_proj` / `down_proj` are the names HuggingFace's
+    /// `LlamaMLP` uses, and the ones [`LlamaModel::load_from_path_with_config`]
+    /// looks up.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.gate_proj.collect_named_parameters(&format!("{prefix}.gate_proj"), into);
+        self.up_proj.collect_named_parameters(&format!("{prefix}.up_proj"), into);
+        self.down_proj.collect_named_parameters(&format!("{prefix}.down_proj"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaMLP::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.gate_proj
+            .collect_named_parameters_mut(&format!("{prefix}.gate_proj"), into);
+        self.up_proj.collect_named_parameters_mut(&format!("{prefix}.up_proj"), into);
+        self.down_proj
+            .collect_named_parameters_mut(&format!("{prefix}.down_proj"), into);
     }
 }
 
@@ -495,6 +559,34 @@ impl LlamaAttention {
             + self.o_proj.parameter_count()
         // Note: RotaryEmbedding doesn't have learnable parameters
     }
+
+    /// Append the four projections under `<prefix>.…`.
+    ///
+    /// The rotary embedding holds only derived cos/sin tables, not learnable
+    /// parameters, so it contributes nothing — exactly as in HuggingFace
+    /// checkpoints, which do not store `rotary_emb.*` either.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters(&format!("{prefix}.o_proj"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaAttention::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters_mut(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters_mut(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters_mut(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters_mut(&format!("{prefix}.o_proj"), into);
+    }
 }
 
 /// LLaMA decoder layer
@@ -560,6 +652,36 @@ impl LlamaDecoderLayer {
             + self.mlp.parameter_count()
             + self.input_layernorm.parameter_count()
             + self.post_attention_layernorm.parameter_count()
+    }
+
+    /// Append this decoder layer's parameters under `<prefix>.…`, in the order
+    /// [`LlamaModel::load_from_path_with_config`] binds them.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.self_attn.collect_named_parameters(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters(&format!("{prefix}.post_attention_layernorm"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaDecoderLayer::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.self_attn
+            .collect_named_parameters_mut(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.post_attention_layernorm"), into);
     }
 }
 
@@ -735,18 +857,80 @@ impl Model for LlamaModel {
 
         total
     }
+
+    /// Enumerate the backbone's live parameters under HuggingFace LLaMA names.
+    ///
+    /// The spelling is exactly what [`LlamaModel::load_from_path_with_config`]
+    /// looks up: `model.embed_tokens.weight`, `model.layers.{i}.…`,
+    /// `model.norm.weight`. The `model.` prefix is part of HuggingFace's LLaMA
+    /// checkpoint layout even for the bare backbone, so it is included here
+    /// rather than added by the causal-LM wrapper.
+    ///
+    /// Order is embeddings, layers in index order, final norm — stable across
+    /// calls.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters(&mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut(&mut tensors);
+        tensors
+    }
+}
+
+impl LlamaModel {
+    /// Append every backbone parameter under the `model.` namespace.
+    ///
+    /// Factored out of [`Model::named_tensors`] so [`LlamaForCausalLM`] can reuse
+    /// it without duplicating the name table.
+    pub(crate) fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.embed_tokens.collect_named_parameters("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter().enumerate() {
+            layer.collect_named_parameters(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters("model.norm", into);
+    }
+
+    /// Mutable counterpart of [`LlamaModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.embed_tokens.collect_named_parameters_mut("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            layer.collect_named_parameters_mut(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters_mut("model.norm", into);
+    }
 }
 
 impl LlamaModel {
     /// Load model weights from a directory containing HuggingFace format weights
     pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
             memory_mapped: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
+
+    /// Load weights tensor-by-tensor with an explicit loader configuration.
+    ///
+    /// Every tensor is fetched individually and installed into its layer, so the
+    /// resident set never holds more than one source tensor at a time on top of
+    /// the model itself.
+    pub fn load_from_path_with_config(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+        config: crate::weight_loading::WeightLoadingConfig,
+    ) -> Result<()> {
+        use crate::weight_loading::auto_create_loader;
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
@@ -835,9 +1019,10 @@ impl LlamaModel {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -864,59 +1049,56 @@ impl LlamaModel {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
 
-            println!("Attempting to download {}", file_url);
+            tracing::info!("Attempting to download {}", file_url);
 
             // Try using curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
-                    "-o",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
                 ])
+                // Pass the path as an OsStr: model caches may legitimately live
+                // under a non-UTF-8 directory name, which `to_str()` cannot express.
+                .arg("-o")
+                .arg(&file_path)
+                .arg(&file_url)
                 .output();
 
             match curl_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {}", file_name);
+                    tracing::info!("Successfully downloaded {}", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with curl: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("curl not available: {}", e);
+                    tracing::info!("curl not available: {}", e);
                 },
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result =
+                Command::new("wget").arg("-O").arg(&file_path).arg(&file_url).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {} with wget", file_name);
+                    tracing::info!("Successfully downloaded {} with wget", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with wget: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("wget not available: {}", e);
+                    tracing::info!("wget not available: {}", e);
                 },
             }
 
@@ -929,19 +1111,23 @@ impl LlamaModel {
             }
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded model {} from HuggingFace Hub",
             model_name
         );
         Ok(())
     }
 
-    /// Load weights with lazy loading for large models
-    pub fn load_with_lazy_loading(
-        &mut self,
-        model_path: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+    /// Load weights through a **memory-mapped** loader.
+    ///
+    /// The checkpoint is mapped rather than read into an intermediate buffer and
+    /// tensors are materialised one at a time, which bounds peak memory to the
+    /// model plus the largest single tensor. It is *not* deferred loading: when
+    /// this call returns, every weight the model knows about is resident. Model
+    /// parameters are owned `Tensor`s, so there is nothing to resolve later; if
+    /// you need bounded resident memory, quantise or shard the model instead.
+    pub fn load_with_mmap(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
@@ -949,20 +1135,22 @@ impl LlamaModel {
             streaming: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
 
-        let loader = auto_create_loader(&model_path, Some(config))?;
-
-        // For lazy loading, we'd store references to the loader and load tensors on-demand
-        // This is a simplified example - a full implementation would need more complex state management
-
-        println!("Lazy loading enabled - tensors will be loaded on-demand");
-
-        // List available tensors
-        let tensor_names = loader.list_tensors()?;
-        println!("Found {} tensors in model", tensor_names.len());
-
-        // For now, still load everything (in a real implementation, this would be truly lazy)
-        self.load_from_path(model_path)
+    /// Deprecated alias for [`load_with_mmap`](Self::load_with_mmap).
+    ///
+    /// The old name promised on-demand tensor resolution that this loader has
+    /// never performed; it maps the checkpoint and loads every tensor eagerly.
+    #[deprecated(
+        since = "0.2.1",
+        note = "renamed to `load_with_mmap`: loading is memory-mapped, not deferred"
+    )]
+    pub fn load_with_lazy_loading(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        self.load_with_mmap(model_path)
     }
 }
 
@@ -1033,6 +1221,28 @@ impl Model for LlamaForCausalLM {
 
     fn num_parameters(&self) -> usize {
         self.model.num_parameters() + self.lm_head.parameter_count()
+    }
+
+    /// Enumerate the backbone (already `model.`-prefixed) plus `lm_head.weight`.
+    ///
+    /// This is the layout of a HuggingFace `LlamaForCausalLM` checkpoint, and
+    /// the pair of names [`LlamaForCausalLM::load_from_path`] binds.
+    ///
+    /// The head is a separate `Linear` in this implementation — LLaMA models
+    /// that tie it to the embedding table are loaded by *copying*, not aliasing —
+    /// so it is listed as its own tensor.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters(&mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters_mut(&mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
     }
 }
 
@@ -1149,6 +1359,82 @@ mod tests {
         } else {
             panic!("Expected F32 tensor");
         }
+    }
+
+    /// Every head block must be rotated. The previous implementation touched
+    /// only the leading `self.dim` columns, so every head above index 0 carried
+    /// no positional information at all.
+    #[test]
+    fn test_rope_rotates_every_head_not_just_the_first() {
+        // head_dim = 2 → half = 1 → freqs = [1.0]; two heads → last dim 4.
+        let rope = RotaryEmbedding::new(2, 32, 10000.0);
+        let values = vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
+        let q = Tensor::from_vec(values.clone(), &[2, 4]).expect("q");
+        let k = Tensor::from_vec(values, &[2, 4]).expect("k");
+
+        let (q_out, k_out) = rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("rope");
+        let q_data = q_out.to_vec_f32().expect("q data");
+        let k_data = k_out.to_vec_f32().expect("k data");
+        assert_eq!(q_data, k_data, "both tensors share the same angle table");
+
+        // Position 0 is the identity.
+        assert!((q_data[0] - 1.0).abs() < 1e-6);
+        assert!(q_data[1].abs() < 1e-6);
+
+        let (sin_val, cos_val) = (1.0f32.sin(), 1.0f32.cos());
+        // Head 0 at position 1: (1, 0) → (cos, sin).
+        assert!(
+            (q_data[4] - cos_val).abs() < 1e-6,
+            "head 0 x: {}",
+            q_data[4]
+        );
+        assert!(
+            (q_data[5] - sin_val).abs() < 1e-6,
+            "head 0 y: {}",
+            q_data[5]
+        );
+        // Head 1 at position 1: (0, 1) → (-sin, cos) — the block that used to be
+        // left untouched.
+        assert!(
+            (q_data[6] + sin_val).abs() < 1e-6,
+            "head 1 x: {}",
+            q_data[6]
+        );
+        assert!(
+            (q_data[7] - cos_val).abs() < 1e-6,
+            "head 1 y: {}",
+            q_data[7]
+        );
+    }
+
+    /// Under GQA the key tensor is narrower than the query tensor; both must be
+    /// rotated with the same table and neither may be rejected.
+    #[test]
+    fn test_rope_accepts_different_query_and_key_widths() {
+        let rope = RotaryEmbedding::new(2, 32, 10000.0);
+        // q: 2 heads (width 4), k: 1 head (width 2).
+        let q =
+            Tensor::from_vec(vec![1.0f32, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], &[2, 4]).expect("q");
+        let k = Tensor::from_vec(vec![1.0f32, 0.0, 1.0, 0.0], &[2, 2]).expect("k");
+        let (q_out, k_out) = rope.apply_rotary_emb(&q, &k, &[0, 1]).expect("rope");
+        assert_eq!(q_out.shape(), &[2, 4]);
+        assert_eq!(k_out.shape(), &[2, 2]);
+
+        let q_data = q_out.to_vec_f32().expect("q data");
+        let k_data = k_out.to_vec_f32().expect("k data");
+        let cos_val = 1.0f32.cos();
+        assert!((q_data[4] - cos_val).abs() < 1e-6);
+        assert!((q_data[6] - cos_val).abs() < 1e-6);
+        assert!((k_data[2] - cos_val).abs() < 1e-6);
+    }
+
+    /// A tensor whose width is not a whole number of head blocks is a caller
+    /// error, not something to silently half-rotate.
+    #[test]
+    fn test_rope_rejects_width_that_is_not_a_multiple_of_head_dim() {
+        let rope = RotaryEmbedding::new(4, 32, 10000.0);
+        let q = Tensor::from_vec(vec![0.0f32; 6], &[1, 6]).expect("q");
+        assert!(rope.apply_rotary_emb(&q, &q, &[0]).is_err());
     }
 
     // -----------------------------------------------------------------------

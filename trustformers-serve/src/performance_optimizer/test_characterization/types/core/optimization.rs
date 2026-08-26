@@ -223,18 +223,11 @@ impl OptimizationStrategy for SamplingRateOptimizer {
     }
 }
 
-/// Placeholder - actual implementation in concurrency_detector.rs
-#[derive(Debug, Clone)]
-pub struct SafeConcurrencyEstimator {
-    pub safety_margin: f64,
-    pub max_concurrency: usize,
-}
-
-impl Default for SafeConcurrencyEstimator {
-    fn default() -> Self {
-        Self {
-            safety_margin: 0.2,
-            max_concurrency: 1000,
-        }
-    }
-}
+// `SafeConcurrencyEstimator` was deleted from this module in 0.2.1. Its own doc
+// comment said "Placeholder - actual implementation in concurrency_detector.rs",
+// and that is exactly the danger: `test_characterization::types::*` and
+// `test_characterization::concurrency_detector::*` are both glob re-exported, so
+// this two-field stand-in shadowed the real estimator wherever the glob was
+// used. Its last consumer went away with the shadow
+// `ConcurrencyRequirementsDetector` in `types/patterns.rs`; leaving an unused
+// same-named placeholder in scope only invites the next accidental shadowing.

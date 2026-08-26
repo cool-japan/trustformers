@@ -56,10 +56,17 @@ pub struct ProfileStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySnapshot {
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub heap_allocated: usize,
-    pub heap_used: usize,
-    pub stack_size: usize,
+    /// Resident set size of this process in bytes, from `sysinfo`.
+    ///
+    /// `None` when the platform's process table does not list this PID. It
+    /// used to be a `usize` hardcoded to `0`, i.e. "this process holds no
+    /// memory", published as a measurement.
+    pub process_rss_bytes: Option<usize>,
+    /// Virtual memory size of this process in bytes, from `sysinfo`.
+    pub process_virtual_bytes: Option<usize>,
+    /// GPU memory allocated. Always `None`: this crate links no GPU driver.
     pub gpu_allocated: Option<usize>,
+    /// GPU memory in use. Always `None`, for the same reason.
     pub gpu_used: Option<usize>,
 }
 
@@ -107,14 +114,42 @@ pub struct CpuProfile {
 /// CPU bottleneck analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuBottleneckAnalysis {
-    pub thread_id: u64,
-    pub cpu_usage: f64,
-    pub context_switches: u64,
-    pub cache_misses: u64,
-    pub instructions_per_cycle: f64,
-    pub branch_mispredictions: u64,
+    /// Id of the process the reading belongs to (this process).
+    pub process_id: u32,
+    /// Real CPU usage percentage of this process, measured by `sysinfo` as the
+    /// delta between two samples of the profiler's long-lived `System`.
+    ///
+    /// `None` when the platform gave no reading, or when fewer than
+    /// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` have elapsed since the previous
+    /// sample -- below that the counters have not advanced enough for the
+    /// quotient to mean anything. It used to be a hardcoded `0.75`, and then
+    /// (briefly) a single-refresh read that could only ever be `Some(0.0)`.
+    pub cpu_usage_percent: Option<f64>,
+    /// Voluntary + involuntary context switches.
+    ///
+    /// Always `None`: reading them needs `getrusage`/`/proc/self/status`
+    /// parsing that this Pure-Rust crate does not do. Previously hardcoded to
+    /// `1000`.
+    pub context_switches: Option<u64>,
+    /// Cache misses. Always `None`: a hardware performance counter, which
+    /// needs `perf_event_open`/PMU access. Previously hardcoded to `500`.
+    pub cache_misses: Option<u64>,
+    /// Instructions per cycle. Always `None`: also a PMU counter. Previously
+    /// hardcoded to `2.5`.
+    pub instructions_per_cycle: Option<f64>,
+    /// Branch mispredictions. Always `None`: also a PMU counter. Previously
+    /// hardcoded to `100`.
+    pub branch_mispredictions: Option<u64>,
+    /// Hottest functions by self time.
+    ///
+    /// Built from this profiler's own recorded operation timings. It used to
+    /// be a two-element literal naming `tensor_multiply` and
+    /// `gradient_computation` with invented call counts, regardless of what
+    /// had been profiled.
     pub hot_functions: Vec<HotFunction>,
-    pub bottleneck_score: f64,
+    /// Share of total recorded time spent in the single hottest function, in
+    /// `[0, 1]`; `None` when nothing has been profiled.
+    pub bottleneck_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

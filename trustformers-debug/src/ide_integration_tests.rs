@@ -2,9 +2,9 @@
 mod tests {
     use crate::ide_integration::*;
     use crate::DebugConfig;
-    use uuid::Uuid;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use uuid::Uuid;
 
     struct Lcg {
         state: u64,
@@ -28,7 +28,7 @@ mod tests {
     // Test 1: SupportedIDE variants
     #[test]
     fn test_supported_ide_variants() {
-        let ides = vec![
+        let ides = [
             SupportedIDE::VSCode,
             SupportedIDE::IntelliJ,
             SupportedIDE::Vim,

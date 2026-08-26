@@ -2,7 +2,7 @@
 ///
 /// This module provides comprehensive debugging tools for tensor operations,
 /// gradient flow analysis, and interactive debugging features.
-use crate::errors::Result;
+use crate::errors::{Result, TrustformersError};
 use crate::tensor::{DType, Tensor};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -400,7 +400,13 @@ pub enum WatchCondition {
     ValueBelow(f64),
     /// Watch for specific shape
     ShapeEquals(Vec<usize>),
-    /// Custom condition (string description)
+    /// A named custom predicate.
+    ///
+    /// The name must have been registered with
+    /// [`TensorDebugger::register_custom_condition`]; a watchpoint naming an
+    /// unregistered predicate is rejected at
+    /// [`TensorDebugger::add_watchpoint`] time rather than silently never
+    /// firing.
     Custom(String),
 }
 
@@ -465,7 +471,12 @@ pub struct TensorDebugger {
     breakpoint_hit: Arc<Mutex<bool>>,
     /// Statistics cache
     stats_cache: Arc<Mutex<HashMap<String, DebugTensorStats>>>,
+    /// Predicates backing [`WatchCondition::Custom`], keyed by name.
+    custom_conditions: Arc<Mutex<HashMap<String, CustomCondition>>>,
 }
+
+/// A user-supplied watchpoint predicate.
+pub type CustomCondition = Arc<dyn Fn(&Tensor) -> Result<bool> + Send + Sync>;
 
 impl TensorDebugger {
     /// Create a new tensor debugger with default configuration
@@ -483,7 +494,29 @@ impl TensorDebugger {
             watchpoints: Arc::new(Mutex::new(Vec::new())),
             breakpoint_hit: Arc::new(Mutex::new(false)),
             stats_cache: Arc::new(Mutex::new(HashMap::new())),
+            custom_conditions: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Register the predicate backing a [`WatchCondition::Custom`] name.
+    ///
+    /// Registering the same name twice replaces the predicate.
+    pub fn register_custom_condition<F>(&self, name: impl Into<String>, predicate: F)
+    where
+        F: Fn(&Tensor) -> Result<bool> + Send + Sync + 'static,
+    {
+        let mut conditions =
+            self.custom_conditions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        conditions.insert(name.into(), Arc::new(predicate));
+    }
+
+    /// Names of the currently registered custom conditions.
+    pub fn custom_condition_names(&self) -> Vec<String> {
+        let conditions =
+            self.custom_conditions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut names: Vec<String> = conditions.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Register a tensor for debugging
@@ -538,10 +571,28 @@ impl TensorDebugger {
     }
 
     /// Add a watchpoint
-    pub fn add_watchpoint(&self, watchpoint: Watchpoint) {
+    /// Register a watchpoint.
+    ///
+    /// A [`WatchCondition::Custom`] whose name has no registered predicate is
+    /// rejected: an inert breakpoint that never fires is worse than an error at
+    /// registration time.
+    pub fn add_watchpoint(&self, watchpoint: Watchpoint) -> Result<()> {
+        if let WatchCondition::Custom(name) = &watchpoint.condition {
+            let conditions =
+                self.custom_conditions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !conditions.contains_key(name) {
+                return Err(TrustformersError::invalid_input(format!(
+                    "watchpoint uses custom condition '{}', which has no registered predicate; \
+                     call register_custom_condition(\"{}\", ...) first",
+                    name, name
+                )));
+            }
+        }
+
         let mut watchpoints =
             self.watchpoints.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         watchpoints.push(watchpoint);
+        Ok(())
     }
 
     /// Remove all watchpoints matching pattern
@@ -579,7 +630,26 @@ impl TensorDebugger {
                     WatchCondition::ShapeEquals(expected_shape) => {
                         tensor.shape() == expected_shape.as_slice()
                     },
-                    WatchCondition::Custom(_) => false, // Custom conditions not implemented
+                    WatchCondition::Custom(name) => {
+                        // The predicate is cloned out before evaluation so the
+                        // registry lock is not held across user code.
+                        let predicate = {
+                            let conditions = self
+                                .custom_conditions
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            conditions.get(name).cloned()
+                        };
+                        match predicate {
+                            Some(predicate) => predicate(tensor)?,
+                            None => {
+                                return Err(TrustformersError::invalid_state(format!(
+                                    "custom watch condition '{}' is no longer registered",
+                                    name
+                                )))
+                            },
+                        }
+                    },
                 };
 
                 if triggered {
@@ -779,7 +849,7 @@ mod tests {
             break_on_trigger: true,
             trigger_count: 0,
         };
-        debugger.add_watchpoint(wp);
+        debugger.add_watchpoint(wp)?;
 
         let data = vec![1.0, f32::NAN];
         let tensor = Tensor::from_slice(&data, &[2])?;
@@ -1014,17 +1084,70 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_watchpoint() {
+    fn test_remove_watchpoint() -> Result<()> {
         let debugger = TensorDebugger::new();
         debugger.add_watchpoint(Watchpoint {
             tensor_pattern: "test_pattern".to_string(),
             condition: WatchCondition::HasNaN,
             break_on_trigger: false,
             trigger_count: 0,
-        });
+        })?;
         debugger.remove_watchpoint("test_pattern");
         // After removal, registering a NaN tensor should not trigger watchpoint
         // (but auto-detect may still fire)
+        Ok(())
+    }
+
+    /// Regression test: `WatchCondition::Custom` used to match the
+    /// `_ => false` arm, so a custom watchpoint was silently inert.
+    #[test]
+    fn test_custom_watch_condition_fires() -> Result<()> {
+        let debugger = TensorDebugger::new();
+
+        // Registering a watchpoint for an unknown predicate must fail loudly.
+        let unregistered = debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "any".to_string(),
+            condition: WatchCondition::Custom("all_negative".to_string()),
+            break_on_trigger: false,
+            trigger_count: 0,
+        });
+        assert!(
+            unregistered.is_err(),
+            "an unregistered predicate must be rejected"
+        );
+
+        debugger.register_custom_condition("all_negative", |tensor: &Tensor| {
+            Ok(tensor.data()?.iter().all(|value| *value < 0.0))
+        });
+        assert_eq!(
+            debugger.custom_condition_names(),
+            vec!["all_negative".to_string()]
+        );
+
+        debugger.add_watchpoint(Watchpoint {
+            tensor_pattern: "weights".to_string(),
+            condition: WatchCondition::Custom("all_negative".to_string()),
+            break_on_trigger: true,
+            trigger_count: 0,
+        })?;
+
+        // A tensor that does not satisfy the predicate must not trigger.
+        let positive = Tensor::from_slice(&[1.0f32, 2.0], &[2])?;
+        debugger.register_tensor("weights".to_string(), positive)?;
+        assert!(
+            !debugger.is_breakpoint_hit(),
+            "predicate was false, must not break"
+        );
+
+        // One that does must trigger.
+        let negative = Tensor::from_slice(&[-1.0f32, -2.0], &[2])?;
+        debugger.register_tensor("weights".to_string(), negative)?;
+        assert!(
+            debugger.is_breakpoint_hit(),
+            "predicate was true, must break"
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -1035,7 +1158,7 @@ mod tests {
             condition: WatchCondition::ValueExceeds(100.0),
             break_on_trigger: true,
             trigger_count: 0,
-        });
+        })?;
 
         let data = vec![200.0, 300.0];
         let tensor = Tensor::from_slice(&data, &[2])?;
@@ -1054,7 +1177,7 @@ mod tests {
             condition: WatchCondition::ValueBelow(0.001),
             break_on_trigger: true,
             trigger_count: 0,
-        });
+        })?;
 
         let data = vec![0.0001, 0.0002];
         let tensor = Tensor::from_slice(&data, &[2])?;
@@ -1077,7 +1200,7 @@ mod tests {
             condition: WatchCondition::ShapeEquals(vec![3, 4]),
             break_on_trigger: true,
             trigger_count: 0,
-        });
+        })?;
 
         let tensor = Tensor::ones(&[3, 4])?;
         debugger.register_tensor("shaped".to_string(), tensor)?;
@@ -1099,7 +1222,7 @@ mod tests {
             condition: WatchCondition::ShapeEquals(vec![2]),
             break_on_trigger: true,
             trigger_count: 0,
-        });
+        })?;
 
         let tensor = Tensor::ones(&[2])?;
         debugger.register_tensor("any_name".to_string(), tensor)?;
@@ -1110,23 +1233,44 @@ mod tests {
     }
 
     #[test]
-    fn test_watch_condition_custom_does_not_trigger() -> Result<()> {
+    /// Regression test: this used to assert that a custom watchpoint never
+    /// triggers, which was the bug. An unregistered predicate must now be
+    /// rejected at registration; a registered one that returns false still
+    /// must not trigger.
+    fn test_watch_condition_custom_requires_a_predicate() -> Result<()> {
         let debugger = TensorDebugger::with_config(TensorDebuggerConfig {
             auto_detect_issues: false,
             break_on_error: false,
             ..TensorDebuggerConfig::default()
         });
+
+        assert!(
+            debugger
+                .add_watchpoint(Watchpoint {
+                    tensor_pattern: "custom".to_string(),
+                    condition: WatchCondition::Custom("custom check".to_string()),
+                    break_on_trigger: true,
+                    trigger_count: 0,
+                })
+                .is_err(),
+            "a watchpoint with no predicate must be rejected, not silently inert"
+        );
+
+        debugger.register_custom_condition("custom check", |_tensor: &Tensor| Ok(false));
         debugger.add_watchpoint(Watchpoint {
             tensor_pattern: "custom".to_string(),
             condition: WatchCondition::Custom("custom check".to_string()),
             break_on_trigger: true,
             trigger_count: 0,
-        });
+        })?;
 
         let tensor = Tensor::ones(&[2])?;
         debugger.register_tensor("custom".to_string(), tensor)?;
 
-        assert!(!debugger.is_breakpoint_hit());
+        assert!(
+            !debugger.is_breakpoint_hit(),
+            "the predicate returned false"
+        );
 
         Ok(())
     }

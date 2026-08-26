@@ -373,6 +373,7 @@ impl FlamingoVisionLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -570,6 +571,7 @@ impl FlamingoLanguageLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -914,6 +916,7 @@ impl PerceiverLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let self_attention_config = AttentionConfig {
@@ -923,6 +926,7 @@ impl PerceiverLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            training: false,
         };
 
         let cross_attention = MultiHeadAttention::from_config(cross_attention_config)?;

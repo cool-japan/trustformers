@@ -35,7 +35,17 @@ pub struct GradientLayerFlow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GradientDirection {
     pub step: usize,
-    pub direction_vector: Vec<f64>,
+    /// Signed change in gradient norm vs. the previous recorded step
+    /// (`norm(step) - norm(step - 1)`; `0.0` on the first step, where
+    /// there is no previous value to compare against). Positive means the
+    /// norm grew, negative means it shrank. This is a real, computed
+    /// trend indicator -- not a per-parameter gradient direction vector:
+    /// [`GradientHistory`] retains only reduced per-step statistics
+    /// (norm/mean/std), so a true high-dimensional direction is not
+    /// available here. Previously misnamed `direction_vector` and set to
+    /// `vec![norm]`, which duplicated `magnitude` rather than carrying
+    /// any directional information.
+    pub norm_delta: f64,
     pub magnitude: f64,
     pub consistency_score: f64,
 }
@@ -124,8 +134,13 @@ pub struct CriticalGradientPath {
     pub path_length: usize,
     pub total_flow_strength: f64,
     pub bottleneck_layers: Vec<String>,
+    /// Share of the path's layers classified as bottlenecks, in `[0, 1]`.
+    /// Previously the constant `0.8`.
     pub criticality_score: f64,
-    pub optimization_potential: f64,
+    /// Mean shortfall of the path's edge flow-consistency from `1.0`, i.e. how
+    /// much consistency is left to gain; `None` for a path with no edges.
+    /// Previously the constant `0.6`.
+    pub optimization_potential: Option<f64>,
 }
 
 /// Region where gradients are vanishing
@@ -169,7 +184,14 @@ pub enum ExplodingSeverity {
 pub struct RegionExtent {
     pub start_layer: String,
     pub end_layer: String,
-    pub affected_parameters: usize,
+    /// Real element count of the affected layer's gradient tensor, when a
+    /// caller has reported one via
+    /// [`super::debugger::GradientDebugger::set_layer_parameter_count`].
+    /// `GradientHistory` only ever holds reduced scalar statistics
+    /// (norm/mean/std) -- never the tensor itself -- so this is an honest
+    /// `None`, not a placeholder, until a caller with access to the real
+    /// shape opts in.
+    pub affected_parameters: Option<usize>,
     pub duration_steps: usize,
 }
 
@@ -293,19 +315,20 @@ impl GradientFlowVisualizer {
         for (i, (&norm, &step)) in
             history.gradient_norms.iter().zip(history.step_numbers.iter()).enumerate()
         {
-            // Simplified direction computation - in practice, this would use actual gradient vectors
-            let direction_vector = vec![norm]; // Placeholder
             let magnitude = norm;
-            let consistency_score = if i > 0 {
-                let prev_norm = history.gradient_norms[i - 1];
-                1.0 - ((norm - prev_norm).abs() / (norm + prev_norm + 1e-8))
-            } else {
-                1.0
+            let prev_norm = (i > 0).then(|| history.gradient_norms[i - 1]);
+            // Real signed change vs. the previous step -- see the field's
+            // doc comment for why this replaces the old `vec![norm]`
+            // "direction vector".
+            let norm_delta = prev_norm.map(|prev| norm - prev).unwrap_or(0.0);
+            let consistency_score = match prev_norm {
+                Some(prev) => 1.0 - ((norm - prev).abs() / (norm + prev + 1e-8)),
+                None => 1.0,
             };
 
             directions.push(GradientDirection {
                 step,
-                direction_vector,
+                norm_delta,
                 magnitude,
                 consistency_score,
             });
@@ -438,7 +461,11 @@ impl GradientFlowVisualizer {
             let node_type = self.classify_node_type(flow);
             let gradient_strength = flow.gradient_magnitudes.iter().sum::<f64>()
                 / flow.gradient_magnitudes.len() as f64;
-            let connectivity = layer_flows.len(); // Simplified
+            // Every layer is treated as connected to every other, because no
+            // real layer topology is available here (see the edge construction
+            // below): `connectivity` is therefore the same for every node and
+            // carries no per-layer information.
+            let connectivity = layer_flows.len();
             let influence_score = gradient_strength * flow.flow_consistency;
 
             nodes.push(FlowNode {
@@ -450,8 +477,15 @@ impl GradientFlowVisualizer {
             });
         }
 
-        // Create edges (simplified - would need actual layer connectivity information)
-        let layer_names: Vec<String> = layer_flows.keys().cloned().collect();
+        // Edges chain the layers in NAME ORDER, which is an assumption, not
+        // measured topology: `GradientDebugger` records per-layer statistics
+        // keyed by name and never learns which layer feeds which. Name order is
+        // right for the usual `layer_0`, `layer_1`, ... naming and wrong for
+        // any other. It is at least deterministic -- this used to iterate a
+        // `HashMap`, so the "network" was re-wired differently on every run of
+        // the same data.
+        let mut layer_names: Vec<String> = layer_flows.keys().cloned().collect();
+        layer_names.sort();
         for i in 0..layer_names.len().saturating_sub(1) {
             let from_layer = &layer_names[i];
             let to_layer = &layer_names[i + 1];
@@ -537,13 +571,15 @@ impl GradientFlowVisualizer {
     ) -> Vec<CriticalGradientPath> {
         let mut paths = Vec::new();
 
-        // Simplified path identification - would use graph algorithms in practice
+        // The network is a single chain (see `build_gradient_flow_network`), so
+        // there is exactly one path through it and no path SEARCH to perform.
+        // What is real here is the path's composition and its aggregate flow.
         if network.nodes.len() < 2 {
             return paths;
         }
 
         let path_layers: Vec<String> = network.nodes.iter().map(|n| n.layer_name.clone()).collect();
-        let total_flow_strength = network.edges.iter().map(|e| e.flow_strength).sum();
+        let total_flow_strength: f64 = network.edges.iter().map(|e| e.flow_strength).sum();
         let bottleneck_layers: Vec<String> = network
             .nodes
             .iter()
@@ -551,14 +587,28 @@ impl GradientFlowVisualizer {
             .map(|n| n.layer_name.clone())
             .collect();
 
+        // Real criticality: the share of this path's nodes that are
+        // bottlenecks. Previously the constant `0.8`.
+        let criticality_score = bottleneck_layers.len() as f64 / network.nodes.len() as f64;
+        // Real headroom: the mean shortfall of each edge's flow consistency
+        // from a perfectly consistent 1.0, i.e. how much consistency there is
+        // left to gain. Previously the constant `0.6`.
+        let optimization_potential = if network.edges.is_empty() {
+            None
+        } else {
+            let mean_consistency = network.edges.iter().map(|e| e.flow_consistency).sum::<f64>()
+                / network.edges.len() as f64;
+            Some((1.0 - mean_consistency).clamp(0.0, 1.0))
+        };
+
         paths.push(CriticalGradientPath {
             path_id: "main_path".to_string(),
             path_length: path_layers.len(),
             layers: path_layers,
             total_flow_strength,
             bottleneck_layers,
-            criticality_score: 0.8, // Simplified
-            optimization_potential: 0.6,
+            criticality_score,
+            optimization_potential,
         });
 
         paths
@@ -587,7 +637,7 @@ impl GradientFlowVisualizer {
                     extent: RegionExtent {
                         start_layer: layer_name.clone(),
                         end_layer: layer_name.clone(),
-                        affected_parameters: 1000, // Placeholder
+                        affected_parameters: history.parameter_count,
                         duration_steps: history.gradient_norms.len(),
                     },
                     mitigation_suggestions: vec![
@@ -624,7 +674,7 @@ impl GradientFlowVisualizer {
                     extent: RegionExtent {
                         start_layer: layer_name.clone(),
                         end_layer: layer_name.clone(),
-                        affected_parameters: 1000, // Placeholder
+                        affected_parameters: history.parameter_count,
                         duration_steps: history.gradient_norms.len(),
                     },
                     mitigation_suggestions: vec![
@@ -676,5 +726,127 @@ impl GradientFlowVisualizer {
     ) -> GradientFlowVisualization {
         // Use existing methods to generate the visualization
         self.generate_visualization(gradient_histories, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vanishing_history(layer: &str, parameter_count: Option<usize>) -> GradientHistory {
+        let mut history = GradientHistory::new(layer.to_string(), 100);
+        // Average well below the 1e-5 vanishing-gradient threshold used by
+        // `identify_vanishing_regions`.
+        for (i, &norm) in [1e-6, 1e-6, 1e-6].iter().enumerate() {
+            history.gradient_norms.push_back(norm);
+            history.gradient_means.push_back(norm);
+            history.gradient_stds.push_back(0.0);
+            history.step_numbers.push_back(i);
+        }
+        history.parameter_count = parameter_count;
+        history
+    }
+
+    fn exploding_history(layer: &str, parameter_count: Option<usize>) -> GradientHistory {
+        let mut history = GradientHistory::new(layer.to_string(), 100);
+        // Max well above the 100.0 exploding-gradient threshold used by
+        // `identify_exploding_regions`.
+        for (i, &norm) in [10.0, 50.0, 500.0].iter().enumerate() {
+            history.gradient_norms.push_back(norm);
+            history.gradient_means.push_back(norm);
+            history.gradient_stds.push_back(0.0);
+            history.step_numbers.push_back(i);
+        }
+        history.parameter_count = parameter_count;
+        history
+    }
+
+    #[test]
+    fn test_vanishing_region_affected_parameters_none_without_real_count() {
+        let visualizer = GradientFlowVisualizer::new(GradientVisualizationConfig::default());
+        let mut histories = HashMap::new();
+        histories.insert("layer0".to_string(), vanishing_history("layer0", None));
+
+        let regions = visualizer.identify_vanishing_regions(&histories);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions[0].extent.affected_parameters, None,
+            "no parameter count was ever reported for this layer -- must stay an honest None, \
+             never the old hardcoded 1000"
+        );
+    }
+
+    #[test]
+    fn test_vanishing_region_affected_parameters_real_when_reported() {
+        let visualizer = GradientFlowVisualizer::new(GradientVisualizationConfig::default());
+        let mut histories = HashMap::new();
+        histories.insert(
+            "layer0".to_string(),
+            vanishing_history("layer0", Some(4096)),
+        );
+
+        let regions = visualizer.identify_vanishing_regions(&histories);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions[0].extent.affected_parameters,
+            Some(4096),
+            "a real reported parameter count must be carried through, not overwritten"
+        );
+    }
+
+    #[test]
+    fn test_exploding_region_affected_parameters_real_when_reported() {
+        let visualizer = GradientFlowVisualizer::new(GradientVisualizationConfig::default());
+        let mut histories = HashMap::new();
+        histories.insert("layer0".to_string(), exploding_history("layer0", Some(777)));
+
+        let regions = visualizer.identify_exploding_regions(&histories);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].extent.affected_parameters, Some(777));
+    }
+
+    #[test]
+    fn test_exploding_region_affected_parameters_none_without_real_count() {
+        let visualizer = GradientFlowVisualizer::new(GradientVisualizationConfig::default());
+        let mut histories = HashMap::new();
+        histories.insert("layer0".to_string(), exploding_history("layer0", None));
+
+        let regions = visualizer.identify_exploding_regions(&histories);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].extent.affected_parameters, None);
+    }
+
+    #[test]
+    fn test_gradient_direction_norm_delta_is_real_signed_change() {
+        let visualizer = GradientFlowVisualizer::new(GradientVisualizationConfig::default());
+        let mut history = GradientHistory::new("layer0".to_string(), 100);
+        for (i, &norm) in [1.0, 1.5, 0.8].iter().enumerate() {
+            history.gradient_norms.push_back(norm);
+            history.gradient_means.push_back(norm);
+            history.gradient_stds.push_back(0.0);
+            history.step_numbers.push_back(i);
+        }
+
+        let directions = visualizer.compute_gradient_directions(&history);
+        assert_eq!(directions.len(), 3);
+        assert_eq!(
+            directions[0].norm_delta, 0.0,
+            "the first recorded step has no previous value to compare against"
+        );
+        assert!(
+            (directions[1].norm_delta - 0.5).abs() < 1e-12,
+            "1.5 - 1.0 = 0.5, got {}",
+            directions[1].norm_delta
+        );
+        assert!(
+            (directions[2].norm_delta - (-0.7)).abs() < 1e-12,
+            "0.8 - 1.5 = -0.7, got {}",
+            directions[2].norm_delta
+        );
+        // `magnitude` (the pre-existing field) still carries the raw norm;
+        // `norm_delta` must be genuinely different data, not the same
+        // value under a new name.
+        assert_eq!(directions[1].magnitude, 1.5);
+        assert_ne!(directions[1].norm_delta, directions[1].magnitude);
     }
 }

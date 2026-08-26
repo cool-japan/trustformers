@@ -31,7 +31,7 @@ impl fmt::Display for FlashAttnError {
         match self {
             Self::InvalidDimensions { expected, got } => {
                 write!(f, "invalid dimensions: expected {expected}, got {got}")
-            }
+            },
             Self::InvalidBlockSize(msg) => write!(f, "invalid block size: {msg}"),
             Self::SeqLenMismatch => write!(f, "sequence length mismatch between Q and K/V"),
         }
@@ -161,7 +161,13 @@ pub fn naive_attention(
     causal: bool,
 ) -> Vec<f32> {
     // Compute S = Q K^T * scale  [seq_len_q, seq_len_kv]
-    let mut s = matmul(q, &transpose(k, seq_len_kv, head_dim), seq_len_q, head_dim, seq_len_kv);
+    let mut s = matmul(
+        q,
+        &transpose(k, seq_len_kv, head_dim),
+        seq_len_q,
+        head_dim,
+        seq_len_kv,
+    );
 
     // Apply scale
     for v_s in s.iter_mut() {
@@ -347,8 +353,8 @@ pub fn flash_attention_forward(
                         let inv_l = 1.0 / l_new;
                         let old_weight = correction * l[abs_r] * inv_l;
                         for dd in 0..d {
-                            o_h[abs_r * d + dd] = old_weight * o_h[abs_r * d + dd]
-                                + pv[r * d + dd] * inv_l;
+                            o_h[abs_r * d + dd] =
+                                old_weight * o_h[abs_r * d + dd] + pv[r * d + dd] * inv_l;
                         }
                     }
 
@@ -371,6 +377,10 @@ pub fn flash_attention_forward(
 
 // ── Flash Attention Backward ───────────────────────────────────────────────
 
+/// Gradients returned by the Flash Attention backward pass:
+/// `(dq, dk, dv)`, each laid out like its corresponding forward input.
+pub type FlashAttentionGradients = (Vec<f32>, Vec<f32>, Vec<f32>);
+
 /// Simplified Flash Attention backward pass.
 ///
 /// Recomputes the attention weights from Q, K, V and the saved output O, then
@@ -389,7 +399,7 @@ pub fn flash_attention_backward(
     config: &FlashAttentionConfig,
     seq_len_q: usize,
     seq_len_kv: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), FlashAttnError> {
+) -> Result<FlashAttentionGradients, FlashAttnError> {
     let h = config.num_heads;
     let d = config.head_dim;
 
@@ -398,19 +408,34 @@ pub fn flash_attention_backward(
     let expected_kv = seq_len_kv * h * d;
 
     if q.len() != expected_q {
-        return Err(FlashAttnError::InvalidDimensions { expected: expected_q, got: q.len() });
+        return Err(FlashAttnError::InvalidDimensions {
+            expected: expected_q,
+            got: q.len(),
+        });
     }
     if k.len() != expected_kv {
-        return Err(FlashAttnError::InvalidDimensions { expected: expected_kv, got: k.len() });
+        return Err(FlashAttnError::InvalidDimensions {
+            expected: expected_kv,
+            got: k.len(),
+        });
     }
     if v.len() != expected_kv {
-        return Err(FlashAttnError::InvalidDimensions { expected: expected_kv, got: v.len() });
+        return Err(FlashAttnError::InvalidDimensions {
+            expected: expected_kv,
+            got: v.len(),
+        });
     }
     if o.len() != expected_q {
-        return Err(FlashAttnError::InvalidDimensions { expected: expected_q, got: o.len() });
+        return Err(FlashAttnError::InvalidDimensions {
+            expected: expected_q,
+            got: o.len(),
+        });
     }
     if do_.len() != expected_q {
-        return Err(FlashAttnError::InvalidDimensions { expected: expected_q, got: do_.len() });
+        return Err(FlashAttnError::InvalidDimensions {
+            expected: expected_q,
+            got: do_.len(),
+        });
     }
 
     let scale = config.scale;
@@ -490,7 +515,13 @@ pub fn flash_attention_backward(
 ///
 /// Input layout: `[seq_len, num_heads, head_dim]`
 /// Output: `[seq_len, head_dim]`  (contiguous, row-major)
-fn extract_head(data: &[f32], seq_len: usize, num_heads: usize, head_dim: usize, head: usize) -> Vec<f32> {
+fn extract_head(
+    data: &[f32],
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    head: usize,
+) -> Vec<f32> {
     let mut out = vec![0.0_f32; seq_len * head_dim];
     for i in 0..seq_len {
         for d in 0..head_dim {
@@ -501,7 +532,14 @@ fn extract_head(data: &[f32], seq_len: usize, num_heads: usize, head_dim: usize,
 }
 
 /// Write a single head's data back into interleaved layout.
-fn insert_head(data: &mut [f32], head_data: &[f32], seq_len: usize, num_heads: usize, head_dim: usize, head: usize) {
+fn insert_head(
+    data: &mut [f32],
+    head_data: &[f32],
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    head: usize,
+) {
     for i in 0..seq_len {
         for d in 0..head_dim {
             data[i * num_heads * head_dim + head * head_dim + d] = head_data[i * head_dim + d];
@@ -518,9 +556,7 @@ mod tests {
     // Helper: build a small random-ish deterministic tensor
     fn make_tensor(seq: usize, heads: usize, dim: usize, seed: f32) -> Vec<f32> {
         let n = seq * heads * dim;
-        (0..n)
-            .map(|i| ((i as f32 * seed * 0.1).sin() * 0.5 + 0.5) * 0.2)
-            .collect()
+        (0..n).map(|i| ((i as f32 * seed * 0.1).sin() * 0.5 + 0.5) * 0.2).collect()
     }
 
     // Helper: compare two slices within tolerance
@@ -572,8 +608,7 @@ mod tests {
         config.block_size_q = 3;
         config.block_size_kv = 3;
 
-        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("forward");
+        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("forward");
 
         // Naive (single head, no interleaving needed for heads=1)
         let naive_out = naive_attention(&q, &k, &v, config.scale, seq, seq, dim, false);
@@ -598,8 +633,7 @@ mod tests {
         config.block_size_q = 4;
         config.block_size_kv = 4;
 
-        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("forward");
+        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("forward");
 
         let naive_out = naive_attention(&q, &k, &v, config.scale, seq, seq, dim, true);
 
@@ -649,8 +683,8 @@ mod tests {
         config.block_size_q = 1;
         config.block_size_kv = 1;
 
-        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("block_size=1 forward");
+        let flash_out =
+            flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("block_size=1 forward");
 
         let naive_out = naive_attention(&q, &k, &v, config.scale, seq, seq, dim, true);
 
@@ -677,12 +711,7 @@ mod tests {
 
             let naive_out = naive_attention(&q, &k, &v, config.scale, seq, seq, dim, false);
 
-            assert_close(
-                &flash_out,
-                &naive_out,
-                1e-4,
-                &format!("head_dim={dim}"),
-            );
+            assert_close(&flash_out, &naive_out, 1e-4, &format!("head_dim={dim}"));
         }
     }
 
@@ -703,8 +732,8 @@ mod tests {
         config.block_size_q = 3;
         config.block_size_kv = 3;
 
-        let flash_out = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("multi-head forward");
+        let flash_out =
+            flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("multi-head forward");
 
         // Verify each head independently
         for h in 0..heads {
@@ -787,18 +816,16 @@ mod tests {
         // Use all-ones dO (loss = sum of outputs)
         let do_ = vec![1.0_f32; o.len()];
 
-        let (_, _, dv) = flash_attention_backward(
-            &q, &k, &v, &o, &do_, &config, seq, seq,
-        )
-        .expect("backward");
+        let (_, _, dv) =
+            flash_attention_backward(&q, &k, &v, &o, &do_, &config, seq, seq).expect("backward");
 
         // Finite-difference check for dV: d(sum(O))/dV[i]
         // We check just the first few elements
         for idx in 0..(seq * heads * dim).min(8) {
             let mut v_plus = v.clone();
             v_plus[idx] += eps;
-            let o_plus = flash_attention_forward(&q, &k, &v_plus, &config, seq, seq)
-                .expect("forward+");
+            let o_plus =
+                flash_attention_forward(&q, &k, &v_plus, &config, seq, seq).expect("forward+");
 
             let loss_plus: f32 = o_plus.iter().sum();
             let loss_base: f32 = o.iter().sum();
@@ -838,12 +865,12 @@ mod tests {
         let mut config = FlashAttentionConfig::new(dim, heads);
         config.causal = true;
 
-        let out_causal = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("causal forward");
+        let out_causal =
+            flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("causal forward");
 
         config.causal = false;
-        let out_no_causal = flash_attention_forward(&q, &k, &v, &config, seq, seq)
-            .expect("non-causal forward");
+        let out_no_causal =
+            flash_attention_forward(&q, &k, &v, &config, seq, seq).expect("non-causal forward");
 
         // First token output should differ significantly between causal/non-causal
         let first_token_causal: f32 = out_causal[..dim].iter().sum();

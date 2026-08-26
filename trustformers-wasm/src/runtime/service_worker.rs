@@ -16,7 +16,27 @@ use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{CacheStorage, MessageEvent, Navigator, ServiceWorkerRegistration};
+use web_sys::{CacheStorage, MessageChannel, MessageEvent, Navigator, ServiceWorkerRegistration};
+
+/// How long [`ServiceWorkerManager::send_message_internal`] waits for the
+/// Service Worker to respond over the `MessageChannel` before giving up.
+/// Without a timeout, a Service Worker that never posts a reply (a bug on
+/// its side, or one that simply doesn't implement the expected protocol)
+/// would hang every caller forever - exactly the bug this module used to
+/// have unconditionally (the response promise's resolver was never wired
+/// up to anything, so the awaited future never completed even in the
+/// non-buggy case).
+const SERVICE_WORKER_RESPONSE_TIMEOUT_MS: i32 = 15_000;
+
+// Regression guard, checked at compile time: a `<= 0` timeout would fire
+// immediately or schedule nothing at all (per the `setTimeout` spec, values
+// <= 0 run "as soon as possible"), silently reintroducing an
+// effective hang-or-instant-fail. A multi-second value is a real,
+// deliberate choice, not a leftover placeholder like the old dead closure
+// was.
+const _: () = assert!(
+    SERVICE_WORKER_RESPONSE_TIMEOUT_MS > 1_000 && SERVICE_WORKER_RESPONSE_TIMEOUT_MS <= 60_000
+);
 
 /// Service Worker message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +180,19 @@ impl ServiceWorkerManager {
     }
 
     /// Send a message to the Service Worker (private - use specific methods instead)
+    ///
+    /// Uses a real `MessageChannel`: `port2` is transferred to the worker
+    /// alongside the message, and `port1`'s `onmessage` handler is wired up
+    /// *before* the message is posted, so the worker's reply (sent back via
+    /// `port2.postMessage(...)`) actually resolves this call's promise.
+    ///
+    /// Previously the response `Promise`'s `resolve` callback was wrapped in
+    /// a `Closure` that was immediately `.forget()`-ed without ever being
+    /// registered as a listener on anything - so `resolve` could never be
+    /// called and every caller of this method hung forever. A `reject` path
+    /// and [`SERVICE_WORKER_RESPONSE_TIMEOUT_MS`] timeout are added so an
+    /// unresponsive or protocol-incompatible worker now surfaces a real
+    /// error instead of hanging.
     async fn send_message_internal(
         &self,
         message: ServiceWorkerMessage,
@@ -168,19 +201,49 @@ impl ServiceWorkerManager {
 
         let active_worker = registration.active().ok_or("No active Service Worker")?;
 
-        let message_js = to_value(&message)?;
-        active_worker.post_message(&message_js)?;
+        let channel = MessageChannel::new()?;
+        let port1 = channel.port1();
+        let port2 = channel.port2();
 
-        // Wait for response
-        let response_promise = Promise::new(&mut |resolve, _reject| {
-            let closure = Closure::wrap(Box::new(move |event: MessageEvent| {
-                let _ = resolve.call1(&JsValue::UNDEFINED, &event.data());
-            }) as Box<dyn FnMut(_)>);
+        let response_promise = Promise::new(&mut |resolve, reject| {
+            let resolve_for_message = resolve.clone();
+            let on_message = Closure::once(Box::new(move |event: MessageEvent| {
+                let _ = resolve_for_message.call1(&JsValue::UNDEFINED, &event.data());
+            }) as Box<dyn FnOnce(MessageEvent)>);
+            port1.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+            // The closure must outlive this `Promise::new` callback - it is
+            // invoked later, asynchronously, when the worker replies. It is
+            // intentionally leaked (matches the `Closure::forget` pattern
+            // used throughout this crate for long-lived event listeners);
+            // `port1` itself is dropped once the message round-trip
+            // completes or times out.
+            on_message.forget();
 
-            // Set up message listener
-            // In a real implementation, this would properly handle the response
-            closure.forget();
+            // Give up (reject, not hang) if the worker never replies.
+            if let Some(window) = web_sys::window() {
+                let reject_for_timeout = reject.clone();
+                let on_timeout = Closure::once(Box::new(move || {
+                    let _ = reject_for_timeout.call1(
+                        &JsValue::UNDEFINED,
+                        &JsValue::from_str(
+                            "Service Worker did not respond within the timeout window",
+                        ),
+                    );
+                }) as Box<dyn FnOnce()>);
+                let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    on_timeout.as_ref().unchecked_ref(),
+                    SERVICE_WORKER_RESPONSE_TIMEOUT_MS,
+                );
+                on_timeout.forget();
+            }
         });
+
+        let message_js = to_value(&message)?;
+        // Post the request together with the transferred `port2` only after
+        // the reply listener above is wired up, so no reply can race ahead
+        // of the listener being ready.
+        let transfer = js_sys::Array::of1(&port2);
+        active_worker.post_message_with_transferable(&message_js, &transfer.into())?;
 
         let response_data = JsFuture::from(response_promise).await?;
         let response: ServiceWorkerResponse = from_value(response_data)?;
@@ -506,5 +569,90 @@ impl PWAInstaller {
 impl Default for PWAInstaller {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `ServiceWorkerManager::send_message_internal` (the function actually
+    // fixed here) is not natively testable: it is built entirely from
+    // `web_sys`/`js_sys` types (`MessageChannel`, `ServiceWorkerRegistration`,
+    // `Window::set_timeout_with_callback_and_timeout_and_arguments_0`, ...)
+    // that panic ("cannot call wasm-bindgen imported functions on non-wasm
+    // targets") the moment they are constructed outside a real browser/JS
+    // engine, and this crate has no such engine available in its native
+    // test environment (see the crate-wide "String-error inner function /
+    // JsValue-wrapping outer function" pattern used elsewhere for functions
+    // that *can* be split that way - this one cannot, since the entire
+    // function body is inherently browser-API calls). What *is* pure logic
+    // - the message/response protocol's serialization shape, and the
+    // timeout constant - is covered below.
+
+    #[test]
+    fn test_service_worker_message_json_round_trips_through_serde_wasm_bindgen_shape() {
+        // `send_message_internal` serializes a `ServiceWorkerMessage` with
+        // `serde_wasm_bindgen::to_value` and expects the worker's reply to
+        // deserialize back into a `ServiceWorkerResponse` the same way.
+        // `serde_json` round-tripping (used here since there is no JS
+        // engine natively) exercises the same serde `Serialize`/
+        // `Deserialize` derive that `serde_wasm_bindgen` relies on, so a
+        // change that broke the wire shape (e.g. an incompatible enum
+        // representation) would be caught here too.
+        let message = ServiceWorkerMessage::BackgroundInference {
+            model_key: "gpt2-tiny".to_string(),
+            input_data: vec![0.1, 0.2, 0.3],
+            config: InferenceConfig {
+                max_tokens: Some(64),
+                temperature: Some(0.8),
+                batch_size: None,
+                use_cache: true,
+            },
+        };
+
+        let json = serde_json::to_string(&message).expect("message should serialize");
+        let round_tripped: ServiceWorkerMessage =
+            serde_json::from_str(&json).expect("message should deserialize");
+
+        match round_tripped {
+            ServiceWorkerMessage::BackgroundInference {
+                model_key,
+                input_data,
+                config,
+            } => {
+                assert_eq!(model_key, "gpt2-tiny");
+                assert_eq!(input_data, vec![0.1, 0.2, 0.3]);
+                assert_eq!(config.max_tokens, Some(64));
+                assert!(config.use_cache);
+            },
+            other => panic!("round-tripped into the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_service_worker_response_error_variant_round_trips() {
+        let response = ServiceWorkerResponse::Error {
+            message: "Service Worker did not respond within the timeout window".to_string(),
+            error_type: "Timeout".to_string(),
+        };
+
+        let json = serde_json::to_string(&response).expect("response should serialize");
+        let round_tripped: ServiceWorkerResponse =
+            serde_json::from_str(&json).expect("response should deserialize");
+
+        match round_tripped {
+            ServiceWorkerResponse::Error {
+                message,
+                error_type,
+            } => {
+                assert_eq!(
+                    message,
+                    "Service Worker did not respond within the timeout window"
+                );
+                assert_eq!(error_type, "Timeout");
+            },
+            other => panic!("round-tripped into the wrong variant: {other:?}"),
+        }
     }
 }

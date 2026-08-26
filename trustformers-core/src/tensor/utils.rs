@@ -71,7 +71,7 @@ impl Tensor {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 // Use buffer_id as a unique identifier for Metal tensors
-                data.buffer_id.hash(&mut hasher);
+                data.buffer_id().hash(&mut hasher);
                 self.len().hash(&mut hasher);
             },
             #[cfg(feature = "cuda")]
@@ -105,8 +105,6 @@ impl Tensor {
             Tensor::CF16(a) => a.shape().to_vec(),
             Tensor::CBF16(a) => a.shape().to_vec(),
             Tensor::Sparse(s) => s.shape().to_vec(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.shape().dims().to_vec(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.clone(),
             #[cfg(feature = "cuda")]
@@ -131,8 +129,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len(),
             Tensor::CBF16(a) => a.len(),
             Tensor::Sparse(s) => s.nnz(), // Non-zero elements for sparse tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.iter().product(),
             #[cfg(feature = "cuda")]
@@ -175,8 +171,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.nnz() * std::mem::size_of::<f32>(), // Simplified estimate
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 let num_elements: usize = data.shape.iter().product();
@@ -336,16 +330,16 @@ impl Tensor {
                 #[cfg(debug_assertions)]
                 {
                     // Debug: Verify data_vec before GPU upload (only in debug builds)
-                    eprintln!(
+                    tracing::debug!(
                         "🔍 to_device_enum(F32→Metal): data_vec.len()={}",
                         data_vec.len()
                     );
                     if !data_vec.is_empty() {
-                        eprintln!(
+                        tracing::debug!(
                             "🔍 to_device_enum: first 10 values: {:?}",
                             &data_vec[..10.min(data_vec.len())]
                         );
-                        eprintln!(
+                        tracing::debug!(
                             "🔍 to_device_enum: stats - min={:.4}, max={:.4}, mean={:.4}",
                             data_vec.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
                             data_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
@@ -358,22 +352,23 @@ impl Tensor {
 
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!("🔍 to_device_enum: Created buffer_id={:?}", buffer_id);
+                    tracing::debug!("🔍 to_device_enum: Created buffer_id={:?}", buffer_id);
 
                     // Verify by immediately downloading (GPU→CPU transfer - expensive!)
                     let verify_data = backend.download_buffer_to_vec(&buffer_id)?;
-                    eprintln!(
+                    tracing::debug!(
                         "🔍 to_device_enum: Verification download - len={}, first 10: {:?}",
                         verify_data.len(),
                         &verify_data[..10.min(verify_data.len())]
                     );
                 }
 
-                Ok(Tensor::Metal(super::MetalTensorData {
+                Ok(Tensor::Metal(super::MetalTensorData::new(
+                    &backend,
                     buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                    arr.shape().to_vec(),
+                    DType::F32,
+                )?))
             },
 
             // F64 → Metal (convert to F32 first)
@@ -383,28 +378,60 @@ impl Tensor {
                 let backend = get_metal_backend()?;
                 let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
                 let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                Ok(Tensor::Metal(super::MetalTensorData {
+                Ok(Tensor::Metal(super::MetalTensorData::new(
+                    &backend,
                     buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                    arr.shape().to_vec(),
+                    DType::F32,
+                )?))
             },
 
             // Metal → F32
+            //
+            // This is the primary public GPU→CPU path (`LayerNorm`'s Metal
+            // fallback and the GPT-2 model core both reach the host through it),
+            // so it must not read the buffer by hand. It used to do exactly that:
+            // `buffer.contents() as *const f32` followed by an unchecked
+            // `from_raw_parts(ptr, shape.iter().product())`, with
+            //
+            //   * **no flush** - kernel wrappers commit asynchronously, so the
+            //     producing dispatch was routinely still in flight. Freshly
+            //     allocated `StorageModeShared` buffers read as zeroes, so a
+            //     forward pass read back all-zero logits instead of its result;
+            //   * **no null check** - `contents()` is null for
+            //     `StorageModePrivate`;
+            //   * **no bounds check** - `size` came from the tensor's shape and was
+            //     never compared against `buffer.length()`, so a shape that
+            //     over-stated the buffer read out of bounds (undefined behaviour).
+            //
+            // `download_buffer_to_vec` does all three: it flushes, refuses
+            // storage modes that have no CPU mapping, rejects a null mapping, and
+            // sizes the slice from `buffer.length()` itself.
             #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(metal_data), crate::device::Device::CPU) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
-                let buffer = backend.get_persistent_buffer(&metal_data.buffer_id)?;
-
-                // Download from GPU
-                let size: usize = metal_data.shape.iter().product();
 
                 // Handle different dtypes
                 match metal_data.dtype {
                     DType::F32 => {
-                        let ptr = buffer.contents() as *const f32;
-                        let data_vec = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+                        let size: usize = metal_data.shape.iter().product();
+                        let mut data_vec =
+                            backend.download_buffer_to_vec(&metal_data.buffer_id())?;
+                        if data_vec.len() < size {
+                            return Err(TrustformersError::shape_error(format!(
+                                "Metal tensor claims shape {:?} ({} elements) but its buffer \
+                                 {:?} only holds {} f32 values",
+                                metal_data.shape,
+                                size,
+                                metal_data.buffer_id(),
+                                data_vec.len()
+                            )));
+                        }
+                        // Buffers may be allocated larger than the tensor that
+                        // occupies them (pool reuse rounds sizes up), so keep only
+                        // the elements the shape actually covers.
+                        data_vec.truncate(size);
 
                         // Convert to ArrayD
                         use scirs2_core::ndarray::ArrayD;
@@ -427,12 +454,30 @@ impl Tensor {
                 }
             },
 
-            // Metal → Metal (different device, currently just clone)
+            // Metal → Metal
             #[cfg(all(target_os = "macos", feature = "metal"))]
-            (Tensor::Metal(metal_data), crate::device::Device::Metal(_)) => {
-                // For now, just return a clone (buffer is reference counted)
-                // TODO: Implement actual device-to-device transfer if needed
-                Ok(Tensor::Metal(metal_data.clone()))
+            (Tensor::Metal(metal_data), crate::device::Device::Metal(target_device)) => {
+                // The Metal backend is a process-wide singleton bound to the system
+                // default device (see `gpu_ops::metal::get_metal_backend`), so the
+                // only reachable ordinal is `METAL_DEFAULT_DEVICE`. Requesting any
+                // other ordinal used to return a clone of the *source* buffer,
+                // silently reporting a transfer that never happened; report the
+                // unsupported request instead.
+                const METAL_DEFAULT_DEVICE: usize = 0;
+                if *target_device == METAL_DEFAULT_DEVICE {
+                    // Same device: the clone shares the same reference-counted
+                    // resident buffer (no copy, refcount increment only).
+                    Ok(Tensor::Metal(metal_data.clone()))
+                } else {
+                    Err(TrustformersError::hardware_error(
+                        &format!(
+                            "Metal device-to-device transfer to ordinal {} is not supported: \
+                             the Metal backend exposes only the system default device (ordinal {})",
+                            target_device, METAL_DEFAULT_DEVICE
+                        ),
+                        "to_device_enum",
+                    ))
+                }
             },
 
             // Already on correct device - no-op
@@ -872,8 +917,6 @@ impl Tensor {
             | Tensor::CF16(_)
             | Tensor::CBF16(_) => "cpu".to_string(),
             Tensor::Sparse(_) => "cpu".to_string(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => format!("{:?}", t.device()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => "metal".to_string(),
             #[cfg(feature = "cuda")]
@@ -907,8 +950,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.memory_usage(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count() * 4, // Approximate
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(m) => m.shape.iter().product::<usize>() * 4, // Approximate as f32
             #[cfg(feature = "cuda")]
@@ -933,8 +974,6 @@ impl Tensor {
             Tensor::CF16(_) => DType::CF16,
             Tensor::CBF16(_) => DType::CBF16,
             Tensor::Sparse(_) => DType::F32, // Sparse tensors use f32 by default
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => DType::F32, // Default assumption
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.dtype,
             #[cfg(feature = "cuda")]

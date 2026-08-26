@@ -343,10 +343,12 @@ impl DistributedAveragedAdam {
                     compressed_for_decompression.insert(
                         name.clone(),
                         CompressedGradient {
-                            indices: (0..tensor.len()).collect(),
+                            // Dense payload: no index list, raw f32 values.
+                            indices: Vec::new(),
                             values: tensor.data()?.to_vec(),
                             original_size: tensor.len(),
                             compression_ratio: 1.0,
+                            value_bits: 32,
                         },
                     );
                 }

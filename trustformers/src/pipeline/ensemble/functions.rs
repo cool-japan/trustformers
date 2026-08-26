@@ -2,7 +2,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::error::{Result, TrustformersError};
+use crate::error::Result;
 
 use super::types::ModelSelectionStrategy;
 use super::types_3::EnsemblePipeline;

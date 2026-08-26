@@ -187,21 +187,75 @@ impl ProtobufSerializer {
             )
     }
 
-    /// Convert tokenized input to protobuf format
+    /// Convert tokenized input to protobuf format.
+    ///
+    /// Every field the input actually carries is carried across. This used to
+    /// hardcode `special_tokens_mask`/`offset_mapping` to empty with the
+    /// comments "Would need to be computed" / "Would need offset information"
+    /// and `num_truncated_tokens` to `0`; all three are now taken from the
+    /// input, which really does supply them (`WordPieceTokenizer` populates
+    /// the special-tokens mask, and both it and `BPETokenizer` populate the
+    /// offset mapping on every encode). An absent optional field still
+    /// serializes to the empty vector, which is protobuf's own encoding of
+    /// "not present" and is what [`Self::deserialize_tokenized_input`] reads
+    /// back as `None`.
     pub fn serialize_tokenized_input(input: &TokenizedInput) -> ProtobufTokenizedInput {
+        let overflowing = input.overflowing_tokens.clone().unwrap_or_default();
         ProtobufTokenizedInput {
             input_ids: input.input_ids.clone(),
             attention_mask: input.attention_mask.iter().map(|&x| x as u32).collect(),
             token_type_ids: input.token_type_ids.clone().unwrap_or_default(),
-            special_tokens_mask: vec![], // Would need to be computed
-            offset_mapping: vec![],      // Would need offset information
-            overflowing_tokens: vec![],
-            num_truncated_tokens: 0,
+            special_tokens_mask: input
+                .special_tokens_mask
+                .as_ref()
+                .map(|mask| mask.iter().map(|&flag| flag as u32).collect())
+                .unwrap_or_default(),
+            offset_mapping: input
+                .offset_mapping
+                .as_ref()
+                .map(|offsets| {
+                    offsets
+                        .iter()
+                        .map(|&(start, end)| ProtobufOffset {
+                            start: start as u32,
+                            end: end as u32,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            num_truncated_tokens: overflowing.len() as u32,
+            // `TokenizedInput` holds the dropped tokens as a flat id list while
+            // the protobuf shape is a list of whole nested inputs, so the ids
+            // travel as one nested input carrying nothing but them. Empty in,
+            // empty out.
+            overflowing_tokens: if overflowing.is_empty() {
+                vec![]
+            } else {
+                vec![ProtobufTokenizedInput {
+                    input_ids: overflowing,
+                    attention_mask: vec![],
+                    token_type_ids: vec![],
+                    special_tokens_mask: vec![],
+                    offset_mapping: vec![],
+                    overflowing_tokens: vec![],
+                    num_truncated_tokens: 0,
+                }]
+            },
         }
     }
 
-    /// Convert protobuf tokenized input back to standard format
+    /// Convert protobuf tokenized input back to standard format.
+    ///
+    /// The inverse of [`Self::serialize_tokenized_input`] for every field:
+    /// an empty vector reads back as `None` (protobuf has no other way to say
+    /// "absent"), a non-empty one as `Some`.
     pub fn deserialize_tokenized_input(protobuf_input: &ProtobufTokenizedInput) -> TokenizedInput {
+        let overflowing: Vec<u32> = protobuf_input
+            .overflowing_tokens
+            .iter()
+            .flat_map(|nested| nested.input_ids.iter().copied())
+            .collect();
+
         TokenizedInput {
             input_ids: protobuf_input.input_ids.clone(),
             attention_mask: protobuf_input.attention_mask.iter().map(|&x| x as u8).collect(),
@@ -210,9 +264,23 @@ impl ProtobufSerializer {
             } else {
                 Some(protobuf_input.token_type_ids.clone())
             },
-            special_tokens_mask: None,
-            offset_mapping: None,
-            overflowing_tokens: None,
+            special_tokens_mask: if protobuf_input.special_tokens_mask.is_empty() {
+                None
+            } else {
+                Some(protobuf_input.special_tokens_mask.iter().map(|&flag| flag as u8).collect())
+            },
+            offset_mapping: if protobuf_input.offset_mapping.is_empty() {
+                None
+            } else {
+                Some(
+                    protobuf_input
+                        .offset_mapping
+                        .iter()
+                        .map(|offset| (offset.start as usize, offset.end as usize))
+                        .collect(),
+                )
+            },
+            overflowing_tokens: if overflowing.is_empty() { None } else { Some(overflowing) },
         }
     }
 
@@ -567,9 +635,9 @@ impl ProtobufExporter {
         if self.config.validate_output {
             let warnings = ProtobufSerializer::validate_model(model)?;
             if !warnings.is_empty() {
-                eprintln!("Validation warnings:");
+                tracing::warn!("Validation warnings:");
                 for warning in warnings {
-                    eprintln!("  - {}", warning);
+                    tracing::warn!("  - {}", warning);
                 }
             }
         }
@@ -701,6 +769,42 @@ mod tests {
         assert_eq!(input.input_ids, converted_back.input_ids);
         assert_eq!(input.attention_mask, converted_back.attention_mask);
         assert_eq!(input.token_type_ids, converted_back.token_type_ids);
+        // Absent optional fields stay absent rather than becoming empty vectors.
+        assert_eq!(converted_back.special_tokens_mask, None);
+        assert_eq!(converted_back.offset_mapping, None);
+        assert_eq!(converted_back.overflowing_tokens, None);
+    }
+
+    /// Regression: `serialize_tokenized_input` used to drop the offset
+    /// mapping, the special-tokens mask and the overflowing tokens outright
+    /// ("Would need offset information"), and to report `num_truncated_tokens`
+    /// as a hardcoded `0`. Every one of those is really present on the input
+    /// now that the WordPiece and BPE encoders populate them.
+    #[test]
+    fn test_tokenized_input_conversion_carries_offsets_and_masks() {
+        let input = TokenizedInput {
+            input_ids: vec![2, 7, 9, 3],
+            attention_mask: vec![1, 1, 1, 1],
+            token_type_ids: Some(vec![0, 0, 0, 0]),
+            special_tokens_mask: Some(vec![1, 0, 0, 1]),
+            offset_mapping: Some(vec![(0, 0), (0, 5), (6, 11), (0, 0)]),
+            overflowing_tokens: Some(vec![42, 43]),
+        };
+
+        let protobuf_input = ProtobufSerializer::serialize_tokenized_input(&input);
+        assert_eq!(protobuf_input.offset_mapping.len(), 4);
+        assert_eq!(protobuf_input.offset_mapping[1].start, 0);
+        assert_eq!(protobuf_input.offset_mapping[1].end, 5);
+        assert_eq!(protobuf_input.special_tokens_mask, vec![1, 0, 0, 1]);
+        assert_eq!(protobuf_input.num_truncated_tokens, 2);
+
+        let converted_back = ProtobufSerializer::deserialize_tokenized_input(&protobuf_input);
+        assert_eq!(converted_back.offset_mapping, input.offset_mapping);
+        assert_eq!(
+            converted_back.special_tokens_mask,
+            input.special_tokens_mask
+        );
+        assert_eq!(converted_back.overflowing_tokens, input.overflowing_tokens);
     }
 
     #[test]

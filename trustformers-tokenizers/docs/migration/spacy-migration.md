@@ -1,17 +1,14 @@
 # Migrating from spaCy Tokenizers to TrustformeRS
 
+> **Accuracy note (2026-08-24):** the `migration/tiktoken-migration.md` guide in this same directory was found to describe roughly 30 methods/types that don't exist on the real `TiktokenTokenizer` and was rewritten from the real source to fix it. A same-pattern grep of this file (not a full method-by-method audit) turns up about 2 hits of the same kind — API calls, config structs, or helper types below that were not individually checked against `trustformers-tokenizers/src/`. Verify any specific method name you plan to depend on against the source before relying on it; do not assume the presence of a name here means it exists in the crate.
+
 This guide will help you migrate from spaCy's tokenization system to TrustformeRS Tokenizers while maintaining compatibility with NLP pipelines and gaining significant performance improvements for large-scale text processing.
 
 ## Why Migrate from spaCy Tokenizers?
 
 ### Performance Benefits
-| Metric | spaCy | TrustformeRS Tokenizers | Improvement |
-|--------|-------|-------------------------|-------------|
-| **Tokenization Speed** | 100K tokens/sec | 1.2M tokens/sec | **1200% faster** |
-| **Memory Usage** | 150MB baseline | 55MB baseline | **63% less memory** |
-| **Binary Size** | 50MB | 18MB | **64% smaller** |
-| **Cold Start Time** | 800ms | 120ms | **85% faster startup** |
-| **Batch Processing** | 300K tokens/sec | 4.5M tokens/sec | **1500% faster batching** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and startup-time figures presented as a measured comparison against spaCy. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (1.2M tokens/sec here, 1.1M in the tiktoken guide, 1.3M in the Fairseq guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real spaCy installation on your own hardware.
 
 ### Feature Advantages
 - **Pure tokenization focus** without linguistic overhead

@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Deployment Strategies
 //!
 //! Handles canary deployments, blue-green deployments, and A/B testing for model rollouts.
@@ -14,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
-    time::Duration,
 };
 use uuid::Uuid;
 
@@ -209,12 +205,97 @@ pub struct DeploymentManager {
     ab_tests: Arc<RwLock<HashMap<String, ABTestDeployment>>>,
     /// Traffic router for directing requests
     traffic_router: Arc<TrafficRouter>,
+    /// Real per-model request counters, the sole source of canary metrics.
+    metrics: Arc<DeploymentMetricsRegistry>,
+    /// Validators available to `run_validation_check`, keyed by check name.
+    validators: Arc<RwLock<HashMap<String, Arc<dyn DeploymentValidator>>>>,
+}
+
+/// Live per-model request counters recorded by the serving path.
+///
+/// Canary decisions read exclusively from here, so a promotion can only happen
+/// on traffic that was genuinely served.
+#[derive(Debug, Default)]
+pub struct DeploymentMetricsRegistry {
+    counters: RwLock<HashMap<String, ModelRequestCounters>>,
+}
+
+/// Accumulated outcomes for one model.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelRequestCounters {
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub total_latency_ms: f64,
+}
+
+impl ModelRequestCounters {
+    /// Fraction of requests that succeeded, or `None` when nothing was served.
+    pub fn success_rate(&self) -> Option<f32> {
+        if self.total_requests == 0 {
+            None
+        } else {
+            Some(self.successful_requests as f32 / self.total_requests as f32)
+        }
+    }
+
+    /// Fraction of requests that failed, or `None` when nothing was served.
+    pub fn error_rate(&self) -> Option<f32> {
+        if self.total_requests == 0 {
+            None
+        } else {
+            Some(self.failed_requests as f32 / self.total_requests as f32)
+        }
+    }
+
+    /// Mean latency, or `None` when nothing was served.
+    pub fn avg_latency_ms(&self) -> Option<f32> {
+        if self.total_requests == 0 {
+            None
+        } else {
+            Some((self.total_latency_ms / self.total_requests as f64) as f32)
+        }
+    }
+}
+
+impl DeploymentMetricsRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one served request against `model_id`.
+    pub fn record_request(&self, model_id: &str, success: bool, latency_ms: f64) {
+        let mut counters = self.counters.write().unwrap_or_else(|p| p.into_inner());
+        let entry = counters.entry(model_id.to_string()).or_default();
+        entry.total_requests += 1;
+        if success {
+            entry.successful_requests += 1;
+        } else {
+            entry.failed_requests += 1;
+        }
+        entry.total_latency_ms += latency_ms;
+    }
+
+    /// Counters for `model_id`, or `None` when it has served nothing.
+    pub fn counters_for(&self, model_id: &str) -> Option<ModelRequestCounters> {
+        let counters = self.counters.read().unwrap_or_else(|p| p.into_inner());
+        counters.get(model_id).cloned()
+    }
+}
+
+/// Runs one named pre-promotion validation check against a model.
+#[async_trait::async_trait]
+pub trait DeploymentValidator: Send + Sync + std::fmt::Debug {
+    /// Execute the check. Returning `Err` marks the check as failed.
+    async fn validate(&self, model_id: &str) -> ModelResult<ValidationResult>;
 }
 
 impl DeploymentManager {
     /// Create a new deployment manager
     pub fn new() -> Self {
         Self {
+            metrics: Arc::new(DeploymentMetricsRegistry::new()),
+            validators: Arc::new(RwLock::new(HashMap::new())),
             canary_deployments: Arc::new(RwLock::new(HashMap::new())),
             blue_green_deployments: Arc::new(RwLock::new(HashMap::new())),
             ab_tests: Arc::new(RwLock::new(HashMap::new())),
@@ -321,8 +402,14 @@ impl DeploymentManager {
         Ok(())
     }
 
-    /// Evaluate current canary step and decide whether to continue
-    async fn evaluate_canary_step(&self, deployment_id: &str) -> ModelResult<()> {
+    /// Evaluate the current canary step and decide whether to continue.
+    ///
+    /// Nothing in this crate schedules this: there is no background progression
+    /// loop, so the operator (or whatever owns the deployment cadence) calls it
+    /// when a step's soak time is up. Metrics come from
+    /// [`Self::collect_canary_metrics`], which fails loudly when either side has
+    /// served no requests, so a step is never judged against invented numbers.
+    pub async fn evaluate_canary_step(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
             let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
             deployments
@@ -333,8 +420,13 @@ impl DeploymentManager {
                 })?
         };
 
-        // Get current metrics (placeholder - would collect real metrics)
-        let metrics = self.collect_canary_metrics(&deployment.model_id).await?;
+        // Metrics come from the real request counters for the canary and its
+        // baseline; if either has served nothing, evaluation fails loudly.
+        let baseline_id = self
+            .traffic_router
+            .baseline_for(&deployment.model_id)
+            .unwrap_or_else(|| format!("{}-baseline", deployment.model_id));
+        let metrics = self.collect_canary_metrics(&deployment.model_id, &baseline_id).await?;
         deployment.metrics = metrics;
 
         // Check success criteria
@@ -385,8 +477,12 @@ impl DeploymentManager {
         Ok(())
     }
 
-    /// Rollback a canary deployment
-    async fn rollback_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
+    /// Roll a canary deployment back to 0% traffic.
+    ///
+    /// Called automatically by [`Self::evaluate_canary_step`] when a step misses
+    /// its thresholds and `auto_rollback` is set; public so an operator can
+    /// pull the deployment back at any time.
+    pub async fn rollback_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
             let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
             deployments
@@ -574,46 +670,145 @@ impl DeploymentManager {
         Ok(test_id)
     }
 
-    /// Collect canary metrics (placeholder implementation)
-    async fn collect_canary_metrics(&self, _model_id: &str) -> ModelResult<CanaryMetrics> {
-        // Placeholder - would collect real metrics from monitoring system
+    /// Collect canary metrics from the real request counters.
+    ///
+    /// `model_id` is the candidate; `baseline_id` is the model it is replacing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either side has served no traffic. Promotion therefore cannot
+    /// happen on absent data — the previous implementation returned constants in
+    /// which the new model always looked better.
+    pub async fn collect_canary_metrics(
+        &self,
+        model_id: &str,
+        baseline_id: &str,
+    ) -> ModelResult<CanaryMetrics> {
+        let new =
+            self.metrics
+                .counters_for(model_id)
+                .ok_or_else(|| ModelError::DeploymentFailed {
+                    error: format!(
+                        "canary model {} has served no requests; there is nothing to evaluate",
+                        model_id
+                    ),
+                })?;
+        let old =
+            self.metrics
+                .counters_for(baseline_id)
+                .ok_or_else(|| ModelError::DeploymentFailed {
+                    error: format!(
+                    "baseline model {} has served no requests; there is nothing to compare against",
+                    baseline_id
+                ),
+                })?;
+
+        let missing = |what: &str, which: &str| ModelError::DeploymentFailed {
+            error: format!("{} for {} is unavailable", what, which),
+        };
+
         Ok(CanaryMetrics {
-            success_rate_new: 0.95,
-            success_rate_old: 0.93,
-            avg_latency_new: 150.0,
-            avg_latency_old: 160.0,
-            error_rate_new: 0.02,
-            error_rate_old: 0.03,
-            requests_new: 1000,
-            requests_old: 5000,
+            success_rate_new: new
+                .success_rate()
+                .ok_or_else(|| missing("success rate", model_id))?,
+            success_rate_old: old
+                .success_rate()
+                .ok_or_else(|| missing("success rate", baseline_id))?,
+            avg_latency_new: new
+                .avg_latency_ms()
+                .ok_or_else(|| missing("average latency", model_id))?,
+            avg_latency_old: old
+                .avg_latency_ms()
+                .ok_or_else(|| missing("average latency", baseline_id))?,
+            error_rate_new: new.error_rate().ok_or_else(|| missing("error rate", model_id))?,
+            error_rate_old: old.error_rate().ok_or_else(|| missing("error rate", baseline_id))?,
+            requests_new: new.total_requests,
+            requests_old: old.total_requests,
         })
     }
 
-    /// Run a validation check (placeholder implementation)
+    /// Run a named validation check by dispatching to its registered validator.
+    ///
+    /// An unregistered check name produces a *failed* result: an unrunnable
+    /// check must never read as a pass.
     async fn run_validation_check(
         &self,
         check_name: &str,
-        _model_id: &str,
+        model_id: &str,
     ) -> ModelResult<ValidationResult> {
-        // Placeholder - would run actual validation
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let validator = {
+            let validators = self.validators.read().unwrap_or_else(|p| p.into_inner());
+            validators.get(check_name).cloned()
+        };
 
-        Ok(ValidationResult {
-            check_name: check_name.to_string(),
-            passed: true,
-            message: "Validation passed".to_string(),
-            executed_at: Utc::now(),
-            metrics: HashMap::new(),
-        })
+        let Some(validator) = validator else {
+            return Ok(ValidationResult {
+                check_name: check_name.to_string(),
+                passed: false,
+                message: format!(
+                    "no validator is registered for check '{}'; register one with \
+                     DeploymentManager::register_validator",
+                    check_name
+                ),
+                executed_at: Utc::now(),
+                metrics: HashMap::new(),
+            });
+        };
+
+        match validator.validate(model_id).await {
+            Ok(result) => Ok(result),
+            Err(e) => Ok(ValidationResult {
+                check_name: check_name.to_string(),
+                passed: false,
+                message: format!("validator failed: {}", e),
+                executed_at: Utc::now(),
+                metrics: HashMap::new(),
+            }),
+        }
     }
 
-    /// Clone for background tasks
-    fn clone_for_background(&self) -> DeploymentManager {
-        DeploymentManager {
+    /// The current state of one canary deployment, if it exists.
+    ///
+    /// [`Self::evaluate_canary_step`] is public but returns only `()`, so this
+    /// is how a caller reads what the evaluation decided.
+    pub fn canary_deployment(&self, deployment_id: &str) -> Option<CanaryDeployment> {
+        let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
+        deployments.get(deployment_id).cloned()
+    }
+
+    /// The live request-metrics registry backing canary decisions.
+    pub fn metrics(&self) -> &Arc<DeploymentMetricsRegistry> {
+        &self.metrics
+    }
+
+    /// The traffic router used to place requests.
+    pub fn traffic_router(&self) -> &Arc<TrafficRouter> {
+        &self.traffic_router
+    }
+
+    /// Register a validator for a named pre-promotion check.
+    pub fn register_validator(&self, check_name: &str, validator: Arc<dyn DeploymentValidator>) {
+        let mut validators = self.validators.write().unwrap_or_else(|p| p.into_inner());
+        validators.insert(check_name.to_string(), validator);
+    }
+}
+
+/// Every field is an `Arc`, so a clone is another handle onto the *same*
+/// deployments, router, metrics and validators -- which is what a caller
+/// driving canary steps from a spawned task needs.
+///
+/// 0.2.1: this replaces a private `clone_for_background` that did exactly this
+/// but was unreachable from outside the module, so no caller could ever get the
+/// background handle it existed to provide.
+impl Clone for DeploymentManager {
+    fn clone(&self) -> Self {
+        Self {
             canary_deployments: Arc::clone(&self.canary_deployments),
             blue_green_deployments: Arc::clone(&self.blue_green_deployments),
             ab_tests: Arc::clone(&self.ab_tests),
             traffic_router: Arc::clone(&self.traffic_router),
+            metrics: Arc::clone(&self.metrics),
+            validators: Arc::clone(&self.validators),
         }
     }
 }
@@ -632,7 +827,12 @@ pub struct TrafficRouter {
     ab_test_traffic: Arc<RwLock<HashMap<String, HashMap<String, f32>>>>,
     /// Blue-green active models
     blue_green_active: Arc<RwLock<HashMap<String, String>>>,
+    /// Baseline model each canary is compared against
+    canary_baselines: Arc<RwLock<HashMap<String, String>>>,
 }
+
+/// Slot key used when a blue/green deployment does not name one.
+const BLUE_GREEN_DEFAULT_SLOT: &str = "default";
 
 impl TrafficRouter {
     /// Create a new traffic router
@@ -641,7 +841,15 @@ impl TrafficRouter {
             canary_traffic: Arc::new(RwLock::new(HashMap::new())),
             ab_test_traffic: Arc::new(RwLock::new(HashMap::new())),
             blue_green_active: Arc::new(RwLock::new(HashMap::new())),
+            canary_baselines: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The percentage of traffic currently routed to `model_id` as a canary,
+    /// or `None` when it has never been set.
+    pub fn canary_traffic(&self, model_id: &str) -> Option<f32> {
+        let traffic = self.canary_traffic.read().unwrap_or_else(|p| p.into_inner());
+        traffic.get(model_id).copied()
     }
 
     /// Set canary traffic percentage
@@ -666,22 +874,337 @@ impl TrafficRouter {
         Ok(())
     }
 
-    /// Switch to green environment
+    /// Record the baseline a canary is being compared against.
+    pub fn set_canary_baseline(&self, canary_model_id: &str, baseline_model_id: &str) {
+        let mut baselines = self.canary_baselines.write().unwrap_or_else(|p| p.into_inner());
+        baselines.insert(canary_model_id.to_string(), baseline_model_id.to_string());
+    }
+
+    /// Baseline registered for a canary model, if any.
+    pub fn baseline_for(&self, canary_model_id: &str) -> Option<String> {
+        let baselines = self.canary_baselines.read().unwrap_or_else(|p| p.into_inner());
+        baselines.get(canary_model_id).cloned()
+    }
+
+    /// Make `green_model_id` the active model for its deployment.
+    ///
+    /// Subsequent `route_request` calls resolve to it.
     pub fn switch_to_green(&self, green_model_id: &str) -> ModelResult<()> {
-        // Placeholder - would implement actual traffic switching
-        tracing::info!("Switching traffic to green model: {}", green_model_id);
+        let mut active = self.blue_green_active.write().unwrap_or_else(|p| p.into_inner());
+        active.insert(
+            BLUE_GREEN_DEFAULT_SLOT.to_string(),
+            green_model_id.to_string(),
+        );
+        tracing::info!("Switched traffic to green model: {}", green_model_id);
         Ok(())
     }
 
-    /// Route a request to appropriate model (placeholder)
-    pub fn route_request(&self, _request_id: &str) -> String {
-        // Placeholder - would implement actual routing logic
-        "default-model".to_string()
+    /// The model currently serving the default blue/green slot, if one is set.
+    pub fn active_model(&self) -> Option<String> {
+        let active = self.blue_green_active.read().unwrap_or_else(|p| p.into_inner());
+        active.get(BLUE_GREEN_DEFAULT_SLOT).cloned()
+    }
+
+    /// Route a request to a model.
+    ///
+    /// Routing is deterministic in `request_id`, so the same request always lands
+    /// on the same model and the traffic split is reproducible:
+    ///
+    /// 1. an active A/B test wins, splitting by cumulative variant weight;
+    /// 2. otherwise a configured canary takes its configured share;
+    /// 3. otherwise the active blue/green model serves.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when nothing is configured, rather than naming a
+    /// "default-model" that may not exist.
+    pub fn route_request(&self, request_id: &str) -> Option<String> {
+        let bucket = Self::bucket_of(request_id);
+
+        // A/B tests take precedence when one is configured.
+        {
+            let ab = self.ab_test_traffic.read().unwrap_or_else(|p| p.into_inner());
+            if let Some((_test_id, variants)) = ab.iter().next() {
+                let mut ordered: Vec<(&String, &f32)> = variants.iter().collect();
+                ordered.sort_by(|a, b| a.0.cmp(b.0));
+                let mut cumulative = 0.0f32;
+                for (model_id, percentage) in ordered {
+                    cumulative += *percentage;
+                    if bucket < cumulative {
+                        return Some(model_id.clone());
+                    }
+                }
+            }
+        }
+
+        // Canary split.
+        {
+            let canary = self.canary_traffic.read().unwrap_or_else(|p| p.into_inner());
+            let mut ordered: Vec<(&String, &f32)> = canary.iter().collect();
+            ordered.sort_by(|a, b| a.0.cmp(b.0));
+            let mut cumulative = 0.0f32;
+            for (model_id, percentage) in ordered {
+                cumulative += *percentage;
+                if bucket < cumulative {
+                    return Some(model_id.clone());
+                }
+            }
+        }
+
+        self.active_model()
+    }
+
+    /// Map a request id onto a stable bucket in `[0, 100)`.
+    fn bucket_of(request_id: &str) -> f32 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        request_id.hash(&mut hasher);
+        (hasher.finish() % 10_000) as f32 / 100.0
     }
 }
 
 impl Default for TrafficRouter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Regression: canary metrics used to be a constant in which the new model
+    /// always looked better. They must now come from the real counters.
+    #[tokio::test]
+    async fn canary_metrics_come_from_real_counters() {
+        let manager = DeploymentManager::new();
+        let metrics = manager.metrics();
+
+        // Candidate: 3 requests, 1 failure.
+        metrics.record_request("candidate", true, 100.0);
+        metrics.record_request("candidate", true, 200.0);
+        metrics.record_request("candidate", false, 300.0);
+        // Baseline: 2 requests, both successful.
+        metrics.record_request("baseline", true, 50.0);
+        metrics.record_request("baseline", true, 150.0);
+
+        let canary = manager
+            .collect_canary_metrics("candidate", "baseline")
+            .await
+            .expect("both sides have traffic");
+
+        assert_eq!(canary.requests_new, 3);
+        assert_eq!(canary.requests_old, 2);
+        assert!((canary.success_rate_new - 2.0 / 3.0).abs() < 1e-6);
+        assert!((canary.success_rate_old - 1.0).abs() < 1e-6);
+        assert!((canary.error_rate_new - 1.0 / 3.0).abs() < 1e-6);
+        assert!((canary.avg_latency_new - 200.0).abs() < 1e-3);
+        assert!((canary.avg_latency_old - 100.0).abs() < 1e-3);
+
+        // The old constants must not reappear.
+        assert_ne!(canary.success_rate_new, 0.95);
+        assert_ne!(canary.requests_new, 1000);
+    }
+
+    fn strict_canary_config() -> CanaryConfig {
+        CanaryConfig {
+            default_percentage: 5.0,
+            min_percentage: 5.0,
+            max_percentage: 50.0,
+            step_size: 5.0,
+            step_duration: Duration::from_secs(1),
+            success_threshold: 0.99,
+            error_threshold: 0.01,
+            auto_rollback: true,
+        }
+    }
+
+    /// A step that misses its thresholds must roll the canary back to 0%.
+    /// `evaluate_canary_step` and `rollback_canary_deployment` are the public
+    /// entry points an operator drives; nothing in this crate schedules them.
+    #[tokio::test]
+    async fn failing_canary_step_rolls_traffic_back_to_zero() {
+        let manager = DeploymentManager::new();
+        manager.traffic_router().set_canary_baseline("candidate", "baseline");
+
+        let deployment_id = manager
+            .start_canary_deployment("candidate".to_string(), 50.0, strict_canary_config())
+            .await
+            .expect("starting a canary should succeed");
+        assert_eq!(
+            manager.traffic_router().canary_traffic("candidate"),
+            Some(5.0),
+            "the first step should have moved traffic to the step size"
+        );
+
+        // Candidate is failing half its requests; baseline is clean.
+        manager.metrics().record_request("candidate", true, 100.0);
+        manager.metrics().record_request("candidate", false, 100.0);
+        manager.metrics().record_request("baseline", true, 100.0);
+
+        manager
+            .evaluate_canary_step(&deployment_id)
+            .await
+            .expect("evaluation should succeed");
+
+        let deployment = manager
+            .canary_deployment(&deployment_id)
+            .expect("deployment should still exist");
+        let step = deployment.steps.last().expect("a step should have been recorded");
+        assert!(
+            !step.success,
+            "a 50% error rate must not pass a 1% error threshold"
+        );
+        assert_eq!(
+            step.metrics.total_requests, 2,
+            "the step counts the candidate's own two requests, from the real counters"
+        );
+        assert_eq!(
+            manager.traffic_router().canary_traffic("candidate"),
+            Some(0.0),
+            "auto_rollback must pull traffic back to zero"
+        );
+    }
+
+    /// Cloning a manager shares its state rather than forking it.
+    #[tokio::test]
+    async fn clone_shares_deployment_state() {
+        let manager = DeploymentManager::new();
+        let background = manager.clone();
+
+        let deployment_id = manager
+            .start_canary_deployment("shared".to_string(), 50.0, strict_canary_config())
+            .await
+            .expect("starting a canary should succeed");
+
+        assert!(
+            background.canary_deployment(&deployment_id).is_some(),
+            "a clone must see deployments started through the original"
+        );
+        background
+            .rollback_canary_deployment(&deployment_id)
+            .await
+            .expect("rollback through the clone should succeed");
+        assert_eq!(
+            manager
+                .canary_deployment(&deployment_id)
+                .map(|deployment| deployment.status)
+                .expect("deployment should exist"),
+            DeploymentStatus::RolledBack,
+            "the original must observe the clone's rollback"
+        );
+    }
+
+    /// Regression: a canary with no traffic must not be evaluated at all.
+    #[tokio::test]
+    async fn canary_without_traffic_cannot_be_evaluated() {
+        let manager = DeploymentManager::new();
+        manager.metrics().record_request("baseline", true, 10.0);
+
+        let error = manager
+            .collect_canary_metrics("candidate", "baseline")
+            .await
+            .expect_err("a candidate with no traffic must not be promotable");
+        assert!(error.to_string().contains("served no requests"));
+    }
+
+    /// Regression: an unregistered validation check must fail, not pass.
+    #[tokio::test]
+    async fn unregistered_validation_check_fails() {
+        let manager = DeploymentManager::new();
+        let result = manager
+            .run_validation_check("smoke", "model-a")
+            .await
+            .expect("the check must produce a result");
+        assert!(!result.passed);
+        assert!(result.message.contains("no validator is registered"));
+        assert_ne!(result.message, "Validation passed");
+    }
+
+    #[derive(Debug)]
+    struct AlwaysPasses;
+
+    #[async_trait::async_trait]
+    impl DeploymentValidator for AlwaysPasses {
+        async fn validate(&self, model_id: &str) -> ModelResult<ValidationResult> {
+            Ok(ValidationResult {
+                check_name: "smoke".to_string(),
+                passed: true,
+                message: format!("{} passed the smoke check", model_id),
+                executed_at: Utc::now(),
+                metrics: HashMap::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_validation_check_is_dispatched() {
+        let manager = DeploymentManager::new();
+        manager.register_validator("smoke", Arc::new(AlwaysPasses));
+
+        let result = manager
+            .run_validation_check("smoke", "model-a")
+            .await
+            .expect("the check must produce a result");
+        assert!(result.passed);
+        assert!(result.message.contains("model-a"));
+    }
+
+    /// Regression: routing used to return the literal "default-model".
+    #[test]
+    fn routing_honours_the_configured_split() {
+        let router = TrafficRouter::new();
+        assert_eq!(router.route_request("req-1"), None);
+
+        router.switch_to_green("green-model").expect("switch succeeds");
+        assert_eq!(
+            router.route_request("req-1"),
+            Some("green-model".to_string())
+        );
+        assert_eq!(router.active_model(), Some("green-model".to_string()));
+
+        // A canary taking 100% of traffic must serve every request.
+        router.set_canary_traffic("canary-model", 100.0).expect("set succeeds");
+        for id in ["a", "b", "c", "d", "e"] {
+            assert_eq!(
+                router.route_request(id),
+                Some("canary-model".to_string()),
+                "request {id} must reach the canary"
+            );
+        }
+
+        // Routing is deterministic in the request id.
+        let first = router.route_request("stable-id");
+        assert_eq!(first, router.route_request("stable-id"));
+    }
+
+    /// A partial canary split must actually send some traffic each way.
+    #[test]
+    fn partial_canary_split_divides_traffic() {
+        let router = TrafficRouter::new();
+        router.switch_to_green("stable-model").expect("switch succeeds");
+        router.set_canary_traffic("canary-model", 50.0).expect("set succeeds");
+
+        let mut canary = 0usize;
+        let mut stable = 0usize;
+        for i in 0..500 {
+            match router.route_request(&format!("request-{i}")) {
+                Some(model) if model == "canary-model" => canary += 1,
+                Some(model) if model == "stable-model" => stable += 1,
+                other => panic!("unexpected routing target: {other:?}"),
+            }
+        }
+        assert!(canary > 100, "canary received too little traffic: {canary}");
+        assert!(stable > 100, "stable received too little traffic: {stable}");
+    }
+
+    #[test]
+    fn counters_report_none_without_traffic() {
+        let counters = ModelRequestCounters::default();
+        assert!(counters.success_rate().is_none());
+        assert!(counters.error_rate().is_none());
+        assert!(counters.avg_latency_ms().is_none());
     }
 }

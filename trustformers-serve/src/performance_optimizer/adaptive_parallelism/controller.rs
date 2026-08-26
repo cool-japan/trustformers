@@ -9,7 +9,6 @@ use anyhow::Result;
 use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -21,6 +20,25 @@ use tokio::{task::JoinHandle, time};
 use crate::performance_optimizer::types::*;
 // OptimalParallelismEstimator, PerformanceFeedbackSystem, and AdaptiveLearningModel
 // are imported from crate::performance_optimizer::types::* above
+
+/// Raised when the periodic adjustment task is asked for a measurement the
+/// controller has never been given.
+///
+/// [`AdaptiveParallelismController`] does not run the test suite and does not
+/// instrument it: throughput, latency and workload shape all arrive from the
+/// caller, through [`AdaptiveParallelismController::adjust_parallelism`] and
+/// [`AdaptiveParallelismController::update_adjustment_performance`]. Until one
+/// of those has been called there is nothing to adapt from, and the background
+/// task says so instead of adapting against invented numbers.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "adaptive parallelism has no {what} to work from yet: the controller is fed by \
+     `adjust_parallelism`/`update_adjustment_performance` and neither has been called"
+)]
+pub struct NoRecordedTelemetry {
+    /// What the adjustment task was looking for.
+    pub what: &'static str,
+}
 
 // =============================================================================
 // ADAPTIVE PARALLELISM CONTROLLER IMPLEMENTATION
@@ -43,6 +61,7 @@ impl AdaptiveParallelismController {
             feedback_system,
             learning_model,
             config: Arc::new(RwLock::new(config)),
+            last_characteristics: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -117,6 +136,10 @@ impl AdaptiveParallelismController {
         target_characteristics: &TestCharacteristics,
     ) -> Result<usize> {
         let previous_level = self.current_parallelism();
+
+        // Remember the workload the caller described. The periodic adjustment
+        // task has no other way to learn what is being run.
+        *self.last_characteristics.lock() = Some(target_characteristics.clone());
 
         // Get recommendation
         let estimate = self.recommend_parallelism(target_characteristics).await?;
@@ -226,17 +249,68 @@ impl AdaptiveParallelismController {
         (throughput_improvement as f32 * 0.6 + efficiency_improvement * 0.4).clamp(-1.0, 1.0)
     }
 
-    /// Get current system state
+    /// Get current system state.
+    ///
+    /// Every field is sampled from the running machine through `sysinfo` at
+    /// call time. `load_average` is the kernel's 1-minute figure, which is
+    /// `0.0` on platforms that keep no load accounting (Windows); that is
+    /// `sysinfo`'s report, not a substituted default.
+    ///
+    /// `temperature_metrics` is populated only when the platform exposes
+    /// thermal components with a reading; otherwise it stays `None` rather
+    /// than carrying an assumed temperature.
     async fn get_current_system_state(&self) -> Result<SystemState> {
-        // In a real implementation, this would collect actual system metrics
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+        let temperature_metrics = Self::read_temperature_metrics();
+
         Ok(SystemState {
             available_cores: num_cpus::get(),
-            available_memory_mb: 8192, // Placeholder
-            load_average: 0.5,
-            active_processes: 100,
-            io_wait_percent: 2.0,
-            network_utilization: 0.1,
-            temperature_metrics: None,
+            available_memory_mb: system.available_memory() / (1024 * 1024),
+            load_average: sysinfo::System::load_average().one as f32,
+            active_processes: system.processes().len(),
+            temperature_metrics,
+        })
+    }
+
+    /// Read CPU/system temperatures from the platform's thermal components.
+    ///
+    /// Returns `None` when the platform exposes no components at all, or none
+    /// of them reports a temperature — a machine whose sensors are not
+    /// readable has no temperature to report, and zero would be a lie.
+    fn read_temperature_metrics() -> Option<TemperatureMetrics> {
+        let components = sysinfo::Components::new_with_refreshed_list();
+        let readings: Vec<f32> = components.iter().filter_map(|c| c.temperature()).collect();
+        if readings.is_empty() {
+            return None;
+        }
+
+        let hottest = readings.iter().copied().fold(f32::MIN, f32::max);
+        let mean = readings.iter().sum::<f32>() / readings.len() as f32;
+        let cpu_temperature = components
+            .iter()
+            .find(|c| {
+                let label = c.label().to_ascii_lowercase();
+                label.contains("cpu") || label.contains("core") || label.contains("package")
+            })
+            .and_then(|c| c.temperature())
+            .unwrap_or(hottest);
+
+        // `sysinfo` exposes a per-component critical threshold; treat the
+        // machine as throttling only when a component that publishes one is at
+        // or past it. No threshold published means no claim either way.
+        let thermal_throttling = components.iter().any(|c| match (c.temperature(), c.critical()) {
+            (Some(current), Some(critical)) => current >= critical,
+            _ => false,
+        });
+
+        Some(TemperatureMetrics {
+            cpu_temperature,
+            gpu_temperature: None,
+            system_temperature: mean,
+            thermal_throttling,
         })
     }
 
@@ -258,7 +332,14 @@ impl AdaptiveParallelismController {
                 interval.tick().await;
 
                 if let Err(e) = controller.perform_adaptive_adjustment().await {
-                    log::error!("Adaptive adjustment failed: {}", e);
+                    // Having no telemetry yet is the normal state of a
+                    // controller nobody has driven, not a failure; anything
+                    // else is.
+                    if e.downcast_ref::<NoRecordedTelemetry>().is_some() {
+                        log::debug!("Adaptive adjustment skipped: {}", e);
+                    } else {
+                        log::error!("Adaptive adjustment failed: {}", e);
+                    }
                 }
             }
         });
@@ -268,7 +349,8 @@ impl AdaptiveParallelismController {
 
     /// Perform periodic adaptive adjustment
     async fn perform_adaptive_adjustment(&self) -> Result<()> {
-        // Get current performance metrics (placeholder implementation)
+        // The most recent measurement a caller supplied. Errors out (and the
+        // caller logs it) while the controller has never been fed one.
         let current_performance = self.get_current_performance().await?;
 
         // Analyze performance trends
@@ -289,21 +371,26 @@ impl AdaptiveParallelismController {
         Ok(())
     }
 
-    /// Get current performance metrics
+    /// Get the most recent performance measurement the controller was given.
+    ///
+    /// Prefers the post-adjustment measurement of the latest adjustment, since
+    /// that describes the level currently in force; falls back to the
+    /// pre-adjustment measurement when
+    /// [`AdaptiveParallelismController::update_adjustment_performance`] has not
+    /// been called for it yet.
+    ///
+    /// Returns [`NoRecordedTelemetry`] when no measurement has ever been
+    /// supplied. The controller has no instrumentation of its own, so there is
+    /// nothing else it could truthfully return.
     async fn get_current_performance(&self) -> Result<PerformanceMeasurement> {
-        // Placeholder implementation - in real system would collect actual metrics
-        Ok(PerformanceMeasurement {
-            throughput: 100.0,
-            average_latency: Duration::from_millis(50),
-            cpu_utilization: 0.6,
-            memory_utilization: 0.4,
-            resource_efficiency: 0.8,
-            timestamp: Utc::now(),
-            measurement_duration: Duration::from_secs(30),
-            cpu_usage: 0.6,
-            memory_usage: 0.4,
-            latency: Duration::from_millis(50),
-        })
+        let history = self.adjustment_history.lock();
+        let latest = history.last().ok_or(NoRecordedTelemetry {
+            what: "performance measurement",
+        })?;
+        Ok(latest
+            .performance_after
+            .clone()
+            .unwrap_or_else(|| latest.performance_before.clone()))
     }
 
     /// Analyze performance trends
@@ -324,7 +411,8 @@ impl AdaptiveParallelismController {
             });
         }
 
-        // Simple trend analysis (in real implementation would use more sophisticated methods)
+        // Trend = mean throughput of the 3 most recent recorded points against
+        // the mean of everything older in the window.
         let recent_throughput: f64 =
             historical_data.iter().take(3).map(|p| p.throughput).sum::<f64>() / 3.0;
         let older_throughput: f64 =
@@ -384,15 +472,18 @@ impl AdaptiveParallelismController {
         Ok(false)
     }
 
-    /// Get current test characteristics
+    /// Get the workload description most recently supplied by a caller.
+    ///
+    /// Recorded by [`AdaptiveParallelismController::adjust_parallelism`].
+    /// Returns [`NoRecordedTelemetry`] before the first call: the controller
+    /// cannot see the test suite, so it has no way to characterise a workload
+    /// nobody has described to it.
     async fn get_current_test_characteristics(&self) -> Result<TestCharacteristics> {
-        // Placeholder implementation
-        Ok(TestCharacteristics {
-            category_distribution: HashMap::new(),
-            average_duration: Duration::from_millis(100),
-            resource_intensity: ResourceIntensity::default(),
-            concurrency_requirements: ConcurrencyRequirements::default(),
-            dependency_complexity: 0.3,
+        self.last_characteristics.lock().clone().ok_or_else(|| {
+            NoRecordedTelemetry {
+                what: "test characteristics",
+            }
+            .into()
         })
     }
 

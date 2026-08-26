@@ -1,13 +1,20 @@
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use uuid;
 
 // Import commonly used types from core
-use super::core::{DetectedPattern, TestCharacterizationResult, UrgencyLevel};
+use super::core::{
+    DetectedPattern, TestCharacterizationError, TestCharacterizationResult, UrgencyLevel,
+};
 
 // Import cross-module types
 use super::optimization::OptimizationRecommendation;
@@ -237,11 +244,18 @@ pub struct AnalyzerMetrics {
 }
 
 #[derive(Debug, Clone)]
+/// Records anomaly alerts raised while the system is running.
+///
+/// Before 0.2.1 `alert_history` was a plain `Vec` behind an `Arc`, so
+/// `trigger_alert` could not record anything; it, `start_alerting` and
+/// `stop_alerting` were all `Ok(())` no-ops, and the caller took that `Ok` as
+/// proof a notification had been delivered.
 pub struct AnomalyAlertSystem {
     pub alert_enabled: bool,
     pub alert_thresholds: HashMap<AnomalySeverity, f64>,
     pub notification_channels: Vec<String>,
-    pub alert_history: Vec<String>,
+    alerting: Arc<AtomicBool>,
+    alert_history: Arc<Mutex<Vec<AnomalyInfo>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,10 +747,15 @@ pub struct TrendDetectionConfig {
 }
 
 #[derive(Debug, Clone)]
+/// Trend-detection lifecycle with an observable running state.
+///
+/// `detection_accuracy` was removed in 0.2.1: it was a constant 0.8 that no
+/// evaluation ever produced, and `start_detection`/`stop_detection` were
+/// `Ok(())` no-ops with nothing to flip.
 pub struct TrendDetectionEngine {
     pub detection_methods: Vec<String>,
     pub current_method: String,
-    pub detection_accuracy: f64,
+    detecting: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -766,15 +785,181 @@ pub trait TrendAnalysisAlgorithm: std::fmt::Debug + Send + Sync {
 
 // Trait implementations
 
+/// Flags readings that deviate from an observed baseline.
+///
+/// Before 0.2.1 `detect_anomalies` took no arguments at all: every
+/// implementation was structurally incapable of detecting anything and returned
+/// an empty vector, which `AnomalyDetectionEngine` reported as "no anomalies".
 pub trait AnomalyDetector: std::fmt::Debug + Send + Sync {
-    fn detect(&self) -> String;
-    fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>>;
+    /// What this detector looks for. Describes the detector, not any state.
+    fn describe(&self) -> String;
+    /// Anomalies in `observations`, judged against `baseline`.
+    fn detect_anomalies(
+        &self,
+        observations: InsightObservations<'_>,
+        baseline: &super::core::BaselineModel,
+    ) -> TestCharacterizationResult<Vec<AnomalyInfo>>;
 }
 
+/// Build an `AnomalyInfo` from a measured deviation.
+///
+/// Severity is a function of how far past the detector's own threshold the
+/// reading sat, so the label always traces back to a number.
+pub fn anomaly_from_deviation(
+    detector: &str,
+    anomaly_type: AnomalyType,
+    metric: &str,
+    ratio: f64,
+    description: String,
+) -> AnomalyInfo {
+    let severity = match ratio {
+        r if r >= 4.0 => AnomalySeverity::Critical,
+        r if r >= 3.0 => AnomalySeverity::Severe,
+        r if r >= 2.0 => AnomalySeverity::Major,
+        r if r >= 1.5 => AnomalySeverity::Significant,
+        r if r >= 1.2 => AnomalySeverity::Moderate,
+        _ => AnomalySeverity::Minor,
+    };
+    AnomalyInfo {
+        anomaly_id: format!(
+            "{}:{}:{}",
+            detector,
+            metric,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ),
+        anomaly_type,
+        severity,
+        detected_at: Utc::now(),
+        affected_resources: vec![metric.to_string()],
+        description,
+        // Impact is reported as the excess over the threshold, capped at one.
+        impact: (ratio - 1.0).clamp(0.0, 1.0),
+        // The detector measures a deviation; it proposes no remedy.
+        recommended_actions: Vec::new(),
+        // A reading twice past its threshold is a false positive far less often
+        // than one that just crossed it; this is that monotone relationship, not
+        // a calibrated rate.
+        false_positive_probability: (1.0 / ratio.max(1.0)).clamp(0.0, 1.0),
+        // No cross-window history is retained, so no frequency is claimed.
+        historical_frequency: 0.0,
+        // Urgency tracks the same measured ratio the severity does.
+        urgency: match ratio {
+            r if r >= 4.0 => UrgencyLevel::Critical,
+            r if r >= 3.0 => UrgencyLevel::VeryUrgent,
+            r if r >= 2.0 => UrgencyLevel::Urgent,
+            r if r >= 1.5 => UrgencyLevel::High,
+            r if r >= 1.2 => UrgencyLevel::Medium,
+            _ => UrgencyLevel::Low,
+        },
+    }
+}
+
+/// Summary of one metric key across an observation window.
+#[derive(Debug, Clone)]
+pub struct MetricSummary {
+    /// The metric key this summarises.
+    pub key: String,
+    /// Number of samples that carried the key.
+    pub count: usize,
+    /// Arithmetic mean of those samples.
+    pub mean: f64,
+    /// Smallest observed value.
+    pub min: f64,
+    /// Largest observed value.
+    pub max: f64,
+    /// Most recent observed value.
+    pub last: f64,
+}
+
+/// The samples an insight engine reasons over.
+///
+/// Before 0.2.1 `InsightEngine` took no input at all: every implementation
+/// produced prose from struct fields that nothing ever wrote to, so an engine
+/// with `insights_generated: 0` still announced an "optimization potential" or a
+/// "priority attention" level. Engines now see the profiler's real sample
+/// window and report only what it supports; an empty window yields no insights.
+#[derive(Debug, Clone, Copy)]
+pub struct InsightObservations<'a> {
+    /// Samples collected over the observation window, oldest first.
+    pub samples: &'a [super::core::RealTimeMetrics],
+}
+
+impl<'a> InsightObservations<'a> {
+    /// Wrap a sample window.
+    pub fn new(samples: &'a [super::core::RealTimeMetrics]) -> Self {
+        Self { samples }
+    }
+
+    /// True when no sample was collected.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Every metric key present in the window, sorted and de-duplicated.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> =
+            self.samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Values recorded for `key`, in sample order.
+    pub fn series(&self, key: &str) -> Vec<f64> {
+        self.samples
+            .iter()
+            .filter_map(|sample| sample.metrics.get(key).copied())
+            .filter(|value| value.is_finite())
+            .collect()
+    }
+
+    /// Summary of `key`, or `None` when no sample carried a finite value for it.
+    pub fn summary(&self, key: &str) -> Option<MetricSummary> {
+        let values = self.series(key);
+        let first = *values.first()?;
+        let mut min = first;
+        let mut max = first;
+        let mut total = 0.0;
+        for value in &values {
+            min = min.min(*value);
+            max = max.max(*value);
+            total += value;
+        }
+        Some(MetricSummary {
+            key: key.to_string(),
+            count: values.len(),
+            mean: total / values.len() as f64,
+            min,
+            max,
+            last: *values.last()?,
+        })
+    }
+
+    /// Summaries for every key whose name contains one of `needles`.
+    pub fn summaries_matching(&self, needles: &[&str]) -> Vec<MetricSummary> {
+        self.keys()
+            .into_iter()
+            .filter(|key| needles.iter().any(|needle| key.contains(needle)))
+            .filter_map(|key| self.summary(&key))
+            .collect()
+    }
+}
+
+/// Produces human-readable findings from an observed metric window.
 pub trait InsightEngine: std::fmt::Debug + Send + Sync {
-    fn generate(&self) -> String;
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>>;
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>>;
+    /// What this engine covers. Describes the engine, not any accumulated state.
+    fn describe(&self) -> String;
+    /// Findings scoped to one test id.
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>>;
+    /// Findings over the whole window.
+    fn generate_insights(
+        &self,
+        observations: InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>>;
 }
 
 // Implementations
@@ -937,17 +1122,51 @@ impl Default for StatisticalAnomalyDetector {
 }
 
 impl AnomalyDetector for StatisticalAnomalyDetector {
-    fn detect(&self) -> String {
+    fn describe(&self) -> String {
         format!(
-            "Statistical anomaly detector (mean={:.2}, std_dev={:.2}, threshold={:.2})",
-            self.mean, self.std_dev, self.threshold
+            "Statistical anomaly detector: flags readings more than {:.2} standard deviations              from the baseline mean (fallback mean {:.2}, std dev {:.2} where the baseline has              no entry)",
+            self.threshold, self.mean, self.std_dev
         )
     }
 
-    fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
-        // Placeholder implementation - in real use, this would analyze actual data
-        // For now, return empty vec indicating no anomalies detected
-        Ok(Vec::new())
+    fn detect_anomalies(
+        &self,
+        observations: InsightObservations<'_>,
+        baseline: &super::core::BaselineModel,
+    ) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
+        if self.threshold <= 0.0 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "z-score threshold must be positive".to_string(),
+                field: "threshold".to_string(),
+                value: self.threshold.to_string(),
+            });
+        }
+        let mut anomalies = Vec::new();
+        for key in observations.keys() {
+            let (mean, std_dev) =
+                baseline.statistics_for(&key).unwrap_or((self.mean, self.std_dev));
+            if std_dev <= 0.0 {
+                // A baseline with no spread cannot separate signal from noise.
+                continue;
+            }
+            for value in observations.series(&key) {
+                let z = (value - mean).abs() / std_dev;
+                if z <= self.threshold {
+                    continue;
+                }
+                anomalies.push(anomaly_from_deviation(
+                    "statistical",
+                    AnomalyType::Statistical,
+                    &key,
+                    z / self.threshold,
+                    format!(
+                        "`{}` read {:.4}, {:.2} standard deviations from the baseline mean                          {:.4} (threshold {:.2})",
+                        key, value, z, mean, self.threshold
+                    ),
+                ));
+            }
+        }
+        Ok(anomalies)
     }
 }
 
@@ -967,18 +1186,66 @@ impl Default for TrendAnomalyDetector {
 }
 
 impl AnomalyDetector for TrendAnomalyDetector {
-    fn detect(&self) -> String {
+    fn describe(&self) -> String {
         format!(
-            "Trend anomaly detector (trends={}, threshold={:.2})",
-            self.trends.len(),
-            self.threshold
+            "Trend anomaly detector: flags a metric whose window drifts by more than {:.2}              baseline standard deviations end to end ({} metric(s) watched; all when empty)",
+            self.threshold,
+            self.trends.len()
         )
     }
 
-    fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
-        // Placeholder implementation - in real use, this would analyze trend deviations
-        // For now, return empty vec indicating no anomalies detected
-        Ok(Vec::new())
+    fn detect_anomalies(
+        &self,
+        observations: InsightObservations<'_>,
+        baseline: &super::core::BaselineModel,
+    ) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
+        if self.threshold <= 0.0 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "drift threshold must be positive".to_string(),
+                field: "threshold".to_string(),
+                value: self.threshold.to_string(),
+            });
+        }
+        let mut anomalies = Vec::new();
+        for key in observations.keys() {
+            if !self.trends.is_empty() && !self.trends.contains(&key) {
+                continue;
+            }
+            let values = observations.series(&key);
+            if values.len() < 3 {
+                continue;
+            }
+            let (_, std_dev) = match baseline.statistics_for(&key) {
+                Some(stats) => stats,
+                None => continue,
+            };
+            if std_dev <= 0.0 {
+                continue;
+            }
+            let (Some(first), Some(last)) = (values.first(), values.last()) else {
+                continue;
+            };
+            let drift = (last - first).abs() / std_dev;
+            if drift <= self.threshold {
+                continue;
+            }
+            anomalies.push(anomaly_from_deviation(
+                "trend",
+                AnomalyType::Temporal,
+                &key,
+                drift / self.threshold,
+                format!(
+                    "`{}` drifted from {:.4} to {:.4} across {} samples, {:.2} baseline standard                      deviations (threshold {:.2})",
+                    key,
+                    first,
+                    last,
+                    values.len(),
+                    drift,
+                    self.threshold
+                ),
+            ));
+        }
+        Ok(anomalies)
     }
 }
 
@@ -1053,29 +1320,71 @@ impl AnomalyAlertSystem {
             alert_enabled: true,
             alert_thresholds: HashMap::new(),
             notification_channels: Vec::new(),
-            alert_history: Vec::new(),
+            alerting: Arc::new(AtomicBool::new(false)),
+            alert_history: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Trigger an alert for a detected anomaly
-    pub async fn trigger_alert(&self, _anomaly: &AnomalyInfo) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would send notifications through configured channels
+    /// Record an alert for a detected anomaly.
+    ///
+    /// The alert is recorded locally and is readable through
+    /// [`Self::alert_history`]. No notification is delivered: no channel
+    /// transport is wired into this crate, so a configured
+    /// `notification_channels` entry is reported back as unsupported rather
+    /// than acknowledged as delivered.
+    pub fn trigger_alert(&self, anomaly: &AnomalyInfo) -> TestCharacterizationResult<()> {
+        if !self.is_alerting() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "alert system is not running; call start_alerting first".to_string(),
+                field: "alerting".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        if let Some(threshold) = self.alert_thresholds.get(&anomaly.severity) {
+            if anomaly.impact < *threshold {
+                return Ok(());
+            }
+        }
+        self.alert_history.lock().push(anomaly.clone());
+        if !self.notification_channels.is_empty() {
+            return Err(TestCharacterizationError::NotSupported {
+                message: format!(
+                    "the alert was recorded locally but {} notification channel(s) are \
+                     configured and no channel transport is wired in",
+                    self.notification_channels.len()
+                ),
+                component: "AnomalyAlertSystem".to_string(),
+            });
+        }
         Ok(())
     }
 
-    /// Start the alerting system
-    pub async fn start_alerting(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would initialize alert monitoring and notification systems
+    /// Start the alerting system.
+    pub fn start_alerting(&self) -> TestCharacterizationResult<()> {
+        if !self.alert_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "alerting is disabled by configuration".to_string(),
+                component: "AnomalyAlertSystem".to_string(),
+            });
+        }
+        self.alerting.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop the alerting system
-    pub async fn stop_alerting(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would gracefully shutdown alert monitoring
+    /// Stop the alerting system.
+    pub fn stop_alerting(&self) -> TestCharacterizationResult<()> {
+        self.alerting.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether alerting is running right now.
+    pub fn is_alerting(&self) -> bool {
+        self.alerting.load(Ordering::Relaxed)
+    }
+
+    /// Alerts recorded so far, oldest first.
+    pub fn alert_history(&self) -> Vec<AnomalyInfo> {
+        self.alert_history.lock().clone()
     }
 }
 
@@ -1090,23 +1399,65 @@ impl TrendDetectionEngine {
     pub fn new() -> Self {
         Self {
             detection_methods: Vec::new(),
-            current_method: String::from("default"),
-            detection_accuracy: 0.8,
+            current_method: String::from("least_squares_slope"),
+            detecting: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start trend detection
-    pub async fn start_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would initialize trend detection processes
+    /// Start trend detection.
+    pub fn start_detection(&self) -> TestCharacterizationResult<()> {
+        self.detecting.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop trend detection
-    pub async fn stop_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would stop trend detection processes
+    /// Stop trend detection.
+    pub fn stop_detection(&self) -> TestCharacterizationResult<()> {
+        self.detecting.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Whether detection is running right now.
+    pub fn is_detecting(&self) -> bool {
+        self.detecting.load(Ordering::Relaxed)
+    }
+
+    /// Least-squares slope per sample of every metric in `observations`.
+    ///
+    /// A metric with fewer than three readings is omitted: two points always
+    /// define a line, so a slope from them carries no evidence of a trend.
+    pub fn detect_trends(
+        &self,
+        observations: InsightObservations<'_>,
+    ) -> TestCharacterizationResult<HashMap<String, f64>> {
+        if !self.is_detecting() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "trend detection is not running; call start_detection first".to_string(),
+                field: "detecting".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let mut slopes = HashMap::new();
+        for key in observations.keys() {
+            let values = observations.series(&key);
+            if values.len() < 3 {
+                continue;
+            }
+            let n = values.len() as f64;
+            let mean_x = (n - 1.0) / 2.0;
+            let mean_y = values.iter().sum::<f64>() / n;
+            let mut sxx = 0.0;
+            let mut sxy = 0.0;
+            for (index, value) in values.iter().enumerate() {
+                let dx = index as f64 - mean_x;
+                sxx += dx * dx;
+                sxy += dx * (value - mean_y);
+            }
+            if sxx <= 0.0 {
+                continue;
+            }
+            slopes.insert(key, sxy / sxx);
+        }
+        Ok(slopes)
     }
 }
 

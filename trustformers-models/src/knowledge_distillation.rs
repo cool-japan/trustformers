@@ -435,15 +435,30 @@ where
         }
     }
 
-    /// Compute hard target loss (standard cross-entropy)
-    fn compute_hard_target_loss(&self, logits: &Tensor, _targets: &Tensor) -> Result<Tensor> {
-        let probs = logits.softmax(-1)?;
-        let log_probs = probs.log()?;
-
-        // Simplified cross-entropy implementation - in practice this would need proper indexing
-        // For now, compute mean of log probs as a placeholder
-        let neg_log_probs = log_probs.scalar_mul(-1.0)?;
-        neg_log_probs.mean()
+    /// Compute the hard-target loss: mean cross-entropy of the student's logits
+    /// against the ground-truth labels.
+    ///
+    /// `logits` has shape `[batch, num_classes]` (a leading batch axis is
+    /// optional for a single example). `targets` is accepted in either of the
+    /// two shapes a training loop produces:
+    ///
+    /// * **class indices** — shape `[batch]`, each entry an integer class id;
+    /// * **one-hot / soft labels** — shape `[batch, num_classes]`, each row a
+    ///   distribution over classes (soft labels are the general case and reduce
+    ///   to one-hot when a single entry is 1).
+    ///
+    /// A previous revision took `_targets` and returned `mean(-log softmax(logits))`
+    /// — the mean negative log-probability over *every* class. That value is
+    /// completely independent of the labels, so the "hard target" term of the
+    /// distillation objective carried no supervision at all: two batches with
+    /// swapped labels produced the identical loss.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tensors are not `F32`, when the shapes disagree, or when a
+    /// target class index is out of range for the logits' class axis.
+    fn compute_hard_target_loss(&self, logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
+        hard_target_cross_entropy(logits, targets)
     }
 
     /// Update training step and potentially stage for progressive distillation
@@ -803,6 +818,113 @@ where
     }
 }
 
+/// Mean cross-entropy of `logits` against ground-truth `targets`.
+///
+/// `logits` has shape `[batch, num_classes]` (the batch axis may be omitted for
+/// a single example). `targets` is accepted in either of the two shapes a
+/// training loop produces:
+///
+/// * **class indices** — shape `[batch]`, each entry an integer class id;
+/// * **one-hot / soft labels** — shape `[batch, num_classes]`, each row a
+///   distribution over classes (soft labels are the general case and reduce to
+///   one-hot when a single entry is 1).
+///
+/// A previous revision of the distillation trainer's hard-target term took
+/// `_targets` and returned `mean(-log softmax(logits))` — the mean negative
+/// log-probability over *every* class. That value is completely independent of
+/// the labels, so the "hard target" term of the objective carried no
+/// supervision at all: two batches with swapped labels produced an identical
+/// loss.
+///
+/// # Errors
+///
+/// Fails when the tensors are not `F32`, when the shapes disagree, or when a
+/// target class index is out of range for the logits' class axis.
+pub fn hard_target_cross_entropy(logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    let log_probs = logits.softmax(-1)?.log()?;
+    let (Tensor::F32(log_prob_arr), Tensor::F32(target_arr)) = (&log_probs, targets) else {
+        return Err(tensor_op_error(
+            "hard_target_cross_entropy",
+            "hard-target cross-entropy requires F32 logits and F32 targets".to_string(),
+        ));
+    };
+
+    // Normalise the logits to [batch, num_classes].
+    let logit_shape = log_prob_arr.shape().to_vec();
+    let (batch_size, num_classes) = match logit_shape.as_slice() {
+        [classes] => (1usize, *classes),
+        [.., classes] => (
+            logit_shape[..logit_shape.len() - 1].iter().product(),
+            *classes,
+        ),
+        [] => {
+            return Err(tensor_op_error(
+                "hard_target_cross_entropy",
+                "logits tensor is a scalar; cross-entropy needs a class axis".to_string(),
+            ))
+        },
+    };
+    if batch_size == 0 || num_classes == 0 {
+        return Err(tensor_op_error(
+            "hard_target_cross_entropy",
+            format!("logits with shape {logit_shape:?} carry no class scores"),
+        ));
+    }
+
+    let flat_log_probs: Vec<f32> = log_prob_arr.iter().copied().collect();
+    let flat_targets: Vec<f32> = target_arr.iter().copied().collect();
+    let target_shape = target_arr.shape().to_vec();
+
+    let mut total_loss = 0.0f32;
+    if flat_targets.len() == batch_size {
+        // Class-index targets: -log p[b, target[b]].
+        for b in 0..batch_size {
+            let raw = flat_targets[b];
+            if raw < 0.0 || raw.fract() != 0.0 {
+                return Err(tensor_op_error(
+                    "hard_target_cross_entropy",
+                    format!(
+                        "target {raw} at batch position {b} is not a non-negative integer \
+                         class index"
+                    ),
+                ));
+            }
+            let class = raw as usize;
+            if class >= num_classes {
+                return Err(tensor_op_error(
+                    "hard_target_cross_entropy",
+                    format!(
+                        "target class {class} at batch position {b} is out of range for \
+                         {num_classes} classes"
+                    ),
+                ));
+            }
+            total_loss -= flat_log_probs[b * num_classes + class];
+        }
+    } else if flat_targets.len() == batch_size * num_classes {
+        // One-hot / soft-label targets: -sum_c q[b, c] * log p[b, c].
+        for b in 0..batch_size {
+            for c in 0..num_classes {
+                let weight = flat_targets[b * num_classes + c];
+                if weight != 0.0 {
+                    total_loss -= weight * flat_log_probs[b * num_classes + c];
+                }
+            }
+        }
+    } else {
+        return Err(tensor_op_error(
+            "hard_target_cross_entropy",
+            format!(
+                "targets with shape {target_shape:?} match neither class indices \
+                 ([{batch_size}]) nor one-hot labels ([{batch_size}, {num_classes}]) for \
+                 logits with shape {logit_shape:?}"
+            ),
+        ));
+    }
+
+    Tensor::scalar(total_loss / batch_size as f32)
+}
+
 /// Outputs from teacher model for distillation
 #[derive(Debug, Clone)]
 pub struct TeacherOutputs {
@@ -915,6 +1037,74 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the hard-target term must actually depend on the targets.
+    ///
+    /// The previous body ignored `_targets` and returned
+    /// `mean(-log softmax(logits))`, so both calls below produced the same
+    /// number and this assertion failed.
+    #[test]
+    fn hard_target_loss_depends_on_the_labels() {
+        // Row 0 strongly prefers class 0, row 1 strongly prefers class 2.
+        let logits = Tensor::from_vec(vec![5.0, 0.0, 0.0, 0.0, 0.0, 5.0], &[2, 3])
+            .expect("logits must build");
+
+        let correct = Tensor::from_vec(vec![0.0, 2.0], &[2]).expect("targets must build");
+        let wrong = Tensor::from_vec(vec![2.0, 0.0], &[2]).expect("targets must build");
+
+        let correct_loss = hard_target_cross_entropy(&logits, &correct)
+            .expect("cross-entropy must succeed")
+            .to_scalar()
+            .expect("loss must be a scalar");
+        let wrong_loss = hard_target_cross_entropy(&logits, &wrong)
+            .expect("cross-entropy must succeed")
+            .to_scalar()
+            .expect("loss must be a scalar");
+
+        assert!(
+            wrong_loss > correct_loss,
+            "predicting the wrong class must cost more: correct={correct_loss}, \
+             wrong={wrong_loss}"
+        );
+        // -log softmax(5,0,0)[0] = log(1 + 2*e^-5) ~= 0.01342
+        assert!(
+            (correct_loss - 0.013_42).abs() < 1e-3,
+            "unexpected cross-entropy for a confident correct prediction: {correct_loss}"
+        );
+    }
+
+    #[test]
+    fn hard_target_loss_accepts_one_hot_labels() {
+        let logits = Tensor::from_vec(vec![5.0, 0.0, 0.0], &[1, 3]).expect("logits must build");
+        let indices = Tensor::from_vec(vec![0.0], &[1]).expect("targets must build");
+        let one_hot = Tensor::from_vec(vec![1.0, 0.0, 0.0], &[1, 3]).expect("targets must build");
+
+        let from_indices = hard_target_cross_entropy(&logits, &indices)
+            .expect("index targets must work")
+            .to_scalar()
+            .expect("scalar");
+        let from_one_hot = hard_target_cross_entropy(&logits, &one_hot)
+            .expect("one-hot targets must work")
+            .to_scalar()
+            .expect("scalar");
+        assert!(
+            (from_indices - from_one_hot).abs() < 1e-6,
+            "index and one-hot encodings of the same label must agree: \
+             {from_indices} vs {from_one_hot}"
+        );
+    }
+
+    #[test]
+    fn hard_target_loss_rejects_an_out_of_range_class() {
+        let logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("logits must build");
+        let targets = Tensor::from_vec(vec![7.0], &[1]).expect("targets must build");
+        let err = hard_target_cross_entropy(&logits, &targets)
+            .expect_err("an out-of-range class must be rejected");
+        assert!(
+            err.to_string().contains("out of range"),
+            "unexpected: {err}"
+        );
+    }
 
     #[test]
     fn test_distillation_config_default() {

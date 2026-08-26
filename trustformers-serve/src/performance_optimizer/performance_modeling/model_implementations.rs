@@ -16,6 +16,107 @@ use crate::performance_optimizer::types::{SystemState, TestCharacteristics};
 pub use super::types::ModelFactory;
 
 // =============================================================================
+// FIT-DERIVED REPORTING
+// =============================================================================
+
+/// Standard-normal multiplier for a two-sided 95% interval.
+const NORMAL_95: f32 = 1.96;
+
+/// One standard deviation of a fit's residuals: `sqrt(MSE)`.
+fn residual_sigma(stats: &TrainingStatistics) -> f32 {
+    stats.mean_squared_error.sqrt()
+}
+
+/// A 95% predictive interval around `point`, assuming residuals of scale
+/// `sigma`.
+///
+/// A model that has never been trained carries an infinite residual scale, and
+/// the interval it produces is correspondingly infinite: that is the honest
+/// statement of "this model knows nothing yet", and it is what the caller sees
+/// instead of the point estimate plus and minus a tenth of an infinite error.
+fn prediction_interval(point: f64, sigma: f32) -> (f64, f64) {
+    let half_width = (NORMAL_95 * sigma) as f64;
+    (point - half_width, point + half_width)
+}
+
+/// Confidence attached to a prediction: the share of target variance the fit
+/// explains, clamped to `[0, 1]`.
+///
+/// 0.2.1: this was `1 - mean_absolute_error / 10`, clamped to `[0.1, 1]`, which
+/// mixed an error in throughput units into a `[0, 1]` confidence and floored an
+/// untrained model at `0.1`. An untrained fit explains no variance and reports
+/// `0.0` now.
+fn fit_confidence(stats: &TrainingStatistics) -> f32 {
+    if stats.sample_count == 0 || !stats.r_squared.is_finite() {
+        return 0.0;
+    }
+    stats.r_squared.clamp(0.0, 1.0)
+}
+
+/// Accuracy relative to the target scale: `1 - MAE / mean|y|`, clamped to
+/// `[0, 1]`.
+///
+/// `None` when the model has not been trained, or when the targets it was
+/// trained on average to zero magnitude and there is no scale to be relative
+/// to. 0.2.1: this was `1 - MAE / 100`, which assumed the targets lived on a
+/// 0-100 scale and reported `-inf` for an untrained model.
+fn relative_accuracy(stats: &TrainingStatistics) -> Option<f32> {
+    if stats.sample_count == 0
+        || stats.mean_absolute_target.is_nan()
+        || stats.mean_absolute_target <= 0.0
+    {
+        return None;
+    }
+    if !stats.mean_absolute_error.is_finite() {
+        return None;
+    }
+    Some((1.0 - stats.mean_absolute_error / stats.mean_absolute_target).clamp(0.0, 1.0))
+}
+
+/// Normal-approximation 95% interval for the mean absolute error measured on
+/// the training sample.
+///
+/// The half-width is `1.96·s/sqrt(n)` for `s` the standard deviation of the
+/// absolute residuals; the lower end is clamped at zero because an absolute
+/// error cannot be negative. `None` for fewer than two points, where the
+/// standard error is undefined. 0.2.1: the field carrying this was the constant
+/// `(0.8, 0.95)` for linear and polynomial models and `(0.75, 0.90)` for the
+/// exponential one, in neither case an interval around anything.
+fn mean_absolute_error_interval(stats: &TrainingStatistics) -> Option<(f32, f32)> {
+    if stats.sample_count < 2 || !stats.absolute_error_std.is_finite() {
+        return None;
+    }
+    let standard_error = stats.absolute_error_std / (stats.sample_count as f32).sqrt();
+    let half_width = NORMAL_95 * standard_error;
+    Some((
+        (stats.mean_absolute_error - half_width).max(0.0),
+        stats.mean_absolute_error + half_width,
+    ))
+}
+
+/// Build the published accuracy record from a measured fit.
+fn accuracy_from_training(
+    stats: &TrainingStatistics,
+    trained_at: DateTime<Utc>,
+) -> ModelAccuracyMetrics {
+    ModelAccuracyMetrics {
+        overall_accuracy: relative_accuracy(stats),
+        r_squared: stats.r_squared,
+        mean_absolute_error: stats.mean_absolute_error,
+        root_mean_squared_error: residual_sigma(stats),
+        // Nothing here cross-validates: the training pipeline's validators do,
+        // and they build their own record. An empty list says so.
+        cross_validation_scores: Vec::new(),
+        mean_absolute_error_interval: mean_absolute_error_interval(stats),
+        // No trainer in this module measures prediction stability; it would
+        // take repeated fits on resampled data, and a trained model keeps its
+        // coefficients but not its training set.
+        prediction_stability: None,
+        last_validated: trained_at,
+    }
+}
+
+// =============================================================================
 // LINEAR REGRESSION MODEL
 // =============================================================================
 
@@ -32,6 +133,9 @@ pub struct LinearRegressionModel {
     metadata: ModelMetadata,
     /// Training statistics
     training_stats: TrainingStatistics,
+    /// Feature normalisation captured during training, applied again at
+    /// prediction time. `None` when the model was trained on raw features.
+    normalization: Option<NormalizationParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,19 +144,36 @@ struct ModelMetadata {
     trained_at: DateTime<Utc>,
     training_samples: usize,
     feature_count: usize,
-    version: String,
 }
 
+/// Fit quality measured on the sample the model was trained on.
+///
+/// `sample_count`, `absolute_error_std` and `mean_absolute_target` were added
+/// in 0.2.1 so that [`ModelAccuracyMetrics`] can report an interval around the
+/// mean absolute error and an accuracy relative to the target scale, instead of
+/// the constants `(0.8, 0.95)` / `(0.75, 0.90)` and the `1 - MAE/100` formula
+/// that assumed targets lived on a 0-100 scale.
 #[derive(Debug, Clone)]
 struct TrainingStatistics {
     r_squared: f32,
     mean_squared_error: f32,
     mean_absolute_error: f32,
-    training_time: Duration,
-    convergence_iterations: usize,
+    /// Points the fit was measured on; zero before the model is trained.
+    sample_count: usize,
+    /// Standard deviation of the absolute residuals, the spread the mean
+    /// absolute error's standard error is computed from.
+    absolute_error_std: f32,
+    /// Mean magnitude of the targets, the scale the relative accuracy divides
+    /// by.
+    mean_absolute_target: f32,
 }
 
 impl LinearRegressionModel {
+    /// The fit quality measured when this model was last trained.
+    fn training_statistics(&self) -> &TrainingStatistics {
+        &self.training_stats
+    }
+
     /// Create new linear regression model
     pub fn new(feature_names: Vec<String>) -> Self {
         Self {
@@ -64,15 +185,16 @@ impl LinearRegressionModel {
                 trained_at: Utc::now(),
                 training_samples: 0,
                 feature_count: 0,
-                version: "1.0.0".to_string(),
             },
             training_stats: TrainingStatistics {
                 r_squared: 0.0,
                 mean_squared_error: f32::INFINITY,
                 mean_absolute_error: f32::INFINITY,
-                training_time: Duration::from_secs(0),
-                convergence_iterations: 0,
+                sample_count: 0,
+                absolute_error_std: f32::INFINITY,
+                mean_absolute_target: 0.0,
             },
+            normalization: None,
         }
     }
 
@@ -93,12 +215,14 @@ impl LinearRegressionModel {
             return Err(anyhow!("No training data provided"));
         }
 
-        // Normalize features if requested
-        let (normalized_features, _normalization_params) = if config.normalize_features {
+        // Normalize features if requested, keeping the parameters so the same
+        // transform can be applied to every later prediction.
+        let (normalized_features, normalization_params) = if config.normalize_features {
             self.normalize_features(features)?
         } else {
             (features.to_vec(), None)
         };
+        self.normalization = normalization_params;
 
         // Perform ordinary least squares regression
         let (coefficients, intercept) =
@@ -153,13 +277,28 @@ impl LinearRegressionModel {
         Ok((coefficients, intercept))
     }
 
-    /// Predict using raw features
+    /// Predict from features expressed in the model's own coordinate system.
+    ///
+    /// Callers inside `train` pass already-normalised rows; external callers go
+    /// through [`LinearRegressionModel::predict_features`], which applies the
+    /// training-time normalisation first.
     fn predict_raw(&self, features: &[f64]) -> f64 {
         let mut prediction = self.intercept;
         for (coef, &feature) in self.coefficients.iter().zip(features.iter()) {
             prediction += coef * feature;
         }
         prediction
+    }
+
+    /// Predict from features in their original units.
+    ///
+    /// Applies the normalisation captured during training, so a model trained
+    /// with `normalize_features` predicts on the same scale it learned on.
+    fn predict_features(&self, features: &[f64]) -> f64 {
+        match &self.normalization {
+            Some(params) => self.predict_raw(&params.apply(features)),
+            None => self.predict_raw(features),
+        }
     }
 
     /// Normalize features using z-score normalization
@@ -210,8 +349,10 @@ impl LinearRegressionModel {
             })
             .collect();
 
-        let params = NormalizationParams { means, stds };
-        Ok((normalized_features, Some(params)))
+        Ok((
+            normalized_features,
+            Some(NormalizationParams { means, stds }),
+        ))
     }
 
     /// Matrix operations
@@ -343,7 +484,7 @@ impl LinearRegressionModel {
         &self,
         targets: &[f64],
         predictions: &[f64],
-        training_time: Duration,
+        _training_time: Duration,
     ) -> TrainingStatistics {
         let n = targets.len() as f64;
 
@@ -368,20 +509,55 @@ impl LinearRegressionModel {
         }
         let r_squared = 1.0 - (ss_res / ss_tot.max(1e-12));
 
+        // Spread of the absolute residuals, for the interval around `mae`, and
+        // the mean target magnitude, the scale a relative accuracy needs.
+        let absolute_error_variance = targets
+            .iter()
+            .zip(predictions.iter())
+            .map(|(actual, predicted)| ((actual - predicted).abs() - mae).powi(2))
+            .sum::<f64>()
+            / n;
+        let mean_absolute_target = targets.iter().map(|target| target.abs()).sum::<f64>() / n;
+
         TrainingStatistics {
             r_squared: r_squared as f32,
             mean_squared_error: mse as f32,
             mean_absolute_error: mae as f32,
-            training_time,
-            convergence_iterations: 1, // Linear regression converges in one step
+            sample_count: targets.len(),
+            absolute_error_std: absolute_error_variance.sqrt() as f32,
+            mean_absolute_target: mean_absolute_target as f32,
         }
     }
 }
 
+/// Per-feature z-score parameters captured during training.
+///
+/// These are applied again at prediction time; before 0.2.1 they were computed,
+/// returned, bound to `_normalization_params` and dropped, so a model trained
+/// with `normalize_features` enabled was queried with raw, unnormalised
+/// features and its predictions were systematically wrong.
 #[derive(Debug, Clone)]
 struct NormalizationParams {
     means: Vec<f64>,
     stds: Vec<f64>,
+}
+
+impl NormalizationParams {
+    /// Apply the training-time z-score transform to one feature vector.
+    ///
+    /// Features beyond the ones seen during training are passed through
+    /// unchanged rather than dropped, so a dimension mismatch cannot silently
+    /// truncate the input.
+    fn apply(&self, features: &[f64]) -> Vec<f64> {
+        features
+            .iter()
+            .enumerate()
+            .map(|(j, &value)| match (self.means.get(j), self.stds.get(j)) {
+                (Some(mean), Some(std)) if *std != 0.0 => (value - mean) / std,
+                _ => value,
+            })
+            .collect()
+    }
 }
 
 impl PerformancePredictor for LinearRegressionModel {
@@ -401,20 +577,21 @@ impl PerformancePredictor for LinearRegressionModel {
         )?;
 
         // Make prediction
-        let throughput = self.predict_raw(&features);
+        let throughput = self.predict_features(&features);
 
-        // Calculate uncertainty bounds (simplified)
-        let uncertainty = self.calculate_prediction_uncertainty(&features)?;
-        let confidence = (1.0 - uncertainty).clamp(0.1, 1.0);
+        // A 95% predictive interval from the fit's own residual spread, and a
+        // confidence that reports how much of the target variance the fit
+        // explains. 0.2.1: the interval was the point estimate plus and minus
+        // `mean_absolute_error / 10`, and the confidence was one minus that
+        // same number.
+        let sigma = self.residual_sigma();
+        let confidence = fit_confidence(&self.training_stats);
 
         Ok(PerformancePrediction {
             throughput: throughput.max(0.0),
             latency: Duration::from_millis((1000.0 / throughput.max(0.001)) as u64),
             confidence,
-            uncertainty_bounds: (
-                throughput - uncertainty as f64,
-                throughput + uncertainty as f64,
-            ),
+            uncertainty_bounds: prediction_interval(throughput, sigma),
             model_name: self.metadata.name.clone(),
             feature_importance: self.get_feature_importance(),
             predicted_at: Utc::now(),
@@ -422,16 +599,7 @@ impl PerformancePredictor for LinearRegressionModel {
     }
 
     fn get_accuracy(&self) -> ModelAccuracyMetrics {
-        ModelAccuracyMetrics {
-            overall_accuracy: 1.0 - self.training_stats.mean_absolute_error / 100.0,
-            r_squared: self.training_stats.r_squared,
-            mean_absolute_error: self.training_stats.mean_absolute_error,
-            root_mean_squared_error: self.training_stats.mean_squared_error.sqrt(),
-            cross_validation_scores: Vec::new(), // Would be populated during cross-validation
-            confidence_interval: (0.8, 0.95),    // Simplified
-            prediction_stability: 0.85,          // Simplified
-            last_validated: self.metadata.trained_at,
-        }
+        accuracy_from_training(&self.training_stats, self.metadata.trained_at)
     }
 
     fn name(&self) -> &str {
@@ -462,8 +630,6 @@ impl LinearRegressionModel {
         features.push(system_state.available_memory_mb as f64);
         features.push(system_state.load_average as f64);
         features.push(system_state.active_processes as f64);
-        features.push(system_state.io_wait_percent as f64);
-        features.push(system_state.network_utilization as f64);
 
         // Test characteristics features
         features.push(test_characteristics.average_duration.as_secs_f64());
@@ -487,10 +653,19 @@ impl LinearRegressionModel {
         Ok(features)
     }
 
-    fn calculate_prediction_uncertainty(&self, _features: &[f64]) -> Result<f32> {
-        // Simplified uncertainty calculation based on training statistics
-        let base_uncertainty = self.training_stats.mean_absolute_error / 10.0;
-        Ok(base_uncertainty)
+    /// One standard deviation of this model's residuals on its training sample.
+    ///
+    /// 0.2.1: this was `mean_absolute_error / 10.0` (and `/ 5.0` in
+    /// [`ExponentialModel`]) -- a divisor with no derivation, ignoring the
+    /// features it was handed. The residual standard deviation is the scale a
+    /// prediction interval is actually built from, and it is the square root of
+    /// the mean squared error the fit already measured.
+    ///
+    /// The value does not vary per point: this model keeps its coefficients but
+    /// not the design matrix, so a per-point predictive variance cannot be
+    /// recovered from it.
+    fn residual_sigma(&self) -> f32 {
+        residual_sigma(&self.training_stats)
     }
 
     fn get_feature_importance(&self) -> HashMap<String, f32> {
@@ -524,20 +699,16 @@ pub struct PolynomialRegressionModel {
     linear_model: LinearRegressionModel,
     /// Polynomial degree
     degree: usize,
-    /// Original feature count
-    original_feature_count: usize,
 }
 
 impl PolynomialRegressionModel {
     /// Create new polynomial regression model
     pub fn new(feature_names: Vec<String>, degree: usize) -> Self {
-        let original_feature_count = feature_names.len();
         let poly_feature_names = Self::generate_polynomial_feature_names(&feature_names, degree);
 
         Self {
             linear_model: LinearRegressionModel::new(poly_feature_names),
             degree,
-            original_feature_count,
         }
     }
 
@@ -658,28 +829,29 @@ impl PerformancePredictor for PolynomialRegressionModel {
         let poly_features = self.generate_polynomial_features(&features)?;
 
         // Create a modified request with polynomial features
-        let throughput = self.linear_model.predict_raw(&poly_features);
-        let uncertainty = self.linear_model.calculate_prediction_uncertainty(&poly_features)?;
-        let confidence = (1.0 - uncertainty).clamp(0.1, 1.0);
+        let throughput = self.linear_model.predict_features(&poly_features);
+        let sigma = self.linear_model.residual_sigma();
+        let confidence = fit_confidence(self.linear_model.training_statistics());
 
         Ok(PerformancePrediction {
             throughput: throughput.max(0.0),
             latency: Duration::from_millis((1000.0 / throughput.max(0.001)) as u64),
             confidence,
-            uncertainty_bounds: (
-                throughput - uncertainty as f64,
-                throughput + uncertainty as f64,
-            ),
+            uncertainty_bounds: prediction_interval(throughput, sigma),
             model_name: format!("PolynomialRegression(degree={})", self.degree),
             feature_importance: self.linear_model.get_feature_importance(),
             predicted_at: Utc::now(),
         })
     }
 
+    /// The polynomial model *is* its expanded-feature linear fit, so it reports
+    /// that fit's measured accuracy.
+    ///
+    /// 0.2.1: the measured accuracy was multiplied by `0.95` here, because
+    /// "Polynomial models may overfit slightly" -- a guess applied on top of a
+    /// measurement, which made the published figure neither.
     fn get_accuracy(&self) -> ModelAccuracyMetrics {
-        let mut accuracy = self.linear_model.get_accuracy();
-        accuracy.overall_accuracy *= 0.95; // Polynomial models may overfit slightly
-        accuracy
+        self.linear_model.get_accuracy()
     }
 
     fn name(&self) -> &str {
@@ -733,14 +905,14 @@ impl ExponentialModel {
                 trained_at: Utc::now(),
                 training_samples: 0,
                 feature_count: 0,
-                version: "1.0.0".to_string(),
             },
             training_stats: TrainingStatistics {
                 r_squared: 0.0,
                 mean_squared_error: f32::INFINITY,
                 mean_absolute_error: f32::INFINITY,
-                training_time: Duration::from_secs(0),
-                convergence_iterations: 0,
+                sample_count: 0,
+                absolute_error_std: f32::INFINITY,
+                mean_absolute_target: 0.0,
             },
         }
     }
@@ -803,7 +975,7 @@ impl ExponentialModel {
         &self,
         targets: &[f64],
         predictions: &[f64],
-        training_time: Duration,
+        _training_time: Duration,
     ) -> TrainingStatistics {
         let n = targets.len() as f64;
 
@@ -826,12 +998,23 @@ impl ExponentialModel {
         }
         let r_squared = 1.0 - (ss_res / ss_tot.max(1e-12));
 
+        // Spread of the absolute residuals, for the interval around `mae`, and
+        // the mean target magnitude, the scale a relative accuracy needs.
+        let absolute_error_variance = targets
+            .iter()
+            .zip(predictions.iter())
+            .map(|(actual, predicted)| ((actual - predicted).abs() - mae).powi(2))
+            .sum::<f64>()
+            / n;
+        let mean_absolute_target = targets.iter().map(|target| target.abs()).sum::<f64>() / n;
+
         TrainingStatistics {
             r_squared: r_squared as f32,
             mean_squared_error: mse as f32,
             mean_absolute_error: mae as f32,
-            training_time,
-            convergence_iterations: 1,
+            sample_count: targets.len(),
+            absolute_error_std: absolute_error_variance.sqrt() as f32,
+            mean_absolute_target: mean_absolute_target as f32,
         }
     }
 }
@@ -846,17 +1029,14 @@ impl PerformancePredictor for ExponentialModel {
         )?;
 
         let throughput = self.predict_raw(&features);
-        let uncertainty = self.calculate_prediction_uncertainty(&features)?;
-        let confidence = (1.0 - uncertainty).clamp(0.1, 1.0);
+        let sigma = self.residual_sigma();
+        let confidence = fit_confidence(&self.training_stats);
 
         Ok(PerformancePrediction {
             throughput: throughput.max(0.0),
             latency: Duration::from_millis((1000.0 / throughput.max(0.001)) as u64),
             confidence,
-            uncertainty_bounds: (
-                throughput - uncertainty as f64,
-                throughput + uncertainty as f64,
-            ),
+            uncertainty_bounds: prediction_interval(throughput, sigma),
             model_name: self.metadata.name.clone(),
             feature_importance: self.get_feature_importance(),
             predicted_at: Utc::now(),
@@ -864,16 +1044,7 @@ impl PerformancePredictor for ExponentialModel {
     }
 
     fn get_accuracy(&self) -> ModelAccuracyMetrics {
-        ModelAccuracyMetrics {
-            overall_accuracy: 1.0 - self.training_stats.mean_absolute_error / 100.0,
-            r_squared: self.training_stats.r_squared,
-            mean_absolute_error: self.training_stats.mean_absolute_error,
-            root_mean_squared_error: self.training_stats.mean_squared_error.sqrt(),
-            cross_validation_scores: Vec::new(),
-            confidence_interval: (0.75, 0.90),
-            prediction_stability: 0.80,
-            last_validated: self.metadata.trained_at,
-        }
+        accuracy_from_training(&self.training_stats, self.metadata.trained_at)
     }
 
     fn name(&self) -> &str {
@@ -905,8 +1076,10 @@ impl ExponentialModel {
         Ok(features)
     }
 
-    fn calculate_prediction_uncertainty(&self, _features: &[f64]) -> Result<f32> {
-        Ok(self.training_stats.mean_absolute_error / 5.0)
+    /// One standard deviation of this model's residuals on its training sample;
+    /// see [`LinearRegressionModel::residual_sigma`].
+    fn residual_sigma(&self) -> f32 {
+        residual_sigma(&self.training_stats)
     }
 
     fn get_feature_importance(&self) -> HashMap<String, f32> {
@@ -1120,5 +1293,195 @@ impl ModelImplementationFactory for ExponentialModelFactory {
                 disk_space_mb: 2,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod honesty_tests {
+    use super::*;
+    use crate::performance_optimizer::types::{SystemState, TestCharacteristics};
+
+    fn training_config() -> ModelTrainingConfig {
+        ModelTrainingConfig {
+            normalize_features: false,
+            ..ModelTrainingConfig::default()
+        }
+    }
+
+    /// `y = 3x + 1` sampled without noise, plus an optional per-point residual.
+    fn linear_sample(count: usize, noise: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut features = Vec::with_capacity(count);
+        let mut targets = Vec::with_capacity(count);
+        for index in 0..count {
+            let x = index as f64;
+            features.push(vec![x]);
+            // Alternating residual: mean absolute error is exactly `noise`.
+            let residual = if index % 2 == 0 { noise } else { -noise };
+            targets.push(3.0 * x + 1.0 + residual);
+        }
+        (features, targets)
+    }
+
+    fn prediction_request(parallelism: usize) -> PredictionRequest {
+        PredictionRequest {
+            parallelism_levels: vec![parallelism],
+            test_characteristics: TestCharacteristics::default(),
+            system_state: SystemState::default(),
+            prediction_horizon: None,
+            confidence_level: 0.95,
+            include_uncertainty: false,
+        }
+    }
+
+    /// Regression: an untrained model reported `overall_accuracy` as
+    /// `1 - INFINITY/100` and a `confidence_interval` of `(0.8, 0.95)`.
+    #[test]
+    fn an_untrained_model_reports_no_accuracy() {
+        let model = LinearRegressionModel::new(vec!["x".to_string()]);
+        let accuracy = model.get_accuracy();
+        assert_eq!(
+            accuracy.overall_accuracy, None,
+            "a model trained on nothing has no measured accuracy"
+        );
+        assert_eq!(
+            accuracy.mean_absolute_error_interval, None,
+            "an interval needs at least two training points"
+        );
+        assert_eq!(
+            accuracy.prediction_stability, None,
+            "no trainer in this module measures stability"
+        );
+    }
+
+    /// Regression: `confidence_interval` was the constant `(0.8, 0.95)` for
+    /// every linear model. The reported interval now brackets the mean absolute
+    /// error this particular fit measured.
+    #[test]
+    fn the_reported_interval_brackets_the_measured_error() {
+        let mut model = LinearRegressionModel::new(vec!["x".to_string()]);
+        let (features, targets) = linear_sample(40, 2.0);
+        model.train(&features, &targets, &training_config()).expect("training succeeds");
+
+        let accuracy = model.get_accuracy();
+        let (low, high) =
+            accuracy.mean_absolute_error_interval.expect("forty points give an interval");
+        assert!(
+            low <= accuracy.mean_absolute_error && accuracy.mean_absolute_error <= high,
+            "the interval ({low}, {high}) must bracket the error {}",
+            accuracy.mean_absolute_error
+        );
+        assert!(
+            low < high,
+            "an interval over a spread sample must have width"
+        );
+
+        // A cleaner fit reports a smaller error and a tighter interval.
+        let mut clean = LinearRegressionModel::new(vec!["x".to_string()]);
+        let (clean_features, clean_targets) = linear_sample(40, 0.2);
+        clean
+            .train(&clean_features, &clean_targets, &training_config())
+            .expect("training succeeds");
+        let clean_accuracy = clean.get_accuracy();
+        assert!(
+            clean_accuracy.mean_absolute_error < accuracy.mean_absolute_error,
+            "the cleaner sample must fit better: {} vs {}",
+            clean_accuracy.mean_absolute_error,
+            accuracy.mean_absolute_error
+        );
+        let (clean_low, clean_high) = clean_accuracy
+            .mean_absolute_error_interval
+            .expect("forty points give an interval");
+        assert!(
+            clean_high - clean_low < high - low,
+            "a tighter fit must give a tighter interval: {} vs {}",
+            clean_high - clean_low,
+            high - low
+        );
+    }
+
+    /// Regression: `overall_accuracy` was `1 - MAE/100`, which assumed the
+    /// targets lived on a 0-100 scale. It is relative to the measured target
+    /// scale now, so the same relative error reports the same accuracy whatever
+    /// the units are.
+    #[test]
+    fn accuracy_is_relative_to_the_target_scale() {
+        let mut small = LinearRegressionModel::new(vec!["x".to_string()]);
+        let (features, targets) = linear_sample(40, 1.0);
+        small.train(&features, &targets, &training_config()).expect("training succeeds");
+
+        // The same series scaled by 1000, with the residuals scaled too.
+        let mut large = LinearRegressionModel::new(vec!["x".to_string()]);
+        let scaled_targets: Vec<f64> = targets.iter().map(|t| t * 1000.0).collect();
+        large
+            .train(&features, &scaled_targets, &training_config())
+            .expect("training succeeds");
+
+        let small_accuracy =
+            small.get_accuracy().overall_accuracy.expect("trained model reports accuracy");
+        let large_accuracy =
+            large.get_accuracy().overall_accuracy.expect("trained model reports accuracy");
+        assert!(
+            (small_accuracy - large_accuracy).abs() < 0.01,
+            "a thousand-fold change of units must not change the accuracy: \
+             {small_accuracy} vs {large_accuracy}"
+        );
+    }
+
+    /// Regression: the prediction interval was the point estimate plus and
+    /// minus `mean_absolute_error / 10`, and the confidence was one minus that
+    /// same quantity clamped to `[0.1, 1]`. Both come from the fit now.
+    #[test]
+    fn prediction_bounds_widen_with_the_residuals() {
+        let mut clean = LinearRegressionModel::new(vec!["x".to_string()]);
+        let (features, targets) = linear_sample(40, 0.1);
+        clean.train(&features, &targets, &training_config()).expect("training succeeds");
+
+        let mut noisy = LinearRegressionModel::new(vec!["x".to_string()]);
+        let (noisy_features, noisy_targets) = linear_sample(40, 20.0);
+        noisy
+            .train(&noisy_features, &noisy_targets, &training_config())
+            .expect("training succeeds");
+
+        let clean_prediction = clean.predict(&prediction_request(4)).expect("prediction succeeds");
+        let noisy_prediction = noisy.predict(&prediction_request(4)).expect("prediction succeeds");
+
+        let clean_width =
+            clean_prediction.uncertainty_bounds.1 - clean_prediction.uncertainty_bounds.0;
+        let noisy_width =
+            noisy_prediction.uncertainty_bounds.1 - noisy_prediction.uncertainty_bounds.0;
+        assert!(
+            noisy_width > clean_width,
+            "noisier residuals must give a wider interval: {noisy_width} vs {clean_width}"
+        );
+
+        // The width is the 95% normal interval of the fit's residual scale.
+        let expected = 2.0 * 1.96 * (noisy.get_accuracy().root_mean_squared_error as f64);
+        assert!(
+            (noisy_width - expected).abs() < expected * 1e-3,
+            "the interval must be ±1.96σ: {noisy_width} vs {expected}"
+        );
+
+        assert!(
+            clean_prediction.confidence > noisy_prediction.confidence,
+            "the better fit must report the higher confidence: {} vs {}",
+            clean_prediction.confidence,
+            noisy_prediction.confidence
+        );
+    }
+
+    /// Regression: the polynomial model multiplied its measured accuracy by
+    /// `0.95` because polynomials "may overfit slightly".
+    #[test]
+    fn the_polynomial_model_reports_its_own_fit_unaltered() {
+        let mut model = PolynomialRegressionModel::new(vec!["x".to_string()], 2);
+        let (features, targets) = linear_sample(40, 1.0);
+        model.train(&features, &targets, &training_config()).expect("training succeeds");
+
+        let accuracy = model.get_accuracy();
+        let inner = model.linear_model.get_accuracy();
+        assert_eq!(
+            accuracy.overall_accuracy, inner.overall_accuracy,
+            "the polynomial model is its expanded-feature linear fit"
+        );
     }
 }

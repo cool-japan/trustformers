@@ -2,13 +2,13 @@
 //!
 //! This module provides the fundamental `Tensor` type that serves as the backbone
 //! for all numerical computations in TrustformeRS. It offers a unified interface
-//! over different backend implementations (ndarray, PyTorch, Candle) while
-//! maintaining high performance through SIMD optimizations.
+//! over different backend implementations (ndarray on the CPU, Metal on Apple
+//! GPUs) while maintaining high performance through SIMD optimizations.
 //!
 //! # Overview
 //!
 //! The `Tensor` enum provides:
-//! - Multi-backend support (CPU via ndarray, GPU via PyTorch/Candle)
+//! - Multi-backend support (CPU via ndarray, GPU via Metal on macOS)
 //! - Common tensor operations (matmul, add, softmax, etc.)
 //! - Broadcasting and shape manipulation
 //! - Gradient-related operations for training
@@ -54,6 +54,8 @@ mod complex_tests;
 mod constructors_tests;
 #[cfg(test)]
 mod property_tests;
+#[cfg(test)]
+mod transformations_tests;
 
 use crate::errors::Result;
 use scirs2_core::ndarray::{ArrayBase, ArrayD, Dim, IxDynImpl, OwnedRepr};
@@ -136,13 +138,14 @@ impl DType {
 /// - `F32`: 32-bit floating point tensors (most common for neural networks)
 /// - `F64`: 64-bit floating point tensors (for high precision requirements)
 /// - `I64`: 64-bit integer tensors (for indices and discrete values)
-/// - `Candle`: Candle backend (requires `candle` feature)
+/// - `Metal`: GPU-resident tensor on Apple silicon (requires the `metal`
+///   feature on macOS)
 ///
 /// # Backend Selection
 ///
 /// The default backend is ndarray (CPU), which provides good performance for
-/// small to medium models. For larger models or when GPU acceleration is needed,
-/// enable the `candle` feature.
+/// small to medium models. GPU acceleration comes from the `metal` feature on
+/// macOS and from the `hardware_acceleration` module elsewhere.
 ///
 /// # Example
 ///
@@ -156,25 +159,49 @@ impl DType {
 /// # Ok(())
 /// # }
 /// ```
-/// Metal GPU buffer wrapper for GPU-resident tensors
+/// Metal GPU buffer wrapper for GPU-resident tensors.
+///
+/// Holds a reference-counted [`MetalBufferHandle`](crate::gpu_ops::metal::MetalBufferHandle)
+/// rather than a raw buffer id, mirroring [`CudaTensorData`]: cloning shares the same GPU
+/// allocation (refcount increment only), and when the last clone drops the buffer is removed
+/// from the backend's cache and the `MTLBuffer` freed. A bare `BufferId` here previously left
+/// every GPU-resident tensor's buffer parked in the cache until `clear_buffer_cache` or process
+/// exit - see the module docs on `gpu_ops::metal::types` for the full history.
 #[cfg(all(target_os = "macos", feature = "metal"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetalTensorData {
-    pub buffer_id: crate::gpu_ops::metal::BufferId,
+    /// Lifecycle-managed reference to the GPU-resident buffer.
+    pub buffer: crate::gpu_ops::metal::MetalBufferHandle,
     pub shape: Vec<usize>,
     pub dtype: DType,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
-impl Clone for MetalTensorData {
-    fn clone(&self) -> Self {
-        // Note: This creates a reference to the same GPU buffer
-        // Actual data is not copied - buffer is reference counted
-        Self {
-            buffer_id: self.buffer_id,
-            shape: self.shape.clone(),
-            dtype: self.dtype,
-        }
+impl MetalTensorData {
+    /// Wrap a freshly minted buffer id into a lifecycle-managed Metal tensor payload.
+    ///
+    /// Takes a reference on `buffer_id` through
+    /// [`MetalBackend::retain_buffer`](crate::gpu_ops::metal::MetalBackend::retain_buffer),
+    /// which exempts the entry from LRU eviction and frees it when the last clone of the
+    /// returned value drops. Each raw id must be wrapped at most once; all sharing then
+    /// goes through `clone()`.
+    pub fn new(
+        backend: &crate::gpu_ops::metal::MetalBackend,
+        buffer_id: crate::gpu_ops::metal::BufferId,
+        shape: Vec<usize>,
+        dtype: DType,
+    ) -> Result<Self> {
+        Ok(Self {
+            buffer: backend.retain_buffer(&buffer_id)?,
+            shape,
+            dtype,
+        })
+    }
+
+    /// The resident buffer id backing this tensor.
+    #[inline]
+    pub fn buffer_id(&self) -> crate::gpu_ops::metal::BufferId {
+        self.buffer.id()
     }
 }
 
@@ -254,9 +281,6 @@ pub enum Tensor {
     // Sparse tensor variant
     Sparse(crate::sparse_tensor::SparseTensor),
     // GPU support available via hardware acceleration module (CUDA, ROCm, Intel OneAPI, Vulkan, Metal)
-    // and backend-specific implementations (Candle)
-    #[cfg(feature = "candle")]
-    Candle(candle_core::Tensor),
     // Metal GPU-resident tensor (data lives on GPU)
     #[cfg(all(target_os = "macos", feature = "metal"))]
     Metal(MetalTensorData),
@@ -279,8 +303,6 @@ impl Clone for Tensor {
             Tensor::CF16(arr) => Tensor::CF16(arr.clone()),
             Tensor::CBF16(arr) => Tensor::CBF16(arr.clone()),
             Tensor::Sparse(s) => Tensor::Sparse(s.clone()),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => Tensor::Candle(t.clone()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => Tensor::Metal(data.clone()),
             #[cfg(feature = "cuda")]
@@ -303,13 +325,11 @@ impl std::fmt::Debug for Tensor {
             Tensor::CF16(_) => write!(f, "Tensor::CF16(shape: {:?}, dtype: CF16)", self.shape()),
             Tensor::CBF16(_) => write!(f, "Tensor::CBF16(shape: {:?}, dtype: CBF16)", self.shape()),
             Tensor::Sparse(s) => write!(f, "Tensor::Sparse({:?})", s),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => write!(
                 f,
-                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
-                data.shape, data.dtype, data.buffer_id
+                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer: {:?})",
+                data.shape, data.dtype, data.buffer
             ),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => write!(
@@ -320,12 +340,6 @@ impl std::fmt::Debug for Tensor {
         }
     }
 }
-
-// Safety: The Candle backend is internally thread-safe:
-// - Candle: Tensors are designed to be thread-safe with reference-counted storage.
-// Multiple threads can safely hold references to the same tensor.
-#[cfg(feature = "candle")]
-unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks
 
@@ -498,3 +512,9 @@ pub use expression::{EvalContext, ExprNode, OpType, OptimizationHints, TensorExp
 
 // Re-export gradient tracking utilities
 pub use utils::{clear_gradients, disable_grad, enable_grad, is_grad_enabled};
+
+// Numerical-stability predicates and clamps used by the tensor math kernels.
+pub use math_ops::{
+    is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64, MAX_SAFE_VALUE_F32,
+    MAX_SAFE_VALUE_F64, STABILITY_EPSILON_F32, STABILITY_EPSILON_F64,
+};

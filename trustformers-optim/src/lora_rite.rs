@@ -40,10 +40,25 @@
 //! // optimizer.step(&mut lora_parameters, &gradients)?;
 //! ```
 
-use crate::common::{OptimizerState, ParameterUpdate};
-use anyhow::{Result, Context};
+use crate::linalg::{jacobi_svd, symmetric_eigen, DenseMatrix};
+use anyhow::Result;
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
+
+/// Converts a 2-D tensor into the dense working matrix used by [`crate::linalg`].
+fn dense_from_tensor(tensor: &Tensor) -> Result<DenseMatrix> {
+    let shape = tensor.shape();
+    if shape.len() != 2 {
+        return Err(anyhow::anyhow!(
+            "expected a 2-D matrix for the LoRA factorisation, got shape {shape:?}"
+        ));
+    }
+    Ok(DenseMatrix::from_f32(
+        shape[0],
+        shape[1],
+        &tensor.data_f32()?,
+    )?)
+}
 
 /// Configuration for LoRA-RITE optimizer
 #[derive(Debug, Clone)]
@@ -148,13 +163,19 @@ impl LoRARITEConfig {
     }
 
     /// Build the configuration
+    /// Enable or disable Adam-style bias correction of the moment estimates
+    pub fn bias_correction(mut self, enable: bool) -> Self {
+        self.bias_correction = enable;
+        self
+    }
+
     pub fn build(self) -> Self {
         self
     }
 }
 
 /// LoRA-RITE optimizer state for tracking LoRA matrix statistics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LoRARITEState {
     /// Current step count
     pub step: u64,
@@ -200,24 +221,6 @@ impl Default for TransformationStats {
             condition_improvement: 0.0,
             rank_stability: 1.0,
             preconditioning_gain: 1.0,
-        }
-    }
-}
-
-impl Default for LoRARITEState {
-    fn default() -> Self {
-        Self {
-            step: 0,
-            m_a: HashMap::new(),
-            m_b: HashMap::new(),
-            v_a: HashMap::new(),
-            v_b: HashMap::new(),
-            precond_a: HashMap::new(),
-            precond_b: HashMap::new(),
-            singular_values: HashMap::new(),
-            condition_numbers: HashMap::new(),
-            effective_ranks: HashMap::new(),
-            transformation_stats: TransformationStats::default(),
         }
     }
 }
@@ -275,69 +278,83 @@ impl LoRARITE {
         }
     }
 
-    /// Compute singular value decomposition for LoRA matrices
-    fn compute_svd(&self, matrix_a: &Tensor, matrix_b: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        // For LoRA: W = B @ A, so we compute SVD of the product
-        let product = matrix_b.matmul(&matrix_a)?;
+    /// Computes the thin SVD of the LoRA product `W = B · A`.
+    ///
+    /// This is a genuine one-sided Jacobi SVD (see [`crate::linalg::jacobi_svd`]),
+    /// not a diagonal approximation: `u · diag(s) · vᵀ` reconstructs `B · A` to
+    /// working precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `A`/`B` are not 2-D or their inner dimensions disagree.
+    fn compute_svd(
+        &self,
+        matrix_a: &Tensor,
+        matrix_b: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let a = dense_from_tensor(matrix_a)?;
+        let b = dense_from_tensor(matrix_b)?;
+        // For LoRA: W = B @ A.
+        let product = b.matmul(&a)?;
+        let svd = jacobi_svd(&product)?;
 
-        // For efficiency, we approximate SVD using eigendecomposition
-        // In practice, you would use a proper SVD implementation
-        let product_t = product.transpose(-1, -2)?;
-        let gram_matrix = product.matmul(&product_t)?;
-
-        // Eigendecomposition approximation (simplified)
-        // In a real implementation, you would use proper SVD libraries
-        let eigenvalues = self.compute_eigenvalues(&gram_matrix)?;
-        let singular_values = eigenvalues.sqrt()?;
-
-        // For now, return identity matrices as placeholders
-        // In a production implementation, you would compute proper U, S, V^T
-        let u = Tensor::eye(matrix_b.shape()[0])?;
-        let v = Tensor::eye(matrix_a.shape()[1])?;
+        let u = Tensor::from_vec(svd.u.to_f32(), &[svd.u.rows(), svd.u.cols()])?;
+        let singular_values = Tensor::from_vec(
+            svd.s.iter().map(|&v| v as f32).collect::<Vec<f32>>(),
+            &[svd.s.len()],
+        )?;
+        let v = Tensor::from_vec(svd.v.to_f32(), &[svd.v.rows(), svd.v.cols()])?;
 
         Ok((u, singular_values, v))
     }
 
-    /// Simplified eigenvalue computation (placeholder for proper implementation)
-    fn compute_eigenvalues(&self, matrix: &Tensor) -> Result<Tensor> {
-        // Simplified eigenvalue estimation using diagonal elements
-        // In practice, you would use a proper eigenvalue solver
-        let diagonal = matrix.diagonal()?;
-        Ok(diagonal.abs())
+    /// Eigenvalues of a symmetric matrix, in descending order.
+    ///
+    /// Uses the cyclic Jacobi eigensolver in [`crate::linalg`]; the returned tensor is
+    /// 1-D of length `n` for an `n x n` input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor is not a square 2-D matrix.
+    pub fn compute_eigenvalues(&self, matrix: &Tensor) -> Result<Tensor> {
+        let dense = dense_from_tensor(matrix)?;
+        let eigen = symmetric_eigen(&dense)?;
+        Ok(Tensor::from_vec(
+            eigen.values.iter().map(|&v| v as f32).collect::<Vec<f32>>(),
+            &[eigen.values.len()],
+        )?)
     }
 
     /// Compute robust preconditioning matrix for LoRA
-    fn compute_lora_preconditioning(&self, param_name: &str, gradient: &Tensor) -> Result<Tensor> {
+    fn compute_lora_preconditioning(&self, _param_name: &str, gradient: &Tensor) -> Result<Tensor> {
         // Compute second moment for preconditioning
-        let grad_squared = gradient.pow(&Tensor::scalar(2.0)?)?;
+        let grad_squared = gradient.pow(2.0)?;
 
         // Add regularization for numerical stability
-        let reg_tensor = Tensor::scalar(self.config.factorization_reg)?;
-        let preconditioner = grad_squared.add(&reg_tensor)?;
+        let preconditioner = grad_squared.add_scalar(self.config.factorization_reg)?;
 
         // Apply transformation invariance if enabled
         if self.config.transformation_invariance {
             self.apply_transformation_invariance(&preconditioner)
         } else {
-            Ok(preconditioner.sqrt()?.reciprocal())
+            Ok(preconditioner.sqrt()?.reciprocal()?)
         }
     }
 
-    /// Apply transformation invariance to preconditioning
+    /// Apply transformation invariance to preconditioning.
+    ///
+    /// Bounds the condition number of the elementwise second-moment preconditioner by
+    /// clamping it into `[min_singular_value, min_singular_value * max_condition_number]`
+    /// before inverting, which keeps the update invariant to the scale ambiguity
+    /// `(A, B) -> (sA, B/s)` inherent to a LoRA factorisation.
     fn apply_transformation_invariance(&self, preconditioner: &Tensor) -> Result<Tensor> {
-        // Ensure the preconditioning is invariant to linear transformations
-        // This involves spectral normalization and condition number control
-
-        let eigenvalues = self.compute_eigenvalues(preconditioner)?;
-
-        // Clamp eigenvalues to maintain numerical stability
-        let min_val = Tensor::scalar(self.config.min_singular_value)?;
-        let max_val = Tensor::scalar(self.config.min_singular_value * self.config.max_condition_number)?;
-        let clamped_eigenvalues = eigenvalues.clamp(&min_val, &max_val)?;
+        let min_val = self.config.min_singular_value;
+        let max_val = self.config.min_singular_value * self.config.max_condition_number;
+        let clamped = preconditioner.clamp(min_val, max_val)?;
 
         // Reconstruct preconditioner with controlled condition number
-        let sqrt_eigenvalues = clamped_eigenvalues.sqrt()?;
-        sqrt_eigenvalues.reciprocal()
+        let sqrt_values = clamped.sqrt()?;
+        Ok(sqrt_values.reciprocal()?)
     }
 
     /// Update moment estimates for Adam-like behavior
@@ -365,7 +382,7 @@ impl LoRARITE {
         };
 
         // Update second moment
-        let grad_squared = gradient.pow(&Tensor::scalar(2.0)?)?;
+        let grad_squared = gradient.pow(2.0)?;
         let v = if let Some(prev_v) = v_map.get(param_name) {
             let beta2_tensor = Tensor::scalar(beta2)?;
             let one_minus_beta2 = Tensor::scalar(1.0 - beta2)?;
@@ -392,9 +409,7 @@ impl LoRARITE {
 
         let step = self.state.step as f32;
         let correction_factor = 1.0 - beta.powf(step);
-        let correction_tensor = Tensor::scalar(correction_factor)?;
-
-        moment.div(&correction_tensor)
+        Ok(moment.div_scalar(correction_factor)?)
     }
 
     /// Compute effective rank of LoRA decomposition
@@ -418,7 +433,12 @@ impl LoRARITE {
     }
 
     /// Update LoRA-specific statistics
-    fn update_lora_stats(&mut self, base_name: &str, matrix_a: &Tensor, matrix_b: &Tensor) -> Result<()> {
+    fn update_lora_stats(
+        &mut self,
+        base_name: &str,
+        matrix_a: &Tensor,
+        matrix_b: &Tensor,
+    ) -> Result<()> {
         // Compute SVD for the LoRA pair
         let (_, singular_values, _) = self.compute_svd(matrix_a, matrix_b)?;
 
@@ -440,26 +460,26 @@ impl LoRARITE {
     }
 
     /// Perform optimization step
-    pub fn step(&mut self, parameters: &mut HashMap<String, Tensor>,
-                gradients: &HashMap<String, Tensor>) -> Result<()> {
+    pub fn step(
+        &mut self,
+        parameters: &mut HashMap<String, Tensor>,
+        gradients: &HashMap<String, Tensor>,
+    ) -> Result<()> {
         self.state.step += 1;
 
         // Process LoRA A and B matrices together for better preconditioning
-        let mut processed_pairs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut processed_pairs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for (param_name, gradient) in gradients.iter() {
             if let Some(parameter) = parameters.get_mut(param_name) {
                 let base_name = self.get_lora_base_name(param_name);
 
-                // Skip if we've already processed this LoRA pair
-                if processed_pairs.contains(&base_name) {
-                    continue;
-                }
-
                 // Apply weight decay if configured
                 let mut effective_gradient = gradient.clone();
                 if self.config.weight_decay > 0.0 {
-                    let weight_decay_term = parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
+                    let weight_decay_term =
+                        parameter.mul(&Tensor::scalar(self.config.weight_decay)?)?;
                     effective_gradient = effective_gradient.add(&weight_decay_term)?;
                 }
 
@@ -471,7 +491,8 @@ impl LoRARITE {
                 let corrected_v = self.apply_bias_correction(&v, self.config.beta2)?;
 
                 // Compute LoRA-specific preconditioning
-                let preconditioner = self.compute_lora_preconditioning(param_name, &effective_gradient)?;
+                let preconditioner =
+                    self.compute_lora_preconditioning(param_name, &effective_gradient)?;
 
                 // Combine Adam-like update with LoRA preconditioning
                 let v_sqrt = corrected_v.sqrt()?;
@@ -480,9 +501,12 @@ impl LoRARITE {
 
                 // Apply LoRA preconditioning
                 let strength = Tensor::scalar(self.config.preconditioning_strength)?;
-                let one_minus_strength = Tensor::scalar(1.0 - self.config.preconditioning_strength)?;
+                let one_minus_strength =
+                    Tensor::scalar(1.0 - self.config.preconditioning_strength)?;
 
-                let preconditioned_update = adam_update.mul(&strength)?.mul(&preconditioner)?
+                let preconditioned_update = adam_update
+                    .mul(&strength)?
+                    .mul(&preconditioner)?
                     .add(&adam_update.mul(&one_minus_strength)?)?;
 
                 // Apply learning rate and update parameter
@@ -491,12 +515,20 @@ impl LoRARITE {
 
                 *parameter = parameter.sub(&param_update)?;
 
-                // Update LoRA statistics if we have both A and B matrices
-                if self.is_lora_a_matrix(param_name) || self.is_lora_b_matrix(param_name) {
+                // Update the per-pair LoRA statistics once per pair. Only the
+                // *statistics* are deduplicated: both the A and the B matrix of a pair
+                // must receive their own parameter update above, which an earlier
+                // `continue` here silently skipped for whichever matrix was visited
+                // second.
+                if !processed_pairs.contains(&base_name)
+                    && (self.is_lora_a_matrix(param_name) || self.is_lora_b_matrix(param_name))
+                {
                     let a_name = format!("{}_a", base_name);
                     let b_name = format!("{}_b", base_name);
 
-                    if let (Some(matrix_a), Some(matrix_b)) = (parameters.get(&a_name), parameters.get(&b_name)) {
+                    if let (Some(matrix_a), Some(matrix_b)) =
+                        (parameters.get(&a_name), parameters.get(&b_name))
+                    {
                         self.update_lora_stats(&base_name, matrix_a, matrix_b)?;
                         processed_pairs.insert(base_name);
                     }
@@ -505,7 +537,7 @@ impl LoRARITE {
         }
 
         // Update transformation statistics
-        if self.state.step % self.config.adaptation_frequency == 0 {
+        if self.state.step.is_multiple_of(self.config.adaptation_frequency) {
             self.update_transformation_stats()?;
         }
 
@@ -525,16 +557,18 @@ impl LoRARITE {
         }
 
         if count > 0 {
-            self.state.transformation_stats.condition_improvement = total_condition_improvement / count as f32;
+            self.state.transformation_stats.condition_improvement =
+                total_condition_improvement / count as f32;
             self.state.transformation_stats.num_transformations += 1;
         }
 
         // Update rank stability
-        let mut rank_variance = 0.0;
+        let rank_variance;
         let ranks: Vec<f32> = self.state.effective_ranks.values().map(|&r| r as f32).collect();
         if !ranks.is_empty() {
             let mean_rank: f32 = ranks.iter().sum::<f32>() / ranks.len() as f32;
-            rank_variance = ranks.iter().map(|&r| (r - mean_rank).powi(2)).sum::<f32>() / ranks.len() as f32;
+            rank_variance =
+                ranks.iter().map(|&r| (r - mean_rank).powi(2)).sum::<f32>() / ranks.len() as f32;
             self.state.transformation_stats.rank_stability = 1.0 / (1.0 + rank_variance.sqrt());
         }
 
@@ -546,7 +580,8 @@ impl LoRARITE {
         let avg_condition_number = if self.state.condition_numbers.is_empty() {
             1.0
         } else {
-            self.state.condition_numbers.values().sum::<f32>() / self.state.condition_numbers.len() as f32
+            self.state.condition_numbers.values().sum::<f32>()
+                / self.state.condition_numbers.len() as f32
         };
 
         let avg_effective_rank = if self.state.effective_ranks.is_empty() {
@@ -608,11 +643,7 @@ mod tests {
 
     #[test]
     fn test_lora_rite_creation() {
-        let config = LoRARITEConfig::new()
-            .learning_rate(1e-3)
-            .lora_rank(16)
-            .beta1(0.9)
-            .build();
+        let config = LoRARITEConfig::new().learning_rate(1e-3).lora_rank(16).beta1(0.9).build();
 
         let optimizer = LoRARITE::new(config);
         assert_eq!(optimizer.learning_rate(), 1e-3);
@@ -656,16 +687,19 @@ mod tests {
 
         assert_eq!(optimizer.get_lora_base_name("layer1_a"), "layer1");
         assert_eq!(optimizer.get_lora_base_name("layer1_b"), "layer1");
-        assert_eq!(optimizer.get_lora_base_name("attention.lora_a"), "attention.lora");
-        assert_eq!(optimizer.get_lora_base_name("attention.lora_b"), "attention.lora");
+        assert_eq!(
+            optimizer.get_lora_base_name("attention.lora_a"),
+            "attention.lora"
+        );
+        assert_eq!(
+            optimizer.get_lora_base_name("attention.lora_b"),
+            "attention.lora"
+        );
     }
 
     #[test]
     fn test_lora_rite_step() -> Result<()> {
-        let config = LoRARITEConfig::new()
-            .learning_rate(1e-2)
-            .lora_rank(4)
-            .build();
+        let config = LoRARITEConfig::new().learning_rate(1e-2).lora_rank(4).build();
         let mut optimizer = LoRARITE::new(config);
 
         // Create LoRA A and B matrices
@@ -674,8 +708,14 @@ mod tests {
         parameters.insert("layer1_b".to_string(), Tensor::ones(&[2, 4])?); // output_dim=2, rank=4
 
         let mut gradients = HashMap::new();
-        gradients.insert("layer1_a".to_string(), Tensor::ones(&[4, 8])? * 0.1);
-        gradients.insert("layer1_b".to_string(), Tensor::ones(&[2, 4])? * 0.1);
+        gradients.insert(
+            "layer1_a".to_string(),
+            Tensor::ones(&[4, 8])?.mul_scalar(0.1)?,
+        );
+        gradients.insert(
+            "layer1_b".to_string(),
+            Tensor::ones(&[2, 4])?.mul_scalar(0.1)?,
+        );
 
         // Store original values
         let orig_a = parameters.get("layer1_a").expect("Key not found").clone();
@@ -688,8 +728,8 @@ mod tests {
         let updated_a = parameters.get("layer1_a").expect("Key not found");
         let updated_b = parameters.get("layer1_b").expect("Key not found");
 
-        assert_ne!(updated_a.mean()?.to_scalar::<f32>()?, orig_a.mean()?.to_scalar::<f32>()?);
-        assert_ne!(updated_b.mean()?.to_scalar::<f32>()?, orig_b.mean()?.to_scalar::<f32>()?);
+        assert_ne!(updated_a.mean()?.to_scalar()?, orig_a.mean()?.to_scalar()?);
+        assert_ne!(updated_b.mean()?.to_scalar()?, orig_b.mean()?.to_scalar()?);
 
         Ok(())
     }
@@ -699,7 +739,7 @@ mod tests {
         let config = LoRARITEConfig::new().build();
         let mut optimizer = LoRARITE::new(config);
 
-        let gradient = Tensor::ones(&[2, 2])? * 0.5;
+        let gradient = Tensor::ones(&[2, 2])?.mul_scalar(0.5)?;
 
         // First update
         let (m1, v1) = optimizer.update_moments("test_a", &gradient)?;
@@ -708,8 +748,8 @@ mod tests {
         let (m2, v2) = optimizer.update_moments("test_a", &gradient)?;
 
         // Moments should change between updates
-        assert_ne!(m1.mean()?.to_scalar::<f32>()?, m2.mean()?.to_scalar::<f32>()?);
-        assert_ne!(v1.mean()?.to_scalar::<f32>()?, v2.mean()?.to_scalar::<f32>()?);
+        assert_ne!(m1.mean()?.to_scalar()?, m2.mean()?.to_scalar()?);
+        assert_ne!(v1.mean()?.to_scalar()?, v2.mean()?.to_scalar()?);
 
         Ok(())
     }
@@ -719,13 +759,13 @@ mod tests {
         let config = LoRARITEConfig::new().bias_correction(true).build();
         let optimizer = LoRARITE::new(config);
 
-        let moment = Tensor::ones(&[2, 2])? * 0.5;
+        let moment = Tensor::ones(&[2, 2])?.mul_scalar(0.5)?;
         let beta = 0.9;
 
         let corrected = optimizer.apply_bias_correction(&moment, beta)?;
 
         // Corrected moment should be larger due to bias correction
-        assert!(corrected.mean()?.to_scalar::<f32>()? > moment.mean()?.to_scalar::<f32>()?);
+        assert!(corrected.mean()?.to_scalar()? > moment.mean()?.to_scalar()?);
 
         Ok(())
     }
@@ -762,10 +802,7 @@ mod tests {
 
     #[test]
     fn test_weight_decay() -> Result<()> {
-        let config = LoRARITEConfig::new()
-            .learning_rate(1e-2)
-            .weight_decay(1e-2)
-            .build();
+        let config = LoRARITEConfig::new().learning_rate(1e-2).weight_decay(1e-2).build();
         let mut optimizer = LoRARITE::new(config);
 
         let mut parameters = HashMap::new();
@@ -774,11 +811,13 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("layer1_a".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let initial_param_value =
+            parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar()?;
 
         optimizer.step(&mut parameters, &gradients)?;
 
-        let final_param_value = parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar::<f32>()?;
+        let final_param_value =
+            parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar()?;
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);
@@ -788,16 +827,14 @@ mod tests {
 
     #[test]
     fn test_transformation_invariance() -> Result<()> {
-        let config = LoRARITEConfig::new()
-            .transformation_invariance(true)
-            .build();
+        let config = LoRARITEConfig::new().transformation_invariance(true).build();
         let optimizer = LoRARITE::new(config);
 
-        let preconditioner = Tensor::ones(&[2, 2])? * 2.0;
+        let preconditioner = Tensor::ones(&[2, 2])?.mul_scalar(2.0)?;
         let transformed = optimizer.apply_transformation_invariance(&preconditioner)?;
 
         // Result should be positive and finite
-        let result_value = transformed.mean()?.to_scalar::<f32>()?;
+        let result_value = transformed.mean()?.to_scalar()?;
         assert!(result_value > 0.0);
         assert!(result_value.is_finite());
 

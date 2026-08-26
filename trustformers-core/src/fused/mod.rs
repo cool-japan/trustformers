@@ -60,12 +60,7 @@ pub struct FusedOpResult {
 /// Returns the normalized vector; `x` itself is not modified.
 ///
 /// `norm = (x - mean) / sqrt(var + eps) * weight + bias`
-fn layer_norm_slice(
-    x: &[f32],
-    weight: &[f32],
-    bias: &[f32],
-    eps: f32,
-) -> Vec<f32> {
+fn layer_norm_slice(x: &[f32], weight: &[f32], bias: &[f32], eps: f32) -> Vec<f32> {
     let n = x.len() as f32;
     let mean = x.iter().sum::<f32>() / n;
     let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
@@ -84,10 +79,7 @@ fn rms_norm_slice(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     let n = x.len() as f32;
     let rms = (x.iter().map(|v| v * v).sum::<f32>() / n + eps).sqrt();
     let inv_rms = 1.0 / rms;
-    x.iter()
-        .zip(weight.iter())
-        .map(|(&xi, &wi)| xi * inv_rms * wi)
-        .collect()
+    x.iter().zip(weight.iter()).map(|(&xi, &wi)| xi * inv_rms * wi).collect()
 }
 
 /// Dense linear projection: `output[i] = sum_j(input[j] * weight[i * in + j]) + bias[i]`.
@@ -224,7 +216,13 @@ pub fn fused_layer_norm_linear(
     let normed = layer_norm_slice(x, ln_weight, ln_bias, eps);
 
     // Step 2: Linear projection using normalized values
-    let output = linear_projection(&normed, linear_weight, linear_bias, hidden_size, out_features);
+    let output = linear_projection(
+        &normed,
+        linear_weight,
+        linear_bias,
+        hidden_size,
+        out_features,
+    );
 
     // FLOPs: LayerNorm ≈ 5*H, Linear ≈ 2*H*O
     let estimated_flops = 5 * hidden_size as u64 + 2 * hidden_size as u64 * out_features as u64;
@@ -295,7 +293,13 @@ pub fn fused_rms_norm_linear(
     }
 
     let normed = rms_norm_slice(x, rms_weight, eps);
-    let output = linear_projection(&normed, linear_weight, linear_bias, hidden_size, out_features);
+    let output = linear_projection(
+        &normed,
+        linear_weight,
+        linear_bias,
+        hidden_size,
+        out_features,
+    );
 
     // FLOPs: RMSNorm ≈ 4*H, Linear ≈ 2*H*O
     let estimated_flops = 4 * hidden_size as u64 + 2 * hidden_size as u64 * out_features as u64;
@@ -355,7 +359,7 @@ pub fn fused_attention_scores(
             "head_dim must be > 0".to_string(),
         ));
     }
-    if num_heads % num_kv_heads != 0 {
+    if !num_heads.is_multiple_of(num_kv_heads) {
         return Err(FusedOpError::InvalidConfig(format!(
             "num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         )));
@@ -411,8 +415,7 @@ pub fn fused_attention_scores(
     }
 
     // FLOPs: num_heads * seq_len * seq_len * (2*head_dim) for QKT
-    let estimated_flops =
-        num_heads as u64 * seq_len as u64 * seq_len as u64 * 2 * head_dim as u64;
+    let estimated_flops = num_heads as u64 * seq_len as u64 * seq_len as u64 * 2 * head_dim as u64;
 
     Ok(FusedOpResult {
         output,
@@ -491,7 +494,7 @@ pub fn fused_swiglu(
 
     // Compute gate and up projections, apply SwiGLU in one fused loop
     let mut activated = vec![0.0f32; intermediate_size];
-    for i in 0..intermediate_size {
+    for (i, slot) in activated.iter_mut().enumerate() {
         let base = i * hidden_size;
         let mut gate_val = 0.0f32;
         let mut up_val = 0.0f32;
@@ -500,14 +503,21 @@ pub fn fused_swiglu(
             up_val += x[j] * up_weight[base + j];
         }
         // SwiGLU: gate * silu(up)
-        activated[i] = gate_val * silu(up_val);
+        *slot = gate_val * silu(up_val);
     }
 
     // Down projection
-    let output = linear_projection(&activated, down_weight, None, intermediate_size, hidden_size);
+    let output = linear_projection(
+        &activated,
+        down_weight,
+        None,
+        intermediate_size,
+        hidden_size,
+    );
 
     // FLOPs: gate+up = 2 * 2*H*I, silu = I, down = 2*I*H
-    let estimated_flops = 6 * hidden_size as u64 * intermediate_size as u64 + intermediate_size as u64;
+    let estimated_flops =
+        6 * hidden_size as u64 * intermediate_size as u64 + intermediate_size as u64;
 
     Ok(FusedOpResult {
         output,
@@ -583,7 +593,7 @@ pub fn fused_geglu(
     }
 
     let mut activated = vec![0.0f32; intermediate_size];
-    for i in 0..intermediate_size {
+    for (i, slot) in activated.iter_mut().enumerate() {
         let base = i * hidden_size;
         let mut gate_val = 0.0f32;
         let mut up_val = 0.0f32;
@@ -592,12 +602,19 @@ pub fn fused_geglu(
             up_val += x[j] * up_weight[base + j];
         }
         // GeGLU: gelu(gate) * up
-        activated[i] = gelu(gate_val) * up_val;
+        *slot = gelu(gate_val) * up_val;
     }
 
-    let output = linear_projection(&activated, down_weight, None, intermediate_size, hidden_size);
+    let output = linear_projection(
+        &activated,
+        down_weight,
+        None,
+        intermediate_size,
+        hidden_size,
+    );
 
-    let estimated_flops = 6 * hidden_size as u64 * intermediate_size as u64 + intermediate_size as u64;
+    let estimated_flops =
+        6 * hidden_size as u64 * intermediate_size as u64 + intermediate_size as u64;
 
     Ok(FusedOpResult {
         output,
@@ -671,11 +688,7 @@ pub fn fused_residual_add_norm(
     }
 
     // Step 1: residual addition
-    let added: Vec<f32> = residual
-        .iter()
-        .zip(hidden_states.iter())
-        .map(|(r, h)| r + h)
-        .collect();
+    let added: Vec<f32> = residual.iter().zip(hidden_states.iter()).map(|(r, h)| r + h).collect();
 
     // Step 2: normalization
     let output = if use_rms_norm {
@@ -757,23 +770,20 @@ mod tests {
         let lb: Vec<f32> = (0..out).map(|i| i as f32 * 0.1).collect();
 
         // Fused
-        let fused_result = fused_layer_norm_linear(
-            &x,
-            &ln_w,
-            &ln_b,
-            &lw,
-            Some(&lb),
-            hidden,
-            out,
-            EPS,
-        )
-        .expect("fused ok");
+        let fused_result =
+            fused_layer_norm_linear(&x, &ln_w, &ln_b, &lw, Some(&lb), hidden, out, EPS)
+                .expect("fused ok");
 
         // Sequential (manual)
         let normed = layer_norm_slice(&x, &ln_w, &ln_b, EPS);
         let seq_out = linear_projection(&normed, &lw, Some(&lb), hidden, out);
 
-        assert_approx_eq(&fused_result.output, &seq_out, 1e-5, "layer_norm_linear_vs_seq");
+        assert_approx_eq(
+            &fused_result.output,
+            &seq_out,
+            1e-5,
+            "layer_norm_linear_vs_seq",
+        );
     }
 
     // ── rms_norm + linear ────────────────────────────────────────────────────
@@ -785,8 +795,8 @@ mod tests {
         let x = vec![0.5f32, -0.5, 1.0, -1.0];
         let rw = vec![1.0f32; hidden];
         let lw = vec![0.5f32; out * hidden];
-        let result = fused_rms_norm_linear(&x, &rw, &lw, None, hidden, out, EPS)
-            .expect("should succeed");
+        let result =
+            fused_rms_norm_linear(&x, &rw, &lw, None, hidden, out, EPS).expect("should succeed");
         assert_eq!(result.output.len(), out);
         assert_eq!(result.ops_fused, vec!["RMSNorm", "Linear"]);
         assert!(result.estimated_flops > 0);
@@ -802,13 +812,17 @@ mod tests {
         let lb: Vec<f32> = vec![0.1, -0.1, 0.2];
 
         let fused_result =
-            fused_rms_norm_linear(&x, &rw, &lw, Some(&lb), hidden, out, EPS)
-                .expect("fused ok");
+            fused_rms_norm_linear(&x, &rw, &lw, Some(&lb), hidden, out, EPS).expect("fused ok");
 
         let normed = rms_norm_slice(&x, &rw, EPS);
         let seq_out = linear_projection(&normed, &lw, Some(&lb), hidden, out);
 
-        assert_approx_eq(&fused_result.output, &seq_out, 1e-5, "rms_norm_linear_vs_seq");
+        assert_approx_eq(
+            &fused_result.output,
+            &seq_out,
+            1e-5,
+            "rms_norm_linear_vs_seq",
+        );
     }
 
     // ── attention scores ─────────────────────────────────────────────────────
@@ -821,8 +835,7 @@ mod tests {
         let hd = 4;
         let q = vec![0.1f32; seq * nh * hd];
         let k = vec![0.1f32; seq * nkv * hd];
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false)
-            .expect("ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false).expect("ok");
         assert_eq!(result.output.len(), nh * seq * seq);
     }
 
@@ -834,19 +847,14 @@ mod tests {
         let hd = 2;
         let q = vec![1.0f32; seq * nh * hd];
         let k = vec![1.0f32; seq * nkv * hd];
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, true)
-            .expect("ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, true).expect("ok");
         // For query position 0, k positions 1 and 2 should be masked → weight ~0
         let attn = &result.output;
         // head 0, query 0, key 1 and key 2 should be near-zero after softmax
-        assert!(
-            attn[0 * seq * seq + 0 * seq + 1] < 1e-10,
-            "future key should be masked"
-        );
-        assert!(
-            attn[0 * seq * seq + 0 * seq + 2] < 1e-10,
-            "future key should be masked"
-        );
+        // Index into [head, query, key] for head 0, query 0.
+        let at = |head: usize, query: usize, key: usize| attn[head * seq * seq + query * seq + key];
+        assert!(at(0, 0, 1) < 1e-10, "future key should be masked");
+        assert!(at(0, 0, 2) < 1e-10, "future key should be masked");
     }
 
     #[test]
@@ -858,8 +866,7 @@ mod tests {
         // Use varied values to exercise softmax
         let q: Vec<f32> = (0..seq * nh * hd).map(|i| (i as f32) * 0.01).collect();
         let k: Vec<f32> = (0..seq * nkv * hd).map(|i| (i as f32) * 0.02 - 0.5).collect();
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false)
-            .expect("ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false).expect("ok");
         // Each (head, query) row must sum to 1.0
         for h in 0..nh {
             for qi in 0..seq {
@@ -882,8 +889,7 @@ mod tests {
         let hd = 4;
         let q = vec![0.5f32; seq * nh * hd];
         let k = vec![0.5f32; seq * nkv * hd];
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false)
-            .expect("GQA ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false).expect("GQA ok");
         assert_eq!(result.output.len(), nh * seq * seq);
         // Softmax rows must sum to 1
         for h in 0..nh {
@@ -925,11 +931,8 @@ mod tests {
         // Sequential: gate proj, up proj, activate, down proj
         let gate_out = linear_projection(&x, &gw, None, h, inter);
         let up_out = linear_projection(&x, &uw, None, h, inter);
-        let activated: Vec<f32> = gate_out
-            .iter()
-            .zip(up_out.iter())
-            .map(|(&g, &u)| g * silu(u))
-            .collect();
+        let activated: Vec<f32> =
+            gate_out.iter().zip(up_out.iter()).map(|(&g, &u)| g * silu(u)).collect();
         let seq_out = linear_projection(&activated, &dw, None, inter, h);
 
         assert_approx_eq(&fused_result.output, &seq_out, 1e-5, "swiglu_vs_seq");
@@ -960,19 +963,15 @@ mod tests {
         let uw: Vec<f32> = (0..inter * h).map(|i| (i as f32) * 0.03 + 0.01).collect();
         let dw: Vec<f32> = (0..h * inter).map(|i| (i as f32) * 0.02 + 0.01).collect();
 
-        let swiglu_out = fused_swiglu(&x, &gw, &uw, &dw, h, inter)
-            .expect("swiglu ok")
-            .output;
-        let geglu_out = fused_geglu(&x, &gw, &uw, &dw, h, inter)
-            .expect("geglu ok")
-            .output;
+        let swiglu_out = fused_swiglu(&x, &gw, &uw, &dw, h, inter).expect("swiglu ok").output;
+        let geglu_out = fused_geglu(&x, &gw, &uw, &dw, h, inter).expect("geglu ok").output;
 
         // They should not be equal (different activations)
-        let all_same = swiglu_out
-            .iter()
-            .zip(geglu_out.iter())
-            .all(|(a, b)| (a - b).abs() < 1e-6);
-        assert!(!all_same, "SwiGLU and GeGLU should produce different outputs");
+        let all_same = swiglu_out.iter().zip(geglu_out.iter()).all(|(a, b)| (a - b).abs() < 1e-6);
+        assert!(
+            !all_same,
+            "SwiGLU and GeGLU should produce different outputs"
+        );
     }
 
     // ── residual add + norm ──────────────────────────────────────────────────
@@ -983,8 +982,8 @@ mod tests {
         let residual = vec![1.0f32, 0.0, -1.0, 0.5];
         let hidden = vec![0.5f32, 0.5, 0.5, 0.5];
         let nw = vec![1.0f32; h];
-        let result = fused_residual_add_norm(&residual, &hidden, &nw, None, h, EPS, true)
-            .expect("ok");
+        let result =
+            fused_residual_add_norm(&residual, &hidden, &nw, None, h, EPS, true).expect("ok");
         assert_eq!(result.output.len(), h);
         assert!(result.ops_fused.contains(&"RMSNorm".to_string()));
 
@@ -1002,8 +1001,7 @@ mod tests {
         let nw = vec![1.0f32; h];
         let nb = vec![0.0f32; h];
         let result =
-            fused_residual_add_norm(&residual, &hidden, &nw, Some(&nb), h, EPS, false)
-                .expect("ok");
+            fused_residual_add_norm(&residual, &hidden, &nw, Some(&nb), h, EPS, false).expect("ok");
         assert_eq!(result.output.len(), h);
         assert!(result.ops_fused.contains(&"LayerNorm".to_string()));
 
@@ -1022,8 +1020,7 @@ mod tests {
         let lw = vec![1.0f32; h];
         let lb = vec![0.0f32; h];
         let pw = vec![0.5f32; out * h];
-        let result = fused_layer_norm_linear(&x, &lw, &lb, &pw, None, h, out, EPS)
-            .expect("ok");
+        let result = fused_layer_norm_linear(&x, &lw, &lb, &pw, None, h, out, EPS).expect("ok");
         assert_eq!(result.ops_fused.len(), 2);
         assert!(result.estimated_flops > 0);
         assert!(!result.output.is_empty());
@@ -1057,7 +1054,7 @@ mod tests {
         // With very small eps the function should still not panic (no unwrap)
         let h = 4;
         let out = 2;
-        let x = vec![0.0f32; h];  // all-zero → mean=0, var=0 → uses eps for stability
+        let x = vec![0.0f32; h]; // all-zero → mean=0, var=0 → uses eps for stability
         let lw = vec![1.0f32; h];
         let lb = vec![0.0f32; h];
         let pw = vec![1.0f32; out * h];
@@ -1076,13 +1073,16 @@ mod tests {
         let hd = 4;
         let q = vec![1.0f32; seq * nh * hd];
         let k = vec![1.0f32; seq * nkv * hd];
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, true)
-            .expect("single token ok");
+        let result =
+            fused_attention_scores(&q, &k, seq, nh, nkv, hd, true).expect("single token ok");
         assert_eq!(result.output.len(), nh * seq * seq);
         // With 1 token, softmax of single element = 1.0
         for h in 0..nh {
             let val = result.output[h * seq * seq];
-            assert!((val - 1.0).abs() < 1e-6, "single-token attn weight should be 1.0, got {val}");
+            assert!(
+                (val - 1.0).abs() < 1e-6,
+                "single-token attn weight should be 1.0, got {val}"
+            );
         }
     }
 
@@ -1117,8 +1117,8 @@ mod tests {
         let rw: Vec<f32> = (0..hidden).map(|i| 1.0 + i as f32 * 0.08).collect();
         let lw: Vec<f32> = (0..out * hidden).map(|i| (i as f32) * 0.04 - 0.1).collect();
 
-        let fused = fused_rms_norm_linear(&x, &rw, &lw, None, hidden, out, EPS)
-            .expect("fused rms ok");
+        let fused =
+            fused_rms_norm_linear(&x, &rw, &lw, None, hidden, out, EPS).expect("fused rms ok");
 
         let normed = rms_norm_slice(&x, &rw, EPS);
         let ref_out = linear_projection(&normed, &lw, None, hidden, out);
@@ -1141,9 +1141,8 @@ mod tests {
         // Sequential
         let gate_out = linear_projection(&x, &gw, None, h, inter);
         let up_out = linear_projection(&x, &uw, None, h, inter);
-        let activated: Vec<f32> = gate_out.iter().zip(up_out.iter())
-            .map(|(&g, &u)| gelu(g) * u)
-            .collect();
+        let activated: Vec<f32> =
+            gate_out.iter().zip(up_out.iter()).map(|(&g, &u)| gelu(g) * u).collect();
         let seq_out = linear_projection(&activated, &dw, None, inter, h);
 
         assert_approx_eq(&fused.output, &seq_out, 1e-4, "geglu vs sequential");
@@ -1160,8 +1159,10 @@ mod tests {
         let uw = vec![1.0f32; inter * h];
         let dw = vec![1.0f32; h * inter];
         let result = fused_swiglu(&x, &gw, &uw, &dw, h, inter).expect("swiglu ok");
-        assert!(result.output.iter().all(|&v| v.abs() < 1e-6),
-            "zero input should produce near-zero output");
+        assert!(
+            result.output.iter().all(|&v| v.abs() < 1e-6),
+            "zero input should produce near-zero output"
+        );
     }
 
     /// Dimension mismatch error for fused_layer_norm_linear.
@@ -1239,7 +1240,8 @@ mod tests {
 
         let residual = vec![0.5f32; h];
         let hidden_s = vec![0.5f32; h];
-        let r6 = fused_residual_add_norm(&residual, &hidden_s, &lnw, None, h, EPS, true).expect("ok6");
+        let r6 =
+            fused_residual_add_norm(&residual, &hidden_s, &lnw, None, h, EPS, true).expect("ok6");
         assert!(r6.estimated_flops > 0, "residual_add_norm flops");
     }
 
@@ -1270,8 +1272,7 @@ mod tests {
         let hd = 8;
         let q: Vec<f32> = (0..seq * nh * hd).map(|i| (i as f32) * 0.01).collect();
         let k: Vec<f32> = (0..seq * nkv * hd).map(|i| (i as f32) * 0.01).collect();
-        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false)
-            .expect("gqa nkv=1 ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nkv, hd, false).expect("gqa nkv=1 ok");
         assert_eq!(result.output.len(), nh * seq * seq);
         // Each row must sum to 1.
         for h in 0..nh {
@@ -1291,11 +1292,13 @@ mod tests {
         let hd = 8;
         let q: Vec<f32> = (0..seq * nh * hd).map(|i| (i as f32 - 16.0) * 0.1).collect();
         let k: Vec<f32> = (0..seq * nh * hd).map(|i| (i as f32) * 0.05).collect();
-        let result = fused_attention_scores(&q, &k, seq, nh, nh, hd, false)
-            .expect("attention ok");
+        let result = fused_attention_scores(&q, &k, seq, nh, nh, hd, false).expect("attention ok");
         // After softmax, all weights in [0, 1].
         for &v in &result.output {
-            assert!(v >= 0.0 && v <= 1.0 + 1e-6, "attention weight {v} out of [0,1]");
+            assert!(
+                (0.0..=1.0 + 1e-6).contains(&v),
+                "attention weight {v} out of [0,1]"
+            );
         }
     }
 

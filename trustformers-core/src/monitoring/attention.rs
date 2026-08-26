@@ -78,7 +78,7 @@ pub struct AttentionPattern {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttentionPatternType {
     Diagonal,     // Attending to nearby tokens
     Vertical,     // Attending to specific positions
@@ -717,16 +717,41 @@ impl AttentionVisualizer {
         })
     }
 
-    /// Analyze pattern evolution between two adjacent layers
+    /// Analyse how attention patterns change between two adjacent layers.
+    ///
+    /// Heads are matched by index across the two layers; a head whose
+    /// classified pattern differs contributes a [`PatternTransition`]. The
+    /// transition strength is the product of the two classifications'
+    /// confidences, so a change between two confidently-classified heads counts
+    /// for more than one between two uncertain ones.
+    ///
+    /// This previously returned an empty `pattern_changes` for every layer
+    /// pair, which is indistinguishable from "the patterns did not change".
     fn analyze_layer_pattern_evolution(
         &self,
         layer1: &LayerAttentionReport,
         layer2: &LayerAttentionReport,
     ) -> LayerPatternEvolution {
-        let pattern_changes = Vec::new();
+        let mut pattern_changes = Vec::new();
 
-        // Simplified pattern transition analysis
-        // In practice, would track specific pattern transitions
+        for pattern in &layer1.patterns {
+            // The same head one layer later.
+            let Some(successor) =
+                layer2.patterns.iter().find(|candidate| candidate.head_idx == pattern.head_idx)
+            else {
+                continue;
+            };
+
+            if successor.pattern_type == pattern.pattern_type {
+                continue;
+            }
+
+            pattern_changes.push(PatternTransition {
+                from_pattern: pattern.pattern_type.clone(),
+                to_pattern: successor.pattern_type.clone(),
+                transition_strength: pattern.confidence * successor.confidence,
+            });
+        }
 
         LayerPatternEvolution {
             layer_idx: layer1.layer_idx,
@@ -879,6 +904,89 @@ impl AttentionReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `analyze_layer_pattern_evolution` returned an empty
+    /// `pattern_changes` for every layer pair, which reads as "nothing
+    /// changed" rather than "nothing was analysed".
+    #[test]
+    fn test_pattern_evolution_detects_real_transitions() {
+        let visualizer = AttentionVisualizer::new();
+
+        let pattern = |head_idx: usize, pattern_type: AttentionPatternType, confidence: f64| {
+            AttentionPattern {
+                pattern_type,
+                confidence,
+                layer_idx: 0,
+                head_idx,
+                description: String::new(),
+            }
+        };
+
+        let report = |layer_idx: usize, patterns: Vec<AttentionPattern>| LayerAttentionReport {
+            layer_idx,
+            head_statistics: Vec::new(),
+            patterns,
+            average_entropy: 0.0,
+            sparsity_distribution: Vec::new(),
+            attention_concentration: 0.0,
+        };
+
+        // Head 0 changes Diagonal -> Vertical; head 1 stays Diagonal.
+        let layer1 = report(
+            0,
+            vec![
+                pattern(0, AttentionPatternType::Diagonal, 0.8),
+                pattern(1, AttentionPatternType::Diagonal, 0.9),
+            ],
+        );
+        let layer2 = report(
+            1,
+            vec![
+                pattern(0, AttentionPatternType::Vertical, 0.5),
+                pattern(1, AttentionPatternType::Diagonal, 0.7),
+            ],
+        );
+
+        let evolution = visualizer.analyze_layer_pattern_evolution(&layer1, &layer2);
+        assert_eq!(evolution.layer_idx, 0);
+        assert_eq!(
+            evolution.pattern_changes.len(),
+            1,
+            "only the head that actually changed contributes a transition"
+        );
+
+        let transition = &evolution.pattern_changes[0];
+        assert_eq!(transition.from_pattern, AttentionPatternType::Diagonal);
+        assert_eq!(transition.to_pattern, AttentionPatternType::Vertical);
+        assert!(
+            (transition.transition_strength - 0.8 * 0.5).abs() < 1e-9,
+            "strength must be the product of the two confidences, got {}",
+            transition.transition_strength
+        );
+    }
+
+    /// Layers whose heads all keep their pattern really do report no changes.
+    #[test]
+    fn test_pattern_evolution_reports_no_changes_when_stable() {
+        let visualizer = AttentionVisualizer::new();
+        let stable = |layer_idx: usize| LayerAttentionReport {
+            layer_idx,
+            head_statistics: Vec::new(),
+            patterns: vec![AttentionPattern {
+                pattern_type: AttentionPatternType::Diagonal,
+                confidence: 1.0,
+                layer_idx,
+                head_idx: 0,
+                description: String::new(),
+            }],
+            average_entropy: 0.0,
+            sparsity_distribution: Vec::new(),
+            attention_concentration: 0.0,
+        };
+
+        let evolution = visualizer.analyze_layer_pattern_evolution(&stable(0), &stable(1));
+        assert!(evolution.pattern_changes.is_empty());
+    }
 
     #[test]
     fn test_attention_visualizer_creation() {

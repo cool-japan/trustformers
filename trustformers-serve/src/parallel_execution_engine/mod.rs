@@ -2,18 +2,32 @@
 
 pub mod adaptiveschedulingparams_traits;
 pub mod dependencytracker_traits;
+pub mod engine;
 pub mod executionsessionconfig_traits;
 pub mod functions;
 pub mod priorityqueue_traits;
 pub mod priorityweights_traits;
 pub mod queuemanagementconfig_traits;
+pub mod resources;
+pub mod scheduling;
 pub mod types;
 
-// Re-export all types
+// Re-export all types. `engine`, `resources` and `scheduling` were split out of
+// `types` in 0.2.1 to keep every file under the 2000-line limit; re-exporting
+// them here keeps the module's public paths unchanged.
+pub use engine::*;
+pub use resources::*;
+pub use scheduling::*;
 pub use types::*;
 
 #[cfg(test)]
+mod engine_tests;
+#[cfg(test)]
 mod functions_tests;
+#[cfg(test)]
+mod resources_tests;
+#[cfg(test)]
+mod scheduling_tests;
 #[cfg(test)]
 mod types_tests;
 
@@ -83,9 +97,9 @@ mod mod_tests {
         let r = AvailableResources::default();
         assert_eq!(r.cpu_cores, 0.0);
         assert_eq!(r.memory_mb, 0);
-        assert!(r.gpu_devices.is_empty());
+        assert!(r.gpu_device_ids.is_empty());
         assert!(r.network_ports.is_empty());
-        assert!(r.temp_directories.is_empty());
+        assert_eq!(r.temp_directory_slots, 0);
         assert_eq!(r.database_connections, 0);
         assert!(r.custom_resources.is_empty());
     }
@@ -97,9 +111,9 @@ mod mod_tests {
         let r = AvailableResources {
             cpu_cores: 32.0_f32,
             memory_mb: 65536,
-            gpu_devices: vec![],
+            gpu_device_ids: vec![],
             network_ports: vec![8080, 8443],
-            temp_directories: vec![],
+            temp_directory_slots: 0,
             database_connections: 10,
             custom_resources: custom,
         };

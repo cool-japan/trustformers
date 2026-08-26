@@ -145,6 +145,43 @@ impl Qwen25RotaryEmbedding {
     }
 }
 
+/// Apply RoPE to `data` (row-major, shape `[seq_len, num_heads * head_dim]`)
+/// in place, rotating every one of the `num_heads` blocks in each row
+/// independently so multi-head (and GQA, where `q` and `k` have a different
+/// head count) tensors are fully rotated, not just the first head.
+///
+/// `pub(crate)` (rather than private) solely so the regression test in
+/// `qwen2_5::tests` can exercise it directly.
+pub(crate) fn rotate_heads_rope(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    theta: f64,
+    position_ids: &[usize],
+) {
+    let half = head_dim / 2;
+    if half == 0 {
+        return;
+    }
+    let row_width = num_heads * head_dim;
+    for (row, &pos) in position_ids.iter().enumerate() {
+        let row_off = row * row_width;
+        for h in 0..num_heads {
+            let head_off = row_off + h * head_dim;
+            for i in 0..half {
+                let freq = 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64);
+                let angle = (pos as f64 * freq) as f32;
+                let cos_v = angle.cos();
+                let sin_v = angle.sin();
+                let x1 = data[head_off + i];
+                let x2 = data[head_off + i + half];
+                data[head_off + i] = x1 * cos_v - x2 * sin_v;
+                data[head_off + i + half] = x1 * sin_v + x2 * cos_v;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Grouped Query Attention
 // ---------------------------------------------------------------------------
@@ -232,53 +269,119 @@ impl Layer for Qwen25Attention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Real grouped-query scaled dot-product attention: RoPE, `Q @ K^T`
+    /// (repeating each KV head across its `num_heads / num_kv_heads` query
+    /// heads), causal masking combined with a sliding window when this
+    /// layer is configured for one, softmax, and `@ V`.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
-        let _v = self.v_proj.forward(input)?;
+        let v = self.v_proj.forward(input)?;
 
-        // Apply RoPE to Q and K
-        let q_roped = match &q {
-            Tensor::F32(arr) => {
-                let mut data = arr
-                    .as_slice()
+        let (mut q_data, mut k_data, v_data) = match (&q, &k, &v) {
+            (Tensor::F32(qd), Tensor::F32(kd), Tensor::F32(vd)) => (
+                qd.as_slice()
                     .ok_or_else(|| tensor_op_error("qwen25_attn", "q not contiguous"))?
-                    .to_vec();
-                let seq_len = data.len() / (self.num_heads * self.head_dim).max(1);
-                if seq_len > 0 {
-                    let mut k_data = match &k {
-                        Tensor::F32(ka) => ka
-                            .as_slice()
-                            .ok_or_else(|| tensor_op_error("qwen25_attn", "k not contiguous"))?
-                            .to_vec(),
-                        _ => return Err(tensor_op_error("qwen25_attn", "k must be F32")),
-                    };
-                    self.rotary_emb.apply(&mut data, &mut k_data, seq_len);
-                }
-                let shape = arr.shape().to_vec();
-                Tensor::from_vec(data, &shape)?
-            },
-            _ => return Err(tensor_op_error("qwen25_attn", "q must be F32")),
+                    .to_vec(),
+                kd.as_slice()
+                    .ok_or_else(|| tensor_op_error("qwen25_attn", "k not contiguous"))?
+                    .to_vec(),
+                vd.as_slice()
+                    .ok_or_else(|| tensor_op_error("qwen25_attn", "v not contiguous"))?
+                    .to_vec(),
+            ),
+            _ => return Err(tensor_op_error("qwen25_attn", "q, k, v must be F32")),
         };
 
-        // Simplified: project Q through o_proj (full SDPA would require V too)
-        let (q_data, q_shape) = match &q_roped {
-            Tensor::F32(arr) => {
-                let data = arr
-                    .as_slice()
-                    .ok_or_else(|| tensor_op_error("qwen25_attn", "q_roped not contiguous"))?
-                    .to_vec();
-                let shape = arr.shape().to_vec();
-                (data, shape)
-            },
-            _ => return Err(tensor_op_error("qwen25_attn", "q_roped must be F32")),
-        };
-        let head_out = (self.num_heads * self.head_dim).max(1);
-        let seq_len = if q_shape.len() >= 2 { q_shape[0] } else { 1 };
-        let total = seq_len * head_out;
-        let mut attended_data = q_data;
-        attended_data.resize(total, 0.0_f32);
-        let attended = Tensor::from_vec(attended_data, &[seq_len, head_out])?;
+        if self.num_heads == 0
+            || self.num_kv_heads == 0
+            || !self.num_heads.is_multiple_of(self.num_kv_heads)
+        {
+            return Err(tensor_op_error(
+                "qwen25_attn",
+                "num_heads must be a positive multiple of num_kv_heads",
+            ));
+        }
+        let q_width = self.num_heads * self.head_dim;
+        let kv_width = self.num_kv_heads * self.head_dim;
+        if q_width == 0 || !q_data.len().is_multiple_of(q_width) {
+            return Err(tensor_op_error(
+                "qwen25_attn",
+                "q size inconsistent with num_heads * head_dim",
+            ));
+        }
+        let seq_len = q_data.len() / q_width;
+        if k_data.len() != seq_len * kv_width || v_data.len() != seq_len * kv_width {
+            return Err(tensor_op_error(
+                "qwen25_attn",
+                "k/v size inconsistent with num_kv_heads * head_dim",
+            ));
+        }
+        if let Some(w) = self.sliding_window {
+            if w == 0 {
+                return Err(tensor_op_error("qwen25_attn", "sliding_window must be > 0"));
+            }
+        }
+
+        let position_ids: Vec<usize> = (0..seq_len).collect();
+        rotate_heads_rope(
+            &mut q_data,
+            self.num_heads,
+            self.head_dim,
+            self.rotary_emb.rope_theta,
+            &position_ids,
+        );
+        rotate_heads_rope(
+            &mut k_data,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rotary_emb.rope_theta,
+            &position_ids,
+        );
+
+        let group = self.num_heads / self.num_kv_heads;
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let mut out = vec![0f32; seq_len * q_width];
+
+        for h in 0..self.num_heads {
+            let kv_h = h / group;
+            for i in 0..seq_len {
+                let q_off = i * q_width + h * self.head_dim;
+                let mut scores = Vec::with_capacity(i + 1);
+                let mut key_positions = Vec::with_capacity(i + 1);
+                for j in 0..=i {
+                    if let Some(w) = self.sliding_window {
+                        if i - j >= w {
+                            continue;
+                        }
+                    }
+                    let k_off = j * kv_width + kv_h * self.head_dim;
+                    let dot: f32 =
+                        (0..self.head_dim).map(|d| q_data[q_off + d] * k_data[k_off + d]).sum();
+                    scores.push(dot * scale);
+                    key_positions.push(j);
+                }
+                let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut weights = vec![0f32; scores.len()];
+                let mut sum = 0f32;
+                for (idx, &s) in scores.iter().enumerate() {
+                    let e = (s - max_val).exp();
+                    weights[idx] = e;
+                    sum += e;
+                }
+                let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                let out_off = i * q_width + h * self.head_dim;
+                for (idx, &j) in key_positions.iter().enumerate() {
+                    let wn = weights[idx] * inv_sum;
+                    let v_off = j * kv_width + kv_h * self.head_dim;
+                    for d in 0..self.head_dim {
+                        out[out_off + d] += wn * v_data[v_off + d];
+                    }
+                }
+            }
+        }
+
+        let attended = Tensor::from_vec(out, &[seq_len, q_width])?;
         self.o_proj.forward(attended)
     }
 }
@@ -400,12 +503,12 @@ impl Layer for Qwen25DecoderLayer {
         // Attention sublayer
         let normed = self.input_layernorm.forward(input.clone())?;
         let attn_out = self.self_attn.forward(normed)?;
-        let hidden = input.add(&attn_out).unwrap_or(attn_out);
+        let hidden = input.add(&attn_out)?;
 
         // MLP sublayer
         let normed_ff = self.post_attention_layernorm.forward(hidden.clone())?;
         let mlp_out = self.mlp.forward(normed_ff)?;
-        hidden.add(&mlp_out).or(Ok(mlp_out))
+        hidden.add(&mlp_out)
     }
 }
 
@@ -483,17 +586,25 @@ impl Model for Qwen25Model {
         self.norm.forward(hidden_states)
     }
 
-    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("Qwen25: failed to read weights: {}", e))
-        })?;
-        if buffer.is_empty() {
-            return Err(TrustformersError::invalid_input_simple(
-                "Qwen25: pretrained weight data is empty".to_string(),
-            ));
-        }
-        Ok(())
+    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+        // `Model::load_pretrained(&mut dyn Read)` is a legacy interface with
+        // no defined weight format (see the note on
+        // `WeightLoader::load_weights_into_model` in
+        // `trustformers_core::utils::weight_loading`: an earlier revision of
+        // this trait method serialised tensors into an invented envelope
+        // that no model could parse, so the weights never actually reached
+        // the model). `Qwen25Model` has no weight-loading path implemented
+        // at all (unlike e.g. `GemmaModel`/`MistralModel`/`QwenModel`, which
+        // provide a real `load_from_path`/`load_from_huggingface` on their
+        // `*ForCausalLM` wrapper). Silently returning `Ok(())` here would
+        // leave the model's freshly-initialised (effectively random)
+        // weights in place while claiming the load succeeded, so report
+        // this honestly as unsupported instead.
+        Err(TrustformersError::not_implemented(
+            "Qwen25Model::load_pretrained: no weight-loading implementation exists for Qwen2.5 \
+             yet; there is no `load_from_path`/`load_from_huggingface` to delegate to"
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -734,6 +845,51 @@ mod tests {
         );
     }
 
+    // `rotate_heads_rope` is the function `Qwen25Attention::forward` actually
+    // calls for both Q and K (see `forward` above); `Qwen25RotaryEmbedding::apply`
+    // exercised above is not on that path. `crate::qwen2_5::tests` (in
+    // `qwen2_5/mod.rs`) already covers "every head rotates"
+    // (`test_qwen25_rotate_heads_rope_rotates_every_head`); the two tests
+    // below add the position-dependence coverage that suite does not have —
+    // identity at position 0, and two non-zero positions actually differing
+    // — using a non-degenerate `theta`/`head_dim` (the attention-level
+    // config's `head_dim=2` collapses to a single frequency band of exactly
+    // 1.0 regardless of `theta`, which would mask a broken frequency
+    // computation). Both would have FAILED against a no-op RoPE that left
+    // `data` unchanged, matching the fake implementation the original audit
+    // found.
+
+    /// RoPE at position 0 must be the identity rotation (angle = 0).
+    #[test]
+    fn test_rotate_heads_rope_position_zero_is_identity() {
+        let original = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mut q = original.clone();
+        rotate_heads_rope(&mut q, 1, 4, 10000.0, &[0]);
+        for (a, b) in original.iter().zip(q.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "position 0 must be identity: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Two different non-zero positions on the same input vector must rotate
+    /// to different outputs. This fails against a no-op RoPE that just
+    /// leaves `data` unchanged regardless of `position_ids`.
+    #[test]
+    fn test_rotate_heads_rope_differs_by_position() {
+        let base = vec![1.0f32; 4];
+        let mut at_pos0 = base.clone();
+        let mut at_pos5 = base.clone();
+        rotate_heads_rope(&mut at_pos0, 1, 4, 10000.0, &[0]);
+        rotate_heads_rope(&mut at_pos5, 1, 4, 10000.0, &[5]);
+        let differs = at_pos0.iter().zip(at_pos5.iter()).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(
+            differs,
+            "RoPE must rotate differently at different positions"
+        );
+    }
+
     // -- Qwen25Attention --
 
     #[test]
@@ -767,6 +923,79 @@ mod tests {
         );
     }
 
+    // Real grouped-query scaled dot-product attention regression tests.
+    // `crate::qwen2_5::tests` (in `qwen2_5/mod.rs`) already covers output
+    // shape, early-token-change propagation, causal masking, prefix
+    // extension, and a `window=1` sliding-window exclusion test, all against
+    // `Qwen25Attention::forward` end to end (RoPE, repeated-KV-head Q@K^T,
+    // causal/sliding-window masking, softmax, @V) — every one of those would
+    // have FAILED against the old fake path, which discarded V and fed a
+    // zero-padded, resized RoPE'd query straight into `o_proj`. The test
+    // below adds a `window=2` variant that is not implied by that suite:
+
+    /// Sliding-window attention must actually restrict the attention span,
+    /// not just be wired through config accessors (`uses_sliding_window`/
+    /// `sliding_window`, already covered above). With `window=2` and
+    /// `seq_len=4`: token 1 (sees positions `{0,1}`, since `1-0=1 < 2`) must
+    /// still be affected by a change to token 0, but token 3 (sees positions
+    /// `{2,3}` only, since `3-0=3 >= 2` excludes position 0) must NOT be —
+    /// the discriminating half that a window which merely gates a flag
+    /// (without actually excluding out-of-window keys) would fail.
+    #[test]
+    fn test_qwen25_attention_sliding_window_restricts_span() {
+        let mut cfg = tiny_qwen25_config();
+        cfg.use_sliding_window = true;
+        cfg.sliding_window = Some(2);
+        cfg.max_window_layers = 0; // layer_idx(0) >= max_window_layers(0) => uses window
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention must build");
+        assert!(
+            attn.uses_sliding_window(),
+            "layer 0 must use the sliding window with this config"
+        );
+        assert_eq!(attn.sliding_window(), Some(2));
+
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+        let base = lcg_vec(seq_len * hidden, 55);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0; // perturb only token 0
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("tensor"))
+            .expect("forward base");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("tensor"))
+            .expect("forward modified");
+
+        let (a, b) = match (&out_base, &out_mod) {
+            (Tensor::F32(x), Tensor::F32(y)) => (
+                x.as_slice().expect("contiguous").to_vec(),
+                y.as_slice().expect("contiguous").to_vec(),
+            ),
+            _ => panic!("expected F32 outputs"),
+        };
+
+        let row1_differs = a[hidden..2 * hidden]
+            .iter()
+            .zip(&b[hidden..2 * hidden])
+            .any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(
+            row1_differs,
+            "token 1 is within the sliding window of token 0 and must be affected by its change"
+        );
+
+        let row3_a = &a[3 * hidden..4 * hidden];
+        let row3_b = &b[3 * hidden..4 * hidden];
+        for (x, y) in row3_a.iter().zip(row3_b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "token 3 is outside the sliding window of token 0 and must be unaffected"
+            );
+        }
+    }
+
     // -- Qwen25Model --
 
     #[test]
@@ -797,6 +1026,23 @@ mod tests {
         assert!(
             model.num_parameters() > 0,
             "num_parameters must be positive"
+        );
+    }
+
+    /// Regression: `load_pretrained` must NOT silently report success while
+    /// leaving the model's random initial weights untouched. It previously
+    /// read the buffer, checked it was non-empty, and returned `Ok(())`
+    /// without parsing anything (a fabricated success). It must now report
+    /// a structured "not implemented" error instead.
+    #[test]
+    fn test_qwen25_model_load_pretrained_reports_not_implemented_instead_of_fake_success() {
+        let cfg = tiny_qwen25_config();
+        let mut model = Qwen25Model::new(cfg).expect("model must build");
+        let mut data: &[u8] = b"not a real checkpoint, but not empty either";
+        let result = model.load_pretrained(&mut data);
+        assert!(
+            result.is_err(),
+            "load_pretrained must fail rather than silently succeed with no weights loaded"
         );
     }
 

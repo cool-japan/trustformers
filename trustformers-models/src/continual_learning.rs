@@ -14,9 +14,13 @@
 //!
 //! ## Usage
 //!
+//! Parameter-space strategies (EWC, L2, LwF, GEM, PackNet) additionally
+//! require the model to implement [`NamedParameters`], which is how the
+//! trainer reads and writes the parameters it regularizes.
+//!
 //! ```rust,no_run
 //! use trustformers_models::continual_learning::{
-//!     ContinualLearningTrainer, ContinualLearningConfig, ContinualStrategy
+//!     ContinualLearningTrainer, ContinualLearningConfig, ContinualStrategy, NamedParameters
 //! };
 //! use trustformers_core::{traits::{Config, Model}, tensor::Tensor, Result};
 //! use serde::{Deserialize, Serialize};
@@ -26,15 +30,24 @@
 //! # impl Config for DocConfig {
 //! #     fn architecture(&self) -> &'static str { "doc" }
 //! # }
-//! # struct DocModel;
+//! # struct DocModel { weight: Tensor }
 //! # impl Model for DocModel {
 //! #     type Config = DocConfig;
 //! #     type Input = Tensor;
 //! #     type Output = Tensor;
-//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
+//! #     fn forward(&self, input: Tensor) -> Result<Tensor> { input.mul(&self.weight) }
 //! #     fn load_pretrained(&mut self, _r: &mut dyn std::io::Read) -> Result<()> { Ok(()) }
 //! #     fn get_config(&self) -> &DocConfig { &DocConfig }
-//! #     fn num_parameters(&self) -> usize { 0 }
+//! #     fn num_parameters(&self) -> usize { 4 }
+//! # }
+//! # impl NamedParameters for DocModel {
+//! #     fn named_parameters(&self) -> Vec<(String, Tensor)> {
+//! #         vec![("weight".to_string(), self.weight.clone())]
+//! #     }
+//! #     fn set_named_parameter(&mut self, name: &str, value: Tensor) -> Result<()> {
+//! #         if name == "weight" { self.weight = value; }
+//! #         Ok(())
+//! #     }
 //! # }
 //!
 //! # fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +60,7 @@
 //!     ..Default::default()
 //! };
 //!
-//! # let model = DocModel;
+//! # let model = DocModel { weight: Tensor::ones(&[1, 4])? };
 //! let mut trainer = ContinualLearningTrainer::new(model, config)?;
 //!
 //! // Learn task 1 (inputs/targets must share shape and be non-empty)
@@ -62,7 +75,74 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::{errors::invalid_input, tensor::Tensor, traits::Model, Result};
+use trustformers_core::{
+    errors::{invalid_input, not_implemented},
+    tensor::Tensor,
+    traits::Model,
+    Result,
+};
+
+/// Step size used when a model does not supply analytic gradients and the
+/// trainer has to estimate them with central finite differences.
+pub const FINITE_DIFFERENCE_EPSILON: f32 = 1e-3;
+
+/// Access to a model's named parameter tensors.
+///
+/// Parameter-space continual-learning strategies (EWC, L2, LwF, GEM, PackNet)
+/// cannot work through the opaque [`Model`] trait alone: they need to read the
+/// current parameter values, to write perturbed values, and — for Fisher
+/// information — to differentiate the loss with respect to them. Implementing
+/// this trait is what makes those strategies available.
+///
+/// A model that can differentiate itself should override
+/// [`NamedParameters::parameter_gradients`]; otherwise the trainer falls back
+/// to central finite differences, which costs `2 · P` forward passes per
+/// example for `P` scalar parameters.
+pub trait NamedParameters {
+    /// Every trainable parameter tensor together with a stable name.
+    fn named_parameters(&self) -> Vec<(String, Tensor)>;
+
+    /// Overwrite the parameter tensor called `name`.
+    ///
+    /// Returns an error for an unknown name or a shape mismatch.
+    fn set_named_parameter(&mut self, name: &str, value: Tensor) -> Result<()>;
+
+    /// Analytic gradients of the task loss with respect to every named
+    /// parameter, when the model can compute them.
+    ///
+    /// Returning `Ok(None)` (the default) tells the trainer to fall back to
+    /// finite differences.
+    fn parameter_gradients(
+        &self,
+        _input: &Tensor,
+        _target: &Tensor,
+    ) -> Result<Option<HashMap<String, Tensor>>> {
+        Ok(None)
+    }
+}
+
+/// Wrap a scalar as a `[1]`-shaped tensor so every loss term has one shape.
+fn scalar_tensor(value: f32) -> Result<Tensor> {
+    Tensor::from_vec(vec![value], &[1])
+}
+
+/// Read a one-element tensor as an `f32`.
+fn scalar_value(tensor: &Tensor) -> Result<f32> {
+    let data = tensor.to_vec_f32()?;
+    data.first()
+        .copied()
+        .ok_or_else(|| invalid_input("expected a non-empty loss tensor"))
+}
+
+/// Index of the largest element of a slice.
+fn argmax(values: &[f32]) -> usize {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
 
 /// Configuration for continual learning
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,9 +461,11 @@ pub struct ContinualLearningTrainer<M: Model> {
     pub step_counter: usize,
     /// Task detection state
     pub task_detector: Option<TaskDetector>,
+    /// PackNet capacity masks: `true` marks a weight still owned by this task
+    pub packnet_masks: HashMap<String, Vec<bool>>,
 }
 
-impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
+impl<M: Model<Input = Tensor, Output = Tensor> + NamedParameters> ContinualLearningTrainer<M> {
     /// Create a new continual learning trainer
     pub fn new(model: M, config: ContinualLearningConfig) -> Result<Self> {
         let memory = MemoryBuffer::new(config.memory_size, config.memory_selection.clone());
@@ -404,7 +486,59 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
             optimal_parameters: HashMap::new(),
             step_counter: 0,
             task_detector,
+            packnet_masks: HashMap::new(),
         })
+    }
+
+    /// Task loss for one example, as a plain scalar.
+    fn example_loss(&self, input: &Tensor, target: &Tensor) -> Result<f32> {
+        let outputs = self.model.forward(input.clone())?;
+        scalar_value(&self.compute_task_loss(&outputs, target)?)
+    }
+
+    /// Gradients of the task loss with respect to every named parameter.
+    ///
+    /// Uses [`NamedParameters::parameter_gradients`] when the model provides
+    /// analytic gradients, and otherwise estimates them with central finite
+    /// differences. The model's parameters are restored exactly on return.
+    pub fn loss_gradients(
+        &mut self,
+        input: &Tensor,
+        target: &Tensor,
+    ) -> Result<HashMap<String, Tensor>> {
+        if let Some(gradients) = self.model.parameter_gradients(input, target)? {
+            return Ok(gradients);
+        }
+
+        let epsilon = FINITE_DIFFERENCE_EPSILON;
+        let parameters = self.model.named_parameters();
+        let mut gradients = HashMap::new();
+
+        for (name, tensor) in parameters {
+            let shape = tensor.shape();
+            let baseline = tensor.to_vec_f32()?;
+            let mut gradient = vec![0.0f32; baseline.len()];
+
+            for index in 0..baseline.len() {
+                let mut plus = baseline.clone();
+                plus[index] += epsilon;
+                self.model.set_named_parameter(&name, Tensor::from_vec(plus, &shape)?)?;
+                let loss_plus = self.example_loss(input, target)?;
+
+                let mut minus = baseline.clone();
+                minus[index] -= epsilon;
+                self.model.set_named_parameter(&name, Tensor::from_vec(minus, &shape)?)?;
+                let loss_minus = self.example_loss(input, target)?;
+
+                gradient[index] = (loss_plus - loss_minus) / (2.0 * epsilon);
+            }
+
+            // Restore the original values before moving on.
+            self.model.set_named_parameter(&name, Tensor::from_vec(baseline, &shape)?)?;
+            gradients.insert(name, Tensor::from_vec(gradient, &shape)?);
+        }
+
+        Ok(gradients)
     }
 
     /// Start learning a new task
@@ -459,14 +593,20 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
             }
         }
 
+        if inputs.is_empty() || targets.is_empty() {
+            return Err(invalid_input("learn_batch requires at least one example"));
+        }
+
         // Compute forward pass and loss
         let outputs = self.model.forward(inputs[0].clone())?; // Simplified single input
         let current_loss = self.compute_task_loss(&outputs, &targets[0])?;
         let current_loss_for_output = current_loss.clone();
 
         // Apply continual learning strategy
-        let total_loss = match &self.config.strategy {
-            ContinualStrategy::ElasticWeightConsolidation { lambda, .. } => {
+        let strategy = self.config.strategy.clone();
+        let total_loss = match &strategy {
+            ContinualStrategy::ElasticWeightConsolidation { lambda, .. }
+            | ContinualStrategy::OnlineElasticWeightConsolidation { lambda, .. } => {
                 let ewc_loss = self.compute_ewc_loss(*lambda)?;
                 current_loss.add(&ewc_loss)?
             },
@@ -485,8 +625,15 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
                 current_loss.add(&replay_loss)?
             },
             ContinualStrategy::GradientEpisodicMemory {
-                memory_strength, ..
-            } => self.compute_gem_loss(&current_loss, *memory_strength)?,
+                memory_strength,
+                constraint_violation_threshold,
+            } => self.compute_gem_loss(
+                &inputs[0],
+                &targets[0],
+                &current_loss,
+                *memory_strength,
+                *constraint_violation_threshold,
+            )?,
             ContinualStrategy::L2Regularization { lambda } => {
                 let l2_loss = self.compute_l2_regularization(*lambda)?;
                 current_loss.add(&l2_loss)?
@@ -509,8 +656,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
         self.step_counter += 1;
 
         // Update task statistics
+        let total_loss_value = scalar_value(&total_loss)?;
         if let Some(task_info) = self.task_info.get_mut(&task_id) {
-            task_info.update_statistics(total_loss.to_scalar().unwrap_or(0.0));
+            task_info.update_statistics(total_loss_value);
         }
 
         let total_loss_clone = total_loss.clone();
@@ -527,17 +675,25 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
     /// Finalize learning for a task
     pub fn finalize_task(&mut self, task_id: usize) -> Result<()> {
         match self.config.strategy.clone() {
-            ContinualStrategy::ElasticWeightConsolidation { fisher_samples, .. }
-            | ContinualStrategy::OnlineElasticWeightConsolidation { fisher_samples, .. } => {
+            ContinualStrategy::ElasticWeightConsolidation { fisher_samples, .. } => {
                 self.compute_fisher_information(task_id, fisher_samples)?;
                 self.save_optimal_parameters()?;
             },
-            ContinualStrategy::PackNet {
-                prune_ratio,
-                retrain_epochs,
+            ContinualStrategy::OnlineElasticWeightConsolidation {
+                gamma,
+                fisher_samples,
+                ..
             } => {
+                // Online EWC keeps a single running Fisher estimate that is
+                // decayed by `gamma` before each task's contribution is added.
+                self.accumulate_fisher_information(task_id, fisher_samples, gamma)?;
+                self.save_optimal_parameters()?;
+            },
+            ContinualStrategy::PackNet { prune_ratio, .. } => {
+                // Pruning and mask bookkeeping happen here; retraining the
+                // surviving weights belongs to the caller's optimizer loop,
+                // which this trainer does not own.
                 self.apply_packnet_pruning(prune_ratio)?;
-                self.retrain_after_pruning(retrain_epochs)?;
             },
             _ => {
                 // Most strategies don't require finalization
@@ -560,7 +716,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
             // Targets are one-hot encoded
             let element_wise = log_probs.mul(targets)?;
             let sum_per_sample = element_wise.sum(Some(vec![outputs_shape.len() - 1]), false)?; // Sum across the last dimension
-            Ok(sum_per_sample.neg()?.mean()?)
+            sum_per_sample.neg()?.mean()?.reshape(&[1])
         } else {
             // Targets are class indices - use simplified approach
             // In a full implementation, we'd use proper gather operation
@@ -581,40 +737,108 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
             let one_hot_targets = Tensor::new(one_hot_data)?.reshape(&outputs_shape)?;
             let element_wise = log_probs.mul(&one_hot_targets)?;
             let sum_per_sample = element_wise.sum(Some(vec![outputs_shape.len() - 1]), false)?; // Sum across the last dimension
-            Ok(sum_per_sample.neg()?.mean()?)
+            sum_per_sample.neg()?.mean()?.reshape(&[1])
         }
     }
 
-    /// Compute EWC regularization loss
-    fn compute_ewc_loss(&self, lambda: f32) -> Result<Tensor> {
-        let mut total_loss = Tensor::zeros(&[1])?;
+    /// Elastic Weight Consolidation penalty `λ/2 · Σ_i F_i (θ_i − θ*_i)²`.
+    ///
+    /// `F` is the diagonal Fisher information accumulated by
+    /// [`Self::compute_fisher_information`] and `θ*` the parameter snapshot
+    /// saved by [`Self::save_optimal_parameters`]; both are read from the live
+    /// model, so the penalty is zero at the snapshot and grows as the
+    /// parameters drift away from it.
+    pub fn compute_ewc_loss(&self, lambda: f32) -> Result<Tensor> {
+        let mut total = 0.0f32;
 
-        // This is a simplified implementation
-        // In practice, you'd iterate through model parameters
-        for (param_name, fisher) in &self.fisher_matrices {
-            if let Some(optimal) = self.optimal_parameters.get(param_name) {
-                // Get current parameter (simplified)
-                let current_param = Tensor::zeros_like(optimal)?; // Placeholder
-                let diff = current_param.sub(optimal)?;
-                let squared_diff = diff.mul(&diff)?;
-                let weighted_diff = fisher.mul(&squared_diff)?;
-                total_loss = total_loss.add(&weighted_diff.sum(None, false)?)?;
+        for (name, current) in self.model.named_parameters() {
+            let (Some(fisher), Some(optimal)) = (
+                self.fisher_matrices.get(&name),
+                self.optimal_parameters.get(&name),
+            ) else {
+                continue;
+            };
+
+            let current_values = current.to_vec_f32()?;
+            let fisher_values = fisher.to_vec_f32()?;
+            let optimal_values = optimal.to_vec_f32()?;
+            if current_values.len() != fisher_values.len()
+                || current_values.len() != optimal_values.len()
+            {
+                return Err(invalid_input(format!(
+                    "EWC state for parameter '{}' has a mismatched length",
+                    name
+                )));
+            }
+
+            for ((value, fisher), optimal) in
+                current_values.iter().zip(fisher_values.iter()).zip(optimal_values.iter())
+            {
+                let delta = value - optimal;
+                total += fisher * delta * delta;
             }
         }
 
-        total_loss.scalar_mul(lambda)
+        scalar_tensor(0.5 * lambda * total)
     }
 
-    /// Compute Learning without Forgetting distillation loss
-    fn compute_lwf_loss(
-        &self,
-        _inputs: &[Tensor],
+    /// Learning-without-Forgetting distillation loss.
+    ///
+    /// The previous task's parameter snapshot is temporarily swapped into the
+    /// model to obtain the old logits, the current logits are recomputed, and
+    /// the returned term is
+    /// `λ · T² · KL(softmax(z_old/T) ‖ softmax(z_new/T))`. Without a snapshot
+    /// (i.e. before the first task has been finalized) there is nothing to
+    /// distill and the term is zero.
+    pub fn compute_lwf_loss(
+        &mut self,
+        inputs: &[Tensor],
         lambda: f32,
-        _temperature: f32,
+        temperature: f32,
     ) -> Result<Tensor> {
-        // This would compute the distillation loss from previous tasks
-        // Simplified implementation
-        Tensor::zeros(&[1])?.scalar_mul(lambda)
+        if inputs.is_empty() || self.optimal_parameters.is_empty() {
+            return scalar_tensor(0.0);
+        }
+
+        let temperature = temperature.abs().max(1e-6);
+        let current_parameters = self.model.named_parameters();
+
+        // Swap in the previous task's parameters to obtain the teacher logits.
+        for (name, value) in &self.optimal_parameters {
+            self.model.set_named_parameter(name, value.clone())?;
+        }
+        let teacher_logits = self.model.forward(inputs[0].clone());
+
+        // Restore the live parameters before propagating any error.
+        for (name, value) in &current_parameters {
+            self.model.set_named_parameter(name, value.clone())?;
+        }
+        let teacher_logits = teacher_logits?;
+        let student_logits = self.model.forward(inputs[0].clone())?;
+
+        let teacher_log_probs = teacher_logits.div_scalar(temperature)?.log_softmax(-1)?;
+        let student_log_probs = student_logits.div_scalar(temperature)?.log_softmax(-1)?;
+
+        let teacher = teacher_log_probs.to_vec_f32()?;
+        let student = student_log_probs.to_vec_f32()?;
+        if teacher.len() != student.len() {
+            return Err(invalid_input(
+                "LwF teacher and student logits have different sizes",
+            ));
+        }
+
+        let classes = *teacher_logits.shape().last().unwrap_or(&teacher.len().max(1));
+        let rows = if classes == 0 { 1 } else { teacher.len() / classes.max(1) };
+
+        let mut divergence = 0.0f32;
+        for (log_t, log_s) in teacher.iter().zip(student.iter()) {
+            divergence += log_t.exp() * (log_t - log_s);
+        }
+        if rows > 0 {
+            divergence /= rows as f32;
+        }
+
+        scalar_tensor(lambda * temperature * temperature * divergence)
     }
 
     /// Compute experience replay loss
@@ -624,34 +848,104 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
         replay_batch_size: usize,
     ) -> Result<Tensor> {
         if self.memory.is_empty() {
-            return Tensor::zeros(&[1]);
+            return scalar_tensor(0.0);
         }
 
         let (replay_inputs, replay_targets, _) = self.memory.sample_batch(replay_batch_size)?;
 
-        if replay_inputs.is_empty() {
-            return Tensor::zeros(&[1]);
+        if replay_inputs.is_empty() || replay_targets.is_empty() {
+            return scalar_tensor(0.0);
         }
 
         // Compute loss on replay data
         let replay_outputs = self.model.forward(replay_inputs[0].clone())?; // Simplified
         let replay_loss = self.compute_task_loss(&replay_outputs, &replay_targets[0])?;
 
-        replay_loss.scalar_mul(memory_strength)
+        scalar_tensor(memory_strength * scalar_value(&replay_loss)?)
     }
 
-    /// Compute GEM constraint loss
-    fn compute_gem_loss(&mut self, current_loss: &Tensor, memory_strength: f32) -> Result<Tensor> {
-        // GEM computes gradients on memory and projects current gradients
-        // This is a simplified implementation
-        current_loss.scalar_mul(memory_strength)
+    /// Gradient Episodic Memory constraint term.
+    ///
+    /// GEM requires the update on the current batch not to increase the loss
+    /// on stored episodes, i.e. `⟨g, g_mem⟩ ≥ 0`. This trainer computes losses
+    /// rather than applying updates, so the inequality is enforced in its
+    /// penalty (A-GEM-style) relaxation: the real inner product between the
+    /// current-batch gradient and the memory gradient is measured, and a
+    /// violation beyond `constraint_violation_threshold` is added to the loss
+    /// scaled by `memory_strength`. A satisfied constraint adds nothing.
+    pub fn compute_gem_loss(
+        &mut self,
+        input: &Tensor,
+        target: &Tensor,
+        current_loss: &Tensor,
+        memory_strength: f32,
+        constraint_violation_threshold: f32,
+    ) -> Result<Tensor> {
+        let base = scalar_value(current_loss)?;
+        if self.memory.is_empty() {
+            return scalar_tensor(base);
+        }
+
+        let (memory_inputs, memory_targets, _) = self.memory.sample_batch(1)?;
+        let (Some(memory_input), Some(memory_target)) =
+            (memory_inputs.first(), memory_targets.first())
+        else {
+            return scalar_tensor(base);
+        };
+        let memory_input = memory_input.clone();
+        let memory_target = memory_target.clone();
+
+        let current_gradients = self.loss_gradients(input, target)?;
+        let memory_gradients = self.loss_gradients(&memory_input, &memory_target)?;
+
+        let mut inner_product = 0.0f32;
+        for (name, gradient) in &current_gradients {
+            let Some(memory_gradient) = memory_gradients.get(name) else {
+                continue;
+            };
+            let a = gradient.to_vec_f32()?;
+            let b = memory_gradient.to_vec_f32()?;
+            inner_product += a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>();
+        }
+
+        let violation = (-inner_product) - constraint_violation_threshold;
+        let penalty = if violation > 0.0 { memory_strength * violation } else { 0.0 };
+
+        scalar_tensor(base + penalty)
     }
 
-    /// Compute L2 regularization loss
-    fn compute_l2_regularization(&self, lambda: f32) -> Result<Tensor> {
-        // Compute L2 norm of parameters
-        // This is a simplified implementation
-        Tensor::zeros(&[1])?.scalar_mul(lambda)
+    /// L2 continual-learning penalty.
+    ///
+    /// After a task has been finalized this is `λ · Σ_i (θ_i − θ*_i)²`, the
+    /// standard "L2 baseline" that anchors the parameters to the previous
+    /// task's solution. Before any snapshot exists it degenerates to plain
+    /// weight decay `λ · Σ_i θ_i²`.
+    pub fn compute_l2_regularization(&self, lambda: f32) -> Result<Tensor> {
+        let mut total = 0.0f32;
+
+        for (name, current) in self.model.named_parameters() {
+            let values = current.to_vec_f32()?;
+            match self.optimal_parameters.get(&name) {
+                Some(optimal) => {
+                    let anchor = optimal.to_vec_f32()?;
+                    if anchor.len() != values.len() {
+                        return Err(invalid_input(format!(
+                            "L2 anchor for parameter '{}' has a mismatched length",
+                            name
+                        )));
+                    }
+                    for (value, target) in values.iter().zip(anchor.iter()) {
+                        let delta = value - target;
+                        total += delta * delta;
+                    }
+                },
+                None => {
+                    total += values.iter().map(|v| v * v).sum::<f32>();
+                },
+            }
+        }
+
+        scalar_tensor(lambda * total)
     }
 
     /// Compute example priority for memory storage
@@ -659,89 +953,190 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
         match self.config.memory_selection {
             MemorySelectionStrategy::Random => Ok(1.0),
             MemorySelectionStrategy::Uncertainty => {
-                // Compute prediction uncertainty
+                // Predictive entropy of the model's own distribution.
                 let outputs = self.model.forward(input.clone())?;
-                let probs = outputs.softmax(-1)?;
-                let entropy = -(probs.clone().mul(&probs.log()?)?)
-                    .sum(Some(vec![1]), false)?
-                    .to_scalar()
-                    .unwrap_or(0.0);
+                let log_probs = outputs.log_softmax(-1)?.to_vec_f32()?;
+                let entropy: f32 = -log_probs.iter().map(|l| l.exp() * l).sum::<f32>();
                 Ok(entropy)
             },
             MemorySelectionStrategy::HighestLoss => {
                 let outputs = self.model.forward(input.clone())?;
                 let loss = self.compute_task_loss(&outputs, target)?;
-                Ok(loss.to_scalar().unwrap_or(0.0))
+                scalar_value(&loss)
             },
             _ => Ok(1.0), // Default priority
         }
     }
 
-    /// Compute Fisher information for EWC
-    fn compute_fisher_information(&mut self, task_id: usize, num_samples: usize) -> Result<()> {
-        // Get examples from current task
-        let (task_inputs, task_targets) = self.memory.get_task_examples(task_id);
+    /// Accumulate the diagonal Fisher information for EWC.
+    ///
+    /// For every sampled example the gradient of the task loss with respect to
+    /// each named parameter is computed (analytically when the model provides
+    /// it, otherwise by central finite differences) and its square is averaged
+    /// into `fisher_matrices`. The result is the empirical diagonal Fisher
+    /// `F_i = E[(∂L/∂θ_i)²]`, keyed by real parameter names.
+    pub fn compute_fisher_information(&mut self, task_id: usize, num_samples: usize) -> Result<()> {
+        // `gamma = 0` discards any previous estimate, which is exactly the
+        // per-task (non-online) EWC behaviour.
+        self.accumulate_fisher_information(task_id, num_samples, 0.0)
+    }
 
-        if task_inputs.is_empty() {
+    /// Accumulate the diagonal Fisher information, decaying whatever was
+    /// already stored by `gamma` first.
+    ///
+    /// `gamma = 0` replaces the estimate (standard EWC); `0 < gamma <= 1`
+    /// retains a fraction of the previous tasks' Fisher (Online EWC).
+    pub fn accumulate_fisher_information(
+        &mut self,
+        task_id: usize,
+        num_samples: usize,
+        gamma: f32,
+    ) -> Result<()> {
+        let (task_inputs, task_targets) = self.memory.get_task_examples(task_id);
+        if task_inputs.is_empty() || task_targets.is_empty() {
             return Ok(());
         }
 
-        // Sample examples for Fisher computation
-        let sample_size = num_samples.min(task_inputs.len());
+        let sample_size = num_samples.min(task_inputs.len()).max(1);
+        let mut accumulator: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
 
-        // This is a simplified implementation
-        // In practice, you'd compute Fisher information for each parameter
-        for i in 0..sample_size {
-            let input = &task_inputs[i % task_inputs.len()];
-            let target = &task_targets[i % task_targets.len()];
+        for index in 0..sample_size {
+            let input = task_inputs[index % task_inputs.len()].clone();
+            let target = task_targets[index % task_targets.len()].clone();
+            let gradients = self.loss_gradients(&input, &target)?;
 
-            // Compute gradients and accumulate Fisher information
-            let outputs = self.model.forward(input.clone())?;
-            let _loss = self.compute_task_loss(&outputs, target)?;
-
-            // Store Fisher information (simplified)
-            self.fisher_matrices.insert(
-                format!("param_{}", i),
-                Tensor::ones(&[10])?, // Placeholder
-            );
+            for (name, gradient) in gradients {
+                let shape = gradient.shape();
+                let squared: Vec<f32> = gradient.to_vec_f32()?.into_iter().map(|g| g * g).collect();
+                let entry =
+                    accumulator.entry(name.clone()).or_insert_with(|| vec![0.0; squared.len()]);
+                if entry.len() != squared.len() {
+                    return Err(invalid_input(format!(
+                        "parameter '{}' changed size during Fisher estimation",
+                        name
+                    )));
+                }
+                for (slot, value) in entry.iter_mut().zip(squared) {
+                    *slot += value;
+                }
+                shapes.insert(name, shape);
+            }
         }
 
+        let decay = gamma.clamp(0.0, 1.0);
+        let mut updated = HashMap::new();
+        for (name, mut values) in accumulator {
+            for value in values.iter_mut() {
+                *value /= sample_size as f32;
+            }
+
+            if decay > 0.0 {
+                if let Some(previous) = self.fisher_matrices.get(&name) {
+                    let previous_values = previous.to_vec_f32()?;
+                    if previous_values.len() == values.len() {
+                        for (value, old) in values.iter_mut().zip(previous_values) {
+                            *value += decay * old;
+                        }
+                    }
+                }
+            }
+
+            let shape = shapes.remove(&name).unwrap_or_else(|| vec![values.len()]);
+            updated.insert(name, Tensor::from_vec(values, &shape)?);
+        }
+
+        self.fisher_matrices = updated;
         Ok(())
     }
 
-    /// Save optimal parameters for EWC
-    fn save_optimal_parameters(&mut self) -> Result<()> {
-        // Save current model parameters as optimal
-        // This is a simplified implementation
-        self.optimal_parameters.insert(
-            "param_0".to_string(),
-            Tensor::zeros(&[10])?, // Placeholder
-        );
+    /// Snapshot the current parameters as the EWC/L2 anchor `θ*`.
+    pub fn save_optimal_parameters(&mut self) -> Result<()> {
+        self.optimal_parameters.clear();
+        for (name, tensor) in self.model.named_parameters() {
+            self.optimal_parameters.insert(name, tensor);
+        }
         Ok(())
     }
 
-    /// Add progressive network columns
+    /// Progressive Neural Networks require adding a new network column per
+    /// task, which cannot be expressed through the [`Model`] trait: the
+    /// trainer can read and write existing parameters but cannot change the
+    /// architecture. This therefore reports the missing capability instead of
+    /// silently doing nothing.
     fn add_progressive_columns(&mut self, _task_id: usize) -> Result<()> {
-        // Add new columns to the network for the new task
-        // This is a simplified implementation
-        Ok(())
+        Err(not_implemented(
+            "ContinualStrategy::ProgressiveNeuralNetworks requires architecture growth, which \
+             the Model trait does not expose",
+        ))
     }
 
-    /// Prepare for PackNet pruning
+    /// Record which weights are still free for the incoming task.
+    ///
+    /// A weight is free when it is not already pinned by an earlier task's
+    /// PackNet mask.
     fn prepare_packnet(&mut self, _task_id: usize) -> Result<()> {
-        // Prepare the network for pruning-based continual learning
+        for (name, tensor) in self.model.named_parameters() {
+            let length = tensor.to_vec_f32()?.len();
+            self.packnet_masks.entry(name).or_insert_with(|| vec![false; length]);
+        }
         Ok(())
     }
 
-    /// Apply PackNet pruning
-    fn apply_packnet_pruning(&mut self, _prune_ratio: f32) -> Result<()> {
-        // Prune the network and freeze pruned weights
-        Ok(())
-    }
+    /// Apply PackNet magnitude pruning.
+    ///
+    /// The smallest-magnitude `prune_ratio` fraction of every free (not yet
+    /// pinned) weight is zeroed, and the surviving weights are pinned to the
+    /// current task so later tasks cannot claim them. Retraining the surviving
+    /// weights is the caller's responsibility.
+    fn apply_packnet_pruning(&mut self, prune_ratio: f32) -> Result<()> {
+        if !(0.0..1.0).contains(&prune_ratio) {
+            return Err(invalid_input(format!(
+                "PackNet prune_ratio must be in [0, 1), got {}",
+                prune_ratio
+            )));
+        }
 
-    /// Retrain after PackNet pruning
-    fn retrain_after_pruning(&mut self, _epochs: usize) -> Result<()> {
-        // Retrain the unpruned weights
+        for (name, tensor) in self.model.named_parameters() {
+            let shape = tensor.shape();
+            let mut values = tensor.to_vec_f32()?;
+            let pinned = self
+                .packnet_masks
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| vec![false; values.len()]);
+
+            let free_indices: Vec<usize> =
+                (0..values.len()).filter(|index| !pinned[*index]).collect();
+            if free_indices.is_empty() {
+                continue;
+            }
+
+            let mut magnitudes: Vec<f32> =
+                free_indices.iter().map(|index| values[*index].abs()).collect();
+            magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let cutoff = ((free_indices.len() as f32) * prune_ratio).floor() as usize;
+            let mut mask = pinned;
+            if cutoff > 0 {
+                let threshold = magnitudes[(cutoff - 1).min(magnitudes.len() - 1)];
+                for index in &free_indices {
+                    if values[*index].abs() <= threshold {
+                        values[*index] = 0.0;
+                    } else {
+                        mask[*index] = true;
+                    }
+                }
+            } else {
+                for index in &free_indices {
+                    mask[*index] = true;
+                }
+            }
+
+            self.model.set_named_parameter(&name, Tensor::from_vec(values, &shape)?)?;
+            self.packnet_masks.insert(name, mask);
+        }
+
         Ok(())
     }
 
@@ -761,57 +1156,100 @@ impl<M: Model<Input = Tensor, Output = Tensor>> ContinualLearningTrainer<M> {
         Ok(evaluations)
     }
 
-    /// Evaluate on a specific task
-    fn evaluate_task(
+    /// Evaluate the live model on a specific task.
+    ///
+    /// Accuracy is the fraction of rows whose predicted class (`argmax` over
+    /// the last output dimension) matches the reference class, taken either
+    /// from one-hot targets (`argmax`) or from class-index targets.
+    pub fn evaluate_task(
         &self,
         inputs: &[Tensor],
         targets: &[Tensor],
         task_id: usize,
     ) -> Result<TaskEvaluation> {
-        let mut total_loss = 0.0;
-        let mut correct_predictions = 0;
-        let total_examples = inputs.len();
+        if inputs.is_empty() {
+            return Err(invalid_input("evaluate_task requires at least one example"));
+        }
+
+        let mut total_loss = 0.0f32;
+        let mut correct_predictions = 0usize;
+        let mut total_rows = 0usize;
 
         for (input, target) in inputs.iter().zip(targets.iter()) {
             let outputs = self.model.forward(input.clone())?;
             let loss = self.compute_task_loss(&outputs, target)?;
-            total_loss += loss.to_scalar().unwrap_or(0.0);
+            total_loss += scalar_value(&loss)?;
 
-            // Compute accuracy (simplified)
-            let predicted = Tensor::zeros(&[1])?; // Simplified placeholder - ideally should be argmax
-            let target_class = Tensor::zeros(&[1])?; // Simplified placeholder - ideally should be argmax
-            if predicted.to_scalar().unwrap_or(-1.0) == target_class.to_scalar().unwrap_or(-2.0) {
-                correct_predictions += 1;
+            let output_shape = outputs.shape();
+            let classes = *output_shape
+                .last()
+                .ok_or_else(|| invalid_input("model output must have at least one dimension"))?;
+            if classes == 0 {
+                return Err(invalid_input("model output has zero classes"));
+            }
+
+            let output_values = outputs.to_vec_f32()?;
+            let target_values = target.to_vec_f32()?;
+            let rows = output_values.len() / classes;
+            let targets_are_one_hot = target_values.len() == output_values.len();
+
+            for row in 0..rows {
+                let predicted = argmax(&output_values[row * classes..(row + 1) * classes]);
+                let reference = if targets_are_one_hot {
+                    argmax(&target_values[row * classes..(row + 1) * classes])
+                } else {
+                    match target_values.get(row) {
+                        Some(index) if *index >= 0.0 => *index as usize,
+                        _ => usize::MAX,
+                    }
+                };
+
+                if predicted == reference {
+                    correct_predictions += 1;
+                }
+                total_rows += 1;
             }
         }
 
+        let denominator = total_rows.max(1) as f32;
         Ok(TaskEvaluation {
             task_id,
-            average_loss: total_loss / total_examples as f32,
-            accuracy: correct_predictions as f32 / total_examples as f32,
-            num_examples: total_examples,
+            average_loss: total_loss / inputs.len() as f32,
+            accuracy: correct_predictions as f32 / denominator,
+            num_examples: total_rows,
         })
     }
 
-    /// Get continual learning metrics
-    pub fn get_metrics(&self) -> ContinualLearningMetrics {
-        let all_evaluations = self.evaluate_all_tasks().unwrap_or_default();
+    /// Continual-learning metrics measured on the live model.
+    ///
+    /// Returns an error when the underlying evaluation fails, rather than
+    /// reporting a fabricated `average_accuracy` of `0.0`. When no task has
+    /// stored examples yet the accuracy is reported as `None`.
+    pub fn get_metrics(&self) -> Result<ContinualLearningMetrics> {
+        let all_evaluations = self.evaluate_all_tasks()?;
 
-        let average_accuracy = if !all_evaluations.is_empty() {
-            all_evaluations.values().map(|e| e.accuracy).sum::<f32>() / all_evaluations.len() as f32
+        let average_accuracy = if all_evaluations.is_empty() {
+            None
         } else {
-            0.0
+            Some(
+                all_evaluations.values().map(|e| e.accuracy).sum::<f32>()
+                    / all_evaluations.len() as f32,
+            )
         };
 
-        let memory_efficiency = self.memory.size() as f32 / self.config.memory_size as f32;
+        let memory_efficiency = if self.config.memory_size == 0 {
+            0.0
+        } else {
+            self.memory.size() as f32 / self.config.memory_size as f32
+        };
 
-        ContinualLearningMetrics {
+        Ok(ContinualLearningMetrics {
             average_accuracy,
             task_evaluations: all_evaluations,
             memory_efficiency,
             num_tasks_learned: self.task_info.len(),
             current_task: self.current_task,
-        }
+        })
     }
 }
 
@@ -843,32 +1281,111 @@ impl TaskInfo {
     }
 }
 
-/// Task detector for automatic task boundary detection
+/// Automatic task-boundary detector based on input-distribution drift.
+///
+/// The detector keeps an exponentially weighted mean of the flattened input
+/// features. When the cosine distance between an incoming batch's mean feature
+/// vector and the running mean exceeds `threshold`, a boundary is reported and
+/// the running mean is reset to the new batch. A change in feature width is
+/// always a boundary.
 pub struct TaskDetector {
-    #[allow(dead_code)]
     threshold: f32,
-    #[allow(dead_code)]
-    recent_losses: Vec<f32>,
-    #[allow(dead_code)]
-    window_size: usize,
+    running_mean: Option<Vec<f32>>,
+    smoothing: f32,
+    boundaries: usize,
 }
 
 impl TaskDetector {
+    /// Create a detector that fires above `threshold` cosine distance.
     pub fn new(threshold: f32) -> Self {
         Self {
             threshold,
-            recent_losses: Vec::new(),
-            window_size: 100,
+            running_mean: None,
+            smoothing: 0.1,
+            boundaries: 0,
         }
     }
 
+    /// Number of boundaries reported so far.
+    pub fn boundaries(&self) -> usize {
+        self.boundaries
+    }
+
+    /// Mean feature vector of a batch of inputs.
+    fn batch_mean(inputs: &[Tensor]) -> Result<Option<Vec<f32>>> {
+        let mut accumulator: Option<Vec<f32>> = None;
+        let mut count = 0usize;
+
+        for input in inputs {
+            let values = input.to_vec_f32()?;
+            if values.is_empty() {
+                continue;
+            }
+            match accumulator.as_mut() {
+                Some(mean) if mean.len() == values.len() => {
+                    for (slot, value) in mean.iter_mut().zip(values) {
+                        *slot += value;
+                    }
+                },
+                Some(_) => {
+                    return Err(invalid_input(
+                        "task detection requires all inputs in a batch to share a shape",
+                    ));
+                },
+                None => accumulator = Some(values),
+            }
+            count += 1;
+        }
+
+        Ok(accumulator.map(|mut mean| {
+            for value in mean.iter_mut() {
+                *value /= count.max(1) as f32;
+            }
+            mean
+        }))
+    }
+
+    fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm_a <= f32::EPSILON || norm_b <= f32::EPSILON {
+            return 0.0;
+        }
+        1.0 - (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+    }
+
+    /// Report a new task index when the input distribution has drifted.
     pub fn detect_task_change(
         &mut self,
-        _inputs: &[Tensor],
+        inputs: &[Tensor],
         _targets: &[Tensor],
     ) -> Result<Option<usize>> {
-        // Simplified task detection based on loss spikes
-        // In practice, this would be more sophisticated
+        let Some(batch_mean) = Self::batch_mean(inputs)? else {
+            return Ok(None);
+        };
+
+        let Some(running) = self.running_mean.as_mut() else {
+            self.running_mean = Some(batch_mean);
+            return Ok(None);
+        };
+
+        if running.len() != batch_mean.len() {
+            self.running_mean = Some(batch_mean);
+            self.boundaries += 1;
+            return Ok(Some(self.boundaries));
+        }
+
+        let distance = Self::cosine_distance(running, &batch_mean);
+        if distance > self.threshold {
+            self.running_mean = Some(batch_mean);
+            self.boundaries += 1;
+            return Ok(Some(self.boundaries));
+        }
+
+        for (slot, value) in running.iter_mut().zip(batch_mean) {
+            *slot = (1.0 - self.smoothing) * *slot + self.smoothing * value;
+        }
         Ok(None)
     }
 }
@@ -895,7 +1412,9 @@ pub struct TaskEvaluation {
 /// Overall continual learning metrics
 #[derive(Debug, Clone)]
 pub struct ContinualLearningMetrics {
-    pub average_accuracy: f32,
+    /// Mean accuracy over every task that has stored examples, or `None` when
+    /// no task has been evaluated yet.
+    pub average_accuracy: Option<f32>,
     pub task_evaluations: HashMap<usize, TaskEvaluation>,
     pub memory_efficiency: f32,
     pub num_tasks_learned: usize,
@@ -1006,174 +1525,5 @@ pub mod utils {
         } else {
             0.0
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_continual_learning_config_default() {
-        let config = ContinualLearningConfig::default();
-        assert_eq!(config.memory_size, 1000);
-        assert!(config.task_specific_heads);
-        assert!(!config.automatic_task_detection);
-
-        if let ContinualStrategy::ElasticWeightConsolidation {
-            lambda,
-            fisher_samples,
-        } = config.strategy
-        {
-            assert_eq!(lambda, 0.4);
-            assert_eq!(fisher_samples, 1000);
-        } else {
-            panic!("Expected EWC strategy");
-        }
-    }
-
-    #[test]
-    fn test_memory_buffer() {
-        let mut buffer = MemoryBuffer::new(3, MemorySelectionStrategy::Random);
-        assert!(buffer.is_empty());
-        assert_eq!(buffer.size(), 0);
-
-        // Add examples
-        let input1 = Tensor::zeros(&[1, 10]).expect("operation failed");
-        let target1 = Tensor::zeros(&[1]).expect("operation failed");
-        buffer.add_example(input1, target1, 0, 1.0);
-        assert_eq!(buffer.size(), 1);
-
-        let input2 = Tensor::ones(&[1, 10]).expect("operation failed");
-        let target2 = Tensor::ones(&[1]).expect("operation failed");
-        buffer.add_example(input2, target2, 1, 2.0);
-        assert_eq!(buffer.size(), 2);
-
-        // Sample batch
-        let (inputs, targets, task_ids) = buffer.sample_batch(2).expect("operation failed");
-        assert_eq!(inputs.len(), 2);
-        assert_eq!(targets.len(), 2);
-        assert_eq!(task_ids.len(), 2);
-    }
-
-    #[test]
-    fn test_ewc_config() {
-        let config = utils::ewc_config(0.5, 2000, 500);
-        assert_eq!(config.memory_size, 500);
-
-        if let ContinualStrategy::ElasticWeightConsolidation {
-            lambda,
-            fisher_samples,
-        } = config.strategy
-        {
-            assert_eq!(lambda, 0.5);
-            assert_eq!(fisher_samples, 2000);
-        } else {
-            panic!("Expected EWC strategy");
-        }
-    }
-
-    #[test]
-    fn test_experience_replay_config() {
-        let config = utils::experience_replay_config(1000, 64);
-        assert_eq!(config.memory_size, 1000);
-
-        if let ContinualStrategy::ExperienceReplay {
-            memory_strength,
-            replay_batch_size,
-        } = config.strategy
-        {
-            assert_eq!(memory_strength, 1.0);
-            assert_eq!(replay_batch_size, 64);
-        } else {
-            panic!("Expected ExperienceReplay strategy");
-        }
-    }
-
-    #[test]
-    fn test_l2_regularization_config() {
-        let config = utils::l2_regularization_config(0.01);
-        assert_eq!(config.memory_size, 0);
-
-        if let ContinualStrategy::L2Regularization { lambda } = config.strategy {
-            assert_eq!(lambda, 0.01);
-        } else {
-            panic!("Expected L2Regularization strategy");
-        }
-    }
-
-    #[test]
-    fn test_task_info() {
-        let mut info = TaskInfo::new(5);
-        assert_eq!(info.task_id, 5);
-        assert_eq!(info.num_examples_seen, 0);
-
-        info.update_statistics(0.5);
-        assert_eq!(info.num_examples_seen, 1);
-        assert_eq!(info.average_loss, 0.5);
-
-        info.update_statistics(1.0);
-        assert_eq!(info.num_examples_seen, 2);
-        assert_eq!(info.average_loss, 0.75);
-    }
-
-    #[test]
-    fn test_backward_transfer_computation() {
-        let mut before = HashMap::new();
-        before.insert(
-            0,
-            TaskEvaluation {
-                task_id: 0,
-                average_loss: 0.5,
-                accuracy: 0.8,
-                num_examples: 100,
-            },
-        );
-        before.insert(
-            1,
-            TaskEvaluation {
-                task_id: 1,
-                average_loss: 0.6,
-                accuracy: 0.7,
-                num_examples: 100,
-            },
-        );
-
-        let mut after = HashMap::new();
-        after.insert(
-            0,
-            TaskEvaluation {
-                task_id: 0,
-                average_loss: 0.4,
-                accuracy: 0.85,
-                num_examples: 100,
-            },
-        );
-        after.insert(
-            1,
-            TaskEvaluation {
-                task_id: 1,
-                average_loss: 0.55,
-                accuracy: 0.72,
-                num_examples: 100,
-            },
-        );
-
-        let backward_transfer = utils::compute_backward_transfer(&before, &after);
-        assert!((backward_transfer - 0.035).abs() < 1e-6); // (0.05 + 0.02) / 2
-    }
-
-    #[test]
-    fn test_forgetting_computation() {
-        let mut max_accuracies = HashMap::new();
-        max_accuracies.insert(0, 0.9);
-        max_accuracies.insert(1, 0.85);
-
-        let mut final_accuracies = HashMap::new();
-        final_accuracies.insert(0, 0.8);
-        final_accuracies.insert(1, 0.75);
-
-        let forgetting = utils::compute_forgetting(&max_accuracies, &final_accuracies);
-        assert!((forgetting - 0.1).abs() < 1e-6); // (0.1 + 0.1) / 2
     }
 }

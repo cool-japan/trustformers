@@ -148,14 +148,43 @@ impl ConversationHealthTracker {
         }
     }
 
+    /// How much vocabulary consecutive turns share.
+    ///
+    /// A measured lexical-overlap signal (mean Jaccard similarity of content
+    /// words between adjacent turns), not a fixed score. A single turn has no
+    /// pair to compare, so it scores the neutral 1.0.
     fn calculate_context_relevance(turns: &[super::super::types::ConversationTurn]) -> f32 {
-        // Simplified context relevance calculation
-        // In a real implementation, this would analyze semantic coherence
-        if turns.is_empty() {
+        if turns.len() < 2 {
             return 1.0;
         }
 
-        0.75 // Placeholder implementation
+        let words_of = |text: &str| -> std::collections::HashSet<String> {
+            text.split_whitespace()
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+                .filter(|w| w.len() > 3)
+                .collect()
+        };
+
+        let mut total = 0.0f32;
+        let mut pairs = 0usize;
+        for window in turns.windows(2) {
+            let previous = words_of(&window[0].content);
+            let current = words_of(&window[1].content);
+            let union = previous.union(&current).count();
+            if union == 0 {
+                continue;
+            }
+            let intersection = previous.intersection(&current).count();
+            total += intersection as f32 / union as f32;
+            pairs += 1;
+        }
+
+        if pairs == 0 {
+            // Nothing comparable (e.g. only stop-words): report neutral rather
+            // than inventing a score.
+            return 1.0;
+        }
+        (total / pairs as f32).clamp(0.0, 1.0)
     }
 
     fn identify_issues(health: &ConversationHealth) -> Vec<String> {
@@ -213,6 +242,43 @@ mod tests {
         ConversationMetadata, ConversationRole, ConversationState, ConversationTurn,
     };
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Regression: `calculate_context_relevance` returned a fixed 0.75 for any
+    // non-empty conversation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn context_relevance_varies_with_the_turns() {
+        use super::super::super::types::{ConversationRole, ConversationTurn};
+
+        let turn = |content: &str| ConversationTurn {
+            role: ConversationRole::User,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+            token_count: content.split_whitespace().count(),
+        };
+
+        let related = [
+            turn("transformer attention layers scale quadratically"),
+            turn("attention layers dominate transformer runtime"),
+        ];
+        let unrelated = [
+            turn("transformer attention layers scale quadratically"),
+            turn("banana bread requires ripe plantains overnight"),
+        ];
+
+        let related_score = ConversationHealthTracker::calculate_context_relevance(&related);
+        let unrelated_score = ConversationHealthTracker::calculate_context_relevance(&unrelated);
+
+        assert!(
+            related_score > unrelated_score,
+            "shared vocabulary must score higher: {related_score} vs {unrelated_score}"
+        );
+        assert_ne!(related_score, 0.75, "0.75 was the old placeholder");
+        assert_ne!(unrelated_score, 0.75, "0.75 was the old placeholder");
+    }
     use chrono::Utc;
 
     fn make_turn_no_metadata(role: ConversationRole, content: &str) -> ConversationTurn {

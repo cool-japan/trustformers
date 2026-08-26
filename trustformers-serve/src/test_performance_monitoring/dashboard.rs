@@ -9,15 +9,20 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, RwLock};
 
-/// Main dashboard management system
+/// Main dashboard management system.
+///
+/// 0.2.1: this used to also hold a `LayoutEngine` and a
+/// `RwLock<HashMap<String, UserPreferences>>`. The layout engine stored a copy
+/// of the config and had no other method; the preferences map was never written
+/// to and never read. Both are gone -- a manager that appears to lay dashboards
+/// out and honour per-user preferences, but does neither, is a claim about
+/// behaviour that does not exist.
 #[derive(Debug)]
 pub struct DashboardManager {
     config: DashboardConfig,
     dashboard_store: RwLock<HashMap<String, Dashboard>>,
     widget_manager: WidgetManager,
-    layout_engine: LayoutEngine,
     real_time_updater: RealTimeUpdater,
-    user_preferences: RwLock<HashMap<String, UserPreferences>>,
 }
 
 /// Dashboard definition
@@ -66,30 +71,19 @@ pub enum WidgetType {
     Custom { widget_class: String },
 }
 
-/// Widget management system
+/// Widget management system.
+///
+/// 0.2.1: dropped a `WidgetFactory` (a list of widget-type name strings that
+/// nothing consulted, and which manufactured nothing) and a `WidgetUpdater`
+/// (an interval nothing ticked).
 #[derive(Debug)]
 pub struct WidgetManager {
-    widget_factory: WidgetFactory,
     widget_registry: RwLock<HashMap<String, WidgetDefinition>>,
     widget_cache: RwLock<HashMap<String, WidgetData>>,
-    widget_updater: WidgetUpdater,
 }
 
 impl WidgetManager {
     fn new(config: &DashboardConfig) -> Self {
-        let factory = WidgetFactory {
-            widget_types: vec![
-                "chart".to_string(),
-                "metric".to_string(),
-                "table".to_string(),
-                "gauge".to_string(),
-                "heatmap".to_string(),
-                "timeline".to_string(),
-                "alert".to_string(),
-                "text".to_string(),
-            ],
-        };
-
         let mut registry = HashMap::new();
         for widget_position in &config.layout.widgets {
             registry.insert(
@@ -108,12 +102,8 @@ impl WidgetManager {
         }
 
         Self {
-            widget_factory: factory,
             widget_registry: RwLock::new(registry),
             widget_cache: RwLock::new(HashMap::new()),
-            widget_updater: WidgetUpdater {
-                update_interval: config.refresh_interval,
-            },
         }
     }
 
@@ -137,12 +127,15 @@ impl WidgetManager {
     }
 }
 
-/// Real-time dashboard updates
+/// Real-time dashboard updates.
+///
+/// 0.2.1: dropped a per-dashboard `subscriptions` map and an `UpdateScheduler`.
+/// [`DashboardManager::subscribe_to_updates`] hands out receivers on the single
+/// broadcast channel below and always did; the map was never populated, and the
+/// scheduler only held a config copy.
 #[derive(Debug)]
 pub struct RealTimeUpdater {
     update_sender: broadcast::Sender<DashboardUpdate>,
-    subscriptions: RwLock<HashMap<String, DashboardSubscription>>,
-    update_scheduler: UpdateScheduler,
 }
 
 /// Dashboard update event
@@ -164,14 +157,13 @@ impl DashboardManager {
             config: config.clone(),
             dashboard_store: RwLock::new(HashMap::new()),
             widget_manager: WidgetManager::new(&config),
-            layout_engine: LayoutEngine::new(&config),
-            real_time_updater: RealTimeUpdater {
-                update_sender,
-                subscriptions: RwLock::new(HashMap::new()),
-                update_scheduler: UpdateScheduler::new(&config),
-            },
-            user_preferences: RwLock::new(HashMap::new()),
+            real_time_updater: RealTimeUpdater { update_sender },
         }
+    }
+
+    /// The configuration this manager was built with.
+    pub fn config(&self) -> &DashboardConfig {
+        &self.config
     }
 
     /// Create new dashboard
@@ -231,5 +223,20 @@ mod tests {
         let _manager = DashboardManager::new(config);
 
         // Basic creation test - succeeds if no panic
+    }
+
+    /// The caller's configuration must survive construction rather than being
+    /// replaced by a default.
+    #[test]
+    fn manager_keeps_the_configuration_it_was_given() {
+        let mut config = DashboardConfig::default();
+        config.refresh_interval = Duration::from_millis(4242);
+
+        let manager = DashboardManager::new(config);
+
+        assert_eq!(
+            manager.config().refresh_interval,
+            Duration::from_millis(4242)
+        );
     }
 }

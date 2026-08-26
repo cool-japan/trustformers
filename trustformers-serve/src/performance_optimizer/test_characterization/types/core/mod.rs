@@ -3,11 +3,13 @@
 
 pub mod analysis;
 pub mod config;
+pub mod conflict_algorithms;
 pub mod enums;
 pub mod events;
 pub mod formatters;
 pub mod metrics;
 pub mod optimization;
+pub mod pattern_algorithms;
 pub mod quality;
 pub mod resources;
 pub mod strategies;
@@ -15,46 +17,46 @@ pub mod strategies;
 // Re-export all types for backward compatibility
 pub use analysis::*;
 pub use config::*;
+pub use conflict_algorithms::*;
 pub use enums::*;
 pub use events::*;
 pub use formatters::*;
 pub use metrics::*;
 pub use optimization::*;
+pub use pattern_algorithms::*;
 pub use quality::*;
 pub use resources::*;
 pub use strategies::*;
 
 // Additional types that don't fit cleanly into other modules
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
 
 // Import cross-module types
-use super::super::synchronization_analyzer::SynchronizationAnalyzer;
 use super::alerts::AlertSystem;
 use super::analysis::{AnalysisResultData, AnalyzerMetrics, AnomalyInfo};
 use super::data_management::{
     ArchivalSettings, CompressionSettings, DataCharacteristics, RetentionPolicy,
 };
 use super::locking::{
-    ConflictDetectionAlgorithm, CycleDetectionAlgorithm, DeadlockDetectionAlgorithm,
-    DeadlockPreventionStrategy, DeadlockRisk, DependencyType, LockDependency, LockUsageInfo,
-    OrderedLockingStrategy, PredictiveDeadlockAlgorithm,
+    CycleDetectionAlgorithm, DeadlockDetectionAlgorithm, DeadlockPreventionStrategy, DeadlockRisk,
+    DependencyType, LockDependency, LockUsageInfo, OrderedLockingStrategy,
+    PredictiveDeadlockAlgorithm,
 };
-use super::optimization::{
-    AdaptiveOptimizer, OptimizationObjective, OptimizationRecommendation, StrategySelector,
-};
+use super::optimization::{OptimizationObjective, OptimizationRecommendation};
 use super::patterns::{
     ConcurrencyAnalysisResult, ConcurrencyEstimationAlgorithm, ConcurrencyRequirements,
-    ConcurrencyRequirementsDetector, PatternCharacteristics, PatternDetectionAlgorithm,
-    PatternEffectiveness, PatternType, PatternUpdate, SynchronizationRequirements,
-    ThreadInteraction,
+    PatternCharacteristics, PatternEffectiveness, PatternType, PatternUpdate,
+    SynchronizationRequirements, ThreadInteraction,
 };
 use super::performance::{EffectivenessMetrics, PerformanceMetrics, PerformanceProfile};
 use super::quality::{
@@ -62,8 +64,8 @@ use super::quality::{
     RiskAssessmentAlgorithm, RiskFactor, RiskFactorType, RiskLevel, ValidationResults,
 };
 use super::resources::{
-    ResourceAccessPattern, ResourceConflict, ResourceIntensity, ResourceIntensityAnalyzer,
-    ResourceMetrics, ResourceUsageDataPoint, SystemResourceSnapshot,
+    ResourceAccessPattern, ResourceIntensity, ResourceMetrics, ResourceUsageDataPoint,
+    SystemResourceSnapshot,
 };
 
 // ============================================================================
@@ -417,74 +419,6 @@ pub struct RealTimeDashboard {
     pub metrics: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RealTimeTestProfiler {
-    /// Profiler configuration
-    pub config: Arc<RwLock<RealTimeProfilerConfig>>,
-    /// Streaming analyzer
-    pub streaming_analyzer: Arc<StreamingAnalyzer>,
-    /// Adaptive optimizer
-    pub adaptive_optimizer: Arc<AdaptiveOptimizer>,
-    /// Strategy selector
-    pub strategy_selector: Arc<StrategySelector>,
-    /// Dashboard integration
-    pub dashboard: Arc<RealTimeDashboard>,
-    /// Profile streams
-    pub profile_streams: Arc<RwLock<HashMap<String, ProfileStream>>>,
-    /// Background tasks
-    pub background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    /// Shutdown signal
-    pub shutdown: Arc<AtomicBool>,
-}
-
-impl RealTimeTestProfiler {
-    pub fn new(config: Arc<RwLock<RealTimeProfilerConfig>>) -> Self {
-        Self {
-            config,
-            streaming_analyzer: Arc::new(StreamingAnalyzer {
-                algorithms: HashMap::new(),
-                stream_config: StreamConfiguration {
-                    buffer_size: 1000,
-                    sampling_interval: Duration::from_secs(1),
-                    compression_enabled: false,
-                    retention_policy: "default".to_string(),
-                },
-                results: Arc::new(RwLock::new(HashMap::new())),
-                quality_settings: StreamQualitySettings {
-                    min_quality_score: 0.8,
-                    max_error_rate: 0.1,
-                    quality_check_interval: Duration::from_secs(60),
-                    auto_quality_adjust: true,
-                },
-                buffer: VecDeque::new(),
-                performance_tracker: AnalyzerMetrics::default(),
-                anomaly_threshold: 0.95,
-                stream_stats: StreamStatistics::default(),
-                alert_system: AlertSystem::default(),
-            }),
-            adaptive_optimizer: Arc::new(AdaptiveOptimizer::new(LearningConfiguration::default())),
-            strategy_selector: Arc::new(StrategySelector::new(SelectionContext::default())),
-            dashboard: Arc::new(RealTimeDashboard {
-                refresh_interval: Duration::from_secs(5),
-                metrics: Vec::new(),
-            }),
-            profile_streams: Arc::new(RwLock::new(HashMap::new())),
-            background_tasks: Arc::new(Mutex::new(Vec::new())),
-            shutdown: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn start_profiling(&self, _test_id: &str) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        Ok(())
-    }
-
-    pub fn stop_profiling(&self, _test_id: &str) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        Ok(())
-    }
-}
-
 // ============================================================================
 // TEST CHARACTERIZATION TYPES
 // ============================================================================
@@ -639,25 +573,6 @@ pub struct TestPattern {
     pub predictive_accuracy: f64,
 }
 
-pub struct TestCharacterizationEngine {
-    /// Engine configuration
-    pub config: Arc<RwLock<TestCharacterizationConfig>>,
-    /// Resource intensity analyzer
-    pub resource_analyzer: Arc<ResourceIntensityAnalyzer>,
-    /// Concurrency requirements detector
-    pub concurrency_detector: Arc<ConcurrencyRequirementsDetector>,
-    /// Synchronization analyzer
-    pub synchronization_analyzer: Arc<SynchronizationAnalyzer>,
-    /// Pattern recognition engine
-    pub pattern_engine: Arc<TestPatternRecognitionEngine>,
-    /// Real-time profiler
-    pub real_time_profiler: Arc<RealTimeTestProfiler>,
-    /// Background profiling tasks
-    pub background_tasks: Vec<JoinHandle<()>>,
-    /// Shutdown signal
-    pub shutdown: Arc<AtomicBool>,
-}
-
 pub struct TestDependency {
     /// Source test identifier
     pub source_test: String,
@@ -686,53 +601,6 @@ pub struct TestFilter {
     pub criteria: HashMap<String, String>,
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecognitionHistory {
-    pub patterns_recognized: Vec<String>,
-    pub recognition_timestamps: Vec<DateTime<Utc>>,
-    pub accuracy_history: Vec<f64>,
-    pub total_recognitions: usize,
-}
-
-/// Placeholder - actual implementation in pattern_engine.rs
-#[derive(Debug, Clone)]
-pub struct TestPatternRecognitionEngine {
-    pub enabled: bool,
-    pub algorithms: Vec<String>,
-    pub confidence_threshold: f64,
-    pub history: RecognitionHistory,
-}
-
-impl TestPatternRecognitionEngine {
-    pub fn new() -> Self {
-        Self {
-            enabled: true,
-            algorithms: vec!["default".to_string()],
-            confidence_threshold: 0.8,
-            history: RecognitionHistory {
-                patterns_recognized: Vec::new(),
-                recognition_timestamps: Vec::new(),
-                accuracy_history: Vec::new(),
-                total_recognitions: 0,
-            },
-        }
-    }
-
-    pub fn recognize_test_patterns(
-        &self,
-        _test_data: &TestExecutionData,
-    ) -> TestCharacterizationResult<Vec<TestPattern>> {
-        // Placeholder implementation
-        Ok(Vec::new())
-    }
-}
-
-impl Default for TestPatternRecognitionEngine {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // ============================================================================
@@ -861,14 +729,16 @@ impl ConcurrencyEstimationAlgorithm for MLBasedEstimationAlgorithm {
         &self,
         analysis_result: &ConcurrencyAnalysisResult,
     ) -> TestCharacterizationResult<usize> {
-        // Use ML-based estimation (simplified for now)
+        // This scales the analyzer's own recommendation by a configured
+        // confidence factor. No model is loaded or evaluated -- see `name()`,
+        // which says so rather than claiming an ML estimator.
         let base_estimate = analysis_result.recommended_concurrency;
-        let ml_adjusted = (base_estimate as f64 * self.confidence) as usize;
-        Ok(ml_adjusted.max(1))
+        let scaled = (base_estimate as f64 * self.confidence) as usize;
+        Ok(scaled.max(1))
     }
 
     fn name(&self) -> &str {
-        "MLBasedEstimation"
+        "ConfidenceScaledEstimation"
     }
 
     fn confidence(&self, _analysis_result: &ConcurrencyAnalysisResult) -> f64 {
@@ -876,185 +746,20 @@ impl ConcurrencyEstimationAlgorithm for MLBasedEstimationAlgorithm {
     }
 
     fn parameters(&self) -> HashMap<String, f64> {
+        // The model identity is the string `self.model`; encoding it as the
+        // float 1.0 (as this did before 0.2.1) told the caller nothing and read
+        // as a measured parameter. Only the genuinely numeric parameter is
+        // reported; `name()` carries the identity.
         let mut params = HashMap::new();
         params.insert("confidence".to_string(), self.confidence);
-        params.insert("model".to_string(), 1.0); // Placeholder for model identifier
         params
     }
 }
 
-// ============================================================================
-// CONFLICT DETECTION ALGORITHMS
-// ============================================================================
-
-#[derive(Debug)]
-pub struct StaticConflictDetectionAlgorithm {
-    pub enabled: bool,
-    pub depth: usize,
-}
-
-impl StaticConflictDetectionAlgorithm {
-    pub fn new(enabled: bool, depth: usize) -> Self {
-        Self { enabled, depth }
-    }
-}
-
-impl ConflictDetectionAlgorithm for StaticConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified static conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "StaticConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        0.8
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&depth) = params.get("depth") {
-            self.depth = depth as usize;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct DynamicConflictDetectionAlgorithm {
-    pub runtime_monitoring: bool,
-    pub sample_rate: f64,
-}
-
-impl DynamicConflictDetectionAlgorithm {
-    pub fn new(runtime_monitoring: bool, sample_rate: f64) -> Self {
-        Self {
-            runtime_monitoring,
-            sample_rate,
-        }
-    }
-}
-
-impl ConflictDetectionAlgorithm for DynamicConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified dynamic conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "DynamicConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.sample_rate
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&rate) = params.get("sample_rate") {
-            self.sample_rate = rate;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct PredictiveConflictDetectionAlgorithm {
-    pub prediction_horizon: usize,
-    pub accuracy_threshold: f64,
-}
-
-impl PredictiveConflictDetectionAlgorithm {
-    pub fn new(prediction_horizon: usize, accuracy_threshold: f64) -> Self {
-        Self {
-            prediction_horizon,
-            accuracy_threshold,
-        }
-    }
-}
-
-impl ConflictDetectionAlgorithm for PredictiveConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified predictive conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "PredictiveConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.accuracy_threshold
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&horizon) = params.get("prediction_horizon") {
-            self.prediction_horizon = horizon as usize;
-        }
-        if let Some(&threshold) = params.get("accuracy_threshold") {
-            self.accuracy_threshold = threshold;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct MLConflictDetectionAlgorithm {
-    pub model: String,
-    pub confidence: f64,
-}
-
-impl MLConflictDetectionAlgorithm {
-    pub fn new(model: String, confidence: f64) -> Self {
-        Self { model, confidence }
-    }
-}
-
-impl ConflictDetectionAlgorithm for MLConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified ML-based conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "MLConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.confidence
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&conf) = params.get("confidence") {
-            self.confidence = conf;
-        }
-        Ok(())
-    }
-}
+// Conflict-detection algorithms live in `conflict_algorithms.rs`. Until 0.2.1
+// they lived here and every one of them ignored its input and returned
+// `Ok(Vec::new())`; see that module for what each one now computes and why
+// the ML variant was deleted rather than fixed.
 
 // ============================================================================
 // DEADLOCK DETECTION IMPLEMENTATIONS
@@ -1467,22 +1172,54 @@ pub struct PredictionModel {
 }
 
 impl PredictionModel {
-    /// Make a prediction using the trained model
-    pub fn predict(&self, input: &[f64]) -> TestCharacterizationResult<Vec<f64>> {
-        // Placeholder implementation
-        // In a real implementation, this would use the trained model to make predictions
-        Ok(input.to_vec())
+    /// Make a prediction using the trained model.
+    ///
+    /// Fails with [`TestCharacterizationError::Internal`]: this struct
+    /// holds a `model_type` string, an `accuracy` number and a timestamp — it
+    /// carries no coefficients, weights or history, so there is nothing here
+    /// to predict *with*.
+    ///
+    /// ## Fixed in 0.2.1
+    ///
+    /// This used to `Ok(input.to_vec())` — it echoed its input back as the
+    /// prediction. `RealTimeTrendAnalyzer::predict_future_performance` fed it
+    /// a metric's historical series and read `prediction.first()`, so the
+    /// "predicted" value was the *oldest observed sample*, reported under
+    /// `prediction_method: "statistical_ml"` with the trend's own confidence
+    /// score attached. A forecast that returns a past measurement is worse
+    /// than no forecast, because the confidence number makes it look
+    /// examined.
+    pub fn predict(&self, _input: &[f64]) -> TestCharacterizationResult<Vec<f64>> {
+        Err(TestCharacterizationError::Internal {
+            message: format!(
+                "prediction model '{}' holds no trained parameters; there is nothing to predict \
+                 with",
+                self.model_type
+            ),
+            component: "PredictionModel::predict".to_string(),
+            details: HashMap::new(),
+        })
     }
 
-    /// Train the model with new data
+    /// Train the model with new data.
+    ///
+    /// Fails with [`TestCharacterizationError::Internal`] for the same
+    /// reason [`Self::predict`] does: there is no parameter storage on this
+    /// struct for training to write into. It used to stamp `trained_at` with
+    /// the current time and report success, so the model advertised itself as
+    /// freshly trained while `accuracy` kept whatever value it was built with.
     pub fn train_with_data(
         &mut self,
         _data: &[(Vec<f64>, Vec<f64>)],
     ) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would update the model with new training data
-        self.trained_at = Utc::now();
-        Ok(())
+        Err(TestCharacterizationError::Internal {
+            message: format!(
+                "prediction model '{}' has no parameter storage to train into",
+                self.model_type
+            ),
+            component: "PredictionModel::train_with_data".to_string(),
+            details: HashMap::new(),
+        })
     }
 }
 
@@ -1494,20 +1231,84 @@ pub struct BaselineModel {
 }
 
 impl BaselineModel {
-    /// Create a new BaselineModel with default settings
+    /// Create an empty baseline that describes nothing yet.
     pub fn new() -> Self {
         Self {
-            model_type: String::from("default"),
+            model_type: String::from("empty"),
             parameters: HashMap::new(),
             created_at: Utc::now(),
         }
     }
 
-    /// Update the baseline model with recent data
-    pub async fn update_with_recent_data(&mut self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would fetch recent data and update model parameters
+    /// Rebuild the baseline from an observed sample window.
+    ///
+    /// Before 0.2.1 this took no data and returned `Ok(())` without touching a
+    /// single parameter, and its one caller discarded the model it was called
+    /// on anyway. It now stores the mean, standard deviation and sample count of
+    /// every metric key present in `samples`, keyed `<metric>.mean`,
+    /// `<metric>.std_dev` and `<metric>.count`.
+    ///
+    /// Returns an error when the window is too small for an unbiased standard
+    /// deviation rather than recording a zero spread that every detector would
+    /// then have to special-case.
+    pub fn update_with_recent_data(
+        &mut self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<()> {
+        if samples.len() < 2 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "a baseline needs at least two samples for a sample standard deviation"
+                    .to_string(),
+                field: "samples".to_string(),
+                value: samples.len().to_string(),
+            });
+        }
+        let mut keys: Vec<String> =
+            samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut parameters = HashMap::new();
+        for key in keys {
+            let values: Vec<f64> = samples
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            if values.len() < 2 {
+                continue;
+            }
+            let count = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / count;
+            let variance =
+                values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (count - 1.0);
+            parameters.insert(format!("{}.mean", key), mean);
+            parameters.insert(format!("{}.std_dev", key), variance.sqrt());
+            parameters.insert(format!("{}.count", key), count);
+        }
+        if parameters.is_empty() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "no metric key in the window carried two finite readings".to_string(),
+                field: "samples".to_string(),
+                value: samples.len().to_string(),
+            });
+        }
+        self.model_type = "window_mean_std".to_string();
+        self.parameters = parameters;
+        self.created_at = Utc::now();
         Ok(())
+    }
+
+    /// Mean and standard deviation recorded for `metric`, if any.
+    pub fn statistics_for(&self, metric: &str) -> Option<(f64, f64)> {
+        let mean = *self.parameters.get(&format!("{}.mean", metric))?;
+        let std_dev = *self.parameters.get(&format!("{}.std_dev", metric))?;
+        Some((mean, std_dev))
+    }
+
+    /// True when the baseline has never been fitted to a window.
+    pub fn is_empty(&self) -> bool {
+        self.parameters.is_empty()
     }
 }
 
@@ -1517,17 +1318,17 @@ impl Default for BaselineModel {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MLPatternRecognizer {
-    pub model_type: String,
-    pub recognition_threshold: f64,
-    pub patterns_detected: usize,
-}
-
+/// Detects monotone drift in a streaming metric window.
+///
+/// `running` is a real, shared flag: `start_detection` and `stop_detection`
+/// flip it and `is_running` reports it, so a caller can observe the lifecycle.
+/// Before 0.2.1 both were `Ok(())` no-ops and `detect_patterns` took no data
+/// and returned an empty vector.
 #[derive(Debug, Clone)]
 pub struct RealTimePatternDetector {
     pub detection_enabled: bool,
     pub min_confidence: f64,
+    running: Arc<AtomicBool>,
 }
 
 impl RealTimePatternDetector {
@@ -1536,25 +1337,121 @@ impl RealTimePatternDetector {
         Self {
             detection_enabled: true,
             min_confidence: 0.8,
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start pattern detection
+    /// Start pattern detection.
     pub async fn start_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        if !self.detection_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "pattern detection is disabled by configuration".to_string(),
+                component: "RealTimePatternDetector".to_string(),
+            });
+        }
+        self.running.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop pattern detection
+    /// Stop pattern detection.
     pub async fn stop_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Detect patterns in streaming data
-    pub async fn detect_patterns(&self) -> TestCharacterizationResult<Vec<DetectedPattern>> {
-        // Placeholder implementation
-        Ok(Vec::new())
+    /// True between `start_detection` and `stop_detection`.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Detect monotone drift in each metric of `samples`.
+    ///
+    /// A metric is reported when the fraction of consecutive steps moving in the
+    /// same direction reaches `min_confidence`; that fraction is the pattern's
+    /// confidence. An empty or short window yields no pattern.
+    pub async fn detect_patterns(
+        &self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<Vec<DetectedPattern>> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "detector is not running; call start_detection first".to_string(),
+                field: "running".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let mut keys: Vec<String> =
+            samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut patterns = Vec::new();
+        for key in keys {
+            let values: Vec<f64> = samples
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            if values.len() < 3 {
+                continue;
+            }
+            let mut rising = 0usize;
+            let mut falling = 0usize;
+            for pair in values.windows(2) {
+                let (Some(previous), Some(current)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                if current > previous {
+                    rising += 1;
+                } else if current < previous {
+                    falling += 1;
+                }
+            }
+            let steps = (values.len() - 1) as f64;
+            let (direction, agreeing) =
+                if rising >= falling { ("rising", rising) } else { ("falling", falling) };
+            let confidence = agreeing as f64 / steps;
+            if confidence < self.min_confidence {
+                continue;
+            }
+            let mut performance_characteristics = HashMap::new();
+            performance_characteristics.insert("rising_steps".to_string(), rising as f64);
+            performance_characteristics.insert("falling_steps".to_string(), falling as f64);
+            performance_characteristics.insert("total_steps".to_string(), steps);
+            patterns.push(DetectedPattern {
+                pattern_id: format!("drift:{}", key),
+                pattern_type: PatternType::Temporal,
+                name: format!("monotone_{}:{}", direction, key),
+                description: format!(
+                    "`{}` moved {} in {} of {} consecutive steps",
+                    key, direction, agreeing, steps as usize
+                ),
+                confidence,
+                characteristics: PatternCharacteristics {
+                    performance_characteristics,
+                    ..PatternCharacteristics::default()
+                },
+                detected_at: Instant::now(),
+                source: "RealTimePatternDetector".to_string(),
+                // The pattern spans the whole window exactly once.
+                frequency: 1.0,
+                // Stability is the same agreement fraction as the confidence:
+                // the share of steps that kept the direction.
+                stability: confidence,
+                // No out-of-sample check is run, so no predictive power is
+                // claimed.
+                predictive_power: 0.0,
+                // The detector sees a metric window, not test identities.
+                associated_tests: Vec::new(),
+                performance_implications: HashMap::new(),
+                // Deciding what to do about a drift is not this detector's job.
+                optimization_opportunities: Vec::new(),
+                optimization_potential: 0.0,
+                tags: vec!["monotone_drift".to_string(), direction.to_string()],
+                metadata: HashMap::new(),
+            });
+        }
+        Ok(patterns)
     }
 }
 
@@ -1564,11 +1461,16 @@ impl Default for RealTimePatternDetector {
     }
 }
 
+/// Computes summary statistics over the tail of a streaming metric window.
+///
+/// `running` is a real, shared flag that `start_analysis` and `stop_analysis`
+/// flip. Before 0.2.1 both were `Ok(())` no-ops and `analyze_stream` took no
+/// data, returning a `statistics` map that nothing ever wrote to.
 #[derive(Debug, Clone)]
 pub struct StreamingStatisticalAnalyzer {
     pub window_size: usize,
-    pub statistics: HashMap<String, f64>,
     pub algorithm: String,
+    running: Arc<AtomicBool>,
 }
 
 impl StreamingStatisticalAnalyzer {
@@ -1576,27 +1478,80 @@ impl StreamingStatisticalAnalyzer {
     pub fn new() -> Self {
         Self {
             window_size: 100,
-            statistics: HashMap::new(),
-            algorithm: "default".to_string(),
+            algorithm: "mean_min_max_std_dev".to_string(),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start statistical analysis
+    /// Start statistical analysis.
     pub async fn start_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop statistical analysis
+    /// Stop statistical analysis.
     pub async fn stop_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Analyze streaming data
-    pub async fn analyze_stream(&self) -> TestCharacterizationResult<HashMap<String, f64>> {
-        // Placeholder implementation - return current statistics
-        Ok(self.statistics.clone())
+    /// True between `start_analysis` and `stop_analysis`.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Summarise the last `window_size` samples.
+    ///
+    /// Produces `<metric>.mean`, `.min`, `.max`, `.std_dev` and `.count` for
+    /// every metric key with at least one finite reading; `.std_dev` is omitted
+    /// where fewer than two readings exist.
+    pub async fn analyze_stream(
+        &self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<HashMap<String, f64>> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "analyzer is not running; call start_analysis first".to_string(),
+                field: "running".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let start = samples.len().saturating_sub(self.window_size);
+        let window = samples.get(start..).unwrap_or(&[]);
+        let mut keys: Vec<String> =
+            window.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut statistics = HashMap::new();
+        for key in keys {
+            let values: Vec<f64> = window
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            let Some(first) = values.first().copied() else {
+                continue;
+            };
+            let count = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / count;
+            let mut min = first;
+            let mut max = first;
+            for value in &values {
+                min = min.min(*value);
+                max = max.max(*value);
+            }
+            statistics.insert(format!("{}.count", key), count);
+            statistics.insert(format!("{}.mean", key), mean);
+            statistics.insert(format!("{}.min", key), min);
+            statistics.insert(format!("{}.max", key), max);
+            if values.len() >= 2 {
+                let variance =
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0);
+                statistics.insert(format!("{}.std_dev", key), variance.sqrt());
+            }
+        }
+        Ok(statistics)
     }
 }
 
@@ -1659,160 +1614,9 @@ pub struct TestDateTime {
     pub timestamp_ms: i64,
 }
 
-// ============================================================================
-// PATTERN DETECTION ALGORITHMS (Re-added from original locations)
-// ============================================================================
-
-#[derive(Debug)]
-pub struct ProducerConsumerDetection {
-    pub detected: bool,
-    pub producer_count: usize,
-    pub consumer_count: usize,
-}
-
-impl ProducerConsumerDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            producer_count: 0,
-            consumer_count: 0,
-        }
-    }
-}
-
-impl Default for ProducerConsumerDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for ProducerConsumerDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            "Producer-Consumer pattern detected (confidence: 0.85)".to_string()
-        } else {
-            "No Producer-Consumer pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "ProducerConsumerDetection"
-    }
-}
-
-#[derive(Debug)]
-pub struct MasterWorkerDetection {
-    pub detected: bool,
-    pub master_count: usize,
-    pub worker_count: usize,
-}
-
-impl MasterWorkerDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            master_count: 0,
-            worker_count: 0,
-        }
-    }
-}
-
-impl Default for MasterWorkerDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for MasterWorkerDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!(
-                "Master-Worker pattern detected (workers: {})",
-                self.worker_count
-            )
-        } else {
-            "No Master-Worker pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "MasterWorkerDetection"
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PipelineDetection {
-    pub detected: bool,
-    pub stages: usize,
-    pub throughput: f64,
-}
-
-impl PipelineDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            stages: 0,
-            throughput: 0.0,
-        }
-    }
-}
-
-impl Default for PipelineDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for PipelineDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!("Pipeline pattern detected (stages: {})", self.stages)
-        } else {
-            "No Pipeline pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "PipelineDetection"
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ForkJoinDetection {
-    pub detected: bool,
-    pub fork_points: usize,
-    pub join_points: usize,
-}
-
-impl ForkJoinDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            fork_points: 0,
-            join_points: 0,
-        }
-    }
-}
-
-impl Default for ForkJoinDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for ForkJoinDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!("Fork-Join pattern detected (forks: {})", self.fork_points)
-        } else {
-            "No Fork-Join pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "ForkJoinDetection"
-    }
-}
+// Concurrency-pattern detection algorithms live in `pattern_algorithms.rs`.
+// Until 0.2.1 they lived here and answered from a `detected: bool` that
+// nothing ever set, so every one of them reported "not detected" forever.
 
 // ============================================================================
 // ADDITIONAL TYPES FOR CROSS-MODULE COMPATIBILITY
@@ -1827,3 +1631,6 @@ pub struct ContextFactorType {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
+
+#[cfg(test)]
+mod core_mod_tests;

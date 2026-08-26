@@ -37,6 +37,9 @@ mod tests {
                 shader_clock_mhz: Some(1900),
             },
             fan_speeds: vec![50.0],
+            // A 24 GiB card, stated explicitly: the percentage helpers
+            // now need a real size rather than assuming one.
+            total_memory_mb: Some(24576),
         }
     }
     #[tokio::test]

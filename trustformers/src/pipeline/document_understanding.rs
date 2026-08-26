@@ -1,8 +1,58 @@
+//! # Document understanding pipeline
+//!
+//! ## What is real here
+//!
+//! Everything that operates on *text you supply*:
+//!
+//! * [`DocumentUnderstandingPipeline::analyze_text`] — the full text-side
+//!   analysis: language-specific normalisation (Chinese/Japanese/Arabic/Latin),
+//!   regex key-value extraction with a confidence model that rewards common
+//!   form fields and structured values, de-duplication by key, and
+//!   [`DocumentUnderstandingPipeline::extract_entities`], a real regex NER for
+//!   emails, phone numbers, URLs, dates and monetary amounts.
+//! * [`DocumentUnderstandingPipeline::preprocess_text`] and the per-script
+//!   helpers.
+//!
+//! ## What is not available
+//!
+//! There is **no OCR engine and no document layout model** in this workspace.
+//! [`DocumentUnderstandingPipeline::extract_text`],
+//! [`DocumentUnderstandingPipeline::perform_ocr`],
+//! [`DocumentUnderstandingPipeline::extract_layout`] and
+//! [`DocumentUnderstandingPipeline::extract_tables`] therefore return a
+//! structured [`TrustformersError::FeatureUnavailable`], and the `Pipeline`
+//! implementation fails for any non-empty document.
+//!
+//! Previously these methods returned fixtures — `"Sample OCR text"`, a
+//! `"John Doe"` PERSON entity, two invented financial tables and
+//! `format!("Answer to '{{question}}' based on document content")` — regardless
+//! of the input. None of that survives.
+//!
+//! Run your own OCR and hand the text to
+//! [`DocumentUnderstandingPipeline::analyze_text`].
+
 use crate::core::traits::{Model, Tokenizer};
-use crate::error::Result;
+use crate::error::{Result, TrustformersError};
 use crate::pipeline::{BasePipeline, Device, Pipeline};
 use serde::{Deserialize, Serialize};
 use trustformers_core::cache::CacheKeyBuilder;
+
+/// Build the "no OCR / layout engine" error shared by this module.
+fn ocr_unavailable(operation: &str) -> TrustformersError {
+    TrustformersError::FeatureUnavailable {
+        message: format!(
+            "{operation} requires an OCR / document-layout engine, and none is implemented in \
+             this workspace. This pipeline never returns canned text, entities or tables — run \
+             your own OCR and call `analyze_text` with the result."
+        ),
+        feature: "document-ocr".to_string(),
+        suggestion: Some(
+            "Use `DocumentUnderstandingPipeline::analyze_text` with text you extracted yourself."
+                .to_string(),
+        ),
+        alternatives: Vec::new(),
+    }
+}
 
 /// Configuration for document understanding pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,28 +200,16 @@ pub struct DocumentUnderstandingOutput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMetadata {
     pub page_count: usize,
+    /// Measured wall-clock processing time in milliseconds.
     pub processing_time_ms: u64,
-    pub detected_language: String,
-    pub text_orientation: f32,
-    pub quality_score: f32,
-}
-
-/// Document region for layout analysis
-#[derive(Debug, Clone)]
-struct DocumentRegion {
-    pub bbox: BoundingBox,
-    pub region_type: RegionType,
-}
-
-/// Type of document region
-#[derive(Debug, Clone)]
-enum RegionType {
-    Header,
-    Title,
-    Body,
-    Footer,
-    Table,
-    List,
+    /// Language detected from the text, or `None` when detection was not run.
+    ///
+    /// Never a hardcoded `"en"`.
+    pub detected_language: Option<String>,
+    /// Page rotation in degrees, or `None` when no deskew stage ran.
+    pub text_orientation: Option<f32>,
+    /// Scan-quality estimate, or `None` when no quality model ran.
+    pub quality_score: Option<f32>,
 }
 
 /// Document understanding pipeline
@@ -217,65 +255,23 @@ where
         self
     }
 
-    /// Extract text from document image using OCR
-    fn extract_text(&self, image: &[u8]) -> Result<String> {
-        // Enhanced text extraction with basic image processing
+    /// Extract text from a document image using OCR.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for any non-empty
+    /// document: no OCR engine is implemented in this workspace. An empty
+    /// buffer yields an empty string.
+    pub fn extract_text(&self, image: &[u8]) -> Result<String> {
         if image.is_empty() {
             return Ok(String::new());
         }
-
-        // Basic text extraction logic (would use OCR library in production)
-        let mut extracted_text = String::new();
-
-        // Check image format and process accordingly
-        if self.is_pdf_image(image) {
-            extracted_text = self.extract_from_pdf(image)?;
-        } else if self.is_text_image(image) {
-            extracted_text = self.extract_from_image(image)?;
-        }
-
-        // Apply language-specific processing
-        if !self.config.language_hints.is_empty() {
-            extracted_text = self.apply_language_processing(&extracted_text)?;
-        }
-
-        Ok(extracted_text)
+        Err(ocr_unavailable("text extraction"))
     }
 
-    /// Check if the image is a PDF
-    fn is_pdf_image(&self, image: &[u8]) -> bool {
+    /// Whether `image` looks like a PDF container (`%PDF` magic).
+    pub fn is_pdf_image(&self, image: &[u8]) -> bool {
         image.len() > 4 && &image[0..4] == b"%PDF"
-    }
-
-    /// Check if the image contains text
-    fn is_text_image(&self, _image: &[u8]) -> bool {
-        // Would analyze image content in real implementation
-        true
-    }
-
-    /// Extract text from PDF
-    fn extract_from_pdf(&self, _image: &[u8]) -> Result<String> {
-        // PDF text extraction logic
-        Ok("Extracted text from PDF document".to_string())
-    }
-
-    /// Extract text from image using OCR
-    fn extract_from_image(&self, _image: &[u8]) -> Result<String> {
-        // OCR processing with confidence filtering
-        let mut text_blocks = Vec::new();
-
-        // Simulate OCR results with confidence scores
-        text_blocks.push(("Document Header", 0.95));
-        text_blocks.push(("Main content paragraph with detailed information", 0.88));
-        text_blocks.push(("Footer information", 0.82));
-
-        let filtered_text: Vec<String> = text_blocks
-            .into_iter()
-            .filter(|(_, confidence)| *confidence >= self.config.confidence_threshold)
-            .map(|(text, _)| text.to_string())
-            .collect();
-
-        Ok(filtered_text.join(" "))
     }
 
     /// Apply language-specific processing
@@ -338,30 +334,31 @@ where
             .join(" ")
     }
 
-    /// Extract layout information from document using advanced analysis
-    fn extract_layout(&self, image: &[u8]) -> Result<Vec<TextBlock>> {
+    /// Extract layout information (text blocks with bounding boxes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for any non-empty
+    /// document: no layout model is implemented. Previously this returned four
+    /// fixed regions carrying the strings `"Document Header"`,
+    /// `"Main Document Title"`, a canned body paragraph and
+    /// `"Page 1 | Footer Information"`, independent of the input.
+    pub fn extract_layout(&self, image: &[u8]) -> Result<Vec<TextBlock>> {
         if image.is_empty() {
             return Ok(Vec::new());
         }
+        Err(ocr_unavailable("layout analysis"))
+    }
 
-        let mut blocks = Vec::new();
-
-        // Analyze document structure
-        let document_bounds = self.detect_document_bounds(image)?;
-        let regions = self.segment_document_regions(image, &document_bounds)?;
-
-        for region in regions {
-            let block = self.analyze_text_region(&region)?;
-            if block.confidence >= self.config.confidence_threshold {
-                blocks.push(block);
-            }
-        }
-
-        // Sort blocks by reading order (top-to-bottom, left-to-right)
+    /// Sort text blocks into reading order (top-to-bottom, left-to-right).
+    ///
+    /// Real geometry, reusable with blocks from any layout engine: blocks whose
+    /// vertical centres are within 20 units are treated as one line and ordered
+    /// by `x`.
+    pub fn sort_reading_order(&self, mut blocks: Vec<TextBlock>) -> Vec<TextBlock> {
         blocks.sort_by(|a, b| {
             let y_diff = (a.bounding_box.y - b.bounding_box.y).abs();
             if y_diff < 20.0 {
-                // Same line
                 a.bounding_box
                     .x
                     .partial_cmp(&b.bounding_box.x)
@@ -373,106 +370,19 @@ where
                     .unwrap_or(std::cmp::Ordering::Equal)
             }
         });
-
-        Ok(blocks)
+        blocks
     }
 
-    /// Detect document boundaries
-    fn detect_document_bounds(&self, _image: &[u8]) -> Result<BoundingBox> {
-        // Document boundary detection (would use computer vision in real implementation)
-        Ok(BoundingBox {
-            x: 0.0,
-            y: 0.0,
-            width: 595.0,  // A4 width in points
-            height: 842.0, // A4 height in points
-        })
-    }
-
-    /// Segment document into regions
-    fn segment_document_regions(
-        &self,
-        _image: &[u8],
-        bounds: &BoundingBox,
-    ) -> Result<Vec<DocumentRegion>> {
-        let mut regions = Vec::new();
-
-        // Header region
-        regions.push(DocumentRegion {
-            bbox: BoundingBox {
-                x: bounds.x + 50.0,
-                y: bounds.y + 30.0,
-                width: bounds.width - 100.0,
-                height: 40.0,
-            },
-            region_type: RegionType::Header,
-        });
-
-        // Title region
-        regions.push(DocumentRegion {
-            bbox: BoundingBox {
-                x: bounds.x + 50.0,
-                y: bounds.y + 80.0,
-                width: bounds.width - 100.0,
-                height: 60.0,
-            },
-            region_type: RegionType::Title,
-        });
-
-        // Main content region
-        regions.push(DocumentRegion {
-            bbox: BoundingBox {
-                x: bounds.x + 50.0,
-                y: bounds.y + 150.0,
-                width: bounds.width - 100.0,
-                height: bounds.height - 250.0,
-            },
-            region_type: RegionType::Body,
-        });
-
-        // Footer region
-        regions.push(DocumentRegion {
-            bbox: BoundingBox {
-                x: bounds.x + 50.0,
-                y: bounds.height - 50.0,
-                width: bounds.width - 100.0,
-                height: 30.0,
-            },
-            region_type: RegionType::Footer,
-        });
-
-        Ok(regions)
-    }
-
-    /// Analyze a text region to create a TextBlock
-    fn analyze_text_region(&self, region: &DocumentRegion) -> Result<TextBlock> {
-        let (text, confidence) = match region.region_type {
-            RegionType::Header => ("Document Header", 0.95),
-            RegionType::Title => ("Main Document Title", 0.98),
-            RegionType::Body => ("This is the main body content of the document with detailed information about the subject matter.", 0.90),
-            RegionType::Footer => ("Page 1 | Footer Information", 0.85),
-            RegionType::Table => ("Table Content", 0.88),
-            RegionType::List => ("• List Item 1\n• List Item 2", 0.87),
-        };
-
-        let block_type = match region.region_type {
-            RegionType::Header => TextBlockType::Header,
-            RegionType::Title => TextBlockType::Title,
-            RegionType::Body => TextBlockType::Paragraph,
-            RegionType::Footer => TextBlockType::Footer,
-            RegionType::Table => TextBlockType::Table,
-            RegionType::List => TextBlockType::List,
-        };
-
-        Ok(TextBlock {
-            text: text.to_string(),
-            bounding_box: region.bbox.clone(),
-            confidence,
-            block_type,
-        })
-    }
-
-    /// Extract key-value pairs from document using pattern matching
-    fn extract_key_value_pairs(&self, _image: &[u8], text: &str) -> Result<Vec<KeyValuePair>> {
+    /// Extract key-value pairs from already-extracted document text.
+    ///
+    /// Real regex matching over `Key: Value`, `Key = Value`, `Key - Value` and
+    /// whitespace-separated forms, scored by `Self::calculate_kv_confidence`
+    /// and de-duplicated by normalised key.
+    ///
+    /// # Errors
+    ///
+    /// Propagates de-duplication failures (currently infallible).
+    pub fn extract_key_value_pairs(&self, text: &str) -> Result<Vec<KeyValuePair>> {
         let mut pairs = Vec::new();
 
         // Extract key-value pairs using regex patterns
@@ -633,182 +543,171 @@ where
         Ok(best_pairs.into_values().collect())
     }
 
-    /// Extract named entities from document
-    fn extract_entities(&self, text: &str) -> Result<Vec<DocumentEntity>> {
-        // Simulate named entity recognition
-        let entities = vec![DocumentEntity {
-            text: "John Doe".to_string(),
-            entity_type: "PERSON".to_string(),
-            bounding_box: BoundingBox {
-                x: 160.0,
-                y: 200.0,
-                width: 80.0,
-                height: 20.0,
-            },
-            confidence: 0.89,
-        }];
+    /// Extract named entities from already-extracted document text.
+    ///
+    /// A real, pattern-based recogniser over the text the caller supplies. It
+    /// finds `EMAIL`, `URL`, `PHONE`, `DATE` and `MONEY` spans — the classes a
+    /// regex can identify reliably — and reports the *character offsets* of
+    /// each match as its bounding box (`x` = start offset, `width` = length),
+    /// because without OCR there are no pixel coordinates to report.
+    ///
+    /// Confidences are fixed per class and documented as pattern-precision
+    /// estimates, not model outputs. Entities below
+    /// `config.confidence_threshold` are dropped.
+    ///
+    /// Previously this returned a single hardcoded `"John Doe"` PERSON entity
+    /// for every input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if a built-in pattern fails to compile.
+    pub fn extract_entities(&self, text: &str) -> Result<Vec<DocumentEntity>> {
+        // (name, pattern, pattern-precision estimate)
+        const PATTERNS: &[(&str, &str, f32)] = &[
+            (
+                "EMAIL",
+                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                0.95,
+            ),
+            ("URL", r#"https?://[^\s<>"]+"#, 0.95),
+            (
+                "PHONE",
+                r"\+?\d{1,3}[-. ]?\(?\d{2,4}\)?[-. ]?\d{3,4}[-. ]?\d{3,4}",
+                0.75,
+            ),
+            ("DATE", r"\d{1,4}[/-]\d{1,2}[/-]\d{1,4}", 0.85),
+            ("MONEY", r"[$£€¥]\s?\d[\d,]*(?:\.\d{1,2})?", 0.90),
+        ];
+
+        let mut entities = Vec::new();
+        for (entity_type, pattern, confidence) in PATTERNS {
+            if *confidence < self.config.confidence_threshold {
+                continue;
+            }
+            let re = regex::Regex::new(pattern).map_err(|e| {
+                TrustformersError::pipeline(
+                    format!("built-in {entity_type} pattern failed to compile: {e}"),
+                    "document-understanding",
+                )
+            })?;
+            for m in re.find_iter(text) {
+                entities.push(DocumentEntity {
+                    text: m.as_str().to_string(),
+                    entity_type: (*entity_type).to_string(),
+                    bounding_box: BoundingBox {
+                        x: m.start() as f32,
+                        y: 0.0,
+                        width: (m.end() - m.start()) as f32,
+                        height: 0.0,
+                    },
+                    confidence: *confidence,
+                });
+            }
+        }
+        entities.sort_by_key(|e| e.bounding_box.x as usize);
         Ok(entities)
     }
 
-    /// Extract tables from document using structure detection
-    fn extract_tables(&self, _image: &[u8]) -> Result<Vec<Table>> {
-        // Enhanced table extraction with structure detection
-        let mut tables = Vec::new();
-
-        // Detect potential table regions
-        let table_regions = self.detect_table_regions()?;
-
-        for region in table_regions {
-            let table = self.extract_table_from_region(&region)?;
-            if table.confidence >= self.config.confidence_threshold {
-                tables.push(table);
-            }
+    /// Extract tables from a document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for any non-empty
+    /// document: no table-structure detector is implemented. Previously this
+    /// returned two invented tables — a four-column "financial" one and a
+    /// three-column "contact" one — for every input.
+    pub fn extract_tables(&self, image: &[u8]) -> Result<Vec<Table>> {
+        if image.is_empty() {
+            return Ok(Vec::new());
         }
-
-        Ok(tables)
+        Err(ocr_unavailable("table extraction"))
     }
 
-    /// Detect table regions in document
-    fn detect_table_regions(&self) -> Result<Vec<BoundingBox>> {
-        // Simulate table region detection
-        let regions = vec![
-            BoundingBox {
-                x: 100.0,
-                y: 300.0,
-                width: 400.0,
-                height: 120.0,
-            },
-            BoundingBox {
-                x: 100.0,
-                y: 450.0,
-                width: 350.0,
-                height: 80.0,
-            },
-        ];
-        Ok(regions)
+    /// Perform OCR on a document image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for any non-empty
+    /// document: no OCR engine is implemented. Previously this returned a fixed
+    /// `"Sample OCR text"` result with a 0.92 confidence and two word boxes,
+    /// regardless of the image.
+    pub fn perform_ocr(&self, image: &[u8]) -> Result<Vec<OCRResult>> {
+        if image.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(ocr_unavailable("OCR"))
     }
 
-    /// Extract table structure from a region
-    fn extract_table_from_region(&self, region: &BoundingBox) -> Result<Table> {
-        // Simulate table structure extraction
-        let (rows, headers, confidence) = if region.y < 400.0 {
-            // First table - financial data
-            let headers = vec![
-                "Item".to_string(),
-                "Quantity".to_string(),
-                "Price".to_string(),
-                "Total".to_string(),
-            ];
-            let rows = vec![
-                headers.clone(),
-                vec![
-                    "Product A".to_string(),
-                    "5".to_string(),
-                    "$10.00".to_string(),
-                    "$50.00".to_string(),
-                ],
-                vec![
-                    "Product B".to_string(),
-                    "3".to_string(),
-                    "$15.00".to_string(),
-                    "$45.00".to_string(),
-                ],
-                vec![
-                    "Product C".to_string(),
-                    "2".to_string(),
-                    "$25.00".to_string(),
-                    "$50.00".to_string(),
-                ],
-                vec![
-                    "Total".to_string(),
-                    "10".to_string(),
-                    "-".to_string(),
-                    "$145.00".to_string(),
-                ],
-            ];
-            (rows, Some(headers), 0.92)
-        } else {
-            // Second table - contact information
-            let headers = vec![
-                "Name".to_string(),
-                "Department".to_string(),
-                "Email".to_string(),
-            ];
-            let rows = vec![
-                headers.clone(),
-                vec![
-                    "John Smith".to_string(),
-                    "Engineering".to_string(),
-                    "john.smith@company.com".to_string(),
-                ],
-                vec![
-                    "Jane Doe".to_string(),
-                    "Marketing".to_string(),
-                    "jane.doe@company.com".to_string(),
-                ],
-                vec![
-                    "Bob Johnson".to_string(),
-                    "Sales".to_string(),
-                    "bob.johnson@company.com".to_string(),
-                ],
-            ];
-            (rows, Some(headers), 0.88)
-        };
-
-        Ok(Table {
-            rows,
-            headers,
-            bounding_box: region.clone(),
-            confidence,
+    /// Answer a question about a document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`]: no document QA model
+    /// is wired in. Previously this returned
+    /// `format!("Answer to '{{question}}' based on document content")`, which
+    /// contained no information from the document at all.
+    pub fn answer_question(&self, _text: &str, question: &str) -> Result<String> {
+        Err(TrustformersError::FeatureUnavailable {
+            message: format!(
+                "document question answering is not implemented; the question {question:?} \
+                 cannot be answered. This pipeline never returns a templated non-answer."
+            ),
+            feature: "document-qa".to_string(),
+            suggestion: Some(
+                "Run your own document QA model over the text from `analyze_text`.".to_string(),
+            ),
+            alternatives: Vec::new(),
         })
     }
 
-    /// Perform OCR on document image
-    fn perform_ocr(&self, image: &[u8]) -> Result<Vec<OCRResult>> {
-        // Simulate OCR processing
-        let ocr_result = OCRResult {
-            text: "Sample OCR text".to_string(),
-            bounding_box: BoundingBox {
-                x: 0.0,
-                y: 0.0,
-                width: 500.0,
-                height: 400.0,
-            },
-            confidence: 0.92,
-            word_level_boxes: Some(vec![
-                (
-                    "Sample".to_string(),
-                    BoundingBox {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 60.0,
-                        height: 20.0,
-                    },
-                ),
-                (
-                    "OCR".to_string(),
-                    BoundingBox {
-                        x: 65.0,
-                        y: 0.0,
-                        width: 40.0,
-                        height: 20.0,
-                    },
-                ),
-            ]),
-        };
-        Ok(vec![ocr_result])
-    }
+    /// Analyse already-extracted document text.
+    ///
+    /// This is the pipeline's real, fully-implemented half: normalisation,
+    /// key-value extraction and pattern-based entity recognition, all driven by
+    /// the same configuration flags the `Pipeline` implementation uses.
+    ///
+    /// Fields the pipeline cannot produce without OCR (`text_blocks`,
+    /// `ocr_results`, `tables`, `answer`) are left `None` rather than filled
+    /// with fixtures.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from entity extraction.
+    pub fn analyze_text(&self, text: &str) -> Result<DocumentUnderstandingOutput> {
+        let start_time = std::time::Instant::now();
+        let processed = self.preprocess_text(&self.apply_language_processing(text)?);
 
-    /// Answer question about document
-    fn answer_question(&self, text: &str, question: &str) -> Result<String> {
-        // Simulate question answering
-        // In a real implementation, this would use the model for QA
-        let answer = format!("Answer to '{}' based on document content", question);
-        Ok(answer)
+        let key_value_pairs = if self.config.return_key_value_pairs {
+            Some(self.extract_key_value_pairs(&processed)?)
+        } else {
+            None
+        };
+        let entities = if self.config.return_entities {
+            Some(self.extract_entities(&processed)?)
+        } else {
+            None
+        };
+
+        Ok(DocumentUnderstandingOutput {
+            text: if self.config.return_text { Some(processed) } else { None },
+            text_blocks: None,
+            key_value_pairs,
+            entities,
+            tables: None,
+            ocr_results: None,
+            answer: None,
+            metadata: DocumentMetadata {
+                page_count: 1,
+                processing_time_ms: start_time.elapsed().as_millis() as u64,
+                detected_language: None,
+                text_orientation: None,
+                quality_score: None,
+            },
+        })
     }
 
     /// Preprocess text
-    fn preprocess_text(&self, text: &str) -> String {
+    pub fn preprocess_text(&self, text: &str) -> String {
         if self.config.preprocess_text {
             // Basic text preprocessing
             text.lines()
@@ -830,15 +729,32 @@ where
     type Input = DocumentUnderstandingInput;
     type Output = DocumentUnderstandingOutput;
 
+    /// Run the pipeline over a document image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TrustformersError::FeatureUnavailable`] for any non-empty
+    /// document: without an OCR engine there is no text to analyse, and this
+    /// pipeline will not substitute fixtures. Call
+    /// [`DocumentUnderstandingPipeline::analyze_text`] with text you extracted
+    /// yourself.
     fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
         let start_time = std::time::Instant::now();
 
-        // Check cache first
+        // Extract text from the image. This is where the pipeline stops without
+        // an OCR engine — the error names the alternative.
+        let text = self.extract_text(&input.image)?;
+
+        // An empty document is genuinely analysable (there is nothing to read),
+        // so the caller still gets a well-formed, empty result.
         let cache_key = if let Some(cache) = &self.base.cache {
             let mut builder = CacheKeyBuilder::new("document_understanding", "image_analysis")
                 .with_param("image_type", &input.image_type)
-                .with_param("image_hash", &input.image.len()) // Use image length as a simple hash proxy
-                .with_param("config", &serde_json::to_string(&self.config).unwrap_or_default());
+                .with_param("image_hash", &input.image.len())
+                .with_param(
+                    "config",
+                    &serde_json::to_string(&self.config).unwrap_or_default(),
+                );
 
             if let Some(question) = &input.question {
                 builder = builder.with_text(question);
@@ -855,62 +771,14 @@ where
             None
         };
 
-        // Extract text from image
-        let text = self.extract_text(&input.image)?;
-        let processed_text = self.preprocess_text(&text);
+        let mut output = self.analyze_text(&text)?;
 
-        // Initialize output
-        let mut output = DocumentUnderstandingOutput {
-            text: None,
-            text_blocks: None,
-            key_value_pairs: None,
-            entities: None,
-            tables: None,
-            ocr_results: None,
-            answer: None,
-            metadata: DocumentMetadata {
-                page_count: 1,
-                processing_time_ms: 0,
-                detected_language: "en".to_string(),
-                text_orientation: 0.0,
-                quality_score: 0.9,
-            },
-        };
-
-        // Extract information based on configuration
-        if self.config.return_text {
-            output.text = Some(processed_text.clone());
-        }
-
-        if self.config.return_layout {
-            output.text_blocks = Some(self.extract_layout(&input.image)?);
-        }
-
-        if self.config.return_key_value_pairs {
-            output.key_value_pairs =
-                Some(self.extract_key_value_pairs(&input.image, &processed_text)?);
-        }
-
-        if self.config.return_entities {
-            output.entities = Some(self.extract_entities(&processed_text)?);
-        }
-
-        if self.config.return_ocr_results {
-            output.ocr_results = Some(self.perform_ocr(&input.image)?);
-        }
-
-        // Extract tables if needed
-        output.tables = Some(self.extract_tables(&input.image)?);
-
-        // Answer question if provided
         if let Some(question) = &input.question {
-            output.answer = Some(self.answer_question(&processed_text, question)?);
+            output.answer = Some(self.answer_question(&text, question)?);
         }
 
-        // Update metadata
         output.metadata.processing_time_ms = start_time.elapsed().as_millis() as u64;
 
-        // Cache the result
         if let (Some(cache), Some(key)) = (&self.base.cache, cache_key) {
             if let Ok(serialized) = serde_json::to_vec(&output) {
                 cache.insert(key, serialized);
@@ -940,6 +808,273 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use trustformers_core::traits::{Config as CoreConfig, TokenizedInput};
+    use trustformers_core::Tensor;
+
+    // ---- Minimal model/tokenizer stand-ins -------------------------------
+    //
+    // The document pipeline never consults either one (its work is all
+    // text-side); they exist only to satisfy the generic bounds.
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct StubConfig;
+
+    impl CoreConfig for StubConfig {
+        fn architecture(&self) -> &'static str {
+            "stub"
+        }
+    }
+
+    struct StubModel;
+
+    impl Model for StubModel {
+        type Input = Tensor;
+        type Output = Tensor;
+        type Config = StubConfig;
+
+        fn forward(&self, input: Self::Input) -> trustformers_core::errors::Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn num_parameters(&self) -> usize {
+            0
+        }
+
+        fn load_pretrained(
+            &mut self,
+            _reader: &mut dyn std::io::Read,
+        ) -> trustformers_core::errors::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &StubConfig
+        }
+    }
+
+    struct StubTokenizer;
+
+    impl Tokenizer for StubTokenizer {
+        fn encode(&self, _text: &str) -> trustformers_core::errors::Result<TokenizedInput> {
+            Ok(TokenizedInput::new(vec![0], vec![1]))
+        }
+
+        fn encode_pair(
+            &self,
+            _a: &str,
+            _b: &str,
+        ) -> trustformers_core::errors::Result<TokenizedInput> {
+            Ok(TokenizedInput::new(vec![0], vec![1]))
+        }
+
+        fn decode(&self, _ids: &[u32]) -> trustformers_core::errors::Result<String> {
+            Ok(String::new())
+        }
+
+        fn vocab_size(&self) -> usize {
+            1
+        }
+
+        fn get_vocab(&self) -> HashMap<String, u32> {
+            HashMap::new()
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn stub_pipeline() -> DocumentUnderstandingPipeline<StubModel, StubTokenizer> {
+        DocumentUnderstandingPipeline::new(StubModel, StubTokenizer).expect("pipeline")
+    }
+
+    // ---- Honesty regressions ---------------------------------------------
+
+    #[test]
+    fn test_extract_text_reports_missing_ocr() {
+        // Regression: `extract_text` used to return the fixed strings
+        // "Document Header", "Main content paragraph …" and "Footer
+        // information" for any image, and "Extracted text from PDF document"
+        // for anything starting with %PDF.
+        let pipeline = stub_pipeline();
+        match pipeline.extract_text(b"%PDF-1.7 some bytes") {
+            Err(TrustformersError::FeatureUnavailable {
+                feature, message, ..
+            }) => {
+                assert_eq!(feature, "document-ocr");
+                assert!(
+                    message.contains("never returns canned"),
+                    "message: {message}"
+                );
+            },
+            other => panic!("expected a document-ocr error, got {other:?}"),
+        }
+        assert_eq!(pipeline.extract_text(&[]).expect("empty is empty"), "");
+    }
+
+    #[test]
+    fn test_perform_ocr_reports_missing_engine() {
+        // Regression: this returned `OCRResult { text: "Sample OCR text", .. }`.
+        let pipeline = stub_pipeline();
+        assert!(matches!(
+            pipeline.perform_ocr(&[1, 2, 3]),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
+        assert!(pipeline.perform_ocr(&[]).expect("empty").is_empty());
+    }
+
+    #[test]
+    fn test_extract_layout_reports_missing_engine() {
+        let pipeline = stub_pipeline();
+        assert!(matches!(
+            pipeline.extract_layout(&[1, 2, 3]),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn test_extract_tables_reports_missing_detector() {
+        // Regression: this returned two invented tables (a "financial" one
+        // totalling $145.00 and a "contact" one with three fake employees).
+        let pipeline = stub_pipeline();
+        assert!(matches!(
+            pipeline.extract_tables(&[1, 2, 3]),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn test_answer_question_refuses_to_template_an_answer() {
+        // Regression: this returned
+        // `format!("Answer to '{}' based on document content", question)`.
+        let pipeline = stub_pipeline();
+        match pipeline.answer_question("some text", "What is the total?") {
+            Err(TrustformersError::FeatureUnavailable {
+                feature, message, ..
+            }) => {
+                assert_eq!(feature, "document-qa");
+                assert!(
+                    !message.contains("based on document content"),
+                    "must not echo the old template: {message}"
+                );
+            },
+            other => panic!("expected a document-qa error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pipeline_call_fails_for_a_real_document() {
+        let pipeline = stub_pipeline();
+        let input = DocumentUnderstandingInput {
+            image: vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+            image_type: "image/jpeg".to_string(),
+            question: Some("Who signed this?".to_string()),
+            extraction_targets: None,
+        };
+        assert!(matches!(
+            pipeline.__call__(input),
+            Err(TrustformersError::FeatureUnavailable { .. })
+        ));
+    }
+
+    // ---- Real text-side analysis -----------------------------------------
+
+    #[test]
+    fn test_extract_entities_finds_real_spans_only() {
+        // Regression: this always returned exactly one `"John Doe"` PERSON
+        // entity, whatever the text said.
+        let pipeline = stub_pipeline();
+        let text =
+            "Contact ada@example.com or call 555-123-4567 before 2024-05-01. Total $1,234.56";
+        let entities = pipeline.extract_entities(text).expect("entities");
+
+        let types: Vec<&str> = entities.iter().map(|e| e.entity_type.as_str()).collect();
+        assert!(types.contains(&"EMAIL"), "{types:?}");
+        assert!(types.contains(&"PHONE"), "{types:?}");
+        assert!(types.contains(&"DATE"), "{types:?}");
+        assert!(types.contains(&"MONEY"), "{types:?}");
+        assert!(
+            !entities.iter().any(|e| e.text == "John Doe"),
+            "the hardcoded fixture must be gone"
+        );
+        for e in &entities {
+            assert!(
+                text.contains(&e.text),
+                "entity {:?} is not a substring of the input",
+                e.text
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_entities_returns_nothing_for_plain_prose() {
+        let pipeline = stub_pipeline();
+        let entities = pipeline
+            .extract_entities("the quick brown fox jumps over the lazy dog")
+            .expect("entities");
+        assert!(entities.is_empty(), "unexpected entities: {entities:?}");
+    }
+
+    #[test]
+    fn test_extract_key_value_pairs_reads_the_supplied_text() {
+        let pipeline = stub_pipeline();
+        let pairs = pipeline
+            .extract_key_value_pairs("Name: Ada Lovelace\nEmail: ada@example.com")
+            .expect("pairs");
+        assert!(!pairs.is_empty(), "expected key-value pairs");
+        assert!(
+            pairs.iter().any(|p| p.value.contains("Ada Lovelace")),
+            "pairs: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn test_analyze_text_leaves_ocr_only_fields_empty() {
+        let pipeline = stub_pipeline();
+        let output = pipeline.analyze_text("Email: ada@example.com").expect("analysis");
+        assert!(output.text.is_some());
+        assert!(output.entities.is_some_and(|e| !e.is_empty()));
+        assert!(output.text_blocks.is_none(), "no layout model exists");
+        assert!(output.ocr_results.is_none(), "no OCR engine exists");
+        assert!(output.tables.is_none(), "no table detector exists");
+        assert!(output.answer.is_none(), "no QA model exists");
+        assert!(
+            output.metadata.detected_language.is_none(),
+            "language must not be hardcoded to `en`"
+        );
+        assert!(
+            output.metadata.quality_score.is_none(),
+            "quality score must not be invented"
+        );
+    }
+
+    #[test]
+    fn test_sort_reading_order_is_top_to_bottom_then_left_to_right() {
+        let pipeline = stub_pipeline();
+        let block = |text: &str, x: f32, y: f32| TextBlock {
+            text: text.to_string(),
+            bounding_box: BoundingBox {
+                x,
+                y,
+                width: 10.0,
+                height: 10.0,
+            },
+            confidence: 0.9,
+            block_type: TextBlockType::Paragraph,
+        };
+        let sorted = pipeline.sort_reading_order(vec![
+            block("c", 10.0, 200.0),
+            block("b", 90.0, 10.0),
+            block("a", 10.0, 12.0),
+        ]);
+        let order: Vec<&str> = sorted.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(order, vec!["a", "b", "c"]);
+    }
 
     // --- DocumentUnderstandingConfig tests ---
 
@@ -1229,12 +1364,13 @@ mod tests {
         let meta = DocumentMetadata {
             page_count: 1,
             processing_time_ms: 150,
-            detected_language: "en".to_string(),
-            text_orientation: 0.0,
-            quality_score: 0.92,
+            detected_language: Some("en".to_string()),
+            text_orientation: Some(0.0),
+            quality_score: Some(0.92),
         };
+        let score = meta.quality_score.expect("quality score present");
         assert!(
-            meta.quality_score >= 0.0 && meta.quality_score <= 1.0,
+            (0.0..=1.0).contains(&score),
             "quality_score must be in [0.0, 1.0]"
         );
     }
@@ -1244,9 +1380,9 @@ mod tests {
         let meta = DocumentMetadata {
             page_count: 5,
             processing_time_ms: 500,
-            detected_language: "en".to_string(),
-            text_orientation: 0.0,
-            quality_score: 0.85,
+            detected_language: Some("en".to_string()),
+            text_orientation: Some(0.0),
+            quality_score: Some(0.85),
         };
         assert!(meta.page_count > 0, "page_count should be at least 1");
     }
@@ -1266,9 +1402,9 @@ mod tests {
             metadata: DocumentMetadata {
                 page_count: 1,
                 processing_time_ms: 200,
-                detected_language: "en".to_string(),
-                text_orientation: 0.0,
-                quality_score: 0.9,
+                detected_language: None,
+                text_orientation: None,
+                quality_score: None,
             },
         };
         assert!(output.text.is_some(), "output should have text");

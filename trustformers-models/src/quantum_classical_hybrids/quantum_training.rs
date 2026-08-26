@@ -1,6 +1,17 @@
-use trustformers_core::errors::Result;
+//! Hybrid quantum-classical training loop.
+//!
+//! The manager owns the parameters it trains: a classical parameter vector and
+//! the rotation angles of a [`VariationalCircuit`]. Each strategy applies a
+//! real gradient-descent step to those vectors, and the reported fidelity is
+//! the exactly computed state overlap `|⟨ψ(θ_before)|ψ(θ_after)⟩|²` between the
+//! circuits before and after the update — not a configuration constant.
 
-use super::config::{HybridTrainingStrategy, QuantumClassicalConfig};
+use trustformers_core::errors::{Result, TrustformersError};
+
+use super::{
+    config::{HybridTrainingStrategy, QuantumClassicalConfig},
+    statevector::VariationalCircuit,
+};
 
 /// Quantum training manager
 #[derive(Debug)]
@@ -13,6 +24,12 @@ pub struct QuantumTrainingManager {
     pub classical_lr: f64,
     /// Quantum learning rate
     pub quantum_lr: f64,
+    /// Classical parameters updated by the trainer
+    pub classical_parameters: Vec<f32>,
+    /// Quantum circuit rotation angles updated by the trainer
+    pub quantum_parameters: Vec<f64>,
+    /// Circuit used to measure the effect of a quantum update
+    pub circuit: VariationalCircuit,
     /// Training metrics
     pub training_metrics: QuantumTrainingMetrics,
     /// Current epoch
@@ -41,27 +58,43 @@ pub struct QuantumTrainingMetrics {
 }
 
 impl QuantumTrainingManager {
-    /// Create a new quantum training manager
+    /// Create a new quantum training manager with zero-initialised classical
+    /// parameters and uniformly initialised circuit angles.
     pub fn new(config: &QuantumClassicalConfig) -> Result<Self> {
-        let training_metrics = QuantumTrainingMetrics {
-            classical_loss: 0.0,
-            quantum_loss: 0.0,
-            total_loss: 0.0,
-            quantum_fidelity: 1.0,
-            classical_accuracy: 0.0,
-            quantum_advantage: 0.0,
-            training_time: 0.0,
-        };
+        let circuit = VariationalCircuit::new(config.num_qubits, config.ansatz_layers())?;
+        let quantum_parameters = vec![0.1; circuit.parameter_count()];
+        let classical_parameters = vec![0.0f32; config.d_model];
 
         Ok(Self {
             config: config.clone(),
             training_strategy: config.hybrid_training_strategy.clone(),
             classical_lr: config.classical_learning_rate,
             quantum_lr: config.quantum_learning_rate,
-            training_metrics,
+            classical_parameters,
+            quantum_parameters,
+            circuit,
+            training_metrics: QuantumTrainingMetrics::default(),
             current_epoch: 0,
             training_history: Vec::new(),
         })
+    }
+
+    /// Replace the classical parameter vector the trainer updates.
+    pub fn set_classical_parameters(&mut self, parameters: Vec<f32>) {
+        self.classical_parameters = parameters;
+    }
+
+    /// Replace the quantum parameter vector the trainer updates.
+    pub fn set_quantum_parameters(&mut self, parameters: Vec<f64>) -> Result<()> {
+        if parameters.len() != self.circuit.parameter_count() {
+            return Err(TrustformersError::invalid_input(format!(
+                "expected {} circuit parameters, got {}",
+                self.circuit.parameter_count(),
+                parameters.len()
+            )));
+        }
+        self.quantum_parameters = parameters;
+        Ok(())
     }
 
     /// Train one epoch
@@ -87,10 +120,11 @@ impl QuantumTrainingManager {
             },
         }
 
-        let training_time = start_time.elapsed().as_secs_f64();
-        self.training_metrics.training_time = training_time;
+        self.training_metrics.total_loss =
+            self.training_metrics.classical_loss + self.training_metrics.quantum_loss;
+        self.training_metrics.quantum_advantage = self.config.get_quantum_advantage_factor();
+        self.training_metrics.training_time = start_time.elapsed().as_secs_f64();
 
-        // Update training history
         self.training_history.push(self.training_metrics.clone());
         self.current_epoch += 1;
 
@@ -103,12 +137,8 @@ impl QuantumTrainingManager {
         classical_gradients: &[f32],
         quantum_gradients: &[f64],
     ) -> Result<()> {
-        // Train classical parameters first
         self.update_classical_parameters(classical_gradients)?;
-
-        // Then train quantum parameters
         self.update_quantum_parameters(quantum_gradients)?;
-
         Ok(())
     }
 
@@ -118,13 +148,11 @@ impl QuantumTrainingManager {
         classical_gradients: &[f32],
         quantum_gradients: &[f64],
     ) -> Result<()> {
-        // Alternate between classical and quantum updates
         if self.current_epoch.is_multiple_of(2) {
             self.update_classical_parameters(classical_gradients)?;
         } else {
             self.update_quantum_parameters(quantum_gradients)?;
         }
-
         Ok(())
     }
 
@@ -134,25 +162,23 @@ impl QuantumTrainingManager {
         classical_gradients: &[f32],
         quantum_gradients: &[f64],
     ) -> Result<()> {
-        // Update both classical and quantum parameters simultaneously
         self.update_classical_parameters(classical_gradients)?;
         self.update_quantum_parameters(quantum_gradients)?;
-
         Ok(())
     }
 
-    /// Adaptive training strategy
+    /// Adaptive training strategy: update whichever half has the larger
+    /// gradient norm.
     fn train_adaptive(
         &mut self,
         classical_gradients: &[f32],
         quantum_gradients: &[f64],
     ) -> Result<()> {
-        // Decide based on current performance
         let classical_grad_norm =
-            classical_gradients.iter().map(|&x| x.powi(2)).sum::<f32>().sqrt();
+            classical_gradients.iter().map(|&x| x.powi(2)).sum::<f32>().sqrt() as f64;
         let quantum_grad_norm = quantum_gradients.iter().map(|&x| x.powi(2)).sum::<f64>().sqrt();
 
-        if classical_grad_norm as f64 > quantum_grad_norm {
+        if classical_grad_norm > quantum_grad_norm {
             self.update_classical_parameters(classical_gradients)?;
         } else {
             self.update_quantum_parameters(quantum_gradients)?;
@@ -161,58 +187,84 @@ impl QuantumTrainingManager {
         Ok(())
     }
 
-    /// Update classical parameters
-    fn update_classical_parameters(&mut self, gradients: &[f32]) -> Result<()> {
-        // Simplified parameter update
-        let classical_loss = gradients.iter().map(|&x| x.powi(2)).sum::<f32>() as f64;
-        self.training_metrics.classical_loss = classical_loss;
+    /// Apply a gradient-descent step to the classical parameters.
+    ///
+    /// Returns an error when the gradient length does not match the parameter
+    /// vector, rather than silently recording a metric and changing nothing.
+    pub fn update_classical_parameters(&mut self, gradients: &[f32]) -> Result<()> {
+        if gradients.len() != self.classical_parameters.len() {
+            return Err(TrustformersError::invalid_input(format!(
+                "expected {} classical gradients, got {}",
+                self.classical_parameters.len(),
+                gradients.len()
+            )));
+        }
+
+        let lr = self.classical_lr as f32;
+        for (parameter, gradient) in self.classical_parameters.iter_mut().zip(gradients) {
+            *parameter -= lr * gradient;
+        }
+
+        self.training_metrics.classical_loss =
+            gradients.iter().map(|&x| x.powi(2)).sum::<f32>() as f64;
 
         Ok(())
     }
 
-    /// Update quantum parameters
-    fn update_quantum_parameters(&mut self, gradients: &[f64]) -> Result<()> {
-        // Simplified parameter update
-        let quantum_loss = gradients.iter().map(|&x| x.powi(2)).sum::<f64>();
-        self.training_metrics.quantum_loss = quantum_loss;
+    /// Apply a gradient-descent step to the circuit angles and measure the
+    /// fidelity between the states before and after the update.
+    pub fn update_quantum_parameters(&mut self, gradients: &[f64]) -> Result<()> {
+        if gradients.len() != self.quantum_parameters.len() {
+            return Err(TrustformersError::invalid_input(format!(
+                "expected {} quantum gradients, got {}",
+                self.quantum_parameters.len(),
+                gradients.len()
+            )));
+        }
 
-        // Update quantum fidelity
-        self.training_metrics.quantum_fidelity = 1.0 - self.config.quantum_noise_variance;
+        let encoding = vec![0.0f64; self.circuit.num_qubits()];
+        let before = self.circuit.run(&encoding, &self.quantum_parameters)?;
+
+        for (parameter, gradient) in self.quantum_parameters.iter_mut().zip(gradients) {
+            *parameter -= self.quantum_lr * gradient;
+        }
+
+        let after = self.circuit.run(&encoding, &self.quantum_parameters)?;
+
+        self.training_metrics.quantum_loss = gradients.iter().map(|&x| x.powi(2)).sum::<f64>();
+        self.training_metrics.quantum_fidelity = before.fidelity(&after)?;
 
         Ok(())
     }
 
     /// Get training statistics
     pub fn get_training_stats(&self) -> QuantumTrainingStats {
-        let avg_classical_loss =
-            self.training_history.iter().map(|m| m.classical_loss).sum::<f64>()
-                / self.training_history.len() as f64;
-
-        let avg_quantum_loss = self.training_history.iter().map(|m| m.quantum_loss).sum::<f64>()
-            / self.training_history.len() as f64;
-
-        let avg_quantum_fidelity =
-            self.training_history.iter().map(|m| m.quantum_fidelity).sum::<f64>()
-                / self.training_history.len() as f64;
+        let epochs = self.training_history.len().max(1) as f64;
 
         QuantumTrainingStats {
             total_epochs: self.current_epoch,
-            avg_classical_loss,
-            avg_quantum_loss,
-            avg_quantum_fidelity,
+            avg_classical_loss: self.training_history.iter().map(|m| m.classical_loss).sum::<f64>()
+                / epochs,
+            avg_quantum_loss: self.training_history.iter().map(|m| m.quantum_loss).sum::<f64>()
+                / epochs,
+            avg_quantum_fidelity: self
+                .training_history
+                .iter()
+                .map(|m| m.quantum_fidelity)
+                .sum::<f64>()
+                / epochs,
             training_strategy: self.training_strategy.clone(),
             convergence_rate: self.compute_convergence_rate(),
         }
     }
 
-    /// Compute convergence rate
+    /// Relative decrease of the total loss over the recorded history.
     fn compute_convergence_rate(&self) -> f64 {
         if self.training_history.len() < 2 {
             return 0.0;
         }
 
         let first_loss = self.training_history[0].total_loss;
-        // reason: the `len() < 2` guard above guarantees a last element exists
         let Some(last_entry) = self.training_history.last() else {
             return 0.0;
         };
@@ -225,19 +277,11 @@ impl QuantumTrainingManager {
         }
     }
 
-    /// Reset training state
+    /// Reset training state (parameters are left untouched).
     pub fn reset(&mut self) {
         self.current_epoch = 0;
         self.training_history.clear();
-        self.training_metrics = QuantumTrainingMetrics {
-            classical_loss: 0.0,
-            quantum_loss: 0.0,
-            total_loss: 0.0,
-            quantum_fidelity: 1.0,
-            classical_accuracy: 0.0,
-            quantum_advantage: 0.0,
-            training_time: 0.0,
-        };
+        self.training_metrics = QuantumTrainingMetrics::default();
     }
 }
 

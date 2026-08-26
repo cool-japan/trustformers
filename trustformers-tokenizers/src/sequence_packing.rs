@@ -2,6 +2,11 @@ use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::TokenizedInput;
 
+/// The span a packed position that came from no source text reports: an
+/// inserted separator, or padding. Same empty-span convention special tokens
+/// use (see `trustformers_tokenizers::offsets`).
+const PACKING_EMPTY_SPAN: (usize, usize) = (0, 0);
+
 /// Configuration for sequence packing
 #[derive(Debug, Clone)]
 pub struct PackingConfig {
@@ -167,12 +172,25 @@ impl SequencePacker {
         Ok((packed_sequences, stats))
     }
 
-    /// Unpack a packed sequence back to individual sequences
+    /// Unpack a packed sequence back to individual sequences.
+    ///
+    /// When the packed input carries an `offset_mapping` (see
+    /// `Self::create_packed_sequence`), each unpacked sequence gets back the
+    /// slice of it that belongs to that sequence — which is exactly the
+    /// mapping the sequence had before packing, in its own source text's
+    /// coordinates.
     pub fn unpack_sequence(&self, packed: &PackedSequence) -> Result<Vec<TokenizedInput>> {
         let mut sequences = Vec::new();
+        let packed_len = packed.tokenized_input.input_ids.len();
+        // Only sliceable when it really is one entry per packed position.
+        let packed_offsets = packed
+            .tokenized_input
+            .offset_mapping
+            .as_ref()
+            .filter(|offsets| offsets.len() == packed_len);
 
         for (start, end) in &packed.packing_info.sequence_boundaries {
-            if *end > packed.tokenized_input.input_ids.len() {
+            if *end > packed_len {
                 return Err(TrustformersError::invalid_input(
                     "Invalid sequence boundary in packed sequence".to_string(),
                 ));
@@ -187,12 +205,14 @@ impl SequencePacker {
                 .as_ref()
                 .map(|ttids| ttids[*start..*end].to_vec());
 
+            let offset_mapping = packed_offsets.map(|offsets| offsets[*start..*end].to_vec());
+
             sequences.push(TokenizedInput {
                 input_ids,
                 attention_mask,
                 token_type_ids,
                 special_tokens_mask: None,
-                offset_mapping: None,
+                offset_mapping,
                 overflowing_tokens: None,
             });
         }
@@ -274,7 +294,22 @@ impl SequencePacker {
         Ok(packed_sequences)
     }
 
-    /// Create a packed sequence from a group of sequence indices
+    /// Create a packed sequence from a group of sequence indices.
+    ///
+    /// # Offsets
+    ///
+    /// The packed input carries an `offset_mapping` exactly when *every*
+    /// sequence being packed carried one of its own (of the right length);
+    /// otherwise it is `None`, because a partial mapping would say nothing
+    /// about the positions it does not cover.
+    ///
+    /// A packed mapping is deliberately in **mixed coordinate spaces**: each
+    /// position's span indexes the source text of the sequence that position
+    /// came from, which `packing_info.sequence_boundaries` (and
+    /// `packing_info.original_indices`) identify, and which
+    /// [`Self::unpack_sequence`] uses to hand each sequence its own slice back.
+    /// Inserted separators and padding get `(0, 0)`, the same empty span
+    /// special tokens use.
     fn create_packed_sequence(
         &self,
         indices: &[usize],
@@ -283,12 +318,15 @@ impl SequencePacker {
         let mut packed_input_ids = Vec::new();
         let mut packed_attention_mask = Vec::new();
         let mut packed_token_type_ids: Vec<u32> = Vec::new();
+        let mut packed_offsets: Vec<(usize, usize)> = Vec::new();
+        let mut every_sequence_has_offsets = true;
         let mut sequence_ids = Vec::new();
         let mut sequence_boundaries = Vec::new();
 
         for (seq_idx, &item_idx) in indices.iter().enumerate() {
             let item = &seq_items[item_idx];
             let start_pos = packed_input_ids.len();
+            let sequence_len = item.tokenized_input.input_ids.len();
 
             // Add the sequence
             packed_input_ids.extend(&item.tokenized_input.input_ids);
@@ -298,11 +336,24 @@ impl SequencePacker {
             if let Some(ref ttids) = item.tokenized_input.token_type_ids {
                 packed_token_type_ids.extend(ttids);
             } else {
-                packed_token_type_ids.extend(vec![0u32; item.tokenized_input.input_ids.len()]);
+                packed_token_type_ids.extend(vec![0u32; sequence_len]);
+            }
+
+            // Carry this sequence's own offsets, in its own source text's
+            // coordinates. A sequence without a usable mapping disqualifies
+            // the whole packed mapping (see this function's docs).
+            match &item.tokenized_input.offset_mapping {
+                Some(offsets) if offsets.len() == sequence_len => {
+                    packed_offsets.extend(offsets.iter().copied());
+                },
+                _ => {
+                    every_sequence_has_offsets = false;
+                    packed_offsets.extend(std::iter::repeat_n(PACKING_EMPTY_SPAN, sequence_len));
+                },
             }
 
             // Add sequence IDs for tracking
-            sequence_ids.extend(vec![seq_idx as u32; item.tokenized_input.input_ids.len()]);
+            sequence_ids.extend(vec![seq_idx as u32; sequence_len]);
 
             let end_pos = packed_input_ids.len();
             sequence_boundaries.push((start_pos, end_pos));
@@ -313,6 +364,7 @@ impl SequencePacker {
                     packed_input_ids.push(sep_token_id);
                     packed_attention_mask.push(1);
                     packed_token_type_ids.push(0u32);
+                    packed_offsets.push(PACKING_EMPTY_SPAN);
                     sequence_ids.push(seq_idx as u32);
                 }
             }
@@ -325,6 +377,7 @@ impl SequencePacker {
             packed_input_ids.extend(vec![self.config.pad_token_id; padding_length]);
             packed_attention_mask.extend(vec![0u8; padding_length]);
             packed_token_type_ids.extend(vec![0u32; padding_length]);
+            packed_offsets.extend(std::iter::repeat_n(PACKING_EMPTY_SPAN, padding_length));
             sequence_ids.extend(vec![u32::MAX; padding_length]); // Use MAX to indicate padding
         }
 
@@ -341,7 +394,7 @@ impl SequencePacker {
             attention_mask: packed_attention_mask,
             token_type_ids: Some(packed_token_type_ids),
             special_tokens_mask: None,
-            offset_mapping: None,
+            offset_mapping: if every_sequence_has_offsets { Some(packed_offsets) } else { None },
             overflowing_tokens: None,
         };
 
@@ -601,6 +654,79 @@ mod tests {
         let unpacked = packer.unpack_sequence(&packed[0]).expect("Operation failed in test");
 
         assert_eq!(unpacked.len(), packed[0].packing_info.num_sequences);
+    }
+
+    /// A sequence whose tokens carry real byte spans into its own source text.
+    fn create_test_sequence_with_offsets(length: usize) -> TokenizedInput {
+        TokenizedInput {
+            offset_mapping: Some((0..length).map(|i| (i, i + 1)).collect()),
+            ..create_test_sequence(length)
+        }
+    }
+
+    /// Regression: packing used to hardcode `offset_mapping: None`, throwing
+    /// away mappings the packed sequences really carried, and unpacking could
+    /// therefore never hand them back.
+    #[test]
+    fn test_packing_carries_offsets_and_unpacking_restores_them() {
+        let config = PackingConfig {
+            max_packed_length: 100,
+            pad_token_id: 0,
+            sep_token_id: Some(999),
+            add_separators: true,
+            ..Default::default()
+        };
+        let packer = SequencePacker::new(config);
+
+        let originals = vec![
+            create_test_sequence_with_offsets(30),
+            create_test_sequence_with_offsets(25),
+        ];
+        let (packed, _) = packer.pack_sequences(&originals).expect("packing must succeed");
+
+        let packed_offsets = packed[0]
+            .tokenized_input
+            .offset_mapping
+            .as_ref()
+            .expect("every packed sequence carried offsets, so the pack must carry them");
+        assert_eq!(
+            packed_offsets.len(),
+            packed[0].tokenized_input.input_ids.len()
+        );
+        // The separator and the padding tail came from no source text.
+        assert_eq!(*packed_offsets.last().expect("padded pack"), (0, 0));
+
+        let unpacked = packer.unpack_sequence(&packed[0]).expect("unpacking must succeed");
+        for (sequence, boundary) in unpacked.iter().zip(&packed[0].packing_info.sequence_boundaries)
+        {
+            let restored = sequence
+                .offset_mapping
+                .as_ref()
+                .expect("unpacking must hand each sequence its own mapping back");
+            assert_eq!(restored.len(), boundary.1 - boundary.0);
+            // Back in the sequence's own coordinates, exactly as before packing.
+            assert_eq!(restored[0], (0, 1));
+        }
+    }
+
+    /// A pack containing even one sequence without offsets reports `None`
+    /// rather than a mapping whose uncovered positions would be invented.
+    #[test]
+    fn test_packing_without_complete_offsets_reports_none() {
+        let config = PackingConfig {
+            max_packed_length: 100,
+            pad_token_id: 0,
+            ..Default::default()
+        };
+        let packer = SequencePacker::new(config);
+
+        let mixed = vec![
+            create_test_sequence_with_offsets(30),
+            create_test_sequence(25),
+        ];
+        let (packed, _) = packer.pack_sequences(&mixed).expect("packing must succeed");
+
+        assert_eq!(packed[0].tokenized_input.offset_mapping, None);
     }
 
     #[test]

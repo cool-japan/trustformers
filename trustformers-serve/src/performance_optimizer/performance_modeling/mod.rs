@@ -416,3 +416,6 @@ mod tests_train_model_fix {
         );
     }
 }
+
+#[cfg(test)]
+mod prediction_engine_tests;

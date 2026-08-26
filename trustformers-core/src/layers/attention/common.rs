@@ -3,12 +3,12 @@
 //! This module contains shared functionality used across different attention implementations
 //! to reduce code duplication and improve maintainability.
 
-#![allow(unused_variables)] // Attention implementation with reserved parameters
-
+use super::mask::MaskView;
 use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
+use scirs2_core::ndarray::Axis;
 
 /// Shared configuration for attention layers
 #[derive(Debug, Clone)]
@@ -25,6 +25,12 @@ pub struct AttentionConfig {
     pub bias: bool,
     /// Maximum sequence length for optimizations
     pub max_seq_len: Option<usize>,
+    /// Whether the layer is in training mode.
+    ///
+    /// Attention dropout is applied **only** when this is `true`; the default
+    /// is `false` so that a model loaded from a checkpoint with a non-zero
+    /// `dropout_prob` produces deterministic inference logits.
+    pub training: bool,
 }
 
 impl AttentionConfig {
@@ -54,12 +60,19 @@ impl AttentionConfig {
             dropout_prob,
             bias,
             max_seq_len: None,
+            training: false,
         })
     }
 
     /// Set maximum sequence length for optimizations
     pub fn with_max_seq_len(mut self, max_seq_len: usize) -> Self {
         self.max_seq_len = Some(max_seq_len);
+        self
+    }
+
+    /// Enable or disable training mode (which gates attention dropout).
+    pub fn with_training(mut self, training: bool) -> Self {
+        self.training = training;
         self
     }
 }
@@ -111,6 +124,57 @@ impl AttentionProjections {
     /// Create new attention projections from configuration
     pub fn new(config: &AttentionConfig) -> Self {
         Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Append all four projections' parameters to `into`.
+    ///
+    /// `names` supplies the checkpoint sub-path of each projection in
+    /// `(query, key, value, out_proj)` order, because the spelling differs per
+    /// architecture (BERT's `attention.self.query` vs DistilBERT's
+    /// `attention.q_lin`). Each name is joined to `prefix` with a `.`, and each
+    /// projection then contributes `.weight` (plus `.bias` when it has one) via
+    /// [`Linear::collect_named_parameters`].
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        names: [&str; 4],
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        let layers = [&self.query, &self.key, &self.value, &self.out_proj];
+        for (layer, name) in layers.into_iter().zip(names) {
+            layer.collect_named_parameters(&join_name(prefix, name), into);
+        }
+    }
+
+    /// Mutable counterpart of [`AttentionProjections::collect_named_parameters`].
+    ///
+    /// The four projections are separate fields, so all four can be borrowed
+    /// mutably at once.
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        names: [&str; 4],
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let layers = [
+            &mut self.query,
+            &mut self.key,
+            &mut self.value,
+            &mut self.out_proj,
+        ];
+        for (layer, name) in layers.into_iter().zip(names) {
+            layer.collect_named_parameters_mut(&join_name(prefix, name), into);
+        }
+    }
+}
+
+/// Join a checkpoint prefix and a relative name with a `.`, tolerating an empty
+/// prefix (a model whose parameters sit at the checkpoint root).
+pub fn join_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
     }
 }
 
@@ -218,8 +282,13 @@ impl AttentionUtils {
 
     /// Apply causal mask to attention scores
     ///
-    /// Sets attention scores to -infinity for positions that should be masked
-    pub fn apply_causal_mask(attention_scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+    /// Sets attention scores to `-inf` for key positions that lie strictly in
+    /// the future of their query position. Works for any rank `>= 2`; the
+    /// masked extent is taken from the last two dimensions of the tensor.
+    ///
+    /// `_seq_len` is retained for API compatibility - the mask geometry is
+    /// derived from the tensor shape itself.
+    pub fn apply_causal_mask(attention_scores: &Tensor, _seq_len: usize) -> Result<Tensor> {
         let mut result = attention_scores.clone();
         let shape = attention_scores.shape();
 
@@ -236,46 +305,18 @@ impl AttentionUtils {
         let seq_q = shape[shape.len() - 2];
         let seq_k = shape[shape.len() - 1];
 
-        // For causal masking, we typically expect seq_q == seq_k == seq_len (self-attention)
-        // But let's be more flexible and use the actual dimensions
-        let actual_seq_len = seq_q.min(seq_k);
-
-        // Create causal mask tensor - lower triangular matrix
-        let mut causal_mask_data = vec![0.0f32; seq_q * seq_k];
-        for i in 0..seq_q {
-            for j in 0..seq_k {
-                if j > i {
-                    // Upper triangular: mask out future positions
-                    causal_mask_data[i * seq_k + j] = f32::NEG_INFINITY;
-                } else {
-                    // Lower triangular + diagonal: allow past and current positions
-                    causal_mask_data[i * seq_k + j] = 0.0;
-                }
-            }
-        }
-
-        // Create causal mask tensor with shape [seq_q, seq_k]
-        let causal_mask = Tensor::from_vec(causal_mask_data, &[seq_q, seq_k])?;
-
-        // Apply causal mask element-wise - we need to mask the attention scores directly
-        // For now, implement a simple approach that works with the tensor structure
-        match (&mut result, &causal_mask) {
-            (Tensor::F32(ref mut scores), Tensor::F32(mask)) => {
-                let scores_shape = scores.shape();
-                let batch_size = scores_shape[0];
-                let num_heads = scores_shape[1];
-
-                // Apply mask to each batch and head
-                for b in 0..batch_size {
-                    for h in 0..num_heads {
-                        for i in 0..seq_q {
-                            for j in 0..seq_k {
-                                if j > i {
-                                    // Mask future tokens
-                                    scores[[b, h, i, j]] = f32::NEG_INFINITY;
-                                }
-                            }
-                        }
+        match &mut result {
+            Tensor::F32(scores) => {
+                let last_axis = Axis(scores.ndim() - 1);
+                // Lanes along the last axis are visited in row-major order of
+                // the remaining axes, so the query index simply cycles with
+                // period `seq_q`. Each masked span is one contiguous fill
+                // instead of `seq_q * seq_k` bounds-checked index computations.
+                for (position, mut row) in scores.lanes_mut(last_axis).into_iter().enumerate() {
+                    let query = position % seq_q;
+                    if query + 1 < seq_k {
+                        row.slice_mut(scirs2_core::ndarray::s![query + 1..])
+                            .fill(f32::NEG_INFINITY);
                     }
                 }
             },
@@ -290,8 +331,52 @@ impl AttentionUtils {
         Ok(result)
     }
 
-    /// Compute attention weights using scaled dot-product
-    pub fn compute_attention_weights(
+    /// Add an attention mask to pre-softmax scores.
+    ///
+    /// See [`super::mask`] for the supported mask shapes and the keep/additive
+    /// convention. Masking **must** happen before the softmax - adding a large
+    /// negative value to a probability is meaningless.
+    pub fn apply_attention_mask_to_scores(scores: &Tensor, mask: &Tensor) -> Result<Tensor> {
+        let shape = scores.shape();
+        if shape.len() != 4 {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "Attention scores must be 4-D [batch, heads, seq_q, seq_k], got {:?}",
+                    shape
+                ),
+                "apply_attention_mask_to_scores",
+            ));
+        }
+        let (batch, heads, seq_q, seq_k) = (shape[0], shape[1], shape[2], shape[3]);
+        let view = MaskView::new(mask, batch, heads, seq_q, seq_k)?;
+
+        let mut result = scores.clone();
+        match &mut result {
+            Tensor::F32(values) => {
+                for b in 0..batch {
+                    for h in 0..heads {
+                        for i in 0..seq_q {
+                            for j in 0..seq_k {
+                                let penalty = view.additive(b, h, i, j);
+                                if penalty != 0.0 {
+                                    values[[b, h, i, j]] += penalty;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(result)
+            },
+            _ => Err(TrustformersError::tensor_op_error(
+                "Attention masking only supports F32 tensors currently",
+                "apply_attention_mask_to_scores",
+            )),
+        }
+    }
+
+    /// Compute pre-softmax attention scores `scale * Q K^T` with optional
+    /// causal masking.
+    pub fn compute_attention_scores(
         q: &Tensor,
         k: &Tensor,
         scale: f32,
@@ -318,15 +403,23 @@ impl AttentionUtils {
         let scaled_scores = attention_scores.scalar_mul(scale)?;
 
         // Apply causal mask if needed
-        let masked_scores = if causal {
+        if causal {
             let seq_len = q.shape()[2];
-            Self::apply_causal_mask(&scaled_scores, seq_len)?
+            Self::apply_causal_mask(&scaled_scores, seq_len)
         } else {
-            scaled_scores
-        };
+            Ok(scaled_scores)
+        }
+    }
 
-        // Apply softmax to get attention weights
-        masked_scores.softmax(-1)
+    /// Compute attention weights using scaled dot-product
+    pub fn compute_attention_weights(
+        q: &Tensor,
+        k: &Tensor,
+        scale: f32,
+        causal: bool,
+    ) -> Result<Tensor> {
+        let scores = Self::compute_attention_scores(q, k, scale, causal)?;
+        scores.softmax(-1)
     }
 
     /// Apply attention weights to values
@@ -356,9 +449,13 @@ impl AttentionUtils {
     }
 
     /// Compute optimal block size for memory-efficient attention
+    ///
+    /// `_head_dim` is accepted for API symmetry with the other block-size
+    /// helpers; the current heuristic only depends on the sequence length and
+    /// the memory budget.
     pub fn compute_block_size(
         seq_len: usize,
-        head_dim: usize,
+        _head_dim: usize,
         available_memory_mb: Option<usize>,
     ) -> usize {
         let default_block_size = 256;
@@ -461,9 +558,17 @@ pub struct AttentionOptimizationHints {
 }
 
 impl Default for AttentionOptimizationHints {
+    /// Defaults tuned for short sequences.
+    ///
+    /// FlashAttention is *off* by default: its tiling only pays for itself once
+    /// the `seq_q x seq_k` score matrix stops fitting comfortably in cache, and
+    /// for the short sequences that dominate the default path the dense kernel
+    /// is faster. [`AttentionOptimizationHints::for_sequence_length`] turns it
+    /// on for sequences longer than 512, and it can always be forced on
+    /// explicitly.
     fn default() -> Self {
         Self {
-            use_flash_attention: false, // Temporarily disabled for testing
+            use_flash_attention: false,
             use_paged_attention: false,
             block_size: 256,
             fuse_operations: true,
@@ -482,5 +587,98 @@ impl AttentionOptimizationHints {
             use_half_precision: seq_len > 4096, // Use half precision for very long sequences to save memory
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scores(shape: &[usize]) -> Tensor {
+        let count: usize = shape.iter().product();
+        let data: Vec<f32> = (0..count).map(|x| x as f32 + 1.0).collect();
+        Tensor::from_vec(data, shape).expect("test tensor shape must be valid")
+    }
+
+    #[test]
+    fn causal_mask_blanks_only_the_strict_upper_triangle() {
+        let masked = AttentionUtils::apply_causal_mask(&scores(&[2, 3, 4, 4]), 4)
+            .expect("causal masking must succeed");
+        let Tensor::F32(values) = &masked else {
+            panic!("expected an F32 tensor");
+        };
+        for b in 0..2 {
+            for h in 0..3 {
+                for i in 0..4 {
+                    for j in 0..4 {
+                        let value = values[[b, h, i, j]];
+                        if j > i {
+                            assert_eq!(
+                                value,
+                                f32::NEG_INFINITY,
+                                "future position ({i}, {j}) must be masked"
+                            );
+                        } else {
+                            assert!(
+                                value.is_finite(),
+                                "past position ({i}, {j}) must be preserved"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn causal_mask_handles_rectangular_scores() {
+        let masked = AttentionUtils::apply_causal_mask(&scores(&[1, 1, 3, 5]), 3)
+            .expect("causal masking must succeed");
+        let Tensor::F32(values) = &masked else {
+            panic!("expected an F32 tensor");
+        };
+        for i in 0..3 {
+            for j in 0..5 {
+                let value = values[[0, 0, i, j]];
+                assert_eq!(
+                    j > i,
+                    value == f32::NEG_INFINITY,
+                    "unexpected mask state at ({i}, {j})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn causal_mask_leaves_the_input_untouched() {
+        let original = scores(&[1, 1, 3, 3]);
+        let _ = AttentionUtils::apply_causal_mask(&original, 3).expect("causal masking");
+        let data = original.data().expect("input data");
+        assert!(
+            data.iter().all(|x| x.is_finite()),
+            "apply_causal_mask must not mutate its input"
+        );
+    }
+
+    #[test]
+    fn keep_mask_zeroes_out_masked_keys_before_softmax() {
+        // A keep mask of 0 must *subtract* from the score, not add to it.
+        let raw =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]).expect("score tensor shape");
+        let mask = Tensor::from_vec(vec![1.0, 0.0], &[1, 1, 1, 2]).expect("mask shape");
+        let masked = AttentionUtils::apply_attention_mask_to_scores(&raw, &mask)
+            .expect("masking must succeed");
+        let data = masked.data().expect("masked data");
+        assert_eq!(data[0], 1.0);
+        assert_eq!(data[1], f32::NEG_INFINITY);
+        assert_eq!(data[2], 3.0);
+        assert_eq!(data[3], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn training_defaults_to_disabled() {
+        let config = AttentionConfig::new(64, 8, 0.5, true).expect("valid config");
+        assert!(!config.training, "inference must be the default mode");
+        assert!(config.with_training(true).training);
     }
 }

@@ -19,11 +19,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    sync::broadcast,
-    task::JoinHandle,
-    time::{interval, sleep},
-};
+use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 use tracing::{debug, error, info, instrument, warn};
 
 // Import types and specialized components
@@ -42,6 +38,7 @@ use crate::resource_management::types::{
 };
 
 // GpuManagerError and GpuResult are imported from super::types::*
+use super::GpuTelemetrySample;
 
 /// Comprehensive GPU resource management system
 ///
@@ -441,72 +438,6 @@ impl GpuResourceManager {
         None
     }
 
-    /// Create a mock GPU device for testing purposes.
-    ///
-    /// This function is retained for unit-test use.  It is **not** called from the
-    /// production discovery path; real discovery uses `query_nvidia_devices`.
-    #[allow(dead_code)]
-    async fn create_mock_device(device_id: usize) -> GpuResult<GpuDeviceInfo> {
-        // Simulate different GPU types and capabilities
-        let (device_name, total_memory_mb, capabilities) = match device_id {
-            0 => (
-                "NVIDIA GeForce RTX 4090".to_string(),
-                24576, // 24GB
-                vec![
-                    GpuCapability::Cuda("12.0".to_string()),
-                    GpuCapability::MachineLearning(vec![
-                        "PyTorch".to_string(),
-                        "TensorFlow".to_string(),
-                        "JAX".to_string(),
-                    ]),
-                    GpuCapability::Vulkan("1.3".to_string()),
-                ],
-            ),
-            1 => (
-                "NVIDIA Tesla V100".to_string(),
-                32768, // 32GB
-                vec![
-                    GpuCapability::Cuda("11.8".to_string()),
-                    GpuCapability::MachineLearning(vec![
-                        "PyTorch".to_string(),
-                        "TensorFlow".to_string(),
-                    ]),
-                ],
-            ),
-            2 => (
-                "AMD Radeon RX 7900 XTX".to_string(),
-                24576, // 24GB
-                vec![
-                    GpuCapability::OpenCl("3.0".to_string()),
-                    GpuCapability::Vulkan("1.3".to_string()),
-                    GpuCapability::MachineLearning(vec!["PyTorch".to_string()]),
-                ],
-            ),
-            _ => (
-                format!("Generic GPU Device {}", device_id),
-                8192, // 8GB
-                vec![
-                    GpuCapability::OpenCl("2.0".to_string()),
-                    GpuCapability::Vulkan("1.2".to_string()),
-                ],
-            ),
-        };
-
-        // Simulate device discovery delay
-        sleep(Duration::from_millis(100)).await;
-
-        Ok(GpuDeviceInfo {
-            device_id,
-            device_name,
-            total_memory_mb,
-            available_memory_mb: total_memory_mb, // Initially all memory available
-            utilization_percent: 0.0,
-            capabilities,
-            status: GpuDeviceStatus::Available,
-            last_updated: Utc::now(),
-        })
-    }
-
     /// Assess initial health of a discovered device.
     ///
     /// Devices returned by `query_nvidia_devices` are known to the NVIDIA driver and
@@ -679,10 +610,26 @@ impl GpuResourceManager {
                         };
 
                         for device in devices_to_monitor {
-                            // Simulate collecting real-time metrics
-                            let metrics = Self::collect_device_metrics(&device).await;
-                            if let Err(e) = monitoring_system.update_metrics(device.device_id, metrics).await {
-                                error!("Failed to update metrics for device {}: {}", device.device_id, e);
+                            // Read live telemetry from the driver. Devices the
+                            // driver does not report are skipped, never faked.
+                            match Self::collect_device_metrics(&device).await {
+                                Ok(Some(metrics)) => {
+                                    if let Err(e) = monitoring_system.update_metrics(device.device_id, metrics).await {
+                                        error!("Failed to update metrics for device {}: {}", device.device_id, e);
+                                    }
+                                },
+                                Ok(None) => {
+                                    debug!(
+                                        "No telemetry available for GPU device {}; skipping this sample",
+                                        device.device_id
+                                    );
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        "Telemetry query failed for GPU device {}: {}",
+                                        device.device_id, e
+                                    );
+                                },
                             }
                         }
                     }
@@ -698,34 +645,139 @@ impl GpuResourceManager {
         Ok(())
     }
 
-    /// Collect real-time metrics for a device
-    async fn collect_device_metrics(device: &GpuDeviceInfo) -> GpuRealTimeMetrics {
-        // In a real implementation, this would use:
-        // - NVML for NVIDIA GPUs
-        // - ROCm for AMD GPUs
-        // - System monitoring APIs
+    /// Read live telemetry for one device from the NVIDIA driver.
+    ///
+    /// Queries `nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,
+    /// clocks.sm,clocks.mem,memory.used,fan.speed`. Returns `Ok(None)` when the
+    /// tool is unavailable or does not report the requested device: no value in
+    /// the returned metrics is ever synthesized.
+    async fn collect_device_metrics(
+        device: &GpuDeviceInfo,
+    ) -> GpuResult<Option<GpuRealTimeMetrics>> {
+        let Some(sample) = Self::query_nvidia_telemetry(device.device_id).await? else {
+            return Ok(None);
+        };
 
-        // For mock implementation, simulate realistic metrics
-        let utilization =
-            (device.device_id as f32 * 7.0 + Utc::now().timestamp() as f32 * 0.1) % 100.0;
-        let temperature = 45.0 + (utilization * 0.4) + (device.device_id as f32 * 2.0);
-        let memory_usage = (device.total_memory_mb as f32 * utilization / 100.0) as u64;
-        let power_consumption = 150.0 + (utilization * 2.0);
+        // `GpuRealTimeMetrics` has no `Option` for these, so a sample missing
+        // the memory or utilization reading cannot be represented on it
+        // honestly -- and publishing it with a zero would put an "idle, empty"
+        // GPU into the monitoring stream. Skip the sample instead.
+        let (Some(memory_usage_mb), Some(utilization_percent)) =
+            (sample.memory_used_mb, sample.utilization_percent)
+        else {
+            debug!(
+                "GPU {} reported no memory/utilization reading; skipping this sample",
+                device.device_id
+            );
+            return Ok(None);
+        };
 
-        GpuRealTimeMetrics {
+        Ok(Some(GpuRealTimeMetrics {
             device_id: device.device_id,
             timestamp: Utc::now(),
-            memory_usage_mb: memory_usage,
-            utilization_percent: utilization,
-            temperature_celsius: temperature,
-            power_consumption_watts: power_consumption,
+            memory_usage_mb,
+            utilization_percent,
+            // NaN, not zero: no comparison against a threshold passes on NaN,
+            // so an unread thermal/power sensor cannot read as "cool and idle".
+            temperature_celsius: sample.temperature_celsius.unwrap_or(f32::NAN),
+            power_consumption_watts: sample.power_watts.unwrap_or(f32::NAN),
             clock_speeds: ResourceGpuClockSpeeds {
-                core_clock_mhz: 1800 + (utilization as u32 * 5),
-                memory_clock_mhz: 7000,
-                shader_clock_mhz: Some(1900 + (utilization as u32 * 6)),
+                core_clock_mhz: sample.sm_clock_mhz.unwrap_or(0),
+                memory_clock_mhz: sample.memory_clock_mhz.unwrap_or(0),
+                shader_clock_mhz: None,
             },
-            fan_speeds: vec![40.0 + (temperature - 45.0) * 1.5],
+            fan_speeds: sample.fan_percent.map(|f| vec![f]).unwrap_or_default(),
+            // The size the driver reported for this device at discovery, so
+            // consumers can compute a real memory percentage. Zero means
+            // discovery could not read it, which is an absence, not a size.
+            total_memory_mb: (device.total_memory_mb > 0).then_some(device.total_memory_mb),
+        }))
+    }
+
+    /// Live telemetry for a single GPU, exactly as reported by the driver.
+    pub async fn device_telemetry(device_id: usize) -> GpuResult<Option<GpuTelemetrySample>> {
+        Self::query_nvidia_telemetry(device_id).await
+    }
+
+    async fn query_nvidia_telemetry(device_id: usize) -> GpuResult<Option<GpuTelemetrySample>> {
+        let spawn_result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("nvidia-smi")
+                .args([
+                    &format!("--id={}", device_id),
+                    "--query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm,clocks.mem,memory.used,fan.speed",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+        })
+        .await
+        .map_err(|e| GpuManagerError::MonitoringError {
+            source: anyhow::anyhow!("spawn_blocking for nvidia-smi failed: {}", e),
+        })?;
+
+        let output = match spawn_result {
+            Ok(output) => output,
+            Err(e) => {
+                debug!("nvidia-smi unavailable for telemetry ({})", e);
+                return Ok(None);
+            },
+        };
+
+        if !output.status.success() {
+            debug!(
+                "nvidia-smi telemetry query for device {} exited with {:?}",
+                device_id, output.status
+            );
+            return Ok(None);
         }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = stdout.lines().map(str::trim).find(|l| !l.is_empty()) else {
+            return Ok(None);
+        };
+
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        if fields.len() < 7 {
+            warn!(
+                "nvidia-smi telemetry line has {} fields, expected 7: {:?}",
+                fields.len(),
+                line
+            );
+            return Ok(None);
+        }
+
+        // "[N/A]" and "[Not Supported]" are the driver's way of saying a sensor
+        // is absent; propagate that as `None` rather than as a number.
+        fn parse_f32(value: &str) -> Option<f32> {
+            value.parse::<f32>().ok()
+        }
+        fn parse_u32(value: &str) -> Option<u32> {
+            value.parse::<u32>().ok()
+        }
+
+        // Every field is `None` when the driver would not report it. 0.2.1:
+        // utilization, the clocks and memory-used fell back to `0` here, so an
+        // unreadable utilization sensor reported an *idle* GPU and every
+        // threshold downstream passed.
+        Ok(Some(GpuTelemetrySample {
+            device_id,
+            utilization_percent: parse_f32(fields[0]),
+            temperature_celsius: parse_f32(fields[1]),
+            power_watts: parse_f32(fields[2]),
+            sm_clock_mhz: parse_u32(fields[3]),
+            memory_clock_mhz: parse_u32(fields[4]),
+            memory_used_mb: fields[5].parse::<u64>().ok(),
+            fan_percent: parse_f32(fields[6]),
+        }))
+    }
+
+    /// Enumerate the real GPU devices on this host.
+    ///
+    /// An empty list means the host genuinely has no discoverable NVIDIA GPU.
+    pub async fn enumerate_devices(config: &GpuPoolConfig) -> GpuResult<Vec<GpuDeviceInfo>> {
+        let devices = Self::discover_gpu_devices(config).await?;
+        let mut devices: Vec<GpuDeviceInfo> = devices.into_values().collect();
+        devices.sort_by_key(|d| d.device_id);
+        Ok(devices)
     }
 
     /// Allocate GPU devices based on performance requirements
@@ -768,6 +820,21 @@ impl GpuResourceManager {
             test_id
         );
 
+        // Read live utilization for every candidate BEFORE taking the locks:
+        // `device_telemetry` is async, and these are `parking_lot` guards.
+        let mut utilizations: HashMap<usize, Option<f32>> = HashMap::new();
+        {
+            let candidate_ids: Vec<usize> = self.available_devices.read().keys().copied().collect();
+            for device_id in candidate_ids {
+                let measured = Self::device_telemetry(device_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|sample| sample.utilization_percent);
+                utilizations.insert(device_id, measured);
+            }
+        }
+
         let mut available_devices = self.available_devices.write();
         let mut allocated_resources = self.allocated_resources.write();
         let mut usage_stats = self.usage_stats.write();
@@ -787,8 +854,14 @@ impl GpuResourceManager {
                 .get_mut(&device_id)
                 .ok_or_else(|| GpuManagerError::DeviceNotFound { device_id })?;
 
-            // Verify device meets requirements
-            self.verify_device_requirements(device, req)?;
+            // Verify device meets requirements. Utilization is read live from
+            // the driver: the device record's own figure is a discovery-time
+            // constant (see `GpuDeviceInfo::utilization_percent`).
+            self.verify_device_requirements(
+                device,
+                req,
+                utilizations.get(&device_id).copied().flatten(),
+            )?;
 
             // Check device health
             let health_status = self.health_monitor.get_health_status().await;
@@ -845,11 +918,17 @@ impl GpuResourceManager {
         Ok(allocated_device_ids)
     }
 
-    /// Verify device meets performance requirements
+    /// Verify device meets performance requirements.
+    ///
+    /// `measured_utilization` is the live driver reading for this device, or
+    /// `None` when the driver would not give one. It is passed in rather than
+    /// fetched here because both call sites hold a lock guard across the check;
+    /// see [`Self::device_telemetry`].
     fn verify_device_requirements(
         &self,
         device: &GpuDeviceInfo,
         requirements: &GpuPerformanceRequirements,
+        measured_utilization: Option<f32>,
     ) -> GpuResult<()> {
         // Check memory requirements
         if device.available_memory_mb < requirements.min_memory_mb {
@@ -888,17 +967,21 @@ impl GpuResourceManager {
 
         // Check constraints
         for constraint in &requirements.constraints {
-            self.verify_constraint(device, constraint)?;
+            self.verify_constraint(device, constraint, measured_utilization)?;
         }
 
         Ok(())
     }
 
-    /// Verify individual constraint
+    /// Verify individual constraint.
+    ///
+    /// `measured_utilization` is the live driver reading, threaded down from
+    /// [`Self::verify_device_requirements`]; see that function's doc.
     fn verify_constraint(
         &self,
         device: &GpuDeviceInfo,
         constraint: &GpuConstraint,
+        measured_utilization: Option<f32>,
     ) -> GpuResult<()> {
         match &constraint.constraint_type {
             GpuConstraintType::MaxMemoryUsage => {
@@ -916,18 +999,38 @@ impl GpuResourceManager {
                 }
             },
             GpuConstraintType::MaxUtilization => {
-                if device.utilization_percent as f64 > constraint.value {
-                    return Err(GpuManagerError::ConstraintViolated {
-                        constraint: format!(
-                            "Utilization {:.1}% exceeds limit {:.1}%",
-                            device.utilization_percent, constraint.value
-                        ),
-                    });
+                // Read live from the driver. 0.2.1: this compared
+                // `GpuDeviceInfo::utilization_percent`, which discovery fixes at
+                // 0.0 and never updates, so a MaxUtilization constraint was
+                // satisfied by every device unconditionally. A device whose
+                // driver will not report utilization now fails the constraint
+                // rather than passing it: an unverifiable limit is not a met one.
+                match measured_utilization {
+                    Some(utilization) if (utilization as f64) <= constraint.value => {},
+                    Some(utilization) => {
+                        return Err(GpuManagerError::ConstraintViolated {
+                            constraint: format!(
+                                "Utilization {:.1}% exceeds limit {:.1}%",
+                                utilization, constraint.value
+                            ),
+                        });
+                    },
+                    None => {
+                        return Err(GpuManagerError::ConstraintViolated {
+                            constraint: format!(
+                                "Utilization limit {:.1}% cannot be verified: device {} reports \
+                                 no utilization",
+                                constraint.value, device.device_id
+                            ),
+                        });
+                    },
                 }
             },
             GpuConstraintType::MinPerformance => {
-                // In a real implementation, this would check against benchmark scores
-                // For now, assume all devices meet minimum performance
+                // Not enforced: a performance floor needs a benchmark score, and
+                // `GpuPerformanceTracker::run_benchmark` correctly refuses to
+                // produce one in a build with no GPU compute backend. Passing
+                // here means "not checked", not "meets the minimum".
             },
             GpuConstraintType::PowerLimit => {
                 // Would check current power consumption
@@ -1052,6 +1155,21 @@ impl GpuResourceManager {
         &self,
         requirements: &[GpuPerformanceRequirements],
     ) -> GpuResult<bool> {
+        // Same ordering constraint as `allocate_gpu_devices`: telemetry is
+        // async, the device map is behind a `parking_lot` guard.
+        let mut utilizations: HashMap<usize, Option<f32>> = HashMap::new();
+        {
+            let candidate_ids: Vec<usize> = self.available_devices.read().keys().copied().collect();
+            for device_id in candidate_ids {
+                let measured = Self::device_telemetry(device_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|sample| sample.utilization_percent);
+                utilizations.insert(device_id, measured);
+            }
+        }
+
         let available_devices = self.available_devices.read();
         let health_status = self.health_monitor.get_health_status().await;
 
@@ -1075,7 +1193,12 @@ impl GpuResourceManager {
                 }
 
                 // Check other requirements
-                self.verify_device_requirements(device, req).is_ok()
+                self.verify_device_requirements(
+                    device,
+                    req,
+                    utilizations.get(&device.device_id).copied().flatten(),
+                )
+                .is_ok()
             });
 
             if !has_suitable_device {

@@ -35,6 +35,11 @@ pub struct PDEAwareOptimizer {
     pub variance: HashMap<String, Vec<f32>>,
     pub residual_variance_history: Vec<f32>,
     pub gradient_alignment_history: Vec<f32>,
+    /// Stable parameter identity registry (see [`crate::param_id`]).
+    ///
+    /// Replaces heap-address keys, which change in every process and so made
+    /// checkpoint resume silently restore nothing.
+    params: crate::param_id::ParamRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +98,7 @@ impl PDEAwareOptimizer {
             variance: HashMap::new(),
             residual_variance_history: Vec::new(),
             gradient_alignment_history: Vec::new(),
+            params: crate::param_id::ParamRegistry::new(),
         }
     }
 
@@ -237,7 +243,7 @@ impl Optimizer for PDEAwareOptimizer {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
                 self.step += 1;
 
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.params.key_for_addr(param.as_ptr() as usize, param.len())?;
 
                 // Compute PDE-aware metrics
                 let grad_norm: f32 = grad_arr.iter().map(|g| g * g).sum::<f32>().sqrt();

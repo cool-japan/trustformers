@@ -6,12 +6,10 @@
 //! generation utilities from `trustformers_models::generation_utils`.
 
 use crate::generation_utils::{GenerationConfig, GenerationMode, GenerationUtils, KVCache};
-use crate::gpt2::model::{Gpt2LMHeadModel, Gpt2LMOutput};
-use scirs2_core::ndarray::s;
+use crate::gpt2::model::{last_token_logits, Gpt2LMHeadModel, Gpt2LMOutput};
 use scirs2_core::random::*;
 use trustformers_core::{
-    errors::{tensor_op_error, Result, TrustformersError},
-    tensor::Tensor,
+    errors::{Result, TrustformersError},
     traits::{Model, TokenizedInput},
 };
 
@@ -165,12 +163,11 @@ impl GenerativeModel for Gpt2LMHeadModel {
                 )?;
                 Ok(vec![result])
             },
-            GenerationMode::ContrastiveSearch { top_k: _, alpha: _ } => {
-                // Contrastive search requires tracking hidden states
-                // For now, return an error indicating this is not yet implemented
-                Err(TrustformersError::model_error(
-                    "Contrastive search not yet implemented for GPT-2".to_string(),
-                ))
+            GenerationMode::ContrastiveSearch { top_k, alpha } => {
+                let result = self.generate_contrastive_internal(
+                    input_ids, max_length, *top_k, *alpha, &config,
+                )?;
+                Ok(vec![result])
             },
         }
     }
@@ -225,7 +222,151 @@ impl GenerativeModel for Gpt2LMHeadModel {
     }
 }
 
+/// Cosine similarity between two equal-length vectors.
+///
+/// Zero vectors have no direction, so their similarity is defined as 0 rather
+/// than producing a NaN that would silently win an `argmax`.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denominator = norm_a.sqrt() * norm_b.sqrt();
+    if denominator == 0.0 {
+        0.0
+    } else {
+        dot / denominator
+    }
+}
+
 impl Gpt2LMHeadModel {
+    /// Contrastive search decoding (Su et al., 2022).
+    ///
+    /// At every step the `top_k` most likely continuations are re-scored with a
+    /// degeneration penalty:
+    ///
+    /// ```text
+    ///   score(v) = (1 - alpha) * p(v | prefix)
+    ///            - alpha * max_j cos(h_v, h_j)
+    /// ```
+    ///
+    /// where `h_v` is the representation the model gives the candidate token once
+    /// it is appended and `h_j` ranges over the representations of the tokens
+    /// already in the prefix. A candidate that merely repeats something already
+    /// present therefore loses to a slightly less likely but more novel one.
+    ///
+    /// This used to be an error arm: the `ContrastiveSearch` variant was publicly
+    /// constructible and documented, but calling it returned
+    /// `"Contrastive search not yet implemented for GPT-2"`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `top_k` is zero, when `alpha` is outside `[0, 1]`, when the
+    /// prompt is empty, or when a forward pass fails.
+    fn generate_contrastive_internal(
+        &self,
+        input_ids: Vec<u32>,
+        max_length: usize,
+        top_k: usize,
+        alpha: f32,
+        config: &GenerationConfig,
+    ) -> Result<Vec<u32>> {
+        if top_k == 0 {
+            return Err(TrustformersError::model_error(
+                "contrastive search requires top_k >= 1".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&alpha) {
+            return Err(TrustformersError::model_error(format!(
+                "contrastive search requires alpha in [0, 1], got {alpha}"
+            )));
+        }
+        if input_ids.is_empty() {
+            return Err(TrustformersError::model_error(
+                "contrastive search requires a non-empty prompt".to_string(),
+            ));
+        }
+
+        // `should_stop` measures the *completion* against `max_new_tokens`, so it
+        // needs the prompt boundary — not the current length, which would make
+        // the completion look empty on every iteration and disable both
+        // `max_new_tokens` and the stop-sequence match entirely.
+        let prompt_length = input_ids.len();
+        let mut generated = input_ids;
+
+        while generated.len() < max_length {
+            if GenerationUtils::should_stop(&generated, config, prompt_length) {
+                break;
+            }
+
+            let (mut logits, context_states) = self.logits_and_hidden_states(&generated)?;
+
+            GenerationUtils::apply_repetition_penalty(
+                &mut logits,
+                &generated,
+                config.repetition_penalty,
+                config.repetition_penalty_decay,
+            );
+            GenerationUtils::apply_frequency_penalty(
+                &mut logits,
+                &generated,
+                config.frequency_penalty,
+            );
+            GenerationUtils::apply_presence_penalty(
+                &mut logits,
+                &generated,
+                config.presence_penalty,
+            );
+
+            let probabilities = GenerationUtils::softmax(&logits);
+            let mut ranked: Vec<(usize, f32)> = probabilities.iter().copied().enumerate().collect();
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ranked.truncate(top_k.min(ranked.len()));
+
+            let mut best: Option<(u32, f32)> = None;
+            for (token_id, probability) in ranked {
+                let candidate_token = token_id as u32;
+                let mut candidate_sequence = generated.clone();
+                candidate_sequence.push(candidate_token);
+
+                let (_, candidate_states) = self.logits_and_hidden_states(&candidate_sequence)?;
+                let candidate_state = candidate_states.last().ok_or_else(|| {
+                    TrustformersError::model_error(
+                        "forward pass produced no hidden states for the candidate".to_string(),
+                    )
+                })?;
+
+                let max_similarity = context_states
+                    .iter()
+                    .map(|state| cosine_similarity(candidate_state, state))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let max_similarity = if max_similarity.is_finite() { max_similarity } else { 0.0 };
+
+                let score = (1.0 - alpha) * probability - alpha * max_similarity;
+                if best.is_none_or(|(_, best_score)| score > best_score) {
+                    best = Some((candidate_token, score));
+                }
+            }
+
+            let (next_token, _) = best.ok_or_else(|| {
+                TrustformersError::model_error(
+                    "contrastive search found no candidate tokens".to_string(),
+                )
+            })?;
+            generated.push(next_token);
+
+            if config.eos_token_id.is_some_and(|eos| eos == next_token) {
+                break;
+            }
+        }
+
+        Ok(generated)
+    }
+
     /// Internal greedy generation with full config support
     fn generate_greedy_internal(
         &self,
@@ -233,12 +374,15 @@ impl Gpt2LMHeadModel {
         max_length: usize,
         config: &GenerationConfig,
     ) -> Result<Vec<u32>> {
+        // The prompt boundary, not the running length: `should_stop` counts the
+        // completion against `max_new_tokens`.
+        let prompt_length = input_ids.len();
         let mut generated = input_ids.clone();
         let mut kv_cache = if !config.no_kv_cache { Some(KVCache::new()) } else { None };
 
         while generated.len() < max_length {
             // Check stopping criteria
-            if GenerationUtils::should_stop(&generated, config, generated.len()) {
+            if GenerationUtils::should_stop(&generated, config, prompt_length) {
                 break;
             }
 
@@ -285,12 +429,15 @@ impl Gpt2LMHeadModel {
         F: Fn(&[f32], &mut R) -> Result<u32>,
         R: Rng,
     {
+        // The prompt boundary, not the running length: `should_stop` counts the
+        // completion against `max_new_tokens`.
+        let prompt_length = input_ids.len();
         let mut generated = input_ids.clone();
         let mut kv_cache = if !config.no_kv_cache { Some(KVCache::new()) } else { None };
 
         while generated.len() < max_length {
             // Check stopping criteria
-            if GenerationUtils::should_stop(&generated, config, generated.len()) {
+            if GenerationUtils::should_stop(&generated, config, prompt_length) {
                 break;
             }
 
@@ -342,6 +489,9 @@ impl Gpt2LMHeadModel {
             return Ok(vec![result]);
         }
 
+        // Every beam starts from the prompt, so the prompt boundary is shared.
+        let prompt_length = input_ids.len();
+
         // Initialize beams
         let mut beams: Vec<BeamHypothesis> = vec![BeamHypothesis::new(input_ids.clone(), 0.0)];
 
@@ -389,7 +539,7 @@ impl Gpt2LMHeadModel {
                     let mut new_beam = BeamHypothesis::new(new_tokens.clone(), new_score);
 
                     // Check if this beam should be marked as finished
-                    if GenerationUtils::should_stop(&new_tokens, config, new_tokens.len()) {
+                    if GenerationUtils::should_stop(&new_tokens, config, prompt_length) {
                         new_beam.finished = true;
                     }
 
@@ -442,50 +592,24 @@ impl Gpt2LMHeadModel {
         // Forward pass
         let output: Gpt2LMOutput = self.forward(input)?;
 
-        // Extract last token logits
-        match &output.logits {
-            Tensor::F32(arr) => {
-                let shape = arr.shape();
-                if shape.len() != 3 {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        format!("Expected 3D logits tensor, got {}D", shape.len()),
-                    ));
-                }
-
-                let seq_len = shape[1];
-                let vocab_size = shape[2];
-
-                // Get last token's logits: [batch=0, seq_len-1, :]
-                let last_logits = arr.slice(s![0, seq_len - 1, ..]);
-
-                // Convert to Vec<f32>
-                let logits_vec: Vec<f32> = last_logits.iter().copied().collect();
-
-                if logits_vec.len() != vocab_size {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        format!(
-                            "Logits size mismatch: expected {}, got {}",
-                            vocab_size,
-                            logits_vec.len()
-                        ),
-                    ));
-                }
-
-                Ok(logits_vec)
-            },
-            _ => Err(tensor_op_error(
-                "tensor_operation",
-                "Unsupported tensor type for logits".to_string(),
-            )),
-        }
+        // Extract last token logits.
+        //
+        // Shared with `Gpt2LMHeadModel`'s own generators (`generate`,
+        // `generate_greedy`, `generate_greedy_with_cache`, `generate_beam_search`):
+        // this used to be a private copy that matched `Tensor::F32` only, so every
+        // `GenerativeModel` method - `generate_greedy`, `generate_top_k`,
+        // `generate_top_p`, `generate_contrastive`, `generate_beam_search` - failed
+        // with "Unsupported tensor type for logits" on a model whose weights had been
+        // moved to the GPU with `weights_to_gpu`, while the inherent methods of the
+        // same model happily generated. One decoder now serves both.
+        last_token_logits(&output.logits)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation_utils::StoppingCriteria;
     use crate::gpt2::Gpt2Config;
 
     #[test]
@@ -708,5 +832,135 @@ mod tests {
             config.mode,
             GenerationMode::BeamSearch { num_beams: 4 }
         ));
+    }
+
+    // ── Prompt boundary passed to `should_stop` ─────────────────────────────
+
+    /// A GPT-2 small enough to run a generation loop in a unit test.
+    fn tiny_lm_head_model() -> Gpt2LMHeadModel {
+        let mut config = Gpt2Config::small();
+        config.vocab_size = 16;
+        config.n_positions = 32;
+        config.n_embd = 16;
+        config.n_layer = 1;
+        config.n_head = 2;
+        Gpt2LMHeadModel::new(config).expect("tiny GPT-2 must build")
+    }
+
+    /// Regression: every generation loop passed `generated.len()` — the running
+    /// length — as `should_stop`'s `prompt_length`. The completion slice
+    /// `sequence[prompt_length..]` was therefore *always empty*, so no
+    /// [`StoppingCriteria`] that inspects generated tokens could ever fire and
+    /// generation ran to `max_length` regardless.
+    ///
+    /// `AnyToken` over the whole vocabulary matches whatever the model emits, so
+    /// the assertion holds for any weights: generation must stop after exactly
+    /// one new token.
+    #[test]
+    fn greedy_generation_honours_a_stopping_criterion_on_the_first_new_token() {
+        let model = tiny_lm_head_model();
+        let prompt = vec![1u32, 2, 3];
+        let config = GenerationConfig {
+            max_length: prompt.len() + 8,
+            mode: GenerationMode::Greedy,
+            stopping_criteria: vec![StoppingCriteria::AnyToken {
+                token_ids: (0..16u32).collect(),
+            }],
+            ..GenerationConfig::greedy()
+        };
+
+        let sequences = model
+            .generate_with_config(prompt.clone(), config)
+            .expect("generation must succeed");
+        let generated = sequences.first().expect("one sequence must be returned");
+
+        assert_eq!(
+            generated.len(),
+            prompt.len() + 1,
+            "the stopping criterion must fire on the first generated token, got {} tokens",
+            generated.len()
+        );
+    }
+
+    /// The same defect on the sampling loop.
+    #[test]
+    fn sampled_generation_honours_a_stopping_criterion_on_the_first_new_token() {
+        let model = tiny_lm_head_model();
+        let prompt = vec![4u32, 5];
+        let config = GenerationConfig {
+            max_length: prompt.len() + 8,
+            mode: GenerationMode::TopK { k: 4 },
+            stopping_criteria: vec![StoppingCriteria::AnyToken {
+                token_ids: (0..16u32).collect(),
+            }],
+            ..GenerationConfig::greedy()
+        };
+
+        let sequences = model
+            .generate_with_config(prompt.clone(), config)
+            .expect("generation must succeed");
+        let generated = sequences.first().expect("one sequence must be returned");
+
+        assert_eq!(
+            generated.len(),
+            prompt.len() + 1,
+            "the stopping criterion must fire on the first sampled token, got {} tokens",
+            generated.len()
+        );
+    }
+
+    /// Contrastive search shares the loop shape and shared the defect.
+    #[test]
+    fn contrastive_generation_honours_a_stopping_criterion_on_the_first_new_token() {
+        let model = tiny_lm_head_model();
+        let prompt = vec![6u32, 7];
+        let config = GenerationConfig {
+            max_length: prompt.len() + 6,
+            mode: GenerationMode::ContrastiveSearch {
+                top_k: 3,
+                alpha: 0.5,
+            },
+            stopping_criteria: vec![StoppingCriteria::AnyToken {
+                token_ids: (0..16u32).collect(),
+            }],
+            ..GenerationConfig::greedy()
+        };
+
+        let sequences = model
+            .generate_with_config(prompt.clone(), config)
+            .expect("generation must succeed");
+        let generated = sequences.first().expect("one sequence must be returned");
+
+        assert_eq!(
+            generated.len(),
+            prompt.len() + 1,
+            "the stopping criterion must fire on the first contrastive token, got {} tokens",
+            generated.len()
+        );
+    }
+
+    /// A prompt token that happens to sit in the stop set must not end
+    /// generation before anything is produced — that is the other half of the
+    /// prompt/completion split.
+    #[test]
+    fn a_stop_token_inside_the_prompt_does_not_end_generation_immediately() {
+        let model = tiny_lm_head_model();
+        let prompt = vec![9u32, 9, 9];
+        let config = GenerationConfig {
+            max_length: prompt.len() + 3,
+            mode: GenerationMode::Greedy,
+            stopping_criteria: vec![StoppingCriteria::AnyToken { token_ids: vec![9] }],
+            ..GenerationConfig::greedy()
+        };
+
+        let sequences = model
+            .generate_with_config(prompt.clone(), config)
+            .expect("generation must succeed");
+        let generated = sequences.first().expect("one sequence must be returned");
+
+        assert!(
+            generated.len() > prompt.len(),
+            "a stop token inside the prompt must not suppress the completion"
+        );
     }
 }

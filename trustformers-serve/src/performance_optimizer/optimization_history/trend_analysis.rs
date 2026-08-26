@@ -1131,25 +1131,6 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    struct Lcg {
-        state: u64,
-    }
-    impl Lcg {
-        fn new(seed: u64) -> Self {
-            Lcg { state: seed }
-        }
-        fn next(&mut self) -> u64 {
-            self.state = self
-                .state
-                .wrapping_mul(6364136223846793005u64)
-                .wrapping_add(1442695040888963407u64);
-            self.state
-        }
-        fn next_f64(&mut self) -> f64 {
-            (self.next() >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
-
     fn make_data_point(throughput: f64, latency_ms: u64) -> PerformanceDataPoint {
         PerformanceDataPoint {
             parallelism: 1,

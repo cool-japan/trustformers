@@ -6,14 +6,16 @@
 //! and device reboots.
 
 use crate::{
-    device_info::DeviceInfo, inference::MobileInferenceEngine, model_management::ModelManager,
+    device_info::{MobileDeviceDetector, MobileDeviceInfo},
+    inference::MobileInferenceEngine,
+    model_management::ModelManager,
     MemoryOptimization, MobileConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use trustformers_core::error::{CoreError, Result};
-use trustformers_core::Tensor;
+use trustformers_core::errors::Result;
+use trustformers_core::{Tensor, TrustformersError};
 
 /// Android Work Manager configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,7 +229,8 @@ pub enum CompressionAlgorithm {
 }
 
 /// Work task types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// Not `Copy`: the `Custom(String)` variant holds a `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorkTaskType {
     /// Model inference task
     Inference,
@@ -436,7 +439,12 @@ pub struct WorkRetryInfo {
 pub struct AndroidWorkManager {
     config: AndroidWorkManagerConfig,
     inference_engine: Arc<Mutex<MobileInferenceEngine>>,
-    model_manager: Arc<Mutex<ModelManager>>,
+    // `tokio::sync::Mutex`, not `std::sync::Mutex`: `execute_model_download_work` /
+    // `execute_model_update_work` hold this guard across an `.await` (the download/update
+    // call itself is async), which makes the enclosing future non-`Send` under a
+    // `std::sync::MutexGuard` and fails to compile under `tokio::spawn`'s `Send` bound.
+    // `tokio::sync::MutexGuard` is `Send`, so it does not have that restriction.
+    model_manager: Arc<tokio::sync::Mutex<ModelManager>>,
     work_queue: Arc<Mutex<WorkQueue>>,
     work_executor: Arc<Mutex<WorkExecutor>>,
     work_statistics: Arc<Mutex<WorkStatistics>>,
@@ -512,7 +520,7 @@ struct WorkerThread {
 /// Execution context
 #[derive(Debug, Clone)]
 struct ExecutionContext {
-    device_info: DeviceInfo,
+    device_info: MobileDeviceInfo,
     available_memory_mb: usize,
     battery_level: f64,
     is_charging: bool,
@@ -548,7 +556,7 @@ impl AndroidWorkManager {
         config.validate()?;
 
         let inference_engine = Arc::new(Mutex::new(MobileInferenceEngine::new(mobile_config)?));
-        let model_manager = Arc::new(Mutex::new(ModelManager::new_default()?));
+        let model_manager = Arc::new(tokio::sync::Mutex::new(ModelManager::new_default()?));
         let work_queue = Arc::new(Mutex::new(WorkQueue::new()));
         let work_executor = Arc::new(Mutex::new(WorkExecutor::new(&config)));
         let work_statistics = Arc::new(Mutex::new(WorkStatistics::new()));
@@ -576,7 +584,9 @@ impl AndroidWorkManager {
 
         // Check constraints
         if !self.check_work_constraints(&work_request).await? {
-            return Err(TrustformersError::runtime_error("Work constraints not met".into()).into());
+            return Err(TrustformersError::runtime_error(
+                "Work constraints not met".to_string(),
+            ));
         }
 
         // Add to queue
@@ -592,7 +602,7 @@ impl AndroidWorkManager {
         }
 
         // Try to schedule immediate execution if possible
-        self.try_schedule_work().await?;
+        self.try_schedule_work()?;
 
         Ok(work_request.work_id)
     }
@@ -700,8 +710,17 @@ impl AndroidWorkManager {
 
     // Private helper methods
 
-    async fn try_schedule_work(&self) -> Result<()> {
-        let mut executor = self.work_executor.lock().unwrap_or_else(|p| p.into_inner());
+    // Deliberately NOT `async fn`: its body has no `.await` of its own -- it only
+    // *constructs* a future and hands it to `tokio::spawn` without polling it inline.
+    // Declaring it `async fn` anyway made its opaque return-position-`impl Future` type
+    // mutually recursive with `complete_work`'s (this fn spawns a task that awaits
+    // `complete_work`, which itself `.await`s this fn), which rustc's Send auto-trait
+    // solver cannot resolve through a `tokio::spawn` boundary -- "future cannot be sent
+    // between threads safely" even though no `MutexGuard` is ever actually held across a
+    // real suspension point. Keeping this synchronous removes the opaque `Future` type
+    // (and the cycle) entirely rather than papering over it with a `Box::pin` erasure.
+    fn try_schedule_work(&self) -> Result<()> {
+        let executor = self.work_executor.lock().unwrap_or_else(|p| p.into_inner());
         let mut queue = self.work_queue.lock().unwrap_or_else(|p| p.into_inner());
 
         // Check if we can schedule more work
@@ -836,7 +855,7 @@ impl AndroidWorkManager {
         }
 
         // Try to schedule next work
-        let _ = self.try_schedule_work().await;
+        let _ = self.try_schedule_work();
     }
 
     fn clone_for_execution(&self) -> Self {
@@ -862,7 +881,25 @@ impl AndroidWorkManager {
                 let result = {
                     let mut engine =
                         self.inference_engine.lock().unwrap_or_else(|p| p.into_inner());
-                    engine.inference(model_id, &input_tensor)?
+                    // `MobileInferenceEngine` holds one loaded model at a
+                    // time and has no per-`model_id` dispatch (see its own
+                    // doc comment in `inference.rs`) -- it runs whichever
+                    // checkpoint was most recently loaded into this
+                    // `AndroidWorkManager`'s shared engine, regardless of
+                    // which `model_id` this work item names. This is an
+                    // existing single-model-engine limitation of
+                    // `AndroidWorkManager`, not something this fix
+                    // introduces; the previous call here
+                    // (`engine.inference(model_id, &input_tensor)`) did not
+                    // even match `MobileInferenceEngine::inference`'s real
+                    // one-argument signature and could not have compiled.
+                    if !engine.has_loaded_model() {
+                        return Err(TrustformersError::runtime_error(format!(
+                            "no model is loaded in the shared inference engine (requested \
+                             model_id '{model_id}')"
+                        )));
+                    }
+                    engine.inference(&input_tensor)?
                 };
 
                 let output_data = result.data_f32()?.to_vec();
@@ -891,7 +928,7 @@ impl AndroidWorkManager {
         work_request: &WorkRequest,
     ) -> Result<WorkResultData> {
         if let Some(ref model_id) = work_request.input_data.model_id {
-            let mut model_manager = self.model_manager.lock().unwrap_or_else(|p| p.into_inner());
+            let mut model_manager = self.model_manager.lock().await;
             // Simulate model download
             model_manager.download_model(model_id, None).await?;
 
@@ -913,7 +950,7 @@ impl AndroidWorkManager {
         work_request: &WorkRequest,
     ) -> Result<WorkResultData> {
         if let Some(ref model_id) = work_request.input_data.model_id {
-            let mut model_manager = self.model_manager.lock().unwrap_or_else(|p| p.into_inner());
+            let mut model_manager = self.model_manager.lock().await;
             // Simulate model update
             model_manager.update_model(model_id).await?;
 
@@ -1010,42 +1047,32 @@ impl AndroidWorkManager {
             return Err(TrustformersError::config_error(
                 "Work ID cannot be empty",
                 "validate_work_request",
-            )
-            .into());
+            ));
         }
 
         // Validate input data based on task type
         match work_request.task_type {
             WorkTaskType::Inference => {
                 if work_request.input_data.model_id.is_none() {
-                    return Err(TrustformersError::config_error {
-                        message: "Model ID required for inference task".to_string(),
-                        context: trustformers_core::error::ErrorContext::new(
-                            trustformers_core::error::ErrorCode::E4001,
-                            "validate_work_request".to_string(),
-                        ),
-                    });
+                    return Err(TrustformersError::config_error(
+                        "Model ID required for inference task",
+                        "validate_work_request",
+                    ));
                 }
                 if work_request.input_data.tensor_data.is_none() {
-                    return Err(TrustformersError::config_error {
-                        message: "Tensor data required for inference task".to_string(),
-                        context: trustformers_core::error::ErrorContext::new(
-                            trustformers_core::error::ErrorCode::E4001,
-                            "validate_work_request".to_string(),
-                        ),
-                    });
+                    return Err(TrustformersError::config_error(
+                        "Tensor data required for inference task",
+                        "validate_work_request",
+                    ));
                 }
             },
-            WorkTaskType::ModelDownload | WorkTaskType::ModelUpdate => {
-                if work_request.input_data.model_id.is_none() {
-                    return Err(TrustformersError::config_error {
-                        message: "Model ID required for model task".to_string(),
-                        context: trustformers_core::error::ErrorContext::new(
-                            trustformers_core::error::ErrorCode::E4001,
-                            "validate_work_request".to_string(),
-                        ),
-                    });
-                }
+            WorkTaskType::ModelDownload | WorkTaskType::ModelUpdate
+                if work_request.input_data.model_id.is_none() =>
+            {
+                return Err(TrustformersError::config_error(
+                    "Model ID required for model task",
+                    "validate_work_request",
+                ));
             },
             _ => {
                 // Other task types may have different validation requirements
@@ -1059,30 +1086,22 @@ impl AndroidWorkManager {
         let constraints = work_request.constraints.as_ref().unwrap_or(&self.config.constraints);
 
         // Check network constraints
-        if constraints.require_unmetered_network {
-            if !self.is_unmetered_network_available() {
-                return Ok(false);
-            }
+        if constraints.require_unmetered_network && !self.is_unmetered_network_available() {
+            return Ok(false);
         }
 
         // Check battery constraints
-        if constraints.require_charging {
-            if !self.is_device_charging() {
-                return Ok(false);
-            }
+        if constraints.require_charging && !self.is_device_charging() {
+            return Ok(false);
         }
 
-        if constraints.require_battery_not_low {
-            if self.is_battery_low() {
-                return Ok(false);
-            }
+        if constraints.require_battery_not_low && self.is_battery_low() {
+            return Ok(false);
         }
 
         // Check device idle constraint
-        if constraints.require_device_idle {
-            if !self.is_device_idle() {
-                return Ok(false);
-            }
+        if constraints.require_device_idle && !self.is_device_idle() {
+            return Ok(false);
         }
 
         // Check storage constraints
@@ -1093,39 +1112,128 @@ impl AndroidWorkManager {
         Ok(true)
     }
 
+    /// Real resident-memory usage of this process, in MB, via `sysinfo`
+    /// (the same crate/pattern `crash_reporter::collect_memory_usage`
+    /// already uses). Previously a hardcoded `64`, regardless of actual
+    /// memory pressure.
     fn get_current_memory_usage(&self) -> usize {
-        // Platform-specific memory usage detection
-        64 // Placeholder
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|p| (p.memory() / (1024 * 1024)) as usize).unwrap_or(0)
     }
 
+    /// Real global CPU usage percentage via `sysinfo`. `sysinfo` requires
+    /// two samples separated by `MINIMUM_CPU_UPDATE_INTERVAL` for an
+    /// accurate reading (the same pattern `crash_reporter::collect_cpu_info`
+    /// uses); this method is called from constraint checks ahead of
+    /// scheduling a work item, not in a per-frame hot path, so the short
+    /// blocking sleep is acceptable. Previously a hardcoded `25.0`,
+    /// regardless of actual load.
     fn get_current_cpu_usage(&self) -> f64 {
-        // Platform-specific CPU usage detection
-        25.0 // Placeholder
+        use sysinfo::System;
+
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        system.refresh_cpu_usage();
+        system.global_cpu_usage() as f64
     }
 
+    // Real per-platform detection of network metering, charging state,
+    // battery level and device-idle state requires querying Android's
+    // `ConnectivityManager`/`BatteryManager`/`PowerManager` system services
+    // through JNI, which in turn requires a `Context` (or at minimum a
+    // `JavaVM`, as `crate::android::engine::AndroidInferenceEngine::init_jvm`
+    // is given). `AndroidWorkManager` is never handed one -- its
+    // constructor takes only `AndroidWorkManagerConfig` and `MobileConfig` --
+    // so there is nothing to honestly query from any of the four methods
+    // below. This is the same class of gap already documented on
+    // `AndroidInferenceEngine::nnapi_inference`/`gpu_inference`: real,
+    // substantial work (threading a `Context`/`JavaVM` through this
+    // manager's construction and every caller) that this pass does not
+    // fabricate a shortcut for.
+    //
+    // What changes here is the *direction* of the fallback. The previous
+    // constants were each wrong in the specific way that made constraints
+    // easiest to (incorrectly) satisfy: unmetered network "available"
+    // (`true`), battery "not low" (`is_battery_low` => `false`), and device
+    // "idle" (`true`) were all assumed by default, so a job declared
+    // "requires charging + unmetered network + battery not low" could run
+    // on a low battery over metered cellular the moment `require_charging`
+    // (the one constraint that *was* conservative) happened not to be set.
+    // Every fallback below now fails *closed* instead: a condition is
+    // reported satisfied only when it has actually been verified, so an
+    // unverifiable precondition blocks the work that declared it required
+    // rather than silently waving it through.
+
+    /// Conservative fallback: never assume an unmetered connection that has
+    /// not been verified. Previously `true` unconditionally.
     fn is_unmetered_network_available(&self) -> bool {
-        // Platform-specific network detection
-        true // Placeholder
+        false
     }
 
+    /// Conservative fallback: never assume charging that has not been
+    /// verified. Unchanged in *value* from the previous constant (already
+    /// `false`) but now documented as a deliberate fail-closed default
+    /// rather than an unexplained placeholder.
     fn is_device_charging(&self) -> bool {
-        // Platform-specific charging detection
-        false // Placeholder
+        false
     }
 
+    /// Conservative fallback: assume the battery *may* be low until
+    /// verified otherwise. Previously `false` unconditionally -- the
+    /// direction that let a `require_battery_not_low` job run on a real
+    /// low battery.
     fn is_battery_low(&self) -> bool {
-        // Platform-specific battery detection
-        false // Placeholder
+        true
     }
 
+    /// Conservative fallback: never assume the device is idle without
+    /// verification. Previously `true` unconditionally -- the direction
+    /// that let a `require_device_idle` job run while the device was
+    /// actively in use.
     fn is_device_idle(&self) -> bool {
-        // Platform-specific idle detection
-        true // Placeholder
+        false
     }
 
+    /// Real, cross-platform available-storage check via `sysinfo::Disks`
+    /// (no JNI/Context needed -- disk space is exposed the same way on
+    /// every desktop/mobile OS `sysinfo` supports). Compares against the
+    /// disk backing the current working directory when that can be
+    /// determined (the longest matching mount-point prefix, the standard
+    /// "which filesystem owns this path" rule), falling back to the
+    /// largest available-space figure across all detected disks otherwise.
+    /// Previously a hardcoded `true`, regardless of real free space --
+    /// `enable_storage_cleanup`/`min_free_storage_mb` were configurable but
+    /// never actually enforced.
     fn check_storage_constraints(&self, constraints: &StorageConstraints) -> bool {
-        // Platform-specific storage check
-        true // Placeholder
+        use sysinfo::Disks;
+
+        let disks = Disks::new_with_refreshed_list();
+        let cwd = std::env::current_dir().ok();
+
+        let available_bytes = cwd
+            .as_deref()
+            .and_then(|cwd| {
+                disks
+                    .list()
+                    .iter()
+                    .filter(|d| cwd.starts_with(d.mount_point()))
+                    .max_by_key(|d| d.mount_point().as_os_str().len())
+                    .map(|d| d.available_space())
+            })
+            .or_else(|| disks.list().iter().map(|d| d.available_space()).max())
+            .unwrap_or(0);
+
+        let available_mb = available_bytes / (1024 * 1024);
+        available_mb >= constraints.min_free_storage_mb as u64
     }
 }
 
@@ -1182,7 +1290,11 @@ impl WorkExecutor {
             active_workers: 0,
             worker_threads: HashMap::new(),
             execution_context: ExecutionContext {
-                device_info: DeviceInfo::current_device(),
+                // Real detection, falling back to `MobileDeviceInfo::default()`
+                // (not a panic) if it fails -- this constructor is
+                // infallible (`WorkExecutor::new` returns `Self`, not
+                // `Result<Self>`), so a detection error cannot propagate.
+                device_info: MobileDeviceDetector::detect().unwrap_or_default(),
                 available_memory_mb: 512,
                 battery_level: 100.0,
                 is_charging: false,
@@ -1290,33 +1402,24 @@ impl AndroidWorkManagerConfig {
     /// Validate configuration
     pub fn validate(&self) -> Result<()> {
         if self.retry_policy.max_retry_attempts > 10 {
-            return Err(TrustformersError::config_error {
-                message: "Too many retry attempts".to_string(),
-                context: trustformers_core::error::ErrorContext::new(
-                    trustformers_core::error::ErrorCode::E4001,
-                    "validate".to_string(),
-                ),
-            });
+            return Err(TrustformersError::config_error(
+                "Too many retry attempts",
+                "validate",
+            ));
         }
 
         if self.background_execution.max_execution_time_seconds > 3600.0 {
-            return Err(TrustformersError::config_error {
-                message: "Execution time too long".to_string(),
-                context: trustformers_core::error::ErrorContext::new(
-                    trustformers_core::error::ErrorCode::E4001,
-                    "validate".to_string(),
-                ),
-            });
+            return Err(TrustformersError::config_error(
+                "Execution time too long",
+                "validate",
+            ));
         }
 
         if self.constraints.storage_constraints.min_free_storage_mb < 50 {
-            return Err(TrustformersError::config_error {
-                message: "Minimum storage too low".to_string(),
-                context: trustformers_core::error::ErrorContext::new(
-                    trustformers_core::error::ErrorCode::E4001,
-                    "validate".to_string(),
-                ),
-            });
+            return Err(TrustformersError::config_error(
+                "Minimum storage too low",
+                "validate",
+            ));
         }
 
         Ok(())

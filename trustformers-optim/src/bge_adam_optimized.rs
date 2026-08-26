@@ -379,7 +379,7 @@ impl Optimizer for OptimizedBGEAdam {
     }
 
     fn update(&mut self, parameter: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        let param_id = format!("{:p}", parameter as *const _);
+        let param_id = self.state.param_key_for_tensor(parameter)?;
         self.step_count += 1;
 
         // Get data references - minimize .data() calls

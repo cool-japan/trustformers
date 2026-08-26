@@ -2,7 +2,7 @@ use crate::mamba::config::MambaConfig;
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::{tensor_op_error, Result},
+    errors::{not_implemented, tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::silu,
     tensor::Tensor,
@@ -21,7 +21,20 @@ fn softplus(x: f32) -> f32 {
 }
 
 /// RMSNorm layer (Root Mean Square Layer Normalization)
-/// Used in Mamba for normalization
+///
+/// Normalises **each token independently** over the last axis:
+///
+/// ```text
+/// y_i = x_i / sqrt(mean_j(x_j²) + eps) · g_i
+/// ```
+///
+/// where the mean runs over the `normalized_shape` channels of that one token.
+/// A previous revision took the mean over every element of the tensor, which made
+/// each token's output depend on every other token in the batch and sequence —
+/// the value of a position then changed when unrelated positions were appended,
+/// breaking both the architecture and incremental decoding.
+///
+/// Reference: Zhang & Sennrich, "Root Mean Square Layer Normalization" (2019).
 pub struct RMSNorm {
     weight: Tensor,
     eps: f32,
@@ -52,28 +65,49 @@ impl Layer for RMSNorm {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        match &input {
-            Tensor::F32(arr) => {
-                let mean_sq = arr.iter().map(|x| x * x).sum::<f32>() / arr.len() as f32;
-                let rms = (mean_sq + self.eps).sqrt();
-                let normalized = arr.mapv(|x| x / rms);
-
-                match &self.weight {
-                    Tensor::F32(weight_arr) => {
-                        let result = &normalized * weight_arr;
-                        Ok(Tensor::F32(result))
-                    },
-                    _ => Err(tensor_op_error(
-                        "tensor_operation",
-                        "Unsupported weight tensor type for RMSNorm",
-                    )),
-                }
-            },
-            _ => Err(tensor_op_error(
+        let Tensor::F32(arr) = &input else {
+            return Err(tensor_op_error(
                 "tensor_operation",
                 "Unsupported input tensor type for RMSNorm",
-            )),
+            ));
+        };
+
+        let shape = arr.shape().to_vec();
+        let Some(&channels) = shape.last() else {
+            return Err(tensor_op_error(
+                "tensor_operation",
+                "RMSNorm expects a tensor with at least one axis",
+            ));
+        };
+
+        let gain = self.weight.data()?;
+        if gain.len() != channels {
+            return Err(tensor_op_error(
+                "tensor_operation",
+                format!(
+                    "RMSNorm weight width {} does not match the input's last axis {channels}",
+                    gain.len()
+                ),
+            ));
         }
+        if channels == 0 {
+            return Err(tensor_op_error(
+                "tensor_operation",
+                "RMSNorm requires a non-empty last axis",
+            ));
+        }
+
+        // Each token is normalised by its *own* root mean square.
+        let mut data: Vec<f32> = arr.iter().copied().collect();
+        for token in data.chunks_mut(channels) {
+            let mean_square = token.iter().map(|v| v * v).sum::<f32>() / channels as f32;
+            let inverse_rms = 1.0 / (mean_square + self.eps).sqrt();
+            for (value, weight) in token.iter_mut().zip(gain.iter()) {
+                *value = *value * inverse_rms * weight;
+            }
+        }
+
+        Tensor::from_vec(data, &shape)
     }
 }
 
@@ -88,7 +122,6 @@ pub struct CausalConv1d {
     weight: Tensor,
     bias: Option<Tensor>,
     kernel_size: usize,
-    #[allow(dead_code)]
     padding: usize,
     device: Device,
 }
@@ -211,6 +244,17 @@ impl Layer for CausalConv1d {
 }
 
 impl CausalConv1d {
+    /// Width of the convolution kernel.
+    pub fn kernel_size(&self) -> usize {
+        self.kernel_size
+    }
+
+    /// Amount of implicit left padding (`kernel_size - 1`) that makes the
+    /// convolution causal: output `t` only ever reads inputs `<= t`.
+    pub fn padding(&self) -> usize {
+        self.padding
+    }
+
     pub fn parameter_count(&self) -> usize {
         let mut total = self.weight.data().unwrap_or_default().len();
         if let Some(bias) = &self.bias {
@@ -553,6 +597,10 @@ pub struct MambaModel {
     layers: Vec<MambaBlock>,
     norm_f: RMSNorm,
     lm_head: Option<Linear>,
+    /// The embedding matrix, kept when `tie_word_embeddings` is set so the LM head
+    /// can genuinely share it (`logits = h · Eᵀ`) instead of silently returning
+    /// hidden states in its place.
+    tied_embedding_weight: Option<Tensor>,
     device: Device,
 }
 
@@ -563,7 +611,7 @@ impl MambaModel {
 
     pub fn new_with_device(config: MambaConfig, device: Device) -> Result<Self> {
         // Word embeddings
-        let embeddings =
+        let mut embeddings =
             Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         // Mamba layers
@@ -575,16 +623,23 @@ impl MambaModel {
         // Final normalization
         let norm_f = RMSNorm::new_with_device(config.d_model, config.rms_norm_eps, device)?;
 
-        // Language modeling head (optional, can be tied with embeddings)
-        let lm_head = if config.tie_word_embeddings {
-            None
+        // Language modeling head: either its own projection, or genuinely tied to
+        // the embedding matrix. Tying means holding the *same* matrix, so the
+        // weight is installed on the embedding table and retained here.
+        let (lm_head, tied_embedding_weight) = if config.tie_word_embeddings {
+            let weight = Tensor::randn(&[config.vocab_size, config.d_model])?;
+            embeddings.set_weight(weight.clone())?;
+            (None, Some(weight))
         } else {
-            Some(Linear::new_with_device(
-                config.d_model,
-                config.vocab_size,
-                false,
-                device,
-            ))
+            (
+                Some(Linear::new_with_device(
+                    config.d_model,
+                    config.vocab_size,
+                    false,
+                    device,
+                )),
+                None,
+            )
         };
 
         Ok(Self {
@@ -593,6 +648,7 @@ impl MambaModel {
             layers,
             norm_f,
             lm_head,
+            tied_embedding_weight,
             device,
         })
     }
@@ -601,16 +657,24 @@ impl MambaModel {
         self.device
     }
 
-    /// Forward pass for causal language modeling
+    /// Forward pass for causal language modeling.
+    ///
+    /// Returns `[seq_len, vocab_size]` logits. With `tie_word_embeddings` the
+    /// output projection is the transposed embedding matrix (`logits = h · Eᵀ`),
+    /// exactly as in the reference implementation.
     pub fn forward_lm(&self, input_ids: &Tensor) -> Result<Tensor> {
         let hidden_states = self.forward(input_ids.clone())?;
 
-        if let Some(lm_head) = &self.lm_head {
-            lm_head.forward(hidden_states)
-        } else {
-            // Use tied embeddings for output projection
-            // This would require access to embedding weights
-            Ok(hidden_states)
+        match (&self.lm_head, &self.tied_embedding_weight) {
+            (Some(lm_head), _) => lm_head.forward(hidden_states),
+            (None, Some(embedding_weight)) => {
+                // E is [vocab, d_model]; h is [seq, d_model]; h · Eᵀ -> [seq, vocab].
+                hidden_states.matmul(&embedding_weight.t()?)
+            },
+            (None, None) => Err(tensor_op_error(
+                "mamba_forward_lm",
+                "no language-modelling head and no tied embedding weight is available",
+            )),
         }
     }
 }
@@ -647,10 +711,17 @@ impl Model for MambaModel {
         Ok(output)
     }
 
+    /// Loading pretrained Mamba checkpoints is not implemented.
+    ///
+    /// Reporting success here would leave the caller with randomly initialised
+    /// weights while believing a checkpoint had been applied, so this returns an
+    /// error instead. Use the `weight_loading` module to populate the individual
+    /// layers from a safetensors or PyTorch checkpoint.
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        // Placeholder for loading pretrained weights
-        // In practice, this would load weights from safetensors or PyTorch format
-        Ok(())
+        Err(not_implemented(
+            "MambaModel::load_pretrained: the Mamba checkpoint format is not parsed yet; the \
+             model would silently keep its randomly initialised weights",
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -746,6 +817,63 @@ mod tests {
     fn test_rms_norm_creation() {
         let norm = RMSNorm::new(768, 1e-5);
         assert!(norm.is_ok());
+    }
+
+    /// RMSNorm must divide each token by its own root mean square.
+    ///
+    /// Hand-computed: for the token `[3, 4]`, `mean(x²) = (9 + 16) / 2 = 12.5`,
+    /// so with `eps = 0` the output is `[3, 4] / sqrt(12.5) ≈ [0.8485, 1.1314]`.
+    /// The token `[1, 1]` has `rms = 1`, so it must come back unchanged. A
+    /// whole-tensor mean (the previous behaviour) gives `sqrt(13.5/2)` for *both*
+    /// rows and reproduces neither.
+    #[test]
+    fn test_rms_norm_normalises_each_token_independently() {
+        let norm = RMSNorm::new(2, 0.0).expect("RMSNorm creation");
+        let input = Tensor::from_vec(vec![3.0, 4.0, 1.0, 1.0], &[2, 2]).expect("input");
+
+        let out = norm.forward(input).expect("forward").data().expect("data");
+        let scale = (12.5f32).sqrt();
+
+        assert!((out[0] - 3.0 / scale).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 4.0 / scale).abs() < 1e-6, "got {}", out[1]);
+        assert!((out[2] - 1.0).abs() < 1e-6, "got {}", out[2]);
+        assert!((out[3] - 1.0).abs() < 1e-6, "got {}", out[3]);
+    }
+
+    /// A token's normalised value must not change when other tokens are appended.
+    ///
+    /// This is what the whole-tensor mean broke: the same token produced a
+    /// different output depending on the rest of the sequence.
+    #[test]
+    fn test_rms_norm_is_independent_of_sequence_length() {
+        let norm = RMSNorm::new(3, 1e-5).expect("RMSNorm creation");
+
+        let short = Tensor::from_vec(vec![0.5, -1.5, 2.0], &[1, 3]).expect("short");
+        let long = Tensor::from_vec(
+            vec![0.5, -1.5, 2.0, 40.0, -40.0, 40.0, 0.25, 0.25, 0.25],
+            &[3, 3],
+        )
+        .expect("long");
+
+        let short_out = norm.forward(short).expect("short forward").data().expect("data");
+        let long_out = norm.forward(long).expect("long forward").data().expect("data");
+
+        for i in 0..3 {
+            assert!(
+                (short_out[i] - long_out[i]).abs() < 1e-6,
+                "token 0 changed when later tokens were appended: {} vs {}",
+                short_out[i],
+                long_out[i]
+            );
+        }
+    }
+
+    /// A weight whose width disagrees with the input is reported, not broadcast.
+    #[test]
+    fn test_rms_norm_rejects_mismatched_width() {
+        let norm = RMSNorm::new(4, 1e-5).expect("RMSNorm creation");
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("input");
+        assert!(norm.forward(input).is_err());
     }
 
     #[test]
@@ -865,5 +993,241 @@ mod tests {
         assert!(MambaModel::mamba_790m_with_device(device).is_ok());
         assert!(MambaModel::mamba_1_4b_with_device(device).is_ok());
         assert!(MambaModel::mamba_2_8b_with_device(device).is_ok());
+    }
+
+    /// The selective scan must reproduce the S6 recurrence exactly.
+    ///
+    /// Reference (Gu & Dao, 2023), evaluated in f64 with a naive triple loop:
+    ///   Ā = exp(Δ · A),  B̄ = Δ · B,  h_t = Ā ⊙ h_{t-1} + B̄ · x_t,
+    ///   y_t = C_t · h_t + D ⊙ x_t,  with A = -exp(a_log).
+    #[test]
+    fn test_selective_scan_matches_naive_reference() {
+        let d_model = 4usize;
+        let d_state = 3usize;
+        let config = MambaConfig {
+            d_model,
+            d_state,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 8,
+            ..MambaConfig::default()
+        };
+        let mut block = MambaBlock::new(&config).expect("block");
+        let d_inner = config.get_d_inner();
+
+        // Pin A and D so the comparison is fully deterministic.
+        let a_log_values: Vec<f32> =
+            (0..d_inner * d_state).map(|i| -0.5 + 0.1 * (i % 7) as f32).collect();
+        let d_values: Vec<f32> = (0..d_inner).map(|i| 0.25 * (i as f32) - 0.5).collect();
+        block.a_log = Tensor::from_vec(a_log_values.clone(), &[d_inner, d_state]).expect("a_log");
+        block.d = Tensor::from_vec(d_values.clone(), &[d_inner]).expect("d");
+
+        let seq = 5usize;
+        let x_values: Vec<f32> = (0..seq * d_inner).map(|i| (i as f32 * 0.37).sin()).collect();
+        let delta_values: Vec<f32> =
+            (0..seq * d_inner).map(|i| 0.1 + 0.05 * ((i % 5) as f32)).collect();
+        let b_values: Vec<f32> = (0..seq * d_state).map(|i| (i as f32 * 0.21).cos()).collect();
+        let c_values: Vec<f32> = (0..seq * d_state).map(|i| 0.5 - 0.1 * ((i % 4) as f32)).collect();
+
+        let x = Tensor::from_vec(x_values.clone(), &[seq, d_inner]).expect("x");
+        let delta = Tensor::from_vec(delta_values.clone(), &[seq, d_inner]).expect("delta");
+        let b = Tensor::from_vec(b_values.clone(), &[seq, d_state]).expect("b");
+        let c = Tensor::from_vec(c_values.clone(), &[seq, d_state]).expect("c");
+
+        let actual = block
+            .selective_scan(&x, &delta, &b, &c)
+            .expect("selective scan")
+            .data()
+            .expect("data");
+
+        // Naive f64 reference.
+        let mut h = vec![0.0f64; d_inner * d_state];
+        let mut expected = vec![0.0f64; seq * d_inner];
+        for t in 0..seq {
+            for i in 0..d_inner {
+                let delta_ti = delta_values[t * d_inner + i] as f64;
+                let x_ti = x_values[t * d_inner + i] as f64;
+                let mut acc = 0.0f64;
+                for n in 0..d_state {
+                    let a = -(a_log_values[i * d_state + n] as f64).exp();
+                    let a_bar = (delta_ti * a).exp();
+                    let b_bar = delta_ti * b_values[t * d_state + n] as f64;
+                    let h_new = a_bar * h[i * d_state + n] + b_bar * x_ti;
+                    h[i * d_state + n] = h_new;
+                    acc += c_values[t * d_state + n] as f64 * h_new;
+                }
+                expected[t * d_inner + i] = acc + d_values[i] as f64 * x_ti;
+            }
+        }
+
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (got, want)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (*got as f64 - *want).abs() < 1e-4,
+                "selective scan element {idx}: got {got}, reference {want}"
+            );
+        }
+    }
+
+    /// The scan is a real recurrence: an earlier timestep must influence a later
+    /// output (a purely position-wise map would not).
+    #[test]
+    fn test_selective_scan_carries_state_forward() {
+        let config = MambaConfig {
+            d_model: 4,
+            d_state: 2,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 8,
+            ..MambaConfig::default()
+        };
+        let block = MambaBlock::new(&config).expect("block");
+        let d_inner = config.get_d_inner();
+        let seq = 4usize;
+
+        let base_x: Vec<f32> = (0..seq * d_inner).map(|i| (i as f32 * 0.29).sin()).collect();
+        let mut perturbed_x = base_x.clone();
+        for value in perturbed_x.iter_mut().take(d_inner) {
+            *value += 2.0; // timestep 0 only
+        }
+
+        let delta = Tensor::from_vec(vec![0.5f32; seq * d_inner], &[seq, d_inner]).expect("delta");
+        let b = Tensor::from_vec(vec![1.0f32; seq * config.d_state], &[seq, config.d_state])
+            .expect("b");
+        let c = Tensor::from_vec(vec![1.0f32; seq * config.d_state], &[seq, config.d_state])
+            .expect("c");
+
+        let y_base = block
+            .selective_scan(
+                &Tensor::from_vec(base_x, &[seq, d_inner]).expect("x"),
+                &delta,
+                &b,
+                &c,
+            )
+            .expect("scan")
+            .data()
+            .expect("data");
+        let y_perturbed = block
+            .selective_scan(
+                &Tensor::from_vec(perturbed_x, &[seq, d_inner]).expect("x"),
+                &delta,
+                &b,
+                &c,
+            )
+            .expect("scan")
+            .data()
+            .expect("data");
+
+        let last = (seq - 1) * d_inner;
+        assert!(
+            y_base[last..]
+                .iter()
+                .zip(y_perturbed[last..].iter())
+                .any(|(a, b)| (a - b).abs() > 1e-6),
+            "the last timestep ignores timestep 0 — the scan carries no state"
+        );
+    }
+
+    /// Shape mismatches in the scan operands are reported, not silently ignored.
+    #[test]
+    fn test_selective_scan_rejects_inconsistent_shapes() {
+        let config = MambaConfig {
+            d_model: 4,
+            d_state: 2,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 8,
+            ..MambaConfig::default()
+        };
+        let block = MambaBlock::new(&config).expect("block");
+        let d_inner = config.get_d_inner();
+
+        let x = Tensor::from_vec(vec![0.0f32; 3 * d_inner], &[3, d_inner]).expect("x");
+        let delta = Tensor::from_vec(vec![0.0f32; 2 * d_inner], &[2, d_inner]).expect("delta");
+        let b =
+            Tensor::from_vec(vec![0.0f32; 3 * config.d_state], &[3, config.d_state]).expect("b");
+        let c =
+            Tensor::from_vec(vec![0.0f32; 3 * config.d_state], &[3, config.d_state]).expect("c");
+
+        assert!(block.selective_scan(&x, &delta, &b, &c).is_err());
+    }
+
+    /// A tied LM head must return real vocabulary logits, not the hidden states.
+    #[test]
+    fn test_forward_lm_with_tied_embeddings_returns_vocab_logits() {
+        let config = MambaConfig {
+            d_model: 8,
+            d_state: 4,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 12,
+            tie_word_embeddings: true,
+            ..MambaConfig::default()
+        };
+        let model = MambaModel::new(config.clone()).expect("model");
+
+        let input = Tensor::I64(Array1::from(vec![1i64, 2, 3]).into_dyn());
+        let logits = model.forward_lm(&input).expect("forward_lm");
+
+        assert_eq!(
+            logits.shape(),
+            vec![3, config.vocab_size],
+            "a tied head must still project to the vocabulary"
+        );
+        let data = logits.data().expect("data");
+        assert!(data.iter().all(|v| v.is_finite()));
+        assert!(data.iter().any(|v| v.abs() > 1e-6));
+    }
+
+    /// An untied LM head also produces vocabulary logits.
+    #[test]
+    fn test_forward_lm_with_untied_head_returns_vocab_logits() {
+        let config = MambaConfig {
+            d_model: 8,
+            d_state: 4,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 12,
+            tie_word_embeddings: false,
+            ..MambaConfig::default()
+        };
+        let model = MambaModel::new(config.clone()).expect("model");
+
+        let input = Tensor::I64(Array1::from(vec![0i64, 5]).into_dyn());
+        let logits = model.forward_lm(&input).expect("forward_lm");
+        assert_eq!(logits.shape(), vec![2, config.vocab_size]);
+    }
+
+    /// `load_pretrained` must report that it did nothing instead of claiming success.
+    #[test]
+    fn test_load_pretrained_reports_not_implemented() {
+        let config = MambaConfig {
+            d_model: 8,
+            d_state: 4,
+            d_conv: 2,
+            expand: 2,
+            n_layer: 1,
+            vocab_size: 12,
+            ..MambaConfig::default()
+        };
+        let mut model = MambaModel::new(config).expect("model");
+        let mut reader = std::io::Cursor::new(vec![0u8; 16]);
+        assert!(
+            model.load_pretrained(&mut reader).is_err(),
+            "load_pretrained must not fake a successful checkpoint load"
+        );
+    }
+
+    /// The causal convolution reports the padding that makes it causal.
+    #[test]
+    fn test_causal_conv1d_reports_its_padding() {
+        let conv = CausalConv1d::new(4, 4, 3, false).expect("conv");
+        assert_eq!(conv.kernel_size(), 3);
+        assert_eq!(conv.padding(), 2);
     }
 }

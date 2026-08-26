@@ -9,29 +9,40 @@ use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{ArrayD, IxDyn};
 use scirs2_core::{Complex, Complex32, Complex64};
 
-/// Numerical stability constants for complex operations
-const STABILITY_EPSILON_F32: f32 = 1e-7;
-const STABILITY_EPSILON_F64: f64 = 1e-15;
+/// Numerical stability constants for complex operations.
+///
+/// Only overflow guards remain: the former `STABILITY_EPSILON_*` underflow
+/// thresholds were removed together with the predicates that used them, because
+/// gradual underflow towards zero is well-defined IEEE-754 behaviour and not a
+/// hazard for the operations in this module.
 const MAX_SAFE_MAGNITUDE_F32: f32 = 1e30;
 const MAX_SAFE_MAGNITUDE_F64: f64 = 1e300;
 
-/// Check if a complex number is numerically stable (no NaN/infinity, within safe magnitude range)
+/// Check if a complex number is numerically stable.
+///
+/// A value is stable when both components are finite and its magnitude is below
+/// [`MAX_SAFE_MAGNITUDE_F32`]. Small magnitudes -- including exact zero -- are
+/// **not** instabilities: the previous predicate required
+/// `norm() > STABILITY_EPSILON_F32`, so `0 + 0i` was reported as unstable and
+/// every consumer (notably the FFT, which skipped "unstable" inputs) silently
+/// dropped zeros from its sums.
 fn is_stable_c32(z: Complex32) -> bool {
-    z.re.is_finite()
-        && z.im.is_finite()
-        && z.norm() < MAX_SAFE_MAGNITUDE_F32
-        && z.norm() > STABILITY_EPSILON_F32
+    z.re.is_finite() && z.im.is_finite() && z.norm() < MAX_SAFE_MAGNITUDE_F32
 }
 
-/// Check if a complex number is numerically stable (64-bit version)
+/// Check if a complex number is numerically stable (64-bit version).
+///
+/// See [`is_stable_c32`]; underflow towards zero is not treated as unstable.
 fn is_stable_c64(z: Complex64) -> bool {
-    z.re.is_finite()
-        && z.im.is_finite()
-        && z.norm() < MAX_SAFE_MAGNITUDE_F64
-        && z.norm() > STABILITY_EPSILON_F64
+    z.re.is_finite() && z.im.is_finite() && z.norm() < MAX_SAFE_MAGNITUDE_F64
 }
 
-/// Stabilize a complex number by clamping to safe ranges
+/// Stabilize a complex number by clamping unsafely large magnitudes.
+///
+/// Non-finite components become `0 + 0i`; magnitudes above
+/// [`MAX_SAFE_MAGNITUDE_F32`] are scaled down to it. Small magnitudes are left
+/// untouched (they used to be inflated to `STABILITY_EPSILON_F32`, a silent
+/// change of the value).
 fn stabilize_c32(z: Complex32) -> Complex32 {
     if !z.re.is_finite() || !z.im.is_finite() {
         return Complex32::new(0.0, 0.0);
@@ -40,15 +51,14 @@ fn stabilize_c32(z: Complex32) -> Complex32 {
     if magnitude > MAX_SAFE_MAGNITUDE_F32 {
         let scale = MAX_SAFE_MAGNITUDE_F32 / magnitude;
         Complex32::new(z.re * scale, z.im * scale)
-    } else if magnitude < STABILITY_EPSILON_F32 && magnitude > 0.0 {
-        let scale = STABILITY_EPSILON_F32 / magnitude;
-        Complex32::new(z.re * scale, z.im * scale)
     } else {
         z
     }
 }
 
-/// Stabilize a complex number by clamping to safe ranges (64-bit version)
+/// Stabilize a complex number by clamping unsafely large magnitudes (64-bit).
+///
+/// See [`stabilize_c32`] for the exact semantics.
 fn stabilize_c64(z: Complex64) -> Complex64 {
     if !z.re.is_finite() || !z.im.is_finite() {
         return Complex64::new(0.0, 0.0);
@@ -56,9 +66,6 @@ fn stabilize_c64(z: Complex64) -> Complex64 {
     let magnitude = z.norm();
     if magnitude > MAX_SAFE_MAGNITUDE_F64 {
         let scale = MAX_SAFE_MAGNITUDE_F64 / magnitude;
-        Complex64::new(z.re * scale, z.im * scale)
-    } else if magnitude < STABILITY_EPSILON_F64 && magnitude > 0.0 {
-        let scale = STABILITY_EPSILON_F64 / magnitude;
         Complex64::new(z.re * scale, z.im * scale)
     } else {
         z
@@ -525,14 +532,27 @@ impl Tensor {
         }
     }
 
-    /// Fast Fourier Transform (FFT) for complex tensors with numerical stability enhancements.
+    /// Fast Fourier Transform (FFT) of a 1-D complex tensor.
     ///
-    /// Essential for advanced transformer architectures using frequency domain operations.
-    /// Optimized for modern SIMD architectures with overflow/underflow protection.
+    /// This is a genuine O(n log n) transform, not a renamed DFT:
     ///
-    /// # Returns
+    /// * power-of-two lengths use an iterative radix-2 Cooley-Tukey
+    ///   decimation-in-time algorithm;
+    /// * every other length uses **Bluestein's chirp-z algorithm**, which
+    ///   expresses the DFT as a linear convolution evaluated with two
+    ///   power-of-two FFTs, so no length falls back to the O(n^2) double loop.
     ///
-    /// A tensor containing the FFT result.
+    /// The transform is unnormalized (the forward convention
+    /// `X[k] = sum_j x[j] e^(-2*pi*i*j*k/n)`), and all intermediate arithmetic is
+    /// performed in `f64` regardless of the input precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-1-D tensors, empty tensors, and inputs that
+    /// contain non-finite or unsafely large values. (The previous implementation
+    /// silently *skipped* such entries, quietly returning the transform of a
+    /// different signal, and applied its `1/sqrt(n)` scale factor only on the
+    /// overflow branch, so the normalization depended on the data.)
     pub fn fft(&self) -> Result<Tensor> {
         match self {
             Tensor::C32(a) => {
@@ -542,7 +562,6 @@ impl Tensor {
                         "complex FFT operation",
                     ));
                 }
-
                 let n = a.len();
                 if n == 0 {
                     return Err(TrustformersError::tensor_op_error(
@@ -551,44 +570,24 @@ impl Tensor {
                     ));
                 }
 
-                let mut result = ArrayD::zeros(IxDyn(&[n]));
-                let n_f32 = n as f32;
-
-                // Pre-compute normalization factor to prevent overflow
-                let scale_factor = 1.0 / n_f32.sqrt();
-
-                for k in 0..n {
-                    let mut sum = Complex32::new(0.0, 0.0);
-                    let mut overflow_detected = false;
-
-                    for j in 0..n {
-                        // Check input stability
-                        if !is_stable_c32(a[[j]]) {
-                            continue; // Skip unstable values
-                        }
-
-                        let angle = -2.0 * std::f32::consts::PI * (k * j) as f32 / n_f32;
-                        let twiddle = Complex32::new(angle.cos(), angle.sin());
-
-                        let product = a[[j]] * twiddle;
-
-                        // Check for overflow in accumulation
-                        if !is_stable_c32(sum + product) {
-                            overflow_detected = true;
-                            break;
-                        }
-
-                        sum += product;
+                let mut buffer = Vec::with_capacity(n);
+                for index in 0..n {
+                    let value = a[[index]];
+                    if !is_stable_c32(value) {
+                        return Err(TrustformersError::tensor_op_error(
+                            "FFT input contains non-finite or unsafely large values",
+                            "complex FFT operation",
+                        ));
                     }
-
-                    // Apply numerical stabilization
-                    if overflow_detected {
-                        result[[k]] = stabilize_c32(sum * scale_factor);
-                    } else {
-                        result[[k]] = sum;
-                    }
+                    buffer.push(Complex64::new(value.re as f64, value.im as f64));
                 }
 
+                fft_1d(&mut buffer)?;
+
+                let mut result = ArrayD::zeros(IxDyn(&[n]));
+                for (index, value) in buffer.iter().enumerate() {
+                    result[[index]] = Complex32::new(value.re as f32, value.im as f32);
+                }
                 Ok(Tensor::C32(result))
             },
             Tensor::C64(a) => {
@@ -598,7 +597,6 @@ impl Tensor {
                         "complex FFT operation",
                     ));
                 }
-
                 let n = a.len();
                 if n == 0 {
                     return Err(TrustformersError::tensor_op_error(
@@ -607,44 +605,24 @@ impl Tensor {
                     ));
                 }
 
-                let mut result = ArrayD::zeros(IxDyn(&[n]));
-                let n_f64 = n as f64;
-
-                // Pre-compute normalization factor to prevent overflow
-                let scale_factor = 1.0 / n_f64.sqrt();
-
-                for k in 0..n {
-                    let mut sum = Complex64::new(0.0, 0.0);
-                    let mut overflow_detected = false;
-
-                    for j in 0..n {
-                        // Check input stability
-                        if !is_stable_c64(a[[j]]) {
-                            continue; // Skip unstable values
-                        }
-
-                        let angle = -2.0 * std::f64::consts::PI * (k * j) as f64 / n_f64;
-                        let twiddle = Complex64::new(angle.cos(), angle.sin());
-
-                        let product = a[[j]] * twiddle;
-
-                        // Check for overflow in accumulation
-                        if !is_stable_c64(sum + product) {
-                            overflow_detected = true;
-                            break;
-                        }
-
-                        sum += product;
+                let mut buffer = Vec::with_capacity(n);
+                for index in 0..n {
+                    let value = a[[index]];
+                    if !is_stable_c64(value) {
+                        return Err(TrustformersError::tensor_op_error(
+                            "FFT input contains non-finite or unsafely large values",
+                            "complex FFT operation",
+                        ));
                     }
-
-                    // Apply numerical stabilization
-                    if overflow_detected {
-                        result[[k]] = stabilize_c64(sum * scale_factor);
-                    } else {
-                        result[[k]] = sum;
-                    }
+                    buffer.push(value);
                 }
 
+                fft_1d(&mut buffer)?;
+
+                let mut result = ArrayD::zeros(IxDyn(&[n]));
+                for (index, value) in buffer.iter().enumerate() {
+                    result[[index]] = *value;
+                }
                 Ok(Tensor::C64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -863,6 +841,136 @@ impl Tensor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FFT kernels
+// ---------------------------------------------------------------------------
+
+/// In-place forward DFT of `data`, dispatching on the length.
+///
+/// Power-of-two lengths use radix-2 Cooley-Tukey; all other lengths use
+/// Bluestein's chirp-z algorithm. Both are O(n log n).
+fn fft_1d(data: &mut Vec<Complex64>) -> Result<()> {
+    let n = data.len();
+    if n <= 1 {
+        return Ok(());
+    }
+    if n.is_power_of_two() {
+        fft_radix2_in_place(data);
+        Ok(())
+    } else {
+        let transformed = fft_bluestein(data)?;
+        data.clear();
+        data.extend_from_slice(&transformed);
+        Ok(())
+    }
+}
+
+/// Iterative radix-2 decimation-in-time FFT (in place, unnormalized).
+///
+/// `data.len()` must be a power of two.
+fn fft_radix2_in_place(data: &mut [Complex64]) {
+    let n = data.len();
+    if n <= 1 {
+        return;
+    }
+
+    // Bit-reversal permutation.
+    let mut target = 0usize;
+    for source in 1..n {
+        let mut bit = n >> 1;
+        while target & bit != 0 {
+            target ^= bit;
+            bit >>= 1;
+        }
+        target |= bit;
+        if source < target {
+            data.swap(source, target);
+        }
+    }
+
+    // Butterfly stages. Twiddles are computed directly from the angle rather
+    // than by repeated multiplication, so error does not accumulate along a
+    // stage.
+    let mut span = 2usize;
+    while span <= n {
+        let half = span / 2;
+        let base_angle = -2.0 * std::f64::consts::PI / span as f64;
+        let mut offset = 0usize;
+        while offset < n {
+            for k in 0..half {
+                let angle = base_angle * k as f64;
+                let twiddle = Complex64::new(angle.cos(), angle.sin());
+                let even = data[offset + k];
+                let odd = data[offset + k + half] * twiddle;
+                data[offset + k] = even + odd;
+                data[offset + k + half] = even - odd;
+            }
+            offset += span;
+        }
+        span <<= 1;
+    }
+}
+
+/// Inverse of [`fft_radix2_in_place`] (in place, normalized by `1/n`).
+fn ifft_radix2_in_place(data: &mut [Complex64]) {
+    for value in data.iter_mut() {
+        *value = value.conj();
+    }
+    fft_radix2_in_place(data);
+    let inverse_len = 1.0 / data.len() as f64;
+    for value in data.iter_mut() {
+        *value = value.conj() * inverse_len;
+    }
+}
+
+/// Bluestein's chirp-z algorithm: DFT of an arbitrary length via convolution.
+///
+/// `X[k] = w^(k^2/2) * sum_j (x[j] * w^(j^2/2)) * w^(-(k-j)^2/2)` with
+/// `w = e^(-2*pi*i/n)`; the sum is a linear convolution, evaluated with two
+/// power-of-two FFTs of length `m >= 2n - 1`.
+fn fft_bluestein(data: &[Complex64]) -> Result<Vec<Complex64>> {
+    let n = data.len();
+    let target = 2 * n - 1;
+    let m = target.checked_next_power_of_two().ok_or_else(|| {
+        TrustformersError::tensor_op_error(
+            "FFT length is too large for the Bluestein convolution buffer",
+            "complex FFT operation",
+        )
+    })?;
+
+    // chirp[j] = e^(-i*pi*j^2/n); the exponent is reduced modulo 2n first so it
+    // stays exact for large j.
+    let modulus = 2u128 * n as u128;
+    let chirp = |index: usize| -> Complex64 {
+        let squared = (index as u128 * index as u128) % modulus;
+        let angle = -std::f64::consts::PI * squared as f64 / n as f64;
+        Complex64::new(angle.cos(), angle.sin())
+    };
+
+    let mut a = vec![Complex64::new(0.0, 0.0); m];
+    let mut b = vec![Complex64::new(0.0, 0.0); m];
+    for index in 0..n {
+        let c = chirp(index);
+        a[index] = data[index] * c;
+        // b is the conjugate chirp, extended symmetrically so the cyclic
+        // convolution of length m reproduces the linear one.
+        let conjugate = c.conj();
+        b[index] = conjugate;
+        if index > 0 {
+            b[m - index] = conjugate;
+        }
+    }
+
+    fft_radix2_in_place(&mut a);
+    fft_radix2_in_place(&mut b);
+    for (a_value, b_value) in a.iter_mut().zip(b.iter()) {
+        *a_value *= *b_value;
+    }
+    ifft_radix2_in_place(&mut a);
+
+    Ok((0..n).map(|k| a[k] * chirp(k)).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,5 +1187,127 @@ mod tests {
         let real = t.real()?;
         assert_eq!(real.shape(), vec![2, 2]);
         Ok(())
+    }
+
+    /// Naive O(n^2) DFT, used only as the reference the fast path is checked
+    /// against.
+    fn reference_dft(values: &[Complex64]) -> Vec<Complex64> {
+        let n = values.len();
+        (0..n)
+            .map(|k| {
+                let mut sum = Complex64::new(0.0, 0.0);
+                for (j, value) in values.iter().enumerate() {
+                    let angle = -2.0 * std::f64::consts::PI * (k as f64) * (j as f64) / n as f64;
+                    sum += value * Complex64::new(angle.cos(), angle.sin());
+                }
+                sum
+            })
+            .collect()
+    }
+
+    fn deterministic_signal(n: usize) -> Vec<Complex64> {
+        (0..n)
+            .map(|i| {
+                Complex64::new(
+                    (i as f64 * 0.37).sin() + 0.25 * i as f64 / n as f64,
+                    (i as f64 * 0.11).cos() - 0.1,
+                )
+            })
+            .collect()
+    }
+
+    /// The FFT must agree with the naive DFT for power-of-two **and**
+    /// non-power-of-two lengths (the latter go through Bluestein).
+    #[test]
+    fn test_fft_matches_naive_dft() {
+        for &n in &[1usize, 2, 3, 4, 5, 6, 7, 8, 12, 16, 17, 31, 32, 60, 64] {
+            let signal = deterministic_signal(n);
+            let expected = reference_dft(&signal);
+
+            let mut array = ArrayD::zeros(IxDyn(&[n]));
+            for (index, value) in signal.iter().enumerate() {
+                array[[index]] = *value;
+            }
+            let transformed = Tensor::C64(array).fft().expect("fft succeeds");
+            let Tensor::C64(output) = transformed else {
+                panic!("FFT of a C64 tensor must stay C64");
+            };
+
+            for k in 0..n {
+                let got = output[[k]];
+                let want = expected[k];
+                let tolerance = 1e-9 * (1.0 + want.norm()) * (n as f64);
+                assert!(
+                    (got.re - want.re).abs() < tolerance && (got.im - want.im).abs() < tolerance,
+                    "n = {n}, k = {k}: got {got:?}, expected {want:?}"
+                );
+            }
+        }
+    }
+
+    /// The DFT of a pure unit impulse is a constant 1 across all frequencies;
+    /// the DFT of a constant signal is an impulse of magnitude n at k = 0.
+    #[test]
+    fn test_fft_known_closed_forms() {
+        let n = 12usize;
+
+        // Impulse at index 0.
+        let mut impulse = ArrayD::zeros(IxDyn(&[n]));
+        impulse[[0]] = Complex64::new(1.0, 0.0);
+        let Tensor::C64(spectrum) = Tensor::C64(impulse).fft().expect("fft succeeds") else {
+            panic!("unexpected dtype");
+        };
+        for k in 0..n {
+            assert!((spectrum[[k]].re - 1.0).abs() < 1e-9);
+            assert!(spectrum[[k]].im.abs() < 1e-9);
+        }
+
+        // Constant signal.
+        let mut constant = ArrayD::zeros(IxDyn(&[n]));
+        for k in 0..n {
+            constant[[k]] = Complex64::new(2.0, 0.0);
+        }
+        let Tensor::C64(spectrum) = Tensor::C64(constant).fft().expect("fft succeeds") else {
+            panic!("unexpected dtype");
+        };
+        assert!((spectrum[[0]].re - 2.0 * n as f64).abs() < 1e-8);
+        for k in 1..n {
+            assert!(spectrum[[k]].norm() < 1e-8, "bin {k} = {:?}", spectrum[[k]]);
+        }
+    }
+
+    /// Non-finite input must be reported, not silently dropped from the sum.
+    #[test]
+    fn test_fft_rejects_non_finite_input() {
+        let mut array = ArrayD::zeros(IxDyn(&[4]));
+        array[[0]] = Complex64::new(1.0, 0.0);
+        array[[1]] = Complex64::new(f64::NAN, 0.0);
+        assert!(Tensor::C64(array).fft().is_err());
+    }
+
+    /// The C32 path must agree with the C64 path within f32 precision.
+    #[test]
+    fn test_fft_c32_matches_c64() {
+        let n = 16usize;
+        let signal = deterministic_signal(n);
+
+        let mut array64 = ArrayD::zeros(IxDyn(&[n]));
+        let mut array32 = ArrayD::zeros(IxDyn(&[n]));
+        for (index, value) in signal.iter().enumerate() {
+            array64[[index]] = *value;
+            array32[[index]] = Complex32::new(value.re as f32, value.im as f32);
+        }
+
+        let Tensor::C64(expected) = Tensor::C64(array64).fft().expect("fft succeeds") else {
+            panic!("unexpected dtype");
+        };
+        let Tensor::C32(got) = Tensor::C32(array32).fft().expect("fft succeeds") else {
+            panic!("unexpected dtype");
+        };
+
+        for k in 0..n {
+            assert!((got[[k]].re as f64 - expected[[k]].re).abs() < 1e-4);
+            assert!((got[[k]].im as f64 - expected[[k]].im).abs() < 1e-4);
+        }
     }
 }

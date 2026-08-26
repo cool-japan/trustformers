@@ -2,15 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use scirs2_core::ndarray::{Array2, IxDyn};
+    use scirs2_core::ndarray::Array2;
 
     use crate::neural_network_debugging::{
         AttentionDebugConfig, AttentionDebugger, AttentionDistribution, AttentionHealthStatus,
-        AttentionHeadAnalysis, AttentionMap, AttentionPattern, EvolutionType,
-        HeadSpecializationType, ModelAttentionSummary, RedundancyAnalysis, TransformerDebugConfig,
-        TransformerDebugger,
+        AttentionPattern, EvolutionType, HeadSpecializationType, ModelAttentionSummary,
+        RedundancyAnalysis, TransformerDebugConfig, TransformerDebugger,
     };
 
     // -------------------------------------------------------------------------
@@ -27,7 +24,8 @@ mod tests {
         }
 
         fn next(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6364136223846793005u64)
                 .wrapping_add(1442695040888963407u64);
             self.state
@@ -58,8 +56,7 @@ mod tests {
                 }
             }
         }
-        let array2 = Array2::from_shape_vec((seq_len, seq_len), data)
-            .expect("shape matches");
+        let array2 = Array2::from_shape_vec((seq_len, seq_len), data).expect("shape matches");
         array2.into_dyn()
     }
 
@@ -172,10 +169,12 @@ mod tests {
         let config = AttentionDebugConfig::default();
         let mut debugger = AttentionDebugger::new(config);
         // Pass a 1D array, which should fail
-        let bad_weights =
-            scirs2_core::ndarray::Array1::from_vec(vec![0.5f32, 0.5]).into_dyn();
+        let bad_weights = scirs2_core::ndarray::Array1::from_vec(vec![0.5f32, 0.5]).into_dyn();
         let result = debugger.analyze_attention_layer(0, &[bad_weights]);
-        assert!(result.is_err(), "1D attention weights should return an error");
+        assert!(
+            result.is_err(),
+            "1D attention weights should return an error"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -240,8 +239,14 @@ mod tests {
 
     #[test]
     fn test_head_specialization_type_equality() {
-        assert_eq!(HeadSpecializationType::LocalSyntax, HeadSpecializationType::LocalSyntax);
-        assert_ne!(HeadSpecializationType::LocalSyntax, HeadSpecializationType::LongRange);
+        assert_eq!(
+            HeadSpecializationType::LocalSyntax,
+            HeadSpecializationType::LocalSyntax
+        );
+        assert_ne!(
+            HeadSpecializationType::LocalSyntax,
+            HeadSpecializationType::LongRange
+        );
     }
 
     #[test]
@@ -392,9 +397,8 @@ mod tests {
             ..TransformerDebugConfig::default()
         };
         let mut debugger = TransformerDebugger::new(config);
-        let layers: Vec<Vec<_>> = (0..2)
-            .map(|i| vec![make_attention_array(6, i as u64 * 7)])
-            .collect();
+        let layers: Vec<Vec<_>> =
+            (0..2).map(|i| vec![make_attention_array(6, i as u64 * 7)]).collect();
         let result = debugger.analyze_transformer_attention(&layers).expect("ok");
         assert!(
             result.cross_layer_analysis.is_some(),
@@ -409,9 +413,8 @@ mod tests {
             ..TransformerDebugConfig::default()
         };
         let mut debugger = TransformerDebugger::new(config);
-        let layers: Vec<Vec<_>> = (0..2)
-            .map(|i| vec![make_attention_array(6, i as u64 * 11)])
-            .collect();
+        let layers: Vec<Vec<_>> =
+            (0..2).map(|i| vec![make_attention_array(6, i as u64 * 11)]).collect();
         let result = debugger.analyze_transformer_attention(&layers).expect("ok");
         assert!(
             result.cross_layer_analysis.is_none(),
@@ -455,7 +458,11 @@ mod tests {
 
     #[test]
     fn test_evolution_type_variants() {
-        let types = [EvolutionType::Increasing, EvolutionType::Decreasing, EvolutionType::Stable];
+        let types = [
+            EvolutionType::Increasing,
+            EvolutionType::Decreasing,
+            EvolutionType::Stable,
+        ];
         for t in &types {
             let dbg = format!("{:?}", t);
             assert!(!dbg.is_empty());
@@ -487,9 +494,8 @@ mod tests {
         };
         let mut debugger = TransformerDebugger::new(config);
         // Provide 5 layers, should be capped at 2
-        let layers: Vec<Vec<_>> = (0..5)
-            .map(|i| vec![make_attention_array(4, i as u64 * 17)])
-            .collect();
+        let layers: Vec<Vec<_>> =
+            (0..5).map(|i| vec![make_attention_array(4, i as u64 * 17)]).collect();
         let result = debugger.analyze_transformer_attention(&layers).expect("ok");
         assert!(
             result.layer_analyses.len() <= 2,

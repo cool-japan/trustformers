@@ -1,8 +1,9 @@
 use crate::models::{
-    PyBertModel, PyGPT2Model, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
+    PyBertForQuestionAnswering, PyBertForSequenceClassification, PyBertForTokenClassification,
+    PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
 };
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
@@ -65,7 +66,11 @@ impl PyAutoModel {
                 model.into_py_any(py)
             },
             "gpt2" | "gpt-j" | "gpt-neo" => {
-                let model = PyGPT2Model::from_pretrained(
+                // `AutoModel`/`AutoModelForCausalLM` callers expect `.generate()` to
+                // work, which requires the language-modeling head; the headless
+                // `PyGPT2Model` deliberately has no `.generate()` (see its doc
+                // comment -- HuggingFace's own `GPT2Model` has none either).
+                let model = PyGPT2LMHeadModel::from_pretrained(
                     py,
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model
@@ -168,6 +173,106 @@ fn infer_model_type(model_name: &str) -> String {
     }
 }
 
+/// Whether `model_type` (an [`infer_model_type`] result) is one of the
+/// architectures this crate's `Bert*` task wrappers cover.
+///
+/// `roberta`/`distilbert`/`deberta` are included because [`infer_model_type`]
+/// already collapses them to those names for `AutoModel`'s own routing, on
+/// the basis that this crate loads all four through `BertModel`/`BertConfig`
+/// -- there is no separate `RobertaModel`/`DistilBertModel` implementation to
+/// disagree with.
+fn is_bert_family(model_type: &str) -> bool {
+    matches!(model_type, "bert" | "roberta" | "distilbert" | "deberta")
+}
+
+#[cfg(test)]
+mod auto_model_for_task_tests {
+    use super::*;
+
+    #[test]
+    fn bert_family_checkpoints_are_accepted() {
+        for name in ["bert-base-uncased", "roberta-large", "distilbert-base", "deberta-v3-base"] {
+            assert!(
+                bert_family_gap_message(
+                    name,
+                    "AutoModelForTokenClassification",
+                    "BertForTokenClassification"
+                )
+                .is_none(),
+                "'{name}' should resolve to a BERT-family checkpoint"
+            );
+        }
+    }
+
+    /// The regression this whole helper exists for: before this fix,
+    /// `AutoModelForTokenClassification.from_pretrained("gpt2")` (or any
+    /// non-BERT checkpoint) silently returned a bare model with no
+    /// token-classification head at all, via `AutoModel::from_pretrained`.
+    /// It must now be a structured refusal instead.
+    #[test]
+    fn non_bert_checkpoints_are_refused_not_silently_mislabeled() {
+        for name in ["gpt2-medium", "t5-base", "meta-llama/Llama-2-7b", "mamba-130m", "RWKV-4-169m"] {
+            let message = bert_family_gap_message(
+                name,
+                "AutoModelForQuestionAnswering",
+                "BertForQuestionAnswering",
+            );
+            assert!(message.is_some(), "'{name}' must be refused, not silently mislabeled");
+        }
+    }
+
+    /// The refusal message must name both the checkpoint's inferred type and
+    /// the wrapper that cannot serve it, so a caller can see immediately why.
+    #[test]
+    fn the_refusal_names_the_inferred_type_and_the_missing_wrapper() {
+        let message = bert_family_gap_message(
+            "gpt2",
+            "AutoModelForTokenClassification",
+            "BertForTokenClassification",
+        )
+        .expect("gpt2 is not BERT-family");
+        assert!(message.contains("gpt2"), "message must name the inferred type: {message}");
+        assert!(
+            message.contains("BertForTokenClassification"),
+            "message must name the missing wrapper: {message}"
+        );
+    }
+
+    /// The `PyResult`-returning wrapper's control flow must match the pure
+    /// function's, at least structurally (`Ok`/`Err`, not the message text --
+    /// see `bert_family_gap_message`'s doc comment for why the text itself is
+    /// tested there instead).
+    #[test]
+    fn require_bert_family_checkpoint_ok_err_matches_the_pure_function() {
+        assert!(
+            require_bert_family_checkpoint(
+                "bert-base-uncased",
+                "AutoModelForSequenceClassification",
+                "BertForSequenceClassification"
+            )
+            .is_ok()
+        );
+        assert!(
+            require_bert_family_checkpoint(
+                "gpt2",
+                "AutoModelForSequenceClassification",
+                "BertForSequenceClassification"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn is_bert_family_covers_exactly_the_four_shared_architectures() {
+        for name in ["bert", "roberta", "distilbert", "deberta"] {
+            assert!(is_bert_family(name), "'{name}' must be BERT-family");
+        }
+        for name in ["gpt2", "t5", "llama", "rwkv", "mamba", "gpt-j", "mistral", ""] {
+            assert!(!is_bert_family(name), "'{name}' must not be BERT-family");
+        }
+    }
+}
+
 /// AutoTokenizer for automatic tokenizer selection
 #[pyclass(name = "AutoTokenizer", module = "trustformers")]
 pub struct PyAutoTokenizer;
@@ -195,28 +300,33 @@ impl PyAutoTokenizer {
         // Determine tokenizer type from name
         let tokenizer_type = infer_tokenizer_type(pretrained_model_name_or_path);
 
-        // Create appropriate tokenizer based on type
+        // Every arm loads the tokenizer's real files from `pretrained_model_name_or_path`.
+        // This used to ignore the path entirely and return a freshly constructed,
+        // *empty* tokenizer -- a five-token `[PAD]/[UNK]/[CLS]/[SEP]/[MASK]`
+        // vocabulary for WordPiece, and no vocabulary and no merges at all for
+        // BPE -- while reporting that the requested checkpoint had been loaded.
+        // Under those tokenizers every real word encodes to `[UNK]`, so anything
+        // downstream (generation, classification) was operating on noise.
         match tokenizer_type.as_str() {
-            "wordpiece" => {
-                // Create a basic WordPiece tokenizer
-                let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
+            "wordpiece" => PyWordPieceTokenizer::from_pretrained(
+                py,
+                pretrained_model_name_or_path,
+                None,
+            )?
+            .into_py_any(py),
             "bpe" => {
-                // Create a basic BPE tokenizer
-                let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
+                PyBPETokenizer::from_pretrained(py, pretrained_model_name_or_path, None)?
+                    .into_py_any(py)
             },
-            "sentencepiece" => {
-                // For now, fall back to BPE for SentencePiece models
-                let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
-            _ => {
-                // Default to WordPiece tokenizer
-                let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
+            // T5/LLaMA checkpoints ship a SentencePiece model, and this crate
+            // implements WordPiece and BPE only. Loading one of those with the
+            // BPE reader (what this used to do) produces a tokenizer that
+            // silently disagrees with the checkpoint it claims to serve.
+            other => Err(PyNotImplementedError::new_err(format!(
+                "no {other} tokenizer is implemented in this crate, so \
+                 '{pretrained_model_name_or_path}' cannot be loaded. Available: WordPieceTokenizer \
+                 (vocab.txt / vocab.json) and BPETokenizer (vocab.json + merges.txt)."
+            ))),
         }
     }
 }
@@ -236,6 +346,69 @@ fn infer_tokenizer_type(model_name: &str) -> String {
     }
 }
 
+/// Refuse `pretrained_model_name_or_path` unless [`infer_model_type`] resolves
+/// it to one of the BERT-family architectures the task-specific wrapper this
+/// factory constructs actually wraps.
+///
+/// `AutoModelForSequenceClassification`/`ForTokenClassification`/
+/// `ForQuestionAnswering` used to all delegate straight to
+/// `AutoModel::from_pretrained`, which returns a *bare* `BertModel` (or
+/// `GPT2Model`, `T5Model`, ...) with no task head at all. That meant
+/// `AutoModelForTokenClassification.from_pretrained("dslim/bert-base-NER")`
+/// handed back an object that looked like a token-classification model --
+/// same `PreTrainedModel`-shaped Python surface, loaded from the very same
+/// checkpoint -- but carried no classifier weights and could never produce
+/// per-token logits, however its `forward()` was called: the checkpoint's
+/// `classifier.{weight,bias}` tensors were silently dropped on the floor by
+/// the loader `AutoModel` actually uses (`BertModel`, encoder-only).
+///
+/// # Errors
+///
+/// Returns a structured `NotImplementedError` naming the inferred
+/// (unsupported) architecture, instead of silently handing back a checkpoint
+/// bound onto the wrong model.
+/// The pure message-construction half of [`require_bert_family_checkpoint`],
+/// returning `None` when `pretrained_model_name_or_path` is BERT-family (no
+/// gap to report) and `Some(message)` otherwise.
+///
+/// Split out from the `PyResult`-returning wrapper so it is unit-testable
+/// with a plain `cargo test`: constructing a `PyErr`'s `Display` output
+/// requires an initialized Python interpreter (this crate's `cargo test`
+/// binary does not embed one -- see `pipelines::scoring`'s module doc for the
+/// same reason its logic is kept free of the Python C API), but building the
+/// `String` this function returns does not.
+fn bert_family_gap_message(
+    pretrained_model_name_or_path: &str,
+    factory_name: &str,
+    wrapper_name: &str,
+) -> Option<String> {
+    let model_type = infer_model_type(pretrained_model_name_or_path);
+    if is_bert_family(&model_type) {
+        return None;
+    }
+    Some(format!(
+        "{factory_name}.from_pretrained('{pretrained_model_name_or_path}') resolves to model \
+         type '{model_type}', but this crate's only {factory_name} wrapper is {wrapper_name} \
+         (BERT-family: bert/roberta/distilbert/deberta share BertModel's architecture here). \
+         There is no {wrapper_name}-equivalent head implemented for '{model_type}' in this \
+         crate; returning a bare encoder for it, relabelled as a task model, would silently \
+         drop the checkpoint's task head."
+    ))
+}
+
+/// Refuse `pretrained_model_name_or_path` unless it is BERT-family; see
+/// [`bert_family_gap_message`] for the logic and why it is split out this way.
+fn require_bert_family_checkpoint(
+    pretrained_model_name_or_path: &str,
+    factory_name: &str,
+    wrapper_name: &str,
+) -> PyResult<()> {
+    match bert_family_gap_message(pretrained_model_name_or_path, factory_name, wrapper_name) {
+        None => Ok(()),
+        Some(message) => Err(PyNotImplementedError::new_err(message)),
+    }
+}
+
 /// AutoModelForSequenceClassification
 #[pyclass(name = "AutoModelForSequenceClassification", module = "trustformers")]
 pub struct PyAutoModelForSequenceClassification;
@@ -249,8 +422,17 @@ impl PyAutoModelForSequenceClassification {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        // Similar implementation to AutoModel but returns classification variants
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForSequenceClassification",
+            "BertForSequenceClassification",
+        )?;
+        PyBertForSequenceClassification::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 
@@ -267,7 +449,17 @@ impl PyAutoModelForTokenClassification {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForTokenClassification",
+            "BertForTokenClassification",
+        )?;
+        PyBertForTokenClassification::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 
@@ -284,7 +476,17 @@ impl PyAutoModelForQuestionAnswering {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForQuestionAnswering",
+            "BertForQuestionAnswering",
+        )?;
+        PyBertForQuestionAnswering::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 
@@ -322,7 +524,23 @@ impl PyAutoModelForMaskedLM {
     }
 }
 
-/// Pipeline factory function
+/// Pipeline factory function.
+///
+/// Routes every task name [`crate::pipelines::canonical_task`] knows to its
+/// pipeline class, and lets that class decide whether the given `model`
+/// carries the head its task needs -- a mismatch is a `TypeError` from the
+/// pipeline class's own `__init__`, not a surprise at call time. All four
+/// tasks (`text-generation`, `text-classification`, `token-classification`,
+/// `question-answering`) run real inference today; `question-answering`
+/// additionally requires its tokenizer to be a `WordPieceTokenizer` (see
+/// `pipelines::qa_requires_wordpiece`).
+///
+/// This used to route only `text-generation` and `text-classification`, so
+/// `pipeline("ner", ...)` reported "Unknown task" even though a (fake)
+/// `TokenClassificationPipeline` existed. A second, unreachable copy of this
+/// factory also lived in `pipelines.rs`, never registered with the module and
+/// so never callable from Python; it has been deleted rather than left to
+/// drift out of sync with this one.
 #[pyfunction]
 #[pyo3(signature = (task, model=None, tokenizer=None, device=None, **kwargs))]
 pub fn pipeline(
@@ -334,58 +552,77 @@ pub fn pipeline(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let _ = kwargs;
-    use crate::pipelines::{PyTextClassificationPipeline, PyTextGenerationPipeline};
-
-    // If model/tokenizer not provided, auto-detect based on task
-    let (model, tokenizer) = if model.is_none() || tokenizer.is_none() {
-        let default_model = match task {
-            "text-generation" => "gpt2",
-            "text-classification" | "sentiment-analysis" => "bert-base-uncased",
-            "question-answering" => "bert-large-uncased-whole-word-masking-finetuned-squad",
-            "token-classification" | "ner" => "bert-base-cased",
-            _ => "bert-base-uncased",
-        };
-
-        let model = match model {
-            None => PyAutoModel::from_pretrained(py, default_model, None)?,
-            Some(m) => m.clone().unbind(),
-        };
-
-        let tokenizer = match tokenizer {
-            None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
-            Some(t) => t.clone().unbind(),
-        };
-
-        (model, tokenizer)
-    } else {
-        // Both model and tokenizer are provided (guaranteed by the `if` condition).
-        match (model, tokenizer) {
-            (Some(m), Some(t)) => (m.clone().unbind(), t.clone().unbind()),
-            _ => {
-                return Err(PyValueError::new_err(
-                    "model and tokenizer must both be provided",
-                ))
-            },
-        }
+    use crate::pipelines::{
+        canonical_task, PipelineTask, PyQuestionAnsweringPipeline, PyTextClassificationPipeline,
+        PyTextGenerationPipeline, PyTokenClassificationPipeline, KNOWN_TASKS,
     };
 
-    // Create appropriate pipeline
-    match task {
-        "text-generation" => {
-            let model_bound = model.bind(py);
-            let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextGenerationPipeline::new(py, model_bound, tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
+    let resolved_task = canonical_task(task).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "Unknown task: {task}. Supported tasks: {}",
+            KNOWN_TASKS.join(", ")
+        ))
+    })?;
+
+    // A default checkpoint name is only useful if it can actually be loaded.
+    // `from_pretrained` resolves a *local* path (this crate has no Hub
+    // downloader), so a bare "gpt2" cannot be found and the error says so --
+    // which is better than the previous behaviour of quietly building a
+    // pipeline around a randomly initialised model.
+    let default_model = match resolved_task {
+        PipelineTask::TextGeneration => "gpt2",
+        PipelineTask::TextClassification => "bert-base-uncased",
+        PipelineTask::TokenClassification => "bert-base-cased",
+        PipelineTask::QuestionAnswering => "bert-large-uncased-whole-word-masking-finetuned-squad",
+    };
+
+    let model = match model {
+        Some(model) => model.clone().unbind(),
+        None => match resolved_task {
+            PipelineTask::TextClassification => {
+                PyBertForSequenceClassification::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            // Both span pipelines need their task head, not a bare encoder:
+            // `PyAutoModel::from_pretrained` resolves to a headless
+            // `BertModel`, which the `.cast::<PyBertFor...>()` inside
+            // `PyTokenClassificationPipeline::new`/
+            // `PyQuestionAnsweringPipeline::new` would then always reject.
+            PipelineTask::TokenClassification => {
+                PyBertForTokenClassification::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            PipelineTask::QuestionAnswering => {
+                PyBertForQuestionAnswering::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            PipelineTask::TextGeneration => PyAutoModel::from_pretrained(py, default_model, None)?,
         },
-        "text-classification" | "sentiment-analysis" => {
-            let model_bound = model.bind(py);
-            let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextClassificationPipeline::new(py, model_bound, tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
+    };
+    let tokenizer = match tokenizer {
+        Some(tokenizer) => tokenizer.clone().unbind(),
+        None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
+    };
+
+    let model_bound = model.bind(py);
+    let tokenizer_bound = tokenizer.bind(py);
+
+    match resolved_task {
+        PipelineTask::TextGeneration => {
+            let parts = PyTextGenerationPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
         },
-        _ => Err(PyValueError::new_err(format!(
-            "Unknown task: {}. Supported tasks: text-generation, text-classification, sentiment-analysis",
-            task
-        )))
+        PipelineTask::TextClassification => {
+            let parts = PyTextClassificationPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
+        PipelineTask::TokenClassification => {
+            let parts = PyTokenClassificationPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
+        PipelineTask::QuestionAnswering => {
+            let parts = PyQuestionAnsweringPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
     }
 }

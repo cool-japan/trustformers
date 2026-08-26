@@ -4,8 +4,11 @@
 //! by loading and compiling WASM modules progressively.
 
 #![allow(dead_code)]
+use futures::future::select_all;
 use js_sys::{ArrayBuffer, Promise, Uint8Array, WebAssembly};
 use std::format;
+use std::future::Future;
+use std::pin::Pin;
 use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
@@ -13,6 +16,47 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use super::StorageError;
+
+/// A boxed, pinned, in-flight [`StreamingLoader::load_chunk_range`] call,
+/// tracked so [`StreamingLoader::wait_for_chunk_completion`] can race an
+/// arbitrary number of them concurrently via `select_all`.
+type PendingChunkFuture<'a> = Pin<Box<dyn Future<Output = Result<ChunkResult, JsValue>> + 'a>>;
+
+/// Compute the inclusive `[start, end]` HTTP `Range` byte offsets for
+/// `chunk_id` given `chunk_size` bytes per chunk and `total_size` total
+/// resource bytes. The last chunk is naturally clamped short of
+/// `chunk_size` when `total_size` doesn't divide evenly.
+///
+/// Pulled out of [`StreamingLoader::load_chunks_parallel`] as a pure
+/// function so the byte-range arithmetic (the exact place a reassembly-order
+/// bug would show up) is natively testable without a browser `fetch` API.
+fn chunk_byte_range(chunk_id: usize, chunk_size: usize, total_size: usize) -> (usize, usize) {
+    let start = chunk_id * chunk_size;
+    let end = ((chunk_id + 1) * chunk_size).min(total_size).saturating_sub(1);
+    (start, end)
+}
+
+/// Race every future in `pending` (via `select_all`) and return the first
+/// one to resolve, leaving the rest still pending in `pending`; `None` if
+/// `pending` was already empty.
+///
+/// Generic over the future's `Output`/lifetime rather than hardcoded to
+/// `Result<ChunkResult, JsValue>` so the actual racing/reassembly-order
+/// logic - the part of the old bug that mattered (`pop()` instead of
+/// racing) - is testable with plain, `JsValue`-free futures on native
+/// targets, where constructing a real `JsValue`/`ArrayBuffer` panics
+/// ("cannot call wasm-bindgen imported functions on non-wasm targets").
+/// [`StreamingLoader::wait_for_chunk_completion`] is a thin `JsValue`-error
+/// wrapper around this.
+async fn race_next<T>(pending: &mut Vec<Pin<Box<dyn Future<Output = T> + '_>>>) -> Option<T> {
+    if pending.is_empty() {
+        return None;
+    }
+    let futures = std::mem::take(pending);
+    let (result, _index, remaining) = select_all(futures).await;
+    *pending = remaining;
+    Some(result)
+}
 
 /// Initialize the streaming loader module
 pub fn initialize() -> Result<(), StorageError> {
@@ -285,30 +329,67 @@ impl StreamingLoader {
         }
     }
 
-    /// Load chunks in parallel using fetch with range requests
+    /// Load chunks with up to `max_concurrent_chunks` in-flight requests at
+    /// once, using fetch with `Range` headers.
+    ///
+    /// Previously this looped over chunks one at a time, calling
+    /// `load_chunk_range(...).await` to completion before starting the
+    /// next request - functionally correct but not actually concurrent
+    /// (the doc comment and `StreamingConfig::max_concurrent_chunks` both
+    /// promised concurrency that never happened). Real concurrency is
+    /// implemented here via [`Self::wait_for_chunk_completion`], which
+    /// races the pending futures instead of serializing them.
     async fn load_chunks_parallel(
         &mut self,
         url: &str,
         chunk_size: usize,
         total_chunks: usize,
     ) -> Result<WebAssembly::Module, JsValue> {
-        // Load chunks sequentially (simplified from parallel due to type constraints)
-        for chunk_id in 0..total_chunks {
-            let start = chunk_id * chunk_size;
-            let end = ((chunk_id + 1) * chunk_size).min(self.total_size) - 1;
+        let max_in_flight = (self.config.max_concurrent_chunks as usize).max(1);
 
-            // Load the chunk and store it
-            let chunk_result = self.load_chunk_range(url, chunk_id, start, end).await?;
-            self.loaded_chunks.push(chunk_result.data);
+        // Slots to place completed chunk data into, indexed by chunk_id, so
+        // completion order (which may differ from request order once
+        // requests race each other) never corrupts final reassembly.
+        let mut chunk_data: Vec<Option<ArrayBuffer>> = (0..total_chunks).map(|_| None).collect();
+
+        let mut next_chunk_id = 0usize;
+        let mut in_flight: Vec<PendingChunkFuture> = Vec::new();
+
+        while next_chunk_id < total_chunks || !in_flight.is_empty() {
+            while in_flight.len() < max_in_flight && next_chunk_id < total_chunks {
+                let chunk_id = next_chunk_id;
+                let (start, end) = chunk_byte_range(chunk_id, chunk_size, self.total_size);
+                in_flight.push(Box::pin(Self::load_chunk_range(url, chunk_id, start, end)));
+                next_chunk_id += 1;
+            }
+
+            let chunk_result = self.wait_for_chunk_completion(&mut in_flight).await?;
+            self.update_progress_metrics(chunk_result.size);
+            chunk_data[chunk_result.chunk_id] = Some(chunk_result.data);
         }
+
+        self.loaded_chunks = chunk_data
+            .into_iter()
+            .enumerate()
+            .map(|(chunk_id, data)| {
+                data.ok_or_else(|| JsValue::from_str(&format!("chunk {chunk_id} never completed")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Compile final module
         self.compile_final_module().await
     }
 
-    /// Load a specific byte range of the resource
+    /// Load a specific byte range of the resource.
+    ///
+    /// A free function (not a `&self` method) even though it is only ever
+    /// called from [`Self::load_chunks_parallel`]: it never actually reads
+    /// any `StreamingLoader` field, and several instances of it need to run
+    /// concurrently as independent, `'static`-ish futures (via
+    /// [`Self::wait_for_chunk_completion`]'s `select_all`), which an
+    /// `&self`-borrowing method cannot do without fighting the borrow
+    /// checker over multiple simultaneous shared borrows of `self`.
     async fn load_chunk_range(
-        &self,
         url: &str,
         chunk_id: usize,
         start: usize,
@@ -353,26 +434,29 @@ impl StreamingLoader {
         })
     }
 
-    /// Wait for the next chunk to complete
+    /// Wait for whichever pending chunk request completes first, returning
+    /// its real, fully-populated [`ChunkResult`] (which already carries its
+    /// own `chunk_id`, since it is exactly what [`Self::load_chunk_range`]
+    /// resolves with) and leaving the remaining still-pending futures in
+    /// `pending`.
+    ///
+    /// The old implementation `pop()`-ed the *most recently pushed* future
+    /// (LIFO), which both defeats the point of racing concurrent requests
+    /// (it always waits for one specific future to resolve rather than the
+    /// first one that actually finishes) and then discarded whatever data
+    /// it received (`let _result = future.await?;`), fabricating an empty
+    /// `ArrayBuffer::new(0)` with `chunk_id: 0`/`size: 0` in its place - so
+    /// `compile_final_module` was always assembling a buffer of zero-filled
+    /// garbage regardless of what was actually downloaded. This uses
+    /// `futures::future::select_all` to genuinely race the pending
+    /// requests and returns the winner's real chunk id, bytes, and size.
     async fn wait_for_chunk_completion(
-        &mut self,
-        chunk_futures: &mut Vec<JsFuture>,
+        &self,
+        pending: &mut Vec<PendingChunkFuture<'_>>,
     ) -> Result<ChunkResult, JsValue> {
-        // This is a simplified implementation
-        // In a real implementation, you'd use Promise.race() to wait for the first completion
-        if let Some(future) = chunk_futures.pop() {
-            let _result = future.await?;
-            // Process the result to extract ChunkResult
-            // For now, return a dummy result
-            Ok(ChunkResult {
-                chunk_id: 0,
-                data: ArrayBuffer::new(0),
-                size: 0,
-                load_time_ms: 0.0,
-            })
-        } else {
-            Err("No chunks to wait for".into())
-        }
+        race_next(pending)
+            .await
+            .ok_or_else(|| JsValue::from_str("No chunks to wait for"))?
     }
 
     /// Compile the final module from loaded chunks
@@ -706,5 +790,152 @@ mod tests {
         let _streaming_supported = is_streaming_compilation_supported();
         let _cache_supported = is_cache_api_available();
         let _optimal_chunk = get_optimal_chunk_size_kb();
+    }
+
+    // -----------------------------------------------------------------
+    // `chunk_byte_range`: pure logic extracted from the old
+    // `load_chunks_parallel`'s inline range math, testable without a real
+    // `fetch`/`Range` request.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_chunk_byte_range_covers_resource_without_gaps_or_overlap() {
+        let total_size: usize = 1000;
+        let chunk_size: usize = 256;
+        let total_chunks = total_size.div_ceil(chunk_size);
+
+        let mut ranges = Vec::new();
+        for chunk_id in 0..total_chunks {
+            ranges.push(chunk_byte_range(chunk_id, chunk_size, total_size));
+        }
+
+        assert_eq!(ranges[0], (0, 255));
+        // Every range after the first must start exactly one byte after the
+        // previous range's end - no gap, no overlap.
+        for pair in ranges.windows(2) {
+            let (_, prev_end) = pair[0];
+            let (next_start, _) = pair[1];
+            assert_eq!(next_start, prev_end + 1);
+        }
+        // The last (possibly short) chunk must end exactly at the last byte
+        // of the resource.
+        let (_, last_end) = *ranges.last().expect("at least one chunk");
+        assert_eq!(last_end, total_size - 1);
+    }
+
+    #[test]
+    fn test_chunk_byte_range_short_final_chunk_is_clamped() {
+        // total_size = 1000, chunk_size = 256 -> chunks of 256,256,256,232.
+        let (start, end) = chunk_byte_range(3, 256, 1000);
+        assert_eq!(start, 768);
+        assert_eq!(end, 999);
+        assert_eq!(end - start + 1, 232);
+    }
+
+    #[test]
+    fn test_chunk_byte_range_zero_total_size_does_not_panic() {
+        // Old inline `((chunk_id + 1) * chunk_size).min(self.total_size) - 1`
+        // would underflow-panic (`0usize - 1`) whenever `total_size` was 0 -
+        // e.g. before a resource's real size had been discovered yet. The
+        // extracted function must saturate instead.
+        let (start, end) = chunk_byte_range(0, 256, 0);
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // `race_next` (the pure racing/reassembly-order logic behind
+    // `wait_for_chunk_completion`, extracted so it can be tested without a
+    // `JsValue`/`ArrayBuffer` - constructing either panics on native
+    // targets with "cannot call wasm-bindgen imported functions on
+    // non-wasm targets"): must return the *actual* winner's data, and must
+    // not always pick the most-recently-pushed future (LIFO), which is
+    // what the old `pop()`-based implementation always did while also
+    // discarding the winner's real payload.
+    // -----------------------------------------------------------------
+
+    fn immediate(value: usize) -> Pin<Box<dyn Future<Output = usize>>> {
+        Box::pin(async move { value })
+    }
+
+    #[test]
+    fn test_race_next_returns_the_single_pending_futures_real_value() {
+        let mut pending: Vec<Pin<Box<dyn Future<Output = usize>>>> = vec![immediate(7)];
+
+        let result = pollster_block_on(race_next(&mut pending));
+
+        // Old `wait_for_chunk_completion` always returned a hardcoded
+        // `chunk_id: 0, size: 0` dummy regardless of what was actually
+        // requested; the analogous behavior here would be returning some
+        // other constant instead of the real `7`.
+        assert_eq!(result, Some(7));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn test_race_next_empty_pending_returns_none_not_panic() {
+        let mut pending: Vec<Pin<Box<dyn Future<Output = usize>>>> = Vec::new();
+        assert_eq!(pollster_block_on(race_next(&mut pending)), None);
+    }
+
+    #[test]
+    fn test_race_next_leaves_unresolved_futures_pending() {
+        // With more than one in-flight future, exactly one must resolve and
+        // be returned per call; the rest must remain in `pending` for the
+        // next call. The old LIFO `pop()` never had this property - it
+        // discarded (didn't even poll) every future except the one it
+        // popped, so nothing was ever "left pending" for a later call.
+        let mut pending: Vec<Pin<Box<dyn Future<Output = usize>>>> =
+            vec![immediate(10), immediate(20), immediate(30)];
+
+        let first = pollster_block_on(race_next(&mut pending)).expect("should resolve");
+        assert_eq!(pending.len(), 2);
+
+        let second = pollster_block_on(race_next(&mut pending)).expect("should resolve");
+        assert_eq!(pending.len(), 1);
+
+        let third = pollster_block_on(race_next(&mut pending)).expect("should resolve");
+        assert!(pending.is_empty());
+
+        // All three distinct values must have been returned exactly once
+        // across the three calls (order may vary since these are
+        // already-ready futures polled by an arbitrary-order executor).
+        let mut values = std::collections::BTreeSet::new();
+        values.insert(first);
+        values.insert(second);
+        values.insert(third);
+        assert_eq!(values, std::collections::BTreeSet::from([10, 20, 30]));
+    }
+
+    // Note: `StreamingLoader::wait_for_chunk_completion` itself is not
+    // exercised directly here - it is a two-line `JsValue`-wrapping shim
+    // around `race_next` (`race_next(pending).await.ok_or_else(||
+    // JsValue::from_str(...))`), and constructing that `JsValue` panics on
+    // native targets ("cannot call wasm-bindgen imported functions on
+    // non-wasm targets"), same as `ArrayBuffer`/`Uint8Array` did before
+    // this logic was factored out. The tests above cover every piece of
+    // real behavior (racing semantics, reassembly-order correctness,
+    // empty-input handling) through the underlying `race_next`.
+
+    /// Drive a `Future` to completion without a real async runtime, using a
+    /// no-op waker in a poll loop. Every future used in these tests
+    /// resolves on its very first poll (no real I/O, no timers), so a
+    /// single `poll` call always suffices - this loop exists only as a
+    /// defensive bound, mirroring the pattern used elsewhere in this crate
+    /// for the same "no JS engine / no async runtime available natively"
+    /// reason.
+    fn pollster_block_on<F: Future>(future: F) -> F::Output {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
+        let mut future = pin!(future);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        for _ in 0..1000 {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+        }
+        panic!("future did not resolve within the poll budget");
     }
 }

@@ -506,4 +506,245 @@ mod tests {
         let stats = adam.memory_usage();
         assert_eq!(stats.total_bytes, 0, "memory should be 0 after reset");
     }
+
+    // ── stable parameter identity / checkpoint resume ────────────────────────
+
+    /// Regression: state used to be keyed by the parameter's heap address, so
+    /// `state_dict` -> new optimizer -> `load_state_dict` restored nothing and the
+    /// resumed run silently started from zeroed moments.
+    #[test]
+    fn test_adam_checkpoint_resume_restores_trajectory() {
+        use crate::traits::StatefulOptimizer;
+
+        // Two parameters with *different* shapes so a key collision or an ordering
+        // bug cannot pass unnoticed.
+        let build = || {
+            (
+                make_f32_tensor(vec![1.0, 2.0, 3.0]),
+                make_f32_tensor(vec![-1.0, 0.5]),
+            )
+        };
+        let grad_a = make_f32_tensor(vec![0.3, -0.2, 0.1]);
+        let grad_b = make_f32_tensor(vec![0.4, 0.7]);
+
+        // Reference run: 3 warm-up steps then one more step.
+        let mut reference = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let (mut ref_a, mut ref_b) = build();
+        for _ in 0..3 {
+            reference.step();
+            reference.update(&mut ref_a, &grad_a).expect("warmup a");
+            reference.update(&mut ref_b, &grad_b).expect("warmup b");
+        }
+
+        // Checkpointed run: identical warm-up, then save.
+        let mut saver = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let (mut save_a, mut save_b) = build();
+        for _ in 0..3 {
+            saver.step();
+            saver.update(&mut save_a, &grad_a).expect("warmup a");
+            saver.update(&mut save_b, &grad_b).expect("warmup b");
+        }
+        let checkpoint = saver.state_dict().expect("state_dict");
+        assert!(
+            checkpoint.keys().any(|k| k.starts_with("exp_avg_p:")),
+            "checkpoint must use stable identity keys, got {:?}",
+            checkpoint.keys().collect::<Vec<_>>()
+        );
+
+        // Fresh optimizer + fresh tensors at fresh addresses.
+        let mut resumed = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        resumed.load_state_dict(checkpoint).expect("load_state_dict");
+        let mut res_a = save_a.clone();
+        let mut res_b = save_b.clone();
+
+        // One further step on both runs must agree exactly.
+        reference.step();
+        reference.update(&mut ref_a, &grad_a).expect("step a");
+        reference.update(&mut ref_b, &grad_b).expect("step b");
+
+        resumed.step();
+        resumed.update(&mut res_a, &grad_a).expect("resumed a");
+        resumed.update(&mut res_b, &grad_b).expect("resumed b");
+
+        let expected_a = match &ref_a {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        let actual_a = match &res_a {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        for (e, a) in expected_a.iter().zip(actual_a.iter()) {
+            assert!(
+                (e - a).abs() < 1e-6,
+                "resumed trajectory must match reference: {e} vs {a}"
+            );
+        }
+
+        let expected_b = match &ref_b {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        let actual_b = match &res_b {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        for (e, a) in expected_b.iter().zip(actual_b.iter()) {
+            assert!(
+                (e - a).abs() < 1e-6,
+                "resumed trajectory must match reference: {e} vs {a}"
+            );
+        }
+    }
+
+    /// A resume that restored nothing would produce a *first-step* update; assert the
+    /// resumed step differs from what a cold optimizer would do.
+    #[test]
+    fn test_adam_resume_differs_from_cold_start() {
+        use crate::traits::StatefulOptimizer;
+
+        let grad = make_f32_tensor(vec![0.5, 0.5, 0.5, 0.5]);
+        let mut saver = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let mut param = make_f32_tensor(vec![1.0; 4]);
+        for _ in 0..10 {
+            saver.step();
+            saver.update(&mut param, &grad).expect("warmup");
+        }
+        let checkpoint = saver.state_dict().expect("state_dict");
+
+        let mut resumed = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        resumed.load_state_dict(checkpoint).expect("load");
+        let mut p_resumed = param.clone();
+        resumed.step();
+        resumed.update(&mut p_resumed, &grad).expect("resumed step");
+
+        let mut cold = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let mut p_cold = param.clone();
+        cold.state_mut().step = 10;
+        cold.step();
+        cold.update(&mut p_cold, &grad).expect("cold step");
+
+        let v_resumed = match &p_resumed {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        let v_cold = match &p_cold {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        assert!(
+            v_resumed.iter().zip(v_cold.iter()).any(|(r, c)| (r - c).abs() > 1e-7),
+            "a resume that restored real moments must differ from a zero-state start"
+        );
+    }
+
+    /// Regression: value/length-hashed keys allocated a new state entry per call, so
+    /// the state map grew without bound and every step behaved like step 1.
+    #[test]
+    fn test_adam_state_does_not_grow_per_step() {
+        use crate::traits::StatefulOptimizer;
+
+        let mut adam = Adam::new(1e-3, (0.9, 0.999), 1e-8, 0.0);
+        let mut param = make_f32_tensor(vec![1.0; 8]);
+        let grad = make_f32_tensor(vec![0.25; 8]);
+        for _ in 0..25 {
+            adam.step();
+            adam.update(&mut param, &grad).expect("update");
+        }
+        // One momentum buffer of 8 elements, not 25 of them.
+        assert_eq!(
+            adam.memory_usage().momentum_elements,
+            8,
+            "exactly one momentum buffer must be retained"
+        );
+    }
+
+    /// Named updates must resolve to the same state no matter where the tensor lives.
+    #[test]
+    fn test_adam_update_named_is_address_independent() {
+        use crate::traits::StatefulOptimizer;
+
+        let mut adam = Adam::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let grad = make_f32_tensor(vec![0.5; 4]);
+
+        let mut first = make_f32_tensor(vec![1.0; 4]);
+        adam.step();
+        adam.update_named("w", &mut first, &grad).expect("first");
+        let data_after_first = match &first {
+            Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+            _ => panic!("expected F32"),
+        };
+        drop(first);
+
+        // A brand new allocation carrying the same logical parameter.
+        let mut second = make_f32_tensor(data_after_first);
+        adam.step();
+        adam.update_named("w", &mut second, &grad).expect("second");
+
+        assert_eq!(
+            adam.memory_usage().momentum_elements,
+            4,
+            "the same name must reuse one state entry"
+        );
+    }
+
+    /// Named checkpoints must resume regardless of the order parameters are visited.
+    #[test]
+    fn test_adamw_named_checkpoint_resume_is_order_independent() {
+        use crate::traits::StatefulOptimizer;
+
+        let grad_a = make_f32_tensor(vec![0.3, -0.2, 0.1]);
+        let grad_b = make_f32_tensor(vec![0.4, 0.7]);
+
+        let mut saver = AdamW::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        let mut a = make_f32_tensor(vec![1.0, 2.0, 3.0]);
+        let mut b = make_f32_tensor(vec![-1.0, 0.5]);
+        for _ in 0..4 {
+            saver.step();
+            saver.update_named("a", &mut a, &grad_a).expect("a");
+            saver.update_named("b", &mut b, &grad_b).expect("b");
+        }
+        let checkpoint = saver.state_dict().expect("state_dict");
+        assert!(
+            checkpoint.contains_key("exp_avg_n:a") && checkpoint.contains_key("exp_avg_n:b"),
+            "named parameters must be checkpointed under their names: {:?}",
+            checkpoint.keys().collect::<Vec<_>>()
+        );
+
+        let mut reference = AdamW::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        reference.load_state_dict(checkpoint.clone()).expect("load ref");
+        let mut ref_a = a.clone();
+        let mut ref_b = b.clone();
+        reference.state_mut().step = 4;
+        reference.step();
+        reference.update_named("a", &mut ref_a, &grad_a).expect("ref a");
+        reference.update_named("b", &mut ref_b, &grad_b).expect("ref b");
+
+        // Same checkpoint, parameters visited in the opposite order.
+        let mut reversed = AdamW::new(1e-2, (0.9, 0.999), 1e-8, 0.0);
+        reversed.load_state_dict(checkpoint).expect("load rev");
+        let mut rev_a = a.clone();
+        let mut rev_b = b.clone();
+        reversed.state_mut().step = 4;
+        reversed.step();
+        reversed.update_named("b", &mut rev_b, &grad_b).expect("rev b");
+        reversed.update_named("a", &mut rev_a, &grad_a).expect("rev a");
+
+        for (x, y) in [(&ref_a, &rev_a), (&ref_b, &rev_b)] {
+            let xs = match x {
+                Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+                _ => panic!("expected F32"),
+            };
+            let ys = match y {
+                Tensor::F32(v) => v.iter().copied().collect::<Vec<_>>(),
+                _ => panic!("expected F32"),
+            };
+            for (a, b) in xs.iter().zip(ys.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "named resume must be order independent: {a} vs {b}"
+                );
+            }
+        }
+    }
 }

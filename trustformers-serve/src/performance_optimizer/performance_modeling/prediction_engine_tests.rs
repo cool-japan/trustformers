@@ -8,16 +8,13 @@
 #[cfg(test)]
 mod tests {
     use crate::performance_optimizer::performance_modeling::prediction_engine::{
-        CachedPrediction, EnsembleCoordinator, EnsembleStrategy,
-        PredictionCache, PredictionEngine, PredictionEngineConfig, PredictionModelRegistry,
-        WeightedPrediction,
+        CachedPrediction, EnsembleCoordinator, EnsembleStrategy, PredictionCache, PredictionEngine,
+        PredictionEngineConfig, PredictionModelRegistry, WeightedPrediction,
     };
     use crate::performance_optimizer::performance_modeling::types::{
         ModelAccuracyMetrics, PerformancePrediction, PredictionRequest,
     };
-    use crate::performance_optimizer::types::{
-        ResourceIntensity, SystemState, TestCharacteristics,
-    };
+
     use anyhow::Result;
     use chrono::Utc;
     use std::collections::HashMap;
@@ -36,37 +33,6 @@ mod tests {
             model_name: "test_model".to_string(),
             feature_importance: HashMap::new(),
             predicted_at: Utc::now(),
-        }
-    }
-
-    fn make_prediction_request() -> PredictionRequest {
-        PredictionRequest {
-            parallelism_levels: vec![1, 2, 4],
-            test_characteristics: TestCharacteristics {
-                category_distribution: HashMap::new(),
-                average_duration: Duration::from_millis(500),
-                resource_intensity: ResourceIntensity {
-                    cpu_intensity: 0.5,
-                    memory_intensity: 0.3,
-                    io_intensity: 0.2,
-                    network_intensity: 0.1,
-                    gpu_intensity: None,
-                },
-                concurrency_requirements: Default::default(),
-                dependency_complexity: 0.1,
-            },
-            system_state: SystemState {
-                available_cores: 8,
-                available_memory_mb: 16384,
-                load_average: 0.5,
-                active_processes: 10,
-                io_wait_percent: 2.0,
-                network_utilization: 0.1,
-                temperature_metrics: None,
-            },
-            prediction_horizon: None,
-            confidence_level: 0.95,
-            include_uncertainty: false,
         }
     }
 
@@ -141,7 +107,10 @@ mod tests {
     fn test_prediction_engine_new_with_default_config() {
         let engine = PredictionEngine::new(PredictionEngineConfig::default());
         let stats = engine.get_prediction_statistics();
-        assert_eq!(stats.total_predictions, 0, "fresh engine must have zero predictions");
+        assert_eq!(
+            stats.total_predictions, 0,
+            "fresh engine must have zero predictions"
+        );
     }
 
     #[test]
@@ -167,22 +136,19 @@ mod tests {
     impl crate::performance_optimizer::performance_modeling::types::PerformancePredictor
         for MockPredictor
     {
-        fn predict(
-            &self,
-            _request: &PredictionRequest,
-        ) -> Result<PerformancePrediction> {
+        fn predict(&self, _request: &PredictionRequest) -> Result<PerformancePrediction> {
             Ok(make_prediction(self.throughput, 0.8))
         }
 
         fn get_accuracy(&self) -> ModelAccuracyMetrics {
             ModelAccuracyMetrics {
-                overall_accuracy: 0.85,
+                overall_accuracy: Some(0.85),
                 r_squared: 0.82,
                 mean_absolute_error: 0.05,
                 root_mean_squared_error: 0.07,
                 cross_validation_scores: vec![0.84, 0.86, 0.85],
-                confidence_interval: (0.80, 0.90),
-                prediction_stability: 0.9,
+                mean_absolute_error_interval: Some((0.04, 0.06)),
+                prediction_stability: Some(0.9),
                 last_validated: Utc::now(),
             }
         }
@@ -212,7 +178,11 @@ mod tests {
         registry
             .register_model("model_a".to_string(), model, 0.5)
             .expect("register_model must succeed");
-        assert_eq!(registry.model_count(), 1, "registry must have 1 model after registration");
+        assert_eq!(
+            registry.model_count(),
+            1,
+            "registry must have 1 model after registration"
+        );
     }
 
     #[test]
@@ -265,7 +235,10 @@ mod tests {
     fn test_registry_update_weight_unknown_model_returns_error() {
         let mut registry = PredictionModelRegistry::new();
         let result = registry.update_model_weight("nonexistent", 0.5);
-        assert!(result.is_err(), "updating nonexistent model must return error");
+        assert!(
+            result.is_err(),
+            "updating nonexistent model must return error"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -297,7 +270,10 @@ mod tests {
     fn test_cache_contains_key_after_insert() {
         let mut cache = PredictionCache::new(100);
         cache.insert("key2".to_string(), make_cached_prediction(300, 200.0));
-        assert!(cache.contains_key("key2"), "cache must contain key after insert");
+        assert!(
+            cache.contains_key("key2"),
+            "cache must contain key after insert"
+        );
     }
 
     #[test]
@@ -339,7 +315,11 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_zero_initially() {
         let cache = PredictionCache::new(100);
-        assert_eq!(cache.hit_rate(), 0.0, "hit rate must be 0.0 with no operations");
+        assert_eq!(
+            cache.hit_rate(),
+            0.0,
+            "hit rate must be 0.0 with no operations"
+        );
     }
 
     #[test]
@@ -360,7 +340,10 @@ mod tests {
     fn test_ensemble_coordinator_empty_predictions_error() {
         let coord = EnsembleCoordinator::new(EnsembleStrategy::SimpleAverage);
         let result = coord.combine_predictions(vec![]);
-        assert!(result.is_err(), "empty prediction list must return an error");
+        assert!(
+            result.is_err(),
+            "empty prediction list must return an error"
+        );
     }
 
     #[test]
@@ -401,6 +384,78 @@ mod tests {
             model_id: "best".to_string(),
         };
         let result = coord.combine_predictions(vec![wp]);
-        assert!(result.is_ok(), "best model strategy must succeed with one prediction");
+        assert!(
+            result.is_ok(),
+            "best model strategy must succeed with one prediction"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache-key coverage (0.2.1 honesty regression)
+    // -----------------------------------------------------------------------
+
+    fn request_with_intensity(io_intensity: f32, network_intensity: f32) -> PredictionRequest {
+        use crate::performance_optimizer::types::{SystemState, TestCharacteristics};
+        let mut characteristics = TestCharacteristics::default();
+        characteristics.resource_intensity.io_intensity = io_intensity;
+        characteristics.resource_intensity.network_intensity = network_intensity;
+        PredictionRequest {
+            parallelism_levels: vec![4],
+            test_characteristics: characteristics,
+            system_state: SystemState::default(),
+            prediction_horizon: None,
+            confidence_level: 0.95,
+            include_uncertainty: false,
+        }
+    }
+
+    /// Regression: the cache key covered neither `io_intensity` nor
+    /// `network_intensity`, both of which the linear model reads, so two
+    /// requests differing only in those fields collided and the second was
+    /// served the first's prediction.
+    #[test]
+    fn cache_keys_separate_requests_the_models_can_tell_apart() {
+        let engine = PredictionEngine::new(PredictionEngineConfig::default());
+        let base = engine.cache_key_for_test(&request_with_intensity(0.1, 0.1));
+        let other_io = engine.cache_key_for_test(&request_with_intensity(0.9, 0.1));
+        let other_network = engine.cache_key_for_test(&request_with_intensity(0.1, 0.9));
+
+        assert_ne!(base, other_io, "I/O intensity must reach the cache key");
+        assert_ne!(
+            base, other_network,
+            "network intensity must reach the cache key"
+        );
+        assert_eq!(
+            base,
+            engine.cache_key_for_test(&request_with_intensity(0.1, 0.1)),
+            "the same request must keep the same key"
+        );
+    }
+
+    /// Regression: `optimal_parallelism` found the highest-throughput
+    /// prediction, discarded it (`.map(|_| 4)`) and reported the constant `4`
+    /// for every batch, whatever levels the batch covered.
+    #[test]
+    fn optimal_parallelism_is_the_level_that_predicted_best() {
+        let engine = PredictionEngine::new(PredictionEngineConfig::default());
+        let predictions = vec![make_prediction(10.0, 0.8), make_prediction(90.0, 0.8)];
+
+        let statistics = engine.batch_statistics_for_test(&predictions, &[2, 16]);
+        assert_eq!(
+            statistics.optimal_parallelism, 16,
+            "the second prediction is nine times higher, so its level wins"
+        );
+
+        // Reverse which level predicted best; the answer must follow the data.
+        let reversed = vec![make_prediction(90.0, 0.8), make_prediction(10.0, 0.8)];
+        let reversed_statistics = engine.batch_statistics_for_test(&reversed, &[2, 16]);
+        assert_eq!(
+            reversed_statistics.optimal_parallelism, 2,
+            "the optimum must track the throughputs, not the position"
+        );
+        assert_ne!(
+            reversed_statistics.optimal_parallelism, 4,
+            "the old code reported 4 regardless of the batch"
+        );
     }
 }

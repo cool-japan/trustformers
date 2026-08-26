@@ -6,10 +6,12 @@
 
 #![allow(unused_variables)] // Model parallelism implementation
 
+use super::local_communicator::LocalCommunicator;
 use crate::errors::{tensor_op_error, Result};
 // Only used by the non-nccl fallback path in `create_communicator`
 #[cfg(not(feature = "nccl"))]
 use crate::errors::runtime_error;
+use crate::errors::TrustformersError;
 use crate::Tensor;
 use std::sync::Arc;
 
@@ -136,10 +138,20 @@ pub struct ModelParallelContext {
 }
 
 impl ModelParallelContext {
-    /// Initialize model parallel context
+    /// Initialize a single-rank model parallel context (rank 0).
+    ///
+    /// This is the entry point for the common single-process case: the
+    /// `Nccl`/`Mpi` backends read their rank from the process environment
+    /// (`RANK`/`WORLD_SIZE`, or MPI's own environment) when the
+    /// corresponding feature is enabled, while `Gloo`/`Custom` fall back to
+    /// [`LocalCommunicator::single`] - a real (not mocked) single-member
+    /// group. To exercise real multi-rank collectives within one process
+    /// (e.g. in tests), use [`ModelParallelContext::new_local_group`]
+    /// instead, which builds every rank together so they share one
+    /// communication group.
     pub fn new(config: ModelParallelConfig) -> Result<Self> {
         let world_size = config.num_devices;
-        let rank = 0; // Will be set by init process
+        let rank = 0;
 
         let communicator = create_communicator(&config.comm_backend)?;
         let device_mesh = DeviceMesh::new(&config.device_ids, config.strategy)?;
@@ -151,6 +163,46 @@ impl ModelParallelContext {
             communicator,
             device_mesh,
         })
+    }
+
+    /// Build `world_size` contexts that share one real in-process
+    /// communication group ([`LocalCommunicator::group`]), each bound to a
+    /// distinct rank in `0..world_size`.
+    ///
+    /// Unlike [`ModelParallelContext::new`] (which always constructs rank 0
+    /// alone, so `world_size` independent calls to it would each believe
+    /// they are rank 0 with no real peers), this is what lets collectives
+    /// and point-to-point exchange move real data between ranks - e.g. by
+    /// handing each returned context to its own thread. `config.comm_backend`
+    /// is intentionally not consulted here (there would be nothing for it to
+    /// select between): the whole point of this constructor is the
+    /// in-process group. Real multi-node execution still requires
+    /// `trustformers-training`'s TCP backend.
+    pub fn new_local_group(config: ModelParallelConfig, world_size: usize) -> Result<Vec<Self>> {
+        if config.device_ids.len() != world_size {
+            return Err(TrustformersError::invalid_input(format!(
+                "new_local_group: config.device_ids has {} entries, expected {} (one per rank)",
+                config.device_ids.len(),
+                world_size
+            )));
+        }
+
+        let device_mesh = DeviceMesh::new(&config.device_ids, config.strategy)?;
+        let communicators = LocalCommunicator::group(world_size);
+
+        communicators
+            .into_iter()
+            .enumerate()
+            .map(|(rank, comm)| {
+                Ok(Self {
+                    config: config.clone(),
+                    rank,
+                    world_size,
+                    communicator: Arc::new(comm),
+                    device_mesh: device_mesh.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Get current process rank
@@ -350,47 +402,17 @@ fn create_communicator(backend: &CommunicationBackend) -> Result<Arc<dyn Communi
             use super::mpi_communicator::MpiCommunicatorImpl;
             Ok(Arc::new(MpiCommunicatorImpl::new()?))
         },
-        CommunicationBackend::Gloo => {
-            // Fallback to mock for now
-            Ok(Arc::new(MockCommunicator::new()))
+        // Gloo has no real binding here (see the Dependency Replacements
+        // policy: no C/C++ FFI by default); `Custom` has no backend of its
+        // own either. Both used to construct a `MockCommunicator` whose
+        // `all_reduce`/`send` were no-ops and `recv` fabricated zeros. A
+        // single-member `LocalCommunicator` is honest instead of mocked:
+        // its collectives are real (if trivial, since there is exactly one
+        // participant), and `new_local_group` is available for callers that
+        // want genuine multi-rank in-process behavior.
+        CommunicationBackend::Gloo | CommunicationBackend::Custom => {
+            Ok(Arc::new(LocalCommunicator::single()))
         },
-        CommunicationBackend::Custom => Ok(Arc::new(MockCommunicator::new())),
-    }
-}
-
-/// Mock communicator for testing
-struct MockCommunicator;
-
-impl MockCommunicator {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Communicator for MockCommunicator {
-    fn all_gather(&self, tensor: &Tensor, _split_dim: usize) -> Result<Tensor> {
-        // In mock mode, just return the tensor as-is
-        Ok(tensor.clone())
-    }
-
-    fn reduce_scatter(&self, tensor: &Tensor, _split_dim: usize) -> Result<Tensor> {
-        Ok(tensor.clone())
-    }
-
-    fn all_reduce(&self, _tensor: &mut Tensor) -> Result<()> {
-        Ok(())
-    }
-
-    fn send(&self, _tensor: &Tensor, _dest: usize) -> Result<()> {
-        Ok(())
-    }
-
-    fn recv(&self, shape: &[usize], _src: usize) -> Result<Tensor> {
-        Tensor::zeros(shape)
-    }
-
-    fn broadcast(&self, _tensor: &mut Tensor, _root: usize) -> Result<()> {
-        Ok(())
     }
 }
 

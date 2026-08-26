@@ -148,7 +148,7 @@ fn test_command_r_rope_creation() {
 #[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_forward() {
     let config = CommandRConfig::command_r();
-    let mut model = CommandRModel::new(&config).expect("operation failed");
+    let model = CommandRModel::new(&config).expect("operation failed");
 
     // Create dummy input
     let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).expect("operation failed");
@@ -165,7 +165,7 @@ fn test_command_r_model_forward() {
 #[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_causal_lm_forward() {
     let config = CommandRConfig::command_r();
-    let mut model = CommandRForCausalLM::new(&config).expect("operation failed");
+    let model = CommandRForCausalLM::new(&config).expect("operation failed");
 
     // Create dummy input
     let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).expect("operation failed");

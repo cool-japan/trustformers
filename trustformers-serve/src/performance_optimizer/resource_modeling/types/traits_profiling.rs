@@ -3,6 +3,7 @@
 //! CPU, Memory, I/O, Network, and GPU profiling types used by
 //! the resource modeling trait implementations.
 
+use super::traits_analysis::MeasurementUnavailable;
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,14 +76,18 @@ impl CpuBenchmarkSuite {
         Self::default()
     }
 
-    /// Execute comprehensive CPU benchmarks
+    /// Execute comprehensive CPU benchmarks.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This used to assign the literals
+    /// `1000.0`, `8000.0`, `1200.0` and `900.0` to the four score fields and
+    /// report success — the same "benchmark result" on a laptop and on a
+    /// 128-core server, obtained without executing a single instruction of
+    /// benchmark. The fields keep their `0.0` defaults instead.
     pub fn execute_comprehensive_benchmarks(&mut self) -> anyhow::Result<()> {
-        // Placeholder implementation - would run actual benchmarks
-        self.single_core_score = 1000.0;
-        self.multi_core_score = 8000.0;
-        self.integer_score = 1200.0;
-        self.float_score = 900.0;
-        Ok(())
+        Err(MeasurementUnavailable::raise(
+            "CPU benchmark scores",
+            "no CPU benchmark harness is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -181,16 +186,15 @@ impl MemoryBandwidthTester {
         Self::default()
     }
 
-    /// Test comprehensive memory bandwidth
+    /// Test comprehensive memory bandwidth.
+    ///
+    /// Returns [`MeasurementUnavailable`]. The `25.0 / 20.0 / 22.0` GB/s this
+    /// used to store and return were literals; no memory traffic was ever
+    /// generated to measure them.
     pub fn test_comprehensive_bandwidth(&mut self) -> anyhow::Result<(f64, f64, f64)> {
-        // Placeholder - would run actual bandwidth tests
-        self.read_bandwidth = 25.0;
-        self.write_bandwidth = 20.0;
-        self.copy_bandwidth = 22.0;
-        Ok((
-            self.read_bandwidth,
-            self.write_bandwidth,
-            self.copy_bandwidth,
+        Err(MeasurementUnavailable::raise(
+            "memory bandwidth",
+            "no memory bandwidth benchmark is linked into trustformers-serve",
         ))
     }
 }
@@ -225,14 +229,16 @@ impl MemoryLatencyTester {
         Self::default()
     }
 
-    /// Measure comprehensive memory latency
+    /// Measure comprehensive memory latency.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This echoed back the struct's own
+    /// `Default` values (`1.0 / 4.0 / 12.0 / 80.0` ns) as though they had been
+    /// measured; a pointer-chase harness is needed to obtain them for real and
+    /// this crate carries none.
     pub fn measure_comprehensive_latency(&mut self) -> anyhow::Result<(f64, f64, f64, f64)> {
-        // Placeholder - would run actual latency measurements
-        Ok((
-            self.l1_latency,
-            self.l2_latency,
-            self.l3_latency,
-            self.main_latency,
+        Err(MeasurementUnavailable::raise(
+            "memory latency",
+            "no pointer-chase latency harness is linked into trustformers-serve",
         ))
     }
 }
@@ -331,18 +337,19 @@ impl StorageDeviceAnalyzer {
         Self::default()
     }
 
-    /// Analyze storage devices
+    /// Analyze storage devices.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This declared every machine to have
+    /// an `"NVMe"` device doing 3500 MB/s read, 3000 MB/s write and 500,000
+    /// IOPS — a specification sheet, not a measurement, and wrong on any
+    /// spinning disk. Enumerating the devices themselves is possible through
+    /// `sysinfo::Disks` (see
+    /// [`hardware_detector::StorageDetector`](crate::performance_optimizer::resource_modeling::hardware_detector::StorageDetector)),
+    /// but their throughput and IOPS require running I/O against them.
     pub fn analyze_storage_devices(&mut self) -> anyhow::Result<(String, f64, f64, u64)> {
-        // Placeholder - would analyze actual storage devices
-        self.device_type = String::from("NVMe");
-        self.read_throughput = 3500.0;
-        self.write_throughput = 3000.0;
-        self.iops = 500000;
-        Ok((
-            self.device_type.clone(),
-            self.read_throughput,
-            self.write_throughput,
-            self.iops,
+        Err(MeasurementUnavailable::raise(
+            "storage device throughput and IOPS",
+            "measuring them requires running I/O against the device",
         ))
     }
 }
@@ -374,13 +381,16 @@ impl IoPatternAnalyzer {
         Self::default()
     }
 
-    /// Analyze I/O patterns
+    /// Analyze I/O patterns.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This returned the struct's own
+    /// `Default` (an exact 50/50 sequential-to-random split at a 4 KiB request
+    /// size) as a finding. Classifying access patterns needs a block-layer
+    /// trace, which nothing here collects.
     pub fn analyze_io_patterns(&mut self) -> anyhow::Result<(f64, f64, usize)> {
-        // Placeholder - would analyze actual I/O patterns
-        Ok((
-            self.sequential_ratio,
-            self.random_ratio,
-            self.avg_request_size,
+        Err(MeasurementUnavailable::raise(
+            "I/O access patterns",
+            "no block-layer tracing source is wired into this analyzer",
         ))
     }
 }
@@ -412,12 +422,16 @@ impl QueueDepthOptimizer {
         Self::default()
     }
 
-    /// Optimize queue depths
+    /// Optimize queue depths.
+    ///
+    /// Returns [`MeasurementUnavailable`]. An "optimal" depth of 64 at 5000
+    /// units of throughput was asserted for every device without sweeping a
+    /// single depth; finding an optimum means measuring at several.
     pub fn optimize_queue_depths(&mut self) -> anyhow::Result<(u32, f64)> {
-        // Placeholder - would optimize queue depths
-        self.optimal_depth = 64;
-        self.optimal_throughput = 5000.0;
-        Ok((self.optimal_depth, self.optimal_throughput))
+        Err(MeasurementUnavailable::raise(
+            "the optimal I/O queue depth",
+            "finding it requires sweeping depths against the real device",
+        ))
     }
 }
 
@@ -448,16 +462,15 @@ impl IoLatencyAnalyzer {
         Self::default()
     }
 
-    /// Analyze comprehensive I/O latency
+    /// Analyze comprehensive I/O latency.
+    ///
+    /// Returns [`MeasurementUnavailable`]. The `0.5 / 0.7 / 2.5` ms figures
+    /// were literals, and a p99 in particular cannot exist without a
+    /// distribution of samples to take a percentile of.
     pub fn analyze_comprehensive_latency(&mut self) -> anyhow::Result<(f64, f64, f64)> {
-        // Placeholder - would analyze actual I/O latency
-        self.avg_read_latency = 0.5;
-        self.avg_write_latency = 0.7;
-        self.p99_latency = 2.5;
-        Ok((
-            self.avg_read_latency,
-            self.avg_write_latency,
-            self.p99_latency,
+        Err(MeasurementUnavailable::raise(
+            "I/O latency percentiles",
+            "no I/O latency samples are collected on this build",
         ))
     }
 }
@@ -516,10 +529,17 @@ impl NetworkInterfaceAnalyzer {
         Self::default()
     }
 
-    /// Analyze network interfaces
+    /// Analyze network interfaces.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This echoed the struct's `Default`
+    /// — an interface literally named `"eth0"` at 1000 Mbps with a 1500-byte
+    /// MTU — regardless of what the machine actually has, and would have named
+    /// `eth0` on a host with no such interface.
     pub fn analyze_network_interfaces(&mut self) -> anyhow::Result<(String, u64, u32)> {
-        // Placeholder - would analyze actual network interfaces
-        Ok((self.interface_name.clone(), self.link_speed, self.mtu))
+        Err(MeasurementUnavailable::raise(
+            "network interface link speed and MTU",
+            "reading them requires a platform interface-query API this build does not use",
+        ))
     }
 }
 
@@ -547,12 +567,17 @@ impl NetworkBandwidthTester {
         Self::default()
     }
 
-    /// Test comprehensive network bandwidth
+    /// Test comprehensive network bandwidth.
+    ///
+    /// Returns [`MeasurementUnavailable`]. Reporting 950/980 Mbps required a
+    /// peer to transfer against; none was ever contacted. Measuring bandwidth
+    /// for real also means sending traffic, which a profiling call has no
+    /// mandate to do unasked.
     pub fn test_comprehensive_bandwidth(&mut self) -> anyhow::Result<(f64, f64)> {
-        // Placeholder - would test actual network bandwidth
-        self.upload_bandwidth = 950.0;
-        self.download_bandwidth = 980.0;
-        Ok((self.upload_bandwidth, self.download_bandwidth))
+        Err(MeasurementUnavailable::raise(
+            "network bandwidth",
+            "measuring it requires transferring data against a peer",
+        ))
     }
 }
 
@@ -583,13 +608,16 @@ impl NetworkLatencyTester {
         Self::default()
     }
 
-    /// Analyze comprehensive network latency
+    /// Analyze comprehensive network latency.
+    ///
+    /// Returns [`MeasurementUnavailable`]. Latency, jitter and packet loss all
+    /// describe a path to a peer; the `1.5 ms / 0.3 ms / 0.1%` this reported
+    /// described no path, because no packet was sent.
     pub fn analyze_comprehensive_latency(&mut self) -> anyhow::Result<(f64, f64, f64)> {
-        // Placeholder - would analyze actual network latency
-        self.avg_latency = 1.5;
-        self.jitter = 0.3;
-        self.packet_loss = 0.001;
-        Ok((self.avg_latency, self.jitter, self.packet_loss))
+        Err(MeasurementUnavailable::raise(
+            "network latency, jitter and packet loss",
+            "measuring them requires probing a peer over the network",
+        ))
     }
 }
 
@@ -617,18 +645,22 @@ impl MtuOptimizer {
         Self::default()
     }
 
-    /// Optimize MTU settings based on interface analysis
+    /// Optimize MTU settings based on interface analysis.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This recommended 9000-byte jumbo
+    /// frames unconditionally — without reading `interface_analysis`, without
+    /// checking whether the interface or the path supports them, and with a
+    /// promised "15% throughput improvement, 5% latency reduction" that no
+    /// experiment produced. On a path with a 1500-byte MTU that advice
+    /// black-holes traffic.
     pub fn optimize_mtu_settings(
         &mut self,
         _interface_analysis: &NetworkInterfaceAnalysisResults,
     ) -> anyhow::Result<MtuOptimizationResults> {
-        // Placeholder - would optimize MTU settings based on interface analysis
-        self.optimal_mtu = 9000; // Jumbo frames
-        Ok(MtuOptimizationResults {
-            optimal_mtu: self.optimal_mtu as usize,
-            throughput_improvement: 1.15, // 15% improvement estimate
-            latency_impact: 0.95,         // 5% latency reduction estimate
-        })
+        Err(MeasurementUnavailable::raise(
+            "an optimal MTU",
+            "choosing one requires path-MTU discovery and a throughput sweep",
+        ))
     }
 }
 
@@ -686,13 +718,16 @@ impl GpuVendorDetector {
         Self::default()
     }
 
-    /// Detect GPU capabilities
+    /// Detect GPU capabilities.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This returned the struct's
+    /// `Default` — vendor `Unknown`, model `"Unknown"`, compute capability
+    /// `"0.0"` — as a detection result, so a caller could not tell a machine
+    /// with no GPU from a machine whose GPU was never looked at.
     pub fn detect_gpu_capabilities(&mut self) -> anyhow::Result<(GpuVendor, String, String)> {
-        // Placeholder - would detect actual GPU capabilities
-        Ok((
-            self.vendor.clone(),
-            self.model.clone(),
-            self.compute_capability.clone(),
+        Err(MeasurementUnavailable::raise(
+            "GPU vendor and compute capability",
+            "no GPU driver query is linked into trustformers-serve",
         ))
     }
 }
@@ -747,21 +782,20 @@ impl GpuComputeBenchmarks {
         Self::default()
     }
 
-    /// Run comprehensive GPU benchmarks
+    /// Run comprehensive GPU benchmarks.
+    ///
+    /// Returns [`MeasurementUnavailable`]. The reported 15,000 GFLOPS,
+    /// 600 GB/s and "peak = measured × 1.2" were literals and arithmetic on
+    /// literals; `gpu_caps` was never read, so the same numbers came back for
+    /// every device, including machines with no GPU at all.
     pub fn run_comprehensive_benchmarks(
         &mut self,
         _gpu_caps: &GpuCapabilityInfo,
     ) -> anyhow::Result<GpuComputePerformance> {
-        // Placeholder - would run actual GPU benchmarks based on GPU capabilities
-        self.compute_score = 15000.0;
-        self.memory_bandwidth_score = 600.0;
-        self.texture_score = 12000.0;
-        Ok(GpuComputePerformance {
-            compute_throughput_gflops: self.compute_score,
-            memory_throughput_gbps: self.memory_bandwidth_score,
-            efficiency: self.texture_score / 20000.0, // Normalized efficiency
-            peak_gflops: self.compute_score * 1.2, // Peak theoretical performance (20% above measured)
-        })
+        Err(MeasurementUnavailable::raise(
+            "GPU compute throughput",
+            "no GPU compute benchmark is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -792,22 +826,19 @@ impl GpuMemoryTester {
         Self::default()
     }
 
-    /// Test comprehensive GPU memory performance
+    /// Test comprehensive GPU memory performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This asserted a 12 GiB device with
+    /// 10 GiB free on every host — so the `utilization` it computed was
+    /// arithmetic over two constants — plus a 600 GB/s bandwidth, a 100 ns
+    /// latency and a 75 ns transfer overhead that nothing timed.
     pub fn test_comprehensive_memory_performance(
         &mut self,
     ) -> anyhow::Result<GpuMemoryPerformance> {
-        // Placeholder - would test actual GPU memory
-        self.total_memory = 12 * 1024 * 1024 * 1024; // 12GB
-        self.available_memory = 10 * 1024 * 1024 * 1024; // 10GB
-        self.memory_bandwidth = 600.0;
-        Ok(GpuMemoryPerformance {
-            bandwidth_gbps: self.memory_bandwidth,
-            latency_ns: 100.0, // Placeholder latency in nanoseconds
-            utilization: (self.total_memory - self.available_memory) as f64
-                / self.total_memory as f64,
-            peak_bandwidth_gbps: self.memory_bandwidth * 1.3, // Peak theoretical bandwidth (30% above measured)
-            transfer_overhead_ns: 75.0, // Memory transfer overhead in nanoseconds
-        })
+        Err(MeasurementUnavailable::raise(
+            "GPU memory capacity and bandwidth",
+            "no GPU driver query or memory benchmark is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -838,20 +869,17 @@ impl GpuKernelAnalyzer {
         Self::default()
     }
 
-    /// Analyze GPU kernel performance
+    /// Analyze GPU kernel performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]. There was no kernel: the analysis
+    /// named one `"default_kernel"` and reported 85% occupancy, 90% memory
+    /// efficiency and "typical" launch and context-switch overheads copied
+    /// from vendor documentation rather than measured on this device.
     pub fn analyze_kernel_performance(&mut self) -> anyhow::Result<GpuKernelAnalysis> {
-        // Placeholder - would analyze actual kernel performance
-        self.execution_time = 2.5;
-        self.occupancy = 85.0;
-        self.memory_efficiency = 90.0;
-        Ok(GpuKernelAnalysis {
-            kernel_name: "default_kernel".to_string(),
-            execution_time_ms: self.execution_time,
-            occupancy: self.occupancy,
-            memory_efficiency: self.memory_efficiency,
-            average_launch_overhead_ns: 8000.0, // Typical GPU kernel launch overhead (8 microseconds)
-            context_switch_overhead_ns: 5000.0, // Typical GPU context switch overhead (5 microseconds)
-        })
+        Err(MeasurementUnavailable::raise(
+            "GPU kernel occupancy and launch overhead",
+            "no GPU kernel is launched or profiled on this build",
+        ))
     }
 }
 
@@ -966,13 +994,19 @@ mod tests {
         assert!((suite.integer_score - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: `execute_comprehensive_benchmarks` used to write the
+    /// literals 1000/8000/1200/900 into the four score fields and report
+    /// success without running a benchmark.
     #[test]
     fn test_cpu_benchmark_suite_execute() {
         let mut suite = CpuBenchmarkSuite::new();
-        let result = suite.execute_comprehensive_benchmarks();
-        assert!(result.is_ok());
-        assert!(suite.single_core_score > 0.0);
-        assert!(suite.multi_core_score > suite.single_core_score);
+        let err = suite
+            .execute_comprehensive_benchmarks()
+            .expect_err("no CPU benchmark harness exists, so no scores can be reported");
+        assert!(err.to_string().contains("CPU benchmark scores"), "{err}");
+        // The scores must stay at their defaults: nothing measured them.
+        assert!((suite.single_core_score - 0.0).abs() < 1e-9);
+        assert!((suite.multi_core_score - 0.0).abs() < 1e-9);
     }
 
     // --- CpuProfilingState tests ---
@@ -1025,15 +1059,18 @@ mod tests {
         assert!((tester.write_bandwidth - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: this used to store 25/20/22 GB/s and return them as a
+    /// bandwidth measurement.
     #[test]
     fn test_memory_bandwidth_test() {
         let mut tester = MemoryBandwidthTester::new();
-        let result = tester.test_comprehensive_bandwidth();
-        assert!(result.is_ok());
-        let (read, write, copy) = result.expect("should succeed");
-        assert!(read > 0.0);
-        assert!(write > 0.0);
-        assert!(copy > 0.0);
+        let err = tester
+            .test_comprehensive_bandwidth()
+            .expect_err("no bandwidth benchmark exists");
+        assert!(err.to_string().contains("memory bandwidth"), "{err}");
+        assert!((tester.read_bandwidth - 0.0).abs() < 1e-9);
+        assert!((tester.write_bandwidth - 0.0).abs() < 1e-9);
+        assert!((tester.copy_bandwidth - 0.0).abs() < 1e-9);
     }
 
     // --- MemoryLatencyTester tests ---
@@ -1053,11 +1090,15 @@ mod tests {
         assert!(tester.main_latency > 0.0);
     }
 
+    /// Regression: this used to echo the struct's `Default` latencies back as
+    /// a measurement.
     #[test]
     fn test_memory_latency_measure() {
         let mut tester = MemoryLatencyTester::new();
-        let result = tester.measure_comprehensive_latency();
-        assert!(result.is_ok());
+        let err = tester
+            .measure_comprehensive_latency()
+            .expect_err("no pointer-chase harness exists");
+        assert!(err.to_string().contains("memory latency"), "{err}");
     }
 
     // --- NumaTopologyAnalyzer tests ---
@@ -1094,15 +1135,16 @@ mod tests {
     }
 
     #[test]
+    /// Regression: every machine used to be reported as an `"NVMe"` doing
+    /// 3500/3000 MB/s at 500,000 IOPS.
     fn test_storage_device_analyzer_analyze() {
         let mut analyzer = StorageDeviceAnalyzer::new();
-        let result = analyzer.analyze_storage_devices();
-        assert!(result.is_ok());
-        let (dev_type, read, write, iops) = result.expect("should succeed");
-        assert_eq!(dev_type, "NVMe");
-        assert!(read > 0.0);
-        assert!(write > 0.0);
-        assert!(iops > 0);
+        let err = analyzer
+            .analyze_storage_devices()
+            .expect_err("device throughput cannot be measured without running I/O");
+        assert!(err.to_string().contains("storage device"), "{err}");
+        assert_eq!(analyzer.device_type, "Unknown");
+        assert_eq!(analyzer.iops, 0);
     }
 
     // --- IoPatternAnalyzer tests ---
@@ -1115,14 +1157,15 @@ mod tests {
         assert_eq!(analyzer.avg_request_size, 4096);
     }
 
+    /// Regression: this used to return the struct's own 50/50 default split
+    /// as an observed access pattern.
     #[test]
     fn test_io_pattern_analyzer_analyze() {
         let mut analyzer = IoPatternAnalyzer::new();
-        let result = analyzer.analyze_io_patterns();
-        assert!(result.is_ok());
-        let (seq, rnd, size) = result.expect("should succeed");
-        assert!((seq + rnd - 1.0).abs() < 1e-9);
-        assert!(size > 0);
+        let err = analyzer
+            .analyze_io_patterns()
+            .expect_err("classifying access patterns needs a block-layer trace");
+        assert!(err.to_string().contains("I/O access patterns"), "{err}");
     }
 
     // --- QueueDepthOptimizer tests ---
@@ -1134,14 +1177,16 @@ mod tests {
         assert_eq!(optimizer.current_depth, 1);
     }
 
+    /// Regression: an "optimal" depth of 64 at 5000 throughput used to be
+    /// asserted for every device without sweeping a single depth.
     #[test]
     fn test_queue_depth_optimize() {
         let mut optimizer = QueueDepthOptimizer::new();
-        let result = optimizer.optimize_queue_depths();
-        assert!(result.is_ok());
-        let (depth, throughput) = result.expect("should succeed");
-        assert!(depth > 0);
-        assert!(throughput > 0.0);
+        let err = optimizer
+            .optimize_queue_depths()
+            .expect_err("an optimum needs measurements at several depths");
+        assert!(err.to_string().contains("queue depth"), "{err}");
+        assert_eq!(optimizer.optimal_depth, 32);
     }
 
     // --- IoLatencyAnalyzer tests ---
@@ -1152,15 +1197,16 @@ mod tests {
         assert!((analyzer.avg_read_latency - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: 0.5/0.7/2.5 ms used to be reported as measured latencies,
+    /// including a p99 with no sample distribution behind it.
     #[test]
     fn test_io_latency_analyzer_analyze() {
         let mut analyzer = IoLatencyAnalyzer::new();
-        let result = analyzer.analyze_comprehensive_latency();
-        assert!(result.is_ok());
-        let (read, write, p99) = result.expect("should succeed");
-        assert!(read > 0.0);
-        assert!(write > 0.0);
-        assert!(p99 > read);
+        let err = analyzer
+            .analyze_comprehensive_latency()
+            .expect_err("a percentile needs samples");
+        assert!(err.to_string().contains("I/O latency"), "{err}");
+        assert!((analyzer.p99_latency - 0.0).abs() < 1e-9);
     }
 
     // --- NetworkInterfaceAnalyzer tests ---
@@ -1173,11 +1219,15 @@ mod tests {
         assert_eq!(analyzer.mtu, 1500);
     }
 
+    /// Regression: this used to report an interface literally named `eth0` at
+    /// 1000 Mbps, whatever the machine actually had.
     #[test]
     fn test_network_interface_analyze() {
         let mut analyzer = NetworkInterfaceAnalyzer::new();
-        let result = analyzer.analyze_network_interfaces();
-        assert!(result.is_ok());
+        let err = analyzer
+            .analyze_network_interfaces()
+            .expect_err("no interface-query API is used on this build");
+        assert!(err.to_string().contains("network interface"), "{err}");
     }
 
     // --- NetworkBandwidthTester tests ---
@@ -1188,14 +1238,15 @@ mod tests {
         assert!((tester.upload_bandwidth - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: 950/980 Mbps used to be reported without contacting a peer.
     #[test]
     fn test_network_bandwidth_test() {
         let mut tester = NetworkBandwidthTester::new();
-        let result = tester.test_comprehensive_bandwidth();
-        assert!(result.is_ok());
-        let (upload, download) = result.expect("should succeed");
-        assert!(upload > 0.0);
-        assert!(download > 0.0);
+        let err = tester
+            .test_comprehensive_bandwidth()
+            .expect_err("bandwidth needs a transfer against a peer");
+        assert!(err.to_string().contains("network bandwidth"), "{err}");
+        assert!((tester.upload_bandwidth - 0.0).abs() < 1e-9);
     }
 
     // --- NetworkLatencyTester tests ---
@@ -1206,15 +1257,14 @@ mod tests {
         assert!((tester.avg_latency - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: 1.5 ms latency, 0.3 ms jitter and 0.1% loss used to be
+    /// reported for a path over which no packet had been sent.
     #[test]
     fn test_network_latency_analyze() {
         let mut tester = NetworkLatencyTester::new();
-        let result = tester.analyze_comprehensive_latency();
-        assert!(result.is_ok());
-        let (lat, jitter, loss) = result.expect("should succeed");
-        assert!(lat > 0.0);
-        assert!(jitter > 0.0);
-        assert!(loss > 0.0 && loss < 1.0);
+        let err = tester.analyze_comprehensive_latency().expect_err("latency needs a probe");
+        assert!(err.to_string().contains("network latency"), "{err}");
+        assert!((tester.avg_latency - 0.0).abs() < 1e-9);
     }
 
     // --- MtuOptimizer tests ---
@@ -1235,11 +1285,15 @@ mod tests {
         assert_eq!(detector.model, "Unknown");
     }
 
+    /// Regression: this used to return the `Unknown` default as a detection
+    /// result, so "no GPU" and "never looked" were indistinguishable.
     #[test]
     fn test_gpu_vendor_detector_detect() {
         let mut detector = GpuVendorDetector::new();
-        let result = detector.detect_gpu_capabilities();
-        assert!(result.is_ok());
+        let err = detector
+            .detect_gpu_capabilities()
+            .expect_err("no GPU driver query is linked in");
+        assert!(err.to_string().contains("GPU vendor"), "{err}");
     }
 
     // --- GpuVendor tests ---
@@ -1273,13 +1327,16 @@ mod tests {
         assert_eq!(tester.available_memory, 0);
     }
 
+    /// Regression: a 12 GiB device with 10 GiB free at 600 GB/s used to be
+    /// reported on every host, GPU or not.
     #[test]
     fn test_gpu_memory_tester_test() {
         let mut tester = GpuMemoryTester::new();
-        let result = tester.test_comprehensive_memory_performance();
-        assert!(result.is_ok());
-        let perf = result.expect("should succeed");
-        assert!(perf.bandwidth_gbps > 0.0);
+        let err = tester
+            .test_comprehensive_memory_performance()
+            .expect_err("no GPU driver query is linked in");
+        assert!(err.to_string().contains("GPU memory"), "{err}");
+        assert_eq!(tester.total_memory, 0);
     }
 
     // --- GpuKernelAnalyzer tests ---
@@ -1291,14 +1348,16 @@ mod tests {
         assert!((analyzer.occupancy - 0.0).abs() < 1e-9);
     }
 
+    /// Regression: an 85%-occupancy analysis of a kernel named
+    /// `"default_kernel"` used to be returned without any kernel being run.
     #[test]
     fn test_gpu_kernel_analyzer_analyze() {
         let mut analyzer = GpuKernelAnalyzer::new();
-        let result = analyzer.analyze_kernel_performance();
-        assert!(result.is_ok());
-        let analysis = result.expect("should succeed");
-        assert!(analysis.execution_time_ms > 0.0);
-        assert!(analysis.occupancy > 0.0);
+        let err = analyzer
+            .analyze_kernel_performance()
+            .expect_err("no GPU kernel is launched on this build");
+        assert!(err.to_string().contains("GPU kernel"), "{err}");
+        assert!((analyzer.occupancy - 0.0).abs() < 1e-9);
     }
 
     // --- GpuVendorOptimizations tests ---

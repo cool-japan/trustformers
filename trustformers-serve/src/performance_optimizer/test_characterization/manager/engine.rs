@@ -58,8 +58,6 @@ pub struct TestCharacterizationEngine {
     analysis_orchestrator: Arc<AnalysisOrchestrator>,
     /// Component manager for lifecycle control
     component_manager: Arc<ComponentManager>,
-    /// Results synthesizer for result integration
-    results_synthesizer: Arc<ResultsSynthesizer>,
     /// Cache coordinator for coordinated caching
     cache_coordinator: Arc<CacheCoordinator>,
     /// Configuration manager for centralized configuration
@@ -265,7 +263,6 @@ impl TestCharacterizationEngine {
         let engine = Self {
             analysis_orchestrator,
             component_manager,
-            results_synthesizer,
             cache_coordinator,
             configuration_manager,
             analysis_scheduler,
@@ -393,13 +390,15 @@ impl TestCharacterizationEngine {
 
     /// Start real-time profiling for a test
     ///
+    /// Starts the sampling loops and opens a monitoring session for `test_id`.
+    ///
     /// # Arguments
     ///
     /// * `test_id` - Identifier of the test to profile
     ///
     /// # Returns
     ///
-    /// Profile session ID for tracking
+    /// Profile session ID for tracking (equal to `test_id`)
     ///
     /// # Errors
     ///
@@ -412,11 +411,13 @@ impl TestCharacterizationEngine {
 
         info!("Starting real-time profiling for test: {}", test_id);
 
-        self.component_manager.get_real_time_profiler().start_profiling(test_id)?;
+        let profiler = self.component_manager.get_real_time_profiler();
+        profiler.start_profiling().await?;
+        profiler.monitor_test_execution(test_id).await?;
         Ok(test_id.to_string())
     }
 
-    /// Stop real-time profiling and get results
+    /// Stop real-time profiling and read back what it measured
     ///
     /// # Arguments
     ///
@@ -424,17 +425,27 @@ impl TestCharacterizationEngine {
     ///
     /// # Returns
     ///
-    /// Test characteristics from real-time profiling
+    /// The sampling counters the profiler accumulated while it ran.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This used to return `Ok(TestCharacteristics::default())` — an
+    /// all-zero characterisation — after calling a `stop_profiling` that was
+    /// itself a `Ok(())` no-op. The real profiler produces
+    /// [`ProfilingStatistics`], never test characteristics, so that is what
+    /// this now returns.
     ///
     /// # Errors
     ///
     /// Returns an error if profiling cannot be stopped
     #[instrument(skip(self))]
-    pub async fn stop_real_time_profiling(&self, profile_id: &str) -> Result<TestCharacteristics> {
+    pub async fn stop_real_time_profiling(&self, profile_id: &str) -> Result<ProfilingStatistics> {
         info!("Stopping real-time profiling: {}", profile_id);
 
-        self.component_manager.get_real_time_profiler().stop_profiling(profile_id)?;
-        Ok(TestCharacteristics::default())
+        let profiler = self.component_manager.get_real_time_profiler();
+        let statistics = profiler.get_profiling_statistics().await?;
+        profiler.stop_profiling().await?;
+        Ok(statistics)
     }
 
     /// Generate comprehensive analysis report

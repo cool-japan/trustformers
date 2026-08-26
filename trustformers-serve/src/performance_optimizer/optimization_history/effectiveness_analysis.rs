@@ -31,8 +31,6 @@ pub struct EffectivenessAnalyzer {
     analysis_cache: Arc<RwLock<HashMap<String, EffectivenessAnalysisResult>>>,
     /// Configuration
     config: Arc<RwLock<EffectivenessAnalysisConfig>>,
-    /// Historical cost data
-    cost_history: Arc<RwLock<HashMap<String, Vec<CostRecord>>>>,
 }
 
 impl EffectivenessAnalyzer {
@@ -43,7 +41,6 @@ impl EffectivenessAnalyzer {
             cost_calculators: Arc::new(Mutex::new(Vec::new())),
             analysis_cache: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(EffectivenessAnalysisConfig::default())),
-            cost_history: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Initialize default calculators
@@ -59,7 +56,6 @@ impl EffectivenessAnalyzer {
             cost_calculators: Arc::new(Mutex::new(Vec::new())),
             analysis_cache: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
-            cost_history: Arc::new(RwLock::new(HashMap::new())),
         };
 
         analyzer.initialize_default_calculators();

@@ -46,8 +46,10 @@
 //! let config = MathSpecializedConfig::math_llama_7b();
 //! let mut model = MathSpecializedForCausalLM::new(config)?;
 //!
-//! // Solve a mathematical problem
-//! let problem = "Find the derivative of f(x) = x^2 + 3x + 1";
+//! // Solve a mathematical problem: `solve_step_by_step` runs a real
+//! // recursive-descent evaluator, so this actually computes `x = 4`
+//! // (with exact rational arithmetic) rather than returning canned text.
+//! let problem = "2*x + 3 = 11";
 //! let solution = model.solve_step_by_step(problem)?;
 //! # let _ = solution;
 //! # Ok(())
@@ -55,12 +57,14 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use trustformers_core::errors::{invalid_config, Result};
+use trustformers_core::errors::{invalid_config, not_implemented, Result};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::{Config, Layer, Model};
 
 #[cfg(feature = "llama")]
 use crate::llama::{LlamaConfig, LlamaModel};
+
+mod evaluator;
 
 /// Configuration for mathematics-specialized models
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -773,29 +777,48 @@ impl MathSpecializedForCausalLM {
         Self::new(config)
     }
 
-    /// Solve a mathematical problem step-by-step (placeholder implementation)
-    pub fn solve_step_by_step(&mut self, _problem: &str) -> Result<String> {
-        // This is a placeholder implementation
-        // In a real implementation, this would:
-        // 1. Parse the mathematical problem
-        // 2. Apply appropriate reasoning strategies
-        // 3. Generate step-by-step solution
-        // 4. Verify each step
-        // 5. Format the final solution
-
-        Ok("Step-by-step solution would be generated here".to_string())
+    /// Solve a mathematical problem step-by-step using a real
+    /// recursive-descent expression evaluator (see `evaluator`).
+    ///
+    /// Two problem shapes are actually solved, with every number in the
+    /// output computed rather than templated:
+    ///
+    /// * A closed-form arithmetic expression (e.g. `"2 + 3 * 4"`) is
+    ///   evaluated with one step shown per operation.
+    /// * A single-variable *linear* equation (e.g. `"2*x + 3 = 11"`) is
+    ///   solved exactly with exact rational arithmetic.
+    ///
+    /// Anything else (multi-variable systems, non-linear equations,
+    /// calculus, free-form word problems) returns an honest error naming
+    /// why, rather than the previous hardcoded
+    /// `"Step-by-step solution would be generated here"`.
+    pub fn solve_step_by_step(&mut self, problem: &str) -> Result<String> {
+        evaluator::solve_step_by_step_text(problem)
     }
 
-    /// Generate mathematical proof (placeholder implementation)
+    /// Automated theorem proving is not implemented. This returns a
+    /// structured [`TrustformersError::NotImplemented`](trustformers_core::errors::TrustformersError)
+    /// naming the missing capability instead of the previous hardcoded
+    /// `"Mathematical proof would be generated here"`, so callers cannot
+    /// mistake a placeholder string for a real proof (or its absence).
     pub fn generate_proof(&mut self, _theorem: &str) -> Result<String> {
-        // Placeholder for proof generation
-        Ok("Mathematical proof would be generated here".to_string())
+        Err(not_implemented(
+            "MathSpecializedForCausalLM::generate_proof: automated theorem proving is not \
+             implemented. evaluate_expression/solve_step_by_step support closed-form \
+             arithmetic and single-variable linear equations; proving general theorems \
+             would require a real proof kernel (e.g. a tactic engine or SAT/SMT backend), \
+             which is out of scope here.",
+        ))
     }
 
-    /// Evaluate mathematical expression (placeholder implementation)
-    pub fn evaluate_expression(&mut self, _expression: &str) -> Result<String> {
-        // Placeholder for expression evaluation
-        Ok("Expression evaluation would be performed here".to_string())
+    /// Evaluate a closed-form arithmetic/algebraic expression with a real
+    /// recursive-descent parser (`+ - * / ^`, parentheses), using exact
+    /// rational arithmetic wherever the operations stay exact. Returns an
+    /// error - never a fabricated number - for malformed input, division by
+    /// zero, or an expression containing an unbound variable, instead of the
+    /// previous hardcoded `"Expression evaluation would be performed here"`.
+    pub fn evaluate_expression(&mut self, expression: &str) -> Result<String> {
+        evaluator::evaluate_to_string(expression)
     }
 }
 
@@ -1110,5 +1133,114 @@ mod tests {
         assert_eq!(config.model_variant, MathModelVariant::CodeT5Math);
         assert!(config.symbolic_computation);
         assert!(config.supports_domain(&MathDomain::ComputerScience));
+    }
+
+    /// A tiny configuration for fast model-construction tests.
+    fn tiny_math_config() -> MathSpecializedConfig {
+        MathSpecializedConfig {
+            base_config: LlamaConfig {
+                vocab_size: 256,
+                hidden_size: 32,
+                intermediate_size: 64,
+                num_hidden_layers: 1,
+                num_attention_heads: 4,
+                max_position_embeddings: 64,
+                ..LlamaConfig::default()
+            },
+            math_vocab_size: None,
+            math_context_length: 64,
+            ..MathSpecializedConfig::default()
+        }
+    }
+
+    // ---- Regression tests for the "literal placeholder sentence" bug ----
+    //
+    // Every one of these would have failed against the old implementation,
+    // which returned a fixed, input-independent string
+    // ("Step-by-step solution would be generated here" /
+    // "Mathematical proof would be generated here" /
+    // "Expression evaluation would be performed here") regardless of input.
+
+    #[test]
+    fn evaluate_expression_computes_a_real_numeric_result() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        let result = model.evaluate_expression("2 + 3 * 4").expect("evaluate");
+        assert_eq!(result, "14");
+        assert_ne!(result, "Expression evaluation would be performed here");
+
+        let result2 = model.evaluate_expression("(2 + 3) * 4").expect("evaluate");
+        assert_eq!(result2, "20");
+        assert_ne!(
+            result, result2,
+            "different expressions must produce different results, not a fixed placeholder"
+        );
+    }
+
+    #[test]
+    fn evaluate_expression_keeps_exact_rational_results() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        assert_eq!(model.evaluate_expression("1 / 3").expect("evaluate"), "1/3");
+        assert_eq!(
+            model.evaluate_expression("2 ^ 10").expect("evaluate"),
+            "1024"
+        );
+    }
+
+    #[test]
+    fn evaluate_expression_errors_on_malformed_input_instead_of_fabricating() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        assert!(model.evaluate_expression("2 + ").is_err());
+        assert!(model.evaluate_expression("1 / 0").is_err());
+        assert!(model.evaluate_expression("not math at all").is_err());
+    }
+
+    #[test]
+    fn solve_step_by_step_solves_a_real_linear_equation() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        let solution = model.solve_step_by_step("2*x + 3 = 11").expect("solve");
+        assert!(solution.contains("x = 4"), "got: {solution}");
+        assert_ne!(solution, "Step-by-step solution would be generated here");
+
+        let solution2 = model.solve_step_by_step("5*x - 1 = 19").expect("solve");
+        assert!(solution2.contains("x = 4"), "got: {solution2}");
+        assert_ne!(
+            solution, solution2,
+            "different problems that happen to share an answer must still show different work"
+        );
+    }
+
+    #[test]
+    fn solve_step_by_step_shows_real_computed_steps_for_plain_arithmetic() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        let solution = model.solve_step_by_step("2 + 3 * 4").expect("solve");
+        assert!(solution.contains("14"), "got: {solution}");
+    }
+
+    #[test]
+    fn solve_step_by_step_refuses_nonlinear_equations_honestly() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        assert!(
+            model.solve_step_by_step("x^2 = 4").is_err(),
+            "a non-linear equation must not silently get a fabricated linear-style answer"
+        );
+    }
+
+    #[test]
+    fn generate_proof_returns_an_honest_not_implemented_error() {
+        let mut model =
+            MathSpecializedForCausalLM::new(tiny_math_config()).expect("model construction");
+        let result = model.generate_proof("For all n, n + 0 = n");
+        assert!(
+            result.is_err(),
+            "theorem proving is not implemented and must not return a fabricated proof"
+        );
+        let message = format!("{}", result.expect_err("checked above"));
+        assert_ne!(message, "Mathematical proof would be generated here");
     }
 }

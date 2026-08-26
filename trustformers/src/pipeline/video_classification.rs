@@ -1,10 +1,20 @@
 //! # Video Classification Pipeline
 //!
-//! VideoMAE / TimeSformer-compatible video clip classification.
+//! ## What is real here
 //!
-//! ## Supported model families
-//! - **VideoMAE** (MCG-NJU/videomae-base-finetuned-kinetics)
-//! - **TimeSformer** — divide-and-conquer space-time attention
+//! [`VideoClip`] validation and the frame-sampling strategies
+//! ([`FrameSamplingStrategy::Uniform`], `Random`, `Dense`, `TSN`) — real
+//! temporal index arithmetic that works on any clip — plus
+//! [`VideoClassificationPipeline::rank_logits`], which softmaxes and ranks a
+//! model's own logits.
+//!
+//! ## Model support
+//!
+//! No video backbone (VideoMAE, TimeSformer, …) is implemented in
+//! `trustformers-models`, so [`VideoClassificationPipeline::classify`] returns
+//! [`VideoError::UnsupportedModel`] instead of the label it used to pick from
+//! the clip's mean pixel value — alongside an `inference_time_ms` of
+//! `frames * 2` that was never measured.
 //!
 //! ## Example
 //!
@@ -17,7 +27,9 @@
 //! let pipeline = VideoClassificationPipeline::new(config)?;
 //! let frames = vec![vec![0.5f32; 224 * 224 * 3]; 16];
 //! let clip = VideoClip::new(frames, 224, 224, 25.0)?;
-//! let result = pipeline.classify(&clip)?;
+//! // Real sampling, then your own model, then real ranking:
+//! let sampled = clip.sample_frames(16, &FrameSamplingStrategy::Uniform);
+//! let result = pipeline.rank_logits(&my_logits, sampled.len(), None)?;
 //! println!("Top label: {} ({:.2})", result.label, result.score);
 //! ```
 
@@ -40,7 +52,27 @@ pub enum VideoError {
     NotEnoughFrames { need: usize, have: usize },
     #[error("Model error: {0}")]
     ModelError(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    #[error(
+        "no real video classification model is implemented for `{requested}`; supported: \
+         {supported}. This pipeline never returns synthesised labels — use `rank_logits` with \
+         your own model's output."
+    )]
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
+    /// The supplied logits do not match the configured label set.
+    #[error("expected {expected} logits (one per label) but got {got}")]
+    LogitCountMismatch { expected: usize, got: usize },
 }
+
+/// Video architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // Frame sampling strategy
@@ -272,11 +304,18 @@ impl VideoClassificationPipeline {
         Ok(Self { config })
     }
 
+    /// Access the pipeline configuration.
+    pub fn config(&self) -> &VideoClassificationConfig {
+        &self.config
+    }
+
     /// Classify a [`VideoClip`].
     ///
-    /// 1. Sample `num_frames` from the clip using the configured strategy.
-    /// 2. Compute a mock classification from the mean pixel value.
-    /// 3. Return top-K scores, sorted by descending confidence.
+    /// # Errors
+    ///
+    /// [`VideoError::EmptyVideo`] for an empty clip, otherwise
+    /// [`VideoError::UnsupportedModel`]: no video backbone is implemented and
+    /// this pipeline will not invent a label.
     pub fn classify(&self, video: &VideoClip) -> Result<VideoClassificationResult, VideoError> {
         if video.frames.is_empty() {
             return Err(VideoError::EmptyVideo);
@@ -286,6 +325,10 @@ impl VideoClassificationPipeline {
     }
 
     /// Classify from pre-extracted frames.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::classify`].
     pub fn classify_frames(
         &self,
         frames: &[Vec<f32>],
@@ -293,23 +336,46 @@ impl VideoClassificationPipeline {
         if frames.is_empty() {
             return Err(VideoError::EmptyVideo);
         }
+        Err(VideoError::UnsupportedModel {
+            requested: self.config.model_name.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no video backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
+    }
 
+    /// Softmax and rank a model's own logits into a classification result.
+    ///
+    /// `inference_time_ms` is the caller's measured duration, or `None` when
+    /// unknown — it is reported as `0` in that case rather than estimated.
+    ///
+    /// # Errors
+    ///
+    /// [`VideoError::LogitCountMismatch`] when `logits.len()` differs from the
+    /// configured label count.
+    pub fn rank_logits(
+        &self,
+        logits: &[f32],
+        frames_processed: usize,
+        inference_time_ms: Option<u64>,
+    ) -> Result<VideoClassificationResult, VideoError> {
         let num_classes = self.config.labels.len();
-        let frames_processed = frames.len();
+        if logits.len() != num_classes {
+            return Err(VideoError::LogitCountMismatch {
+                expected: num_classes,
+                got: logits.len(),
+            });
+        }
 
-        // Mock: derive label index from mean pixel value across all frames.
-        let total_pixels: usize = frames.iter().map(|f| f.len()).sum();
-        let pixel_sum: f32 = frames.iter().flat_map(|f| f.iter()).sum();
-        let mean_pixel = if total_pixels > 0 { pixel_sum / total_pixels as f32 } else { 0.0 };
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut scores: Vec<f32> = logits.iter().map(|&l| (l - max_logit).exp()).collect();
+        let sum: f32 = scores.iter().sum();
+        if sum > 0.0 {
+            scores.iter_mut().for_each(|s| *s /= sum);
+        }
 
-        // Clamp to [0, 1] range for label indexing.
-        let clamped = mean_pixel.clamp(0.0, 1.0 - f32::EPSILON);
-        let top1_idx = ((clamped * num_classes as f32) as usize).min(num_classes - 1);
-
-        // Generate deterministic softmax-like scores.
-        let scores = mock_scores(top1_idx, num_classes, mean_pixel);
-
-        // Build top-k list sorted by score descending.
         let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -330,7 +396,7 @@ impl VideoClassificationPipeline {
             score,
             top_labels,
             frames_processed,
-            inference_time_ms: frames_processed as u64 * 2, // 2 ms per frame mock
+            inference_time_ms: inference_time_ms.unwrap_or(0),
         })
     }
 
@@ -634,28 +700,6 @@ fn random_indices(total: usize, count: usize, seed: u64) -> Vec<usize> {
     indices
 }
 
-/// Generate a mock score distribution (softmax-like) that peaks at `top_idx`.
-fn mock_scores(top_idx: usize, num_classes: usize, mean_pixel: f32) -> Vec<f32> {
-    // Use a simple temperature-scaled exponential centred on top_idx.
-    let temperature = 2.0_f32;
-    let mut logits: Vec<f32> = (0..num_classes)
-        .map(|i| {
-            let dist = (i as f32 - top_idx as f32).abs();
-            // Add a tiny pixel-based perturbation to make scores vary.
-            -(dist * temperature) + mean_pixel * 0.1
-        })
-        .collect();
-
-    // Softmax.
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    logits.iter_mut().for_each(|l| *l = (*l - max_logit).exp());
-    let sum: f32 = logits.iter().sum();
-    if sum > 0.0 {
-        logits.iter_mut().for_each(|l| *l /= sum);
-    }
-    logits
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -781,68 +825,87 @@ mod tests {
 
     // --- VideoClassificationPipeline::classify ---
 
-    #[test]
-    fn test_classify_result_has_labels() {
-        let pipeline = default_pipeline();
-        let clip = make_clip(20, 4, 4);
-        let result = pipeline.classify(&clip).expect("ok");
-        assert!(!result.label.is_empty(), "label should not be empty");
-        assert!(
-            !result.top_labels.is_empty(),
-            "top_labels should not be empty"
-        );
-    }
-
-    // --- VideoClassificationPipeline::classify_frames ---
-
-    #[test]
-    fn test_classify_frames_basic() {
-        let pipeline = default_pipeline();
-        let frames = vec![vec![0.5f32; 4 * 4 * 3]; 4];
-        let result = pipeline.classify_frames(&frames).expect("ok");
-        assert_eq!(result.frames_processed, 4);
-        assert!(result.score > 0.0);
-    }
-
-    // --- VideoClassificationPipeline::classify_batch ---
-
-    #[test]
-    fn test_classify_batch_count() {
-        let pipeline = default_pipeline();
-        let clip1 = make_clip(8, 4, 4);
-        let clip2 = make_clip(16, 4, 4);
-        let clip3 = make_clip(12, 4, 4);
-        let batch: Vec<&VideoClip> = vec![&clip1, &clip2, &clip3];
-        let results = pipeline.classify_batch(&batch).expect("ok");
-        assert_eq!(results.len(), 3);
-    }
-
-    // --- VideoClassificationResult::top_k ---
-
-    #[test]
-    fn test_top_k_result_ordering() {
-        let pipeline = default_pipeline();
-        let clip = make_clip(16, 4, 4);
-        let result = pipeline.classify(&clip).expect("ok");
-        // top_labels should be sorted descending.
-        let scores: Vec<f32> = result.top_labels.iter().map(|(_, s)| *s).collect();
-        for window in scores.windows(2) {
-            assert!(
-                window[0] >= window[1],
-                "top_labels should be sorted descending: {} < {}",
-                window[0],
-                window[1]
-            );
+    fn assert_unsupported(err: &VideoError) {
+        match err {
+            VideoError::UnsupportedModel { supported, .. } => {
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_top_k_limits_results() {
+    fn test_classify_reports_unsupported_model() {
+        // Regression: `classify` used to pick a label from the clip's mean
+        // pixel value and report `inference_time_ms = frames * 2`.
         let pipeline = default_pipeline();
-        let clip = make_clip(16, 4, 4);
-        let result = pipeline.classify(&clip).expect("ok");
-        let top3 = result.top_k(3);
-        assert!(top3.len() <= 3);
+        let clip = make_clip(20, 4, 4);
+        assert_unsupported(&pipeline.classify(&clip).expect_err("no backbone"));
+    }
+
+    #[test]
+    fn test_classify_frames_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let frames = vec![vec![0.5f32; 4 * 4 * 3]; 4];
+        assert_unsupported(&pipeline.classify_frames(&frames).expect_err("no backbone"));
+    }
+
+    #[test]
+    fn test_classify_batch_reports_unsupported_model() {
+        let pipeline = default_pipeline();
+        let clip1 = make_clip(8, 4, 4);
+        let clip2 = make_clip(16, 4, 4);
+        let batch: Vec<&VideoClip> = vec![&clip1, &clip2];
+        assert_unsupported(&pipeline.classify_batch(&batch).expect_err("no backbone"));
+    }
+
+    // --- Real post-processing over a model's own logits ---
+
+    #[test]
+    fn test_rank_logits_orders_descending_and_normalises() {
+        let pipeline = default_pipeline();
+        let n = pipeline.config().labels.len();
+        let mut logits = vec![0.0f32; n];
+        logits[2] = 5.0;
+        logits[1] = 3.0;
+        let result = pipeline.rank_logits(&logits, 16, None).expect("rank");
+        assert_eq!(result.label, pipeline.config().labels[2]);
+        assert_eq!(result.frames_processed, 16);
+        assert_eq!(
+            result.inference_time_ms, 0,
+            "timing must not be invented when the caller did not measure it"
+        );
+        let scores: Vec<f32> = result.top_labels.iter().map(|(_, s)| *s).collect();
+        for window in scores.windows(2) {
+            assert!(window[0] >= window[1], "must be sorted descending");
+        }
+        let sum: f32 = scores.iter().sum();
+        assert!(sum > 0.0 && sum <= 1.0 + 1e-4, "probability sum: {sum}");
+    }
+
+    #[test]
+    fn test_rank_logits_reports_caller_measured_time() {
+        let pipeline = default_pipeline();
+        let n = pipeline.config().labels.len();
+        let result = pipeline.rank_logits(&vec![0.0f32; n], 8, Some(37)).expect("rank");
+        assert_eq!(result.inference_time_ms, 37);
+    }
+
+    #[test]
+    fn test_rank_logits_rejects_length_mismatch() {
+        let pipeline = default_pipeline();
+        assert!(matches!(
+            pipeline.rank_logits(&[1.0, 2.0], 4, None),
+            Err(VideoError::LogitCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_rank_logits_top_k_limits_results() {
+        let pipeline = default_pipeline();
+        let n = pipeline.config().labels.len();
+        let result = pipeline.rank_logits(&vec![0.0f32; n], 4, None).expect("rank");
+        assert!(result.top_k(3).len() <= 3);
     }
 
     // --- Empty video error ---
@@ -901,21 +964,6 @@ mod tests {
     }
 
     // --- Scores sum to approximately 1.0 ---
-
-    #[test]
-    fn test_scores_sum_to_one() {
-        let pipeline = default_pipeline();
-        let clip = make_clip(16, 4, 4);
-        let result = pipeline.classify(&clip).expect("ok");
-        // All labels' scores (not just top-k) should sum to ~1.0.
-        // We can only check top_labels here; verify they're valid probabilities.
-        let sum: f32 = result.top_labels.iter().map(|(_, s)| *s).sum();
-        // Sum of top-k probabilities must be in (0, 1].
-        assert!(
-            sum > 0.0 && sum <= 1.0 + 1e-4,
-            "probability sum out of range: {sum}"
-        );
-    }
 
     // ── VideoFrame ────────────────────────────────────────────────────────────
 

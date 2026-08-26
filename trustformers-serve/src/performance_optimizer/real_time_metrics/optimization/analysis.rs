@@ -3,10 +3,10 @@
 //! Continuous analysis of performance data to support optimization decision-making
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -268,18 +268,7 @@ impl Clone for RealTimeAnalyzer {
 /// Performance analysis algorithm
 ///
 /// Analyzes current performance metrics and identifies optimization opportunities.
-pub struct PerformanceAnalysisAlgorithm {
-    analysis_history: VecDeque<PerformanceAnalysisRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct PerformanceAnalysisRecord {
-    timestamp: DateTime<Utc>,
-    cpu_efficiency: f32,
-    memory_efficiency: f32,
-    throughput_score: f32,
-    latency_score: f32,
-}
+pub struct PerformanceAnalysisAlgorithm {}
 
 impl Default for PerformanceAnalysisAlgorithm {
     fn default() -> Self {
@@ -289,9 +278,7 @@ impl Default for PerformanceAnalysisAlgorithm {
 
 impl PerformanceAnalysisAlgorithm {
     pub fn new() -> Self {
-        Self {
-            analysis_history: VecDeque::new(),
-        }
+        Self {}
     }
 
     fn calculate_performance_scores(&self, metrics: &RealTimeMetrics) -> (f32, f32, f32, f32) {
@@ -388,18 +375,7 @@ impl RealTimeAnalysisAlgorithm for PerformanceAnalysisAlgorithm {
 /// Trend analysis algorithm
 ///
 /// Analyzes performance trends over time to identify patterns and predict future behavior.
-pub struct TrendAnalysisAlgorithm {
-    trend_history: VecDeque<TrendDataPoint>,
-}
-
-#[derive(Debug, Clone)]
-struct TrendDataPoint {
-    timestamp: DateTime<Utc>,
-    cpu_trend: f32,
-    memory_trend: f32,
-    throughput_trend: f32,
-    latency_trend: f32,
-}
+pub struct TrendAnalysisAlgorithm {}
 
 impl Default for TrendAnalysisAlgorithm {
     fn default() -> Self {
@@ -409,9 +385,7 @@ impl Default for TrendAnalysisAlgorithm {
 
 impl TrendAnalysisAlgorithm {
     pub fn new() -> Self {
-        Self {
-            trend_history: VecDeque::new(),
-        }
+        Self {}
     }
 
     fn calculate_trends(&self, history: &[TimestampedMetrics]) -> (f32, f32, f32, f32) {
@@ -508,17 +482,7 @@ impl RealTimeAnalysisAlgorithm for TrendAnalysisAlgorithm {
 /// Bottleneck analysis algorithm
 ///
 /// Identifies performance bottlenecks and resource constraints in the system.
-pub struct BottleneckAnalysisAlgorithm {
-    bottleneck_history: VecDeque<BottleneckRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct BottleneckRecord {
-    timestamp: DateTime<Utc>,
-    bottleneck_type: BottleneckType,
-    severity: f32,
-    resolution_suggested: String,
-}
+pub struct BottleneckAnalysisAlgorithm {}
 
 #[derive(Debug, Clone)]
 enum BottleneckType {
@@ -526,8 +490,6 @@ enum BottleneckType {
     Memory,
     IO,
     Network,
-    Concurrency,
-    Unknown,
 }
 
 impl Default for BottleneckAnalysisAlgorithm {
@@ -538,9 +500,7 @@ impl Default for BottleneckAnalysisAlgorithm {
 
 impl BottleneckAnalysisAlgorithm {
     pub fn new() -> Self {
-        Self {
-            bottleneck_history: VecDeque::new(),
-        }
+        Self {}
     }
 
     fn identify_bottlenecks(&self, metrics: &RealTimeMetrics) -> Vec<(BottleneckType, f32)> {
@@ -602,17 +562,6 @@ impl BottleneckAnalysisAlgorithm {
                         "Network bottleneck detected (severity: {:.1}%) - Optimize network usage or improve bandwidth",
                         severity * 100.0
                     ));
-                },
-                BottleneckType::Concurrency => {
-                    recommendations.push(format!(
-                        "Concurrency bottleneck detected (severity: {:.1}%) - Optimize thread usage or reduce contention",
-                        severity * 100.0
-                    ));
-                },
-                BottleneckType::Unknown => {
-                    recommendations.push(
-                        "Unknown bottleneck detected - perform detailed profiling".to_string(),
-                    );
                 },
             }
         }
@@ -680,14 +629,10 @@ impl RealTimeAnalysisAlgorithm for BottleneckAnalysisAlgorithm {
 /// Predictive analysis algorithm
 ///
 /// Uses historical data to predict future performance trends and potential issues.
-pub struct PredictiveAnalysisAlgorithm {
-    prediction_history: VecDeque<PredictionRecord>,
-    model_coefficients: HashMap<String, f32>,
-}
+pub struct PredictiveAnalysisAlgorithm {}
 
 #[derive(Debug, Clone)]
 struct PredictionRecord {
-    timestamp: DateTime<Utc>,
     predicted_cpu: f32,
     predicted_memory: f32,
     predicted_throughput: f64,
@@ -703,18 +648,12 @@ impl Default for PredictiveAnalysisAlgorithm {
 
 impl PredictiveAnalysisAlgorithm {
     pub fn new() -> Self {
-        let mut coefficients = HashMap::new();
-
-        // Simple linear model coefficients (would be trained in a real implementation)
-        coefficients.insert("cpu_trend".to_string(), 0.7);
-        coefficients.insert("memory_trend".to_string(), 0.8);
-        coefficients.insert("throughput_trend".to_string(), 0.6);
-        coefficients.insert("latency_trend".to_string(), 0.9);
-
-        Self {
-            prediction_history: VecDeque::new(),
-            model_coefficients: coefficients,
-        }
+        // Removed in 0.2.1: this constructor used to build a `coefficients` map
+        // of four invented "trained" weights (0.7/0.8/0.6/0.9) and then drop it
+        // on the floor -- `PredictiveAnalysisAlgorithm` has no fields, so the
+        // map could never reach the prediction path. Prediction is done by
+        // `calculate_trend` over the observed history instead.
+        Self {}
     }
 
     fn predict_future_metrics(&self, history: &[TimestampedMetrics]) -> Option<PredictionRecord> {
@@ -767,7 +706,6 @@ impl PredictiveAnalysisAlgorithm {
         let confidence = self.calculate_prediction_confidence(history);
 
         Some(PredictionRecord {
-            timestamp: Utc::now(),
             predicted_cpu,
             predicted_memory,
             predicted_throughput,

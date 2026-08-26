@@ -9,27 +9,6 @@ use std::time::Duration;
 use super::*;
 use crate::performance_optimizer::test_characterization::types::quality::SafetyValidationRule;
 
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self.state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        self.state
-    }
-
-    fn next_f64(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
-
 #[test]
 fn test_algorithm_selector_default() {
     let selector = AlgorithmSelector::default();
@@ -91,12 +70,7 @@ fn test_test_characteristics_from_test_data() {
     let ri = ResourceIntensity::default();
     let cr = ConcurrencyRequirements::default();
     let sr = SynchronizationRequirements::default();
-    let tc = TestCharacteristics::from_test_data(
-        "test_001".to_string(),
-        ri,
-        cr,
-        sr,
-    );
+    let tc = TestCharacteristics::from_test_data("test_001".to_string(), ri, cr, sr);
     assert_eq!(tc.test_id, "test_001");
     assert!(tc.synchronization_dependencies.is_empty());
     assert!(tc.performance_patterns.is_empty());
@@ -109,21 +83,6 @@ fn test_test_execution_data_default() {
     assert!(data.resource_access_patterns.is_empty());
     assert!(data.thread_interactions.is_empty());
     assert!(data.system_snapshots.is_empty());
-}
-
-#[test]
-fn test_test_pattern_recognition_engine_new() {
-    let engine = TestPatternRecognitionEngine::new();
-    assert!(engine.enabled);
-    assert!((engine.confidence_threshold - 0.8).abs() < 1e-9);
-    assert_eq!(engine.algorithms.len(), 1);
-    assert_eq!(engine.history.total_recognitions, 0);
-}
-
-#[test]
-fn test_test_pattern_recognition_engine_default() {
-    let engine = TestPatternRecognitionEngine::default();
-    assert!(engine.enabled);
 }
 
 #[test]
@@ -293,52 +252,52 @@ fn test_resolution_action_construction() {
     assert_eq!(action.success_criteria.len(), 1);
 }
 
+/// Regression: `PredictionModel::predict` used to return its input unchanged.
+///
+/// `RealTimeTrendAnalyzer::predict_future_performance` fed it a metric's
+/// historical series and took `prediction.first()`, so the "forecast" was the
+/// oldest sample already on record — published with a confidence score and a
+/// `prediction_method: "statistical_ml"` label. The model holds no
+/// coefficients, so it now says it cannot predict.
 #[test]
-fn test_prediction_model_predict() {
+fn test_prediction_model_predict_reports_it_has_no_parameters() {
     let model = PredictionModel {
         model_type: "linear".to_string(),
         accuracy: 0.9,
         trained_at: chrono::Utc::now(),
     };
     let input = vec![1.0, 2.0, 3.0];
-    let result = model.predict(&input);
-    match result {
-        Ok(output) => assert_eq!(output.len(), 3),
-        Err(_) => panic!("predict should not fail"),
-    }
+    let err = model.predict(&input).expect_err("a model with no parameters cannot predict");
+    let message = err.to_string();
+    assert!(message.contains("linear"), "{message}");
+    assert!(message.contains("no trained parameters"), "{message}");
 }
 
+/// Regression: `train_with_data` used to stamp `trained_at` and report success
+/// while `PredictionModel` has nowhere to store what was learned.
 #[test]
-fn test_producer_consumer_detection_default() {
-    let detection = ProducerConsumerDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.producer_count, 0);
-    assert_eq!(detection.consumer_count, 0);
+fn test_prediction_model_train_reports_it_has_no_storage() {
+    let mut model = PredictionModel {
+        model_type: "linear".to_string(),
+        accuracy: 0.9,
+        trained_at: chrono::Utc::now(),
+    };
+    let before = model.trained_at;
+    let err = model
+        .train_with_data(&[(vec![1.0], vec![2.0])])
+        .expect_err("a model with no parameter storage cannot be trained");
+    assert!(err.to_string().contains("no parameter storage"), "{err}");
+    assert_eq!(
+        model.trained_at, before,
+        "a failed train must not claim freshness"
+    );
 }
 
-#[test]
-fn test_master_worker_detection_default() {
-    let detection = MasterWorkerDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.master_count, 0);
-    assert_eq!(detection.worker_count, 0);
-}
-
-#[test]
-fn test_pipeline_detection_default() {
-    let detection = PipelineDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.stages, 0);
-    assert!((detection.throughput - 0.0).abs() < 1e-9);
-}
-
-#[test]
-fn test_fork_join_detection_default() {
-    let detection = ForkJoinDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.fork_points, 0);
-    assert_eq!(detection.join_points, 0);
-}
+// The four `*_detection_default` tests that stood here asserted that a freshly
+// constructed pattern detector had `detected == false` and zero counts -- i.e.
+// they locked in the state that made every detector answer "not detected"
+// forever. Detection is now a function of the execution data, the detectors
+// hold no state, and the real tests live in `pattern_algorithms_tests.rs`.
 
 #[test]
 fn test_priority_calculator_fields() {
@@ -422,11 +381,45 @@ fn test_isolation_safety_rule_validate() {
 }
 
 #[test]
-fn test_threshold_anomaly_detector_default() {
+fn test_threshold_anomaly_detector_flags_only_out_of_band_readings() {
+    use crate::performance_optimizer::test_characterization::types::analysis::{
+        AnomalyDetector, InsightObservations,
+    };
+    use crate::performance_optimizer::test_characterization::types::core::{
+        BaselineModel, RealTimeMetrics,
+    };
+
     let detector = ThresholdAnomalyDetector::default();
     assert!((detector.upper_threshold - 100.0).abs() < 1e-9);
     assert!((detector.lower_threshold - 0.0).abs() < 1e-9);
-    assert_eq!(detector.anomalies_detected, 0);
+
+    let baseline = BaselineModel::new();
+
+    // Nothing observed, nothing flagged.
+    assert!(detector
+        .detect_anomalies(InsightObservations::new(&[]), &baseline)
+        .expect("an empty window is a valid input")
+        .is_empty());
+
+    let mut inside = RealTimeMetrics::new();
+    inside.metrics.insert("queue_depth".to_string(), 50.0);
+    let mut above = RealTimeMetrics::new();
+    above.metrics.insert("queue_depth".to_string(), 150.0);
+    let mut below = RealTimeMetrics::new();
+    below.metrics.insert("queue_depth".to_string(), -25.0);
+    let samples = vec![inside, above, below];
+
+    let anomalies = detector
+        .detect_anomalies(InsightObservations::new(&samples), &baseline)
+        .expect("a populated window is a valid input");
+    assert_eq!(
+        anomalies.len(),
+        2,
+        "50.0 sits inside [0, 100] and must not be flagged"
+    );
+    assert!(anomalies
+        .iter()
+        .all(|a| a.affected_resources == vec!["queue_depth".to_string()]));
 }
 
 #[test]

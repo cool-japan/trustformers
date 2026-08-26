@@ -87,7 +87,7 @@ fn test_pytorch_compatibility() -> Result<(), TrustformersError> {
     println!("   ✅ PyTorch Adam: 10 steps in {:.2?}", pytorch_time);
 
     // Test state dict functionality
-    let state_dict = pytorch_adam.state_dict();
+    let state_dict = pytorch_adam.state_dict()?;
     println!("   📊 State dict keys: {}", state_dict.state.len());
 
     println!("✅ PyTorch compatibility validated");

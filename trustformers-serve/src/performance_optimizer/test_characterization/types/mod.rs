@@ -34,3 +34,17 @@ pub use reporting::*;
 pub use resources::functions::*;
 pub use resources::types::*;
 pub use resources::types_3::*;
+
+#[cfg(test)]
+mod data_management_tests;
+
+#[cfg(test)]
+mod locking_tests;
+
+#[cfg(test)]
+mod optimization_tests;
+#[cfg(test)]
+mod optimization_unit_tests;
+
+#[cfg(test)]
+mod resources_tests;

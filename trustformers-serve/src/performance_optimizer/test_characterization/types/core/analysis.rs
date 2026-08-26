@@ -10,7 +10,7 @@ use super::super::{
     analysis::{TrendAnalysis, TrendAnalysisAlgorithm, TrendDirection},
     quality::{QualityAssessment, ValidationResult},
 };
-use super::enums::TestCharacterizationResult;
+use super::enums::{TestCharacterizationError, TestCharacterizationResult};
 
 #[derive(Debug, Clone)]
 pub struct AccuracyRecord {
@@ -125,18 +125,80 @@ impl Default for ArimaTrendAnalyzer {
 }
 
 impl TrendAnalysisAlgorithm for ArimaTrendAnalyzer {
-    fn analyze_trend(&self, _data: &[(Instant, f64)]) -> TestCharacterizationResult<TrendAnalysis> {
-        // Placeholder implementation - ARIMA analysis
+    /// Difference the series `diff_order` times, then read the direction off
+    /// the mean of the differenced series against its own standard error.
+    ///
+    /// This is the integrated (`I`) part of ARIMA computed exactly; the `AR`
+    /// and `MA` parts are not fitted, which is why `name()` says so. Before
+    /// 0.2.1 this ignored `data` entirely and returned `Stable` with a
+    /// hardcoded `confidence: 0.70`.
+    fn analyze_trend(&self, data: &[(Instant, f64)]) -> TestCharacterizationResult<TrendAnalysis> {
+        let mut values: Vec<f64> = data.iter().map(|(_, value)| *value).collect();
+        for _ in 0..self.diff_order {
+            values = values
+                .windows(2)
+                .filter_map(|pair| {
+                    let (Some(previous), Some(current)) = (pair.first(), pair.get(1)) else {
+                        return None;
+                    };
+                    Some(current - previous)
+                })
+                .collect();
+        }
+        // Direction comes from consecutive first differences of whatever series
+        // survived the requested differencing.
+        let deltas: Vec<f64> = values
+            .windows(2)
+            .filter_map(|pair| {
+                let (Some(previous), Some(current)) = (pair.first(), pair.get(1)) else {
+                    return None;
+                };
+                Some(current - previous)
+            })
+            .collect();
+        if deltas.len() < 2 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: format!(
+                    "differencing of order {} left {} usable step(s); at least two are needed",
+                    self.diff_order,
+                    deltas.len()
+                ),
+                field: "data".to_string(),
+                value: data.len().to_string(),
+            });
+        }
+        let n = deltas.len() as f64;
+        let mean_delta = deltas.iter().sum::<f64>() / n;
+        let variance =
+            deltas.iter().map(|delta| (delta - mean_delta).powi(2)).sum::<f64>() / (n - 1.0);
+        let standard_error = (variance / n).sqrt();
+        // t-ratio of the mean step against zero; a mean smaller than its own
+        // standard error is not evidence of a direction.
+        let t_ratio = if standard_error > 0.0 { mean_delta / standard_error } else { 0.0 };
+        let overall_direction = if t_ratio > 2.0 {
+            TrendDirection::Increasing
+        } else if t_ratio < -2.0 {
+            TrendDirection::Decreasing
+        } else if variance > 0.0 && mean_delta.abs() < variance.sqrt() {
+            TrendDirection::Fluctuating
+        } else {
+            TrendDirection::Stable
+        };
         Ok(TrendAnalysis {
+            // Segmenting the window into individual trends is not attempted.
             detected_trends: Vec::new(),
-            overall_direction: TrendDirection::Stable,
-            confidence: 0.70,
+            overall_direction,
+            // Confidence is the t-ratio scaled so |t| >= 4 reads as certain.
+            confidence: (t_ratio.abs() / 4.0).clamp(0.0, 1.0),
+            // `analyze_trend` characterises; `predict` forecasts.
             forecast: Vec::new(),
         })
     }
 
     fn name(&self) -> &str {
-        "ArimaTrendAnalyzer"
+        // Only the integrated (differencing) component is computed; the AR and
+        // MA coefficients are never fitted, so the name says what it does.
+        "DifferencedMeanTrendAnalyzer"
     }
 
     fn confidence(&self, data: &[(Instant, f64)]) -> f64 {
@@ -149,15 +211,40 @@ impl TrendAnalysisAlgorithm for ArimaTrendAnalyzer {
         }
     }
 
+    /// Extrapolate the mean first difference from the last observation.
+    ///
+    /// Before 0.2.1 this repeated the last value `steps` times, which is a
+    /// random-walk forecast dressed up as "AR-based".
     fn predict(
         &self,
         data: &[(Instant, f64)],
         steps: usize,
     ) -> TestCharacterizationResult<Vec<f64>> {
-        // Simple AR-based forecast - uses last value as baseline
-        let baseline = data.last().map(|(_, v)| *v).unwrap_or(0.0);
-        let forecast = vec![baseline; steps];
-        Ok(forecast)
+        let values: Vec<f64> = data.iter().map(|(_, value)| *value).collect();
+        let Some(last) = values.last().copied() else {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "a forecast needs at least one observation to start from".to_string(),
+                field: "data".to_string(),
+                value: "0".to_string(),
+            });
+        };
+        let deltas: Vec<f64> = values
+            .windows(2)
+            .filter_map(|pair| {
+                let (Some(previous), Some(current)) = (pair.first(), pair.get(1)) else {
+                    return None;
+                };
+                Some(current - previous)
+            })
+            .collect();
+        // With a single observation there is no drift to extrapolate; holding
+        // the level is then the honest forecast, not a stand-in for one.
+        let drift = if deltas.is_empty() {
+            0.0
+        } else {
+            deltas.iter().sum::<f64>() / deltas.len() as f64
+        };
+        Ok((1..=steps).map(|step| last + drift * step as f64).collect())
     }
 }
 
@@ -440,12 +527,66 @@ impl Default for SeasonalTrendAnalyzer {
 }
 
 impl TrendAnalysisAlgorithm for SeasonalTrendAnalyzer {
-    fn analyze_trend(&self, _data: &[(Instant, f64)]) -> TestCharacterizationResult<TrendAnalysis> {
-        // Placeholder implementation - seasonal decomposition
+    /// Measure how strongly the series repeats at `period` samples, via the
+    /// autocorrelation at that lag.
+    ///
+    /// Before 0.2.1 this ignored `data` and asserted `Cyclical` with a
+    /// hardcoded `confidence: 0.75` for any input, including a flat line.
+    fn analyze_trend(&self, data: &[(Instant, f64)]) -> TestCharacterizationResult<TrendAnalysis> {
+        if self.period == 0 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "seasonal period must be positive".to_string(),
+                field: "period".to_string(),
+                value: self.period.to_string(),
+            });
+        }
+        let values: Vec<f64> = data.iter().map(|(_, value)| *value).collect();
+        if values.len() <= self.period + 2 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: format!(
+                    "a period of {} samples needs more than {} readings to autocorrelate; got {}",
+                    self.period,
+                    self.period + 2,
+                    values.len()
+                ),
+                field: "data".to_string(),
+                value: values.len().to_string(),
+            });
+        }
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let denominator: f64 = values.iter().map(|value| (value - mean).powi(2)).sum();
+        if denominator <= 0.0 {
+            // A constant series repeats trivially and seasonally means nothing.
+            return Ok(TrendAnalysis {
+                detected_trends: Vec::new(),
+                overall_direction: TrendDirection::Stable,
+                confidence: 0.0,
+                forecast: Vec::new(),
+            });
+        }
+        let mut numerator = 0.0;
+        for index in self.period..values.len() {
+            let (Some(current), Some(lagged)) =
+                (values.get(index), values.get(index - self.period))
+            else {
+                continue;
+            };
+            numerator += (current - mean) * (lagged - mean);
+        }
+        let autocorrelation = (numerator / denominator).clamp(-1.0, 1.0);
+        let overall_direction = if autocorrelation >= 0.5 {
+            TrendDirection::Seasonal
+        } else if autocorrelation >= 0.2 {
+            TrendDirection::Cyclical
+        } else {
+            TrendDirection::Random
+        };
         Ok(TrendAnalysis {
             detected_trends: Vec::new(),
-            overall_direction: TrendDirection::Cyclical,
-            confidence: 0.75,
+            overall_direction,
+            // Confidence is the measured autocorrelation at the configured lag.
+            confidence: autocorrelation.max(0.0),
             forecast: Vec::new(),
         })
     }
@@ -463,17 +604,40 @@ impl TrendAnalysisAlgorithm for SeasonalTrendAnalyzer {
         }
     }
 
+    /// A sinusoid of the configured period and amplitude, centred on the mean
+    /// of the observed series.
+    ///
+    /// Before 0.2.1 the observed data was ignored (`_data`), so the forecast
+    /// oscillated about zero regardless of where the series actually sat.
     fn predict(
         &self,
-        _data: &[(Instant, f64)],
+        data: &[(Instant, f64)],
         steps: usize,
     ) -> TestCharacterizationResult<Vec<f64>> {
-        // Simple seasonal forecast using amplitude and period
+        if self.period == 0 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "seasonal period must be positive".to_string(),
+                field: "period".to_string(),
+                value: self.period.to_string(),
+            });
+        }
+        if data.is_empty() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "a seasonal forecast needs at least one observation to centre on"
+                    .to_string(),
+                field: "data".to_string(),
+                value: "0".to_string(),
+            });
+        }
+        let level = data.iter().map(|(_, value)| *value).sum::<f64>() / data.len() as f64;
+        // The forecast continues the cycle from where the observed series ends.
+        let offset = data.len();
         let forecast: Vec<f64> = (0..steps)
             .map(|i| {
-                let phase = 2.0 * std::f64::consts::PI * (i as f64) / (self.period as f64)
+                let phase = 2.0 * std::f64::consts::PI * ((offset + i) as f64)
+                    / (self.period as f64)
                     + self.phase_shift;
-                self.amplitude * phase.sin()
+                level + self.amplitude * phase.sin()
             })
             .collect();
         Ok(forecast)

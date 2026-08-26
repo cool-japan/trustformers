@@ -1,6 +1,6 @@
 # TODO-CUDA.md — Work requiring a real NVIDIA (CUDA) GPU
 
-> **Branch:** `0.2.0` · **Generated:** 2026-06-29 · **Companion to:** `TODO.md` ("Hardware-gated remaining work" section)
+> **Branch:** `0.2.1` · **Generated:** 2026-06-29 · **Companion to:** `TODO.md` ("Hardware-gated remaining work" section)
 
 ## ✅ STATUS 2026-06-29 (Campaign E) — oxicuda migration COMPLETE on RTX A4000
 

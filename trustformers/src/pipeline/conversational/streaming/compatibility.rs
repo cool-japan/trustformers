@@ -36,7 +36,7 @@ use crate::pipeline::conversational::types::{
 };
 use crate::{AutoModel, AutoTokenizer};
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -715,18 +715,22 @@ pub mod conversion {
         }
     }
 
-    /// Convert legacy StreamingStats to QualityAnalysis
+    /// Start a fresh `QualityAnalyzer` for callers migrating off the
+    /// deprecated `StreamingStats`.
     ///
-    /// This utility helps convert old streaming statistics to the new comprehensive
-    /// quality analysis format.
+    /// `StreamingStats` only carries aggregate totals (chunk/character/word
+    /// counts, an average and an estimate) with no per-sample history, so
+    /// there is no principled way to populate `QualityAnalyzer`'s rolling
+    /// measurement window from it — this is a migration starting point, not
+    /// a lossless conversion. `legacy_stats` is accepted (rather than
+    /// dropped from the signature) purely to keep this a drop-in
+    /// replacement call for existing migration call sites.
     // reason: backward-compat shim for the deprecated StreamingManager API;
     // the allow is required because it implements/uses an intentionally deprecated type.
     #[allow(deprecated)]
     pub fn upgrade_stats_to_quality_analysis(
-        legacy_stats: StreamingStats,
+        _legacy_stats: StreamingStats,
     ) -> super::super::quality_analyzer::QualityAnalyzer {
-        // Simply return a new QualityAnalyzer with defaults
-        // Legacy stats are deprecated and the new analyzer uses sophisticated metrics
         super::super::quality_analyzer::QualityAnalyzer::new()
     }
 }

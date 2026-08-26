@@ -40,6 +40,9 @@ pub struct ShadowConfig {
 
     /// Shadow model configurations
     pub shadow_models: HashMap<String, ShadowModelConfig>,
+
+    /// Version string reported for the production side of every comparison.
+    pub production_model_version: String,
 }
 
 impl Default for ShadowConfig {
@@ -52,6 +55,7 @@ impl Default for ShadowConfig {
             max_shadow_results: 10000,
             enable_detailed_logging: true,
             shadow_models: HashMap::new(),
+            production_model_version: crate::VERSION.to_string(),
         }
     }
 }
@@ -282,11 +286,96 @@ pub struct ShadowTestingService {
     /// Event broadcaster for shadow events
     event_sender: broadcast::Sender<ShadowEvent>,
 
-    /// Request sender for shadow processing
-    request_sender: mpsc::UnboundedSender<ShadowRequest>,
+    /// Request sender for shadow processing. Carries the real production
+    /// response alongside the request so the comparator never has to invent one.
+    request_sender: mpsc::UnboundedSender<(ShadowRequest, ShadowResponse)>,
+
+    /// Invoker used to run the configured shadow models. When absent, shadow
+    /// responses are recorded as explicit errors rather than being synthesized.
+    invoker: Option<Arc<dyn ShadowModelInvoker>>,
 
     /// Background task handles
     task_handles: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+/// Runs a shadow model for a mirrored request.
+///
+/// Implementors must perform real inference. There is deliberately no default
+/// implementation: a service without an invoker reports an error instead of a
+/// plausible-looking payload.
+#[async_trait::async_trait]
+pub trait ShadowModelInvoker: Send + Sync {
+    /// Invoke `model_name` for `request` and return its real response payload.
+    async fn invoke(
+        &self,
+        model_name: &str,
+        model_config: &ShadowModelConfig,
+        request: &ShadowRequest,
+    ) -> Result<serde_json::Value>;
+}
+
+/// A [`ShadowModelInvoker`] backed by a real batching service.
+///
+/// The mirrored request's `text` field is submitted to the batching stack and
+/// the model's real output is returned.
+pub struct BatchingShadowInvoker {
+    batching_service: Arc<crate::batching::DynamicBatchingService>,
+}
+
+impl BatchingShadowInvoker {
+    pub fn new(batching_service: Arc<crate::batching::DynamicBatchingService>) -> Self {
+        Self { batching_service }
+    }
+}
+
+#[async_trait::async_trait]
+impl ShadowModelInvoker for BatchingShadowInvoker {
+    async fn invoke(
+        &self,
+        model_name: &str,
+        _model_config: &ShadowModelConfig,
+        request: &ShadowRequest,
+    ) -> Result<serde_json::Value> {
+        let text = request
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("mirrored payload has no 'text' field to shadow"))?
+            .to_string();
+        let max_length =
+            request.payload.get("max_length").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+        let internal = crate::batching::Request {
+            id: crate::batching::RequestId::new(),
+            input: crate::batching::aggregator::RequestInput::Text { text, max_length },
+            priority: crate::batching::config::Priority::Low,
+            submitted_at: std::time::Instant::now(),
+            deadline: None,
+            metadata: HashMap::new(),
+        };
+
+        let result = self.batching_service.submit_request(internal).await?;
+        match result.output {
+            crate::batching::aggregator::ProcessingOutput::Text(text) => Ok(serde_json::json!({
+                "text": text,
+                "tokens": text.split_whitespace().collect::<Vec<_>>(),
+                "model": model_name,
+            })),
+            crate::batching::aggregator::ProcessingOutput::Tokens(tokens) => {
+                Ok(serde_json::json!({
+                    "tokens": tokens,
+                    "model": model_name,
+                }))
+            },
+            crate::batching::aggregator::ProcessingOutput::Error(error) => {
+                Err(anyhow::anyhow!(error))
+            },
+            other => Err(anyhow::anyhow!(
+                "unsupported shadow output type: {:?}",
+                other
+            )),
+        }
+    }
 }
 
 /// Shadow testing events
@@ -325,8 +414,20 @@ pub enum ShadowEvent {
 }
 
 impl ShadowTestingService {
-    /// Create a new shadow testing service
+    /// Create a new shadow testing service with no model invoker.
+    ///
+    /// Mirrored requests are still compared, but every shadow response is
+    /// recorded as an explicit error stating that no invoker is configured.
     pub fn new(config: ShadowConfig) -> Self {
+        Self::build(config, None)
+    }
+
+    /// Create a shadow testing service that invokes real shadow models.
+    pub fn with_invoker(config: ShadowConfig, invoker: Arc<dyn ShadowModelInvoker>) -> Self {
+        Self::build(config, Some(invoker))
+    }
+
+    fn build(config: ShadowConfig, invoker: Option<Arc<dyn ShadowModelInvoker>>) -> Self {
         let (event_sender, _) = broadcast::channel(1000);
         let (request_sender, request_receiver) = mpsc::unbounded_channel();
 
@@ -337,6 +438,7 @@ impl ShadowTestingService {
             stats: Arc::new(RwLock::new(ShadowStats::default())),
             event_sender,
             request_sender,
+            invoker,
             task_handles: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -344,6 +446,11 @@ impl ShadowTestingService {
         service.start_background_processing(request_receiver);
 
         service
+    }
+
+    /// Whether a real shadow model invoker is installed.
+    pub fn has_invoker(&self) -> bool {
+        self.invoker.is_some()
     }
 
     /// Start shadow testing service
@@ -368,20 +475,29 @@ impl ShadowTestingService {
         Ok(())
     }
 
-    /// Process a request with shadow testing
+    /// Mirror a request to the configured shadow models.
+    ///
+    /// `production_payload` and `production_time_ms` describe the response the
+    /// production path actually returned; they become the baseline the shadow
+    /// responses are compared against, so no side of the comparison is invented.
+    ///
+    /// Returns the request id that was mirrored, or `None` when shadow testing
+    /// is disabled or the request was not sampled.
     pub async fn process_request(
         &self,
         payload: serde_json::Value,
+        production_payload: serde_json::Value,
+        production_time_ms: f64,
         client_info: Option<ClientInfo>,
         metadata: HashMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         if !self.config.enabled {
-            return Ok(());
+            return Ok(None);
         }
 
         // Check if this request should be shadowed
         if !self.should_shadow_request() {
-            return Ok(());
+            return Ok(None);
         }
 
         let request_id = Uuid::new_v4().to_string();
@@ -393,6 +509,19 @@ impl ShadowTestingService {
             metadata,
         };
 
+        let production_response = ShadowResponse {
+            response_id: Uuid::new_v4().to_string(),
+            request_id: request_id.clone(),
+            model_name: "production".to_string(),
+            model_version: self.config.production_model_version.clone(),
+            payload: production_payload,
+            processing_time_ms: production_time_ms,
+            timestamp: chrono::Utc::now(),
+            status: ShadowResponseStatus::Success,
+            error: None,
+            metrics: HashMap::new(),
+        };
+
         // Store active request
         {
             let mut active_requests =
@@ -401,11 +530,63 @@ impl ShadowTestingService {
         }
 
         // Send for shadow processing
-        if let Err(e) = self.request_sender.send(shadow_request) {
+        if let Err(e) = self.request_sender.send((shadow_request, production_response)) {
             tracing::error!("Failed to send shadow request: {}", e);
+            return Err(anyhow::anyhow!(
+                "shadow pipeline is not accepting requests: {}",
+                e
+            ));
         }
 
-        Ok(())
+        Ok(Some(request_id))
+    }
+
+    /// Mirror a request and wait until its comparison is recorded.
+    ///
+    /// Returns `None` when the request was not sampled, and an error when the
+    /// comparison does not appear within `timeout_duration`.
+    pub async fn process_request_blocking(
+        &self,
+        payload: serde_json::Value,
+        production_payload: serde_json::Value,
+        production_time_ms: f64,
+        timeout_duration: Duration,
+    ) -> Result<Option<ShadowComparison>> {
+        let Some(request_id) = self
+            .process_request(
+                payload,
+                production_payload,
+                production_time_ms,
+                None,
+                HashMap::new(),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            if let Some(comparison) = self
+                .shadow_results
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .find(|c| c.request_id == request_id)
+                .cloned()
+            {
+                return Ok(Some(comparison));
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "shadow comparison for request {} did not complete within {:?}",
+                    request_id,
+                    timeout_duration
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Get shadow testing statistics
@@ -443,14 +624,14 @@ impl ShadowTestingService {
     /// Start background processing
     fn start_background_processing(
         &self,
-        mut request_receiver: mpsc::UnboundedReceiver<ShadowRequest>,
+        mut request_receiver: mpsc::UnboundedReceiver<(ShadowRequest, ShadowResponse)>,
     ) {
         let service = self.clone();
         let service_for_handles = self.clone();
 
         let handle = tokio::spawn(async move {
-            while let Some(request) = request_receiver.recv().await {
-                service.process_shadow_request(request).await;
+            while let Some((request, production_response)) = request_receiver.recv().await {
+                service.process_shadow_request(request, production_response).await;
             }
         });
 
@@ -460,8 +641,12 @@ impl ShadowTestingService {
         });
     }
 
-    /// Process a shadow request
-    async fn process_shadow_request(&self, request: ShadowRequest) {
+    /// Process a shadow request against the real production response.
+    async fn process_shadow_request(
+        &self,
+        request: ShadowRequest,
+        production_response: ShadowResponse,
+    ) {
         let request_id = request.request_id.clone();
 
         // Send start event
@@ -481,10 +666,10 @@ impl ShadowTestingService {
 
             let start_time = Instant::now();
 
-            // Simulate shadow model processing
+            // Run the real shadow model.
             let response = match timeout(
                 Duration::from_secs(self.config.shadow_timeout_seconds),
-                self.simulate_model_processing(model_name, model_config, &request),
+                self.invoke_shadow_model(model_name, model_config, &request),
             )
             .await
             {
@@ -533,20 +718,7 @@ impl ShadowTestingService {
             shadow_responses.push(response);
         }
 
-        // Create production response (simulated)
-        let production_response = ShadowResponse {
-            response_id: Uuid::new_v4().to_string(),
-            request_id: request_id.clone(),
-            model_name: "production".to_string(),
-            model_version: "1.0.0".to_string(),
-            payload: serde_json::json!({"text": "Production response", "tokens": ["production", "response"]}),
-            processing_time_ms: 50.0,
-            timestamp: chrono::Utc::now(),
-            status: ShadowResponseStatus::Success,
-            error: None,
-            metrics: HashMap::new(),
-        };
-
+        // The production response is the real one recorded by the caller.
         // Compare responses
         let comparison = self.compare_responses(&production_response, &shadow_responses);
 
@@ -580,34 +752,40 @@ impl ShadowTestingService {
         }
     }
 
-    /// Simulate model processing (placeholder)
-    async fn simulate_model_processing(
+    /// Invoke a configured shadow model for a mirrored request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no [`ShadowModelInvoker`] is installed, or when the
+    /// invoker itself fails. No payload is ever synthesized.
+    async fn invoke_shadow_model(
         &self,
         model_name: &str,
-        _model_config: &ShadowModelConfig,
+        model_config: &ShadowModelConfig,
         request: &ShadowRequest,
     ) -> Result<ShadowResponse> {
-        // Simulate processing delay
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let invoker = self.invoker.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no shadow model invoker is configured; build the service with \
+                 ShadowTestingService::with_invoker to mirror traffic to a real model"
+            )
+        })?;
 
-        // Generate mock response
-        let response = ShadowResponse {
+        let started = Instant::now();
+        let payload = invoker.invoke(model_name, model_config, request).await?;
+
+        Ok(ShadowResponse {
             response_id: Uuid::new_v4().to_string(),
             request_id: request.request_id.clone(),
             model_name: model_name.to_string(),
-            model_version: "1.0.0".to_string(),
-            payload: serde_json::json!({
-                "text": format!("Shadow response from {}", model_name),
-                "tokens": ["shadow", "response", "from", model_name]
-            }),
-            processing_time_ms: 100.0,
+            model_version: model_config.version.clone(),
+            payload,
+            processing_time_ms: started.elapsed().as_secs_f64() * 1000.0,
             timestamp: chrono::Utc::now(),
             status: ShadowResponseStatus::Success,
             error: None,
             metrics: HashMap::new(),
-        };
-
-        Ok(response)
+        })
     }
 
     /// Compare responses
@@ -623,7 +801,7 @@ impl ShadowTestingService {
         let mut latency_differences = Vec::new();
 
         for shadow_response in shadow_responses {
-            // Simple similarity calculation (placeholder)
+            // Structural JSON similarity; see `json_similarity`.
             let similarity =
                 self.calculate_similarity(&production_response.payload, &shadow_response.payload);
             similarity_scores.push(similarity);
@@ -645,11 +823,27 @@ impl ShadowTestingService {
             latency_differences.iter().sum::<f64>() / latency_differences.len() as f64
         };
 
+        // Length and content differences are measured against the first shadow
+        // response, which is the one a single-shadow deployment has; reporting
+        // a hardcoded zero here previously made every comparison look
+        // byte-identical in length regardless of what came back.
+        let (response_length_difference, content_differences) = match shadow_responses.first() {
+            Some(first) => {
+                let production_len = production_response.payload.to_string().len() as i64;
+                let shadow_len = first.payload.to_string().len() as i64;
+                (
+                    shadow_len - production_len,
+                    describe_differences(&production_response.payload, &first.payload),
+                )
+            },
+            None => (0, Vec::new()),
+        };
+
         let comparison_metrics = ComparisonMetrics {
             similarity_score: avg_similarity,
             latency_difference_ms: avg_latency_diff,
-            response_length_difference: 0,
-            content_differences: vec![],
+            response_length_difference,
+            content_differences,
             token_differences: None,
             custom_metrics: HashMap::new(),
         };
@@ -664,18 +858,33 @@ impl ShadowTestingService {
         }
     }
 
-    /// Calculate similarity between two responses
+    /// Similarity between a production and a shadow response payload, in `[0, 1]`.
+    ///
+    /// This is a real structural comparison of the two JSON documents, not a
+    /// flag with a constant attached. Previously any pair of differing payloads
+    /// scored a fixed `0.8`, so a shadow model returning complete nonsense was
+    /// indistinguishable from one that differed by a single token — and that
+    /// figure was then averaged into [`ShadowStats::avg_similarity_score`] and
+    /// reported over HTTP as a measurement.
+    ///
+    /// The score is computed recursively over the JSON structure:
+    ///
+    /// * two values of different kinds (object vs array vs string …) score `0`;
+    /// * strings score by token overlap, see [`Self::string_similarity`];
+    /// * numbers score by relative difference, so `100.0` vs `101.0` is close
+    ///   to `1.0` while `1.0` vs `1000.0` is near `0`;
+    /// * booleans and nulls score `1` when equal and `0` otherwise;
+    /// * arrays score as the mean similarity of the positions they share,
+    ///   scaled by the fraction of positions that both actually have;
+    /// * objects score as the mean similarity over the union of their keys, so
+    ///   a key present in only one side counts as a `0` rather than being
+    ///   quietly skipped.
     fn calculate_similarity(
         &self,
         response1: &serde_json::Value,
         response2: &serde_json::Value,
     ) -> f64 {
-        // Simple similarity calculation (placeholder)
-        if response1 == response2 {
-            1.0
-        } else {
-            0.8 // Mock similarity score
-        }
+        json_similarity(response1, response2)
     }
 
     /// Update statistics
@@ -723,6 +932,203 @@ impl ShadowTestingService {
     }
 }
 
+/// Name the places where two JSON payloads actually differ.
+///
+/// Returns JSON-pointer-style paths (`/choices/0/text`) paired with a short
+/// description of the disagreement, so an operator reading a shadow comparison
+/// can see *what* diverged rather than only that something did. The list is
+/// capped at [`MAX_REPORTED_DIFFERENCES`] entries — a wholly different response
+/// would otherwise produce a path per leaf — and the cap is stated in the
+/// output rather than silently truncating.
+pub fn describe_differences(
+    production: &serde_json::Value,
+    shadow: &serde_json::Value,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_differences("", production, shadow, &mut out);
+    if out.len() > MAX_REPORTED_DIFFERENCES {
+        let hidden = out.len() - MAX_REPORTED_DIFFERENCES;
+        out.truncate(MAX_REPORTED_DIFFERENCES);
+        out.push(format!("… and {hidden} further difference(s) not listed"));
+    }
+    out
+}
+
+/// Upper bound on the number of individual differences reported by
+/// [`describe_differences`] before the rest are summarised as a count.
+pub const MAX_REPORTED_DIFFERENCES: usize = 32;
+
+/// Recursive worker behind [`describe_differences`].
+fn collect_differences(
+    path: &str,
+    production: &serde_json::Value,
+    shadow: &serde_json::Value,
+    out: &mut Vec<String>,
+) {
+    use serde_json::Value;
+
+    // Stop descending once the cap is exceeded; the caller summarises the rest.
+    if out.len() > MAX_REPORTED_DIFFERENCES {
+        return;
+    }
+    let here = if path.is_empty() { "/" } else { path };
+
+    match (production, shadow) {
+        (Value::Object(p), Value::Object(s)) => {
+            let mut keys: Vec<&String> = p.keys().collect();
+            keys.extend(s.keys());
+            keys.sort_unstable();
+            keys.dedup();
+            for key in keys {
+                let child = format!("{path}/{key}");
+                match (p.get(key), s.get(key)) {
+                    (Some(pv), Some(sv)) => collect_differences(&child, pv, sv, out),
+                    (Some(_), None) => out.push(format!("{child}: missing from shadow response")),
+                    (None, Some(_)) => {
+                        out.push(format!("{child}: present only in shadow response"))
+                    },
+                    (None, None) => {},
+                }
+            }
+        },
+        (Value::Array(p), Value::Array(s)) => {
+            if p.len() != s.len() {
+                out.push(format!(
+                    "{here}: length {} in production, {} in shadow",
+                    p.len(),
+                    s.len()
+                ));
+            }
+            for (index, (pv, sv)) in p.iter().zip(s.iter()).enumerate() {
+                collect_differences(&format!("{path}/{index}"), pv, sv, out);
+            }
+        },
+        (p, s) if p == s => {},
+        (p, s) => {
+            out.push(format!(
+                "{here}: {} vs {}",
+                truncate_for_report(&p.to_string()),
+                truncate_for_report(&s.to_string())
+            ));
+        },
+    }
+}
+
+/// Shorten a rendered JSON value so one long string cannot dominate a report.
+fn truncate_for_report(rendered: &str) -> String {
+    const LIMIT: usize = 60;
+    if rendered.chars().count() <= LIMIT {
+        return rendered.to_string();
+    }
+    let head: String = rendered.chars().take(LIMIT).collect();
+    format!("{head}…")
+}
+
+/// Structural similarity of two JSON values, in `[0, 1]`.
+///
+/// See `ShadowTestingService::calculate_similarity` for the rules. Kept as a
+/// free function so it can be exercised directly, without standing up a shadow
+/// testing service.
+pub fn json_similarity(a: &serde_json::Value, b: &serde_json::Value) -> f64 {
+    use serde_json::Value;
+
+    match (a, b) {
+        (Value::Null, Value::Null) => 1.0,
+        (Value::Bool(x), Value::Bool(y)) => {
+            if x == y {
+                1.0
+            } else {
+                0.0
+            }
+        },
+        (Value::Number(x), Value::Number(y)) => number_similarity(x, y),
+        (Value::String(x), Value::String(y)) => string_similarity(x, y),
+        (Value::Array(x), Value::Array(y)) => {
+            if x.is_empty() && y.is_empty() {
+                return 1.0;
+            }
+            let longest = x.len().max(y.len());
+            if longest == 0 {
+                return 1.0;
+            }
+            // Positions present in only one array contribute zero: a truncated
+            // response is genuinely less similar, not merely shorter.
+            let total: f64 = x.iter().zip(y.iter()).map(|(xi, yi)| json_similarity(xi, yi)).sum();
+            total / longest as f64
+        },
+        (Value::Object(x), Value::Object(y)) => {
+            let mut keys: Vec<&String> = x.keys().collect();
+            keys.extend(y.keys());
+            keys.sort_unstable();
+            keys.dedup();
+            if keys.is_empty() {
+                return 1.0;
+            }
+            let total: f64 = keys
+                .iter()
+                .map(|key| match (x.get(*key), y.get(*key)) {
+                    (Some(xv), Some(yv)) => json_similarity(xv, yv),
+                    // A key on one side only is a real difference.
+                    _ => 0.0,
+                })
+                .sum();
+            total / keys.len() as f64
+        },
+        // Different JSON kinds are not comparable on any scale that would mean
+        // anything; they are simply different.
+        _ => 0.0,
+    }
+}
+
+/// Similarity of two JSON numbers by relative difference.
+///
+/// Equal values score `1.0`. Otherwise the score falls off with the difference
+/// relative to the larger magnitude, so nearby values stay close to `1.0` and
+/// values differing by orders of magnitude approach `0.0`.
+fn number_similarity(x: &serde_json::Number, y: &serde_json::Number) -> f64 {
+    let (Some(xf), Some(yf)) = (x.as_f64(), y.as_f64()) else {
+        // Numbers outside f64 (e.g. u128-scale integers) can still be compared
+        // exactly for equality, which is the only honest answer available.
+        return if x == y { 1.0 } else { 0.0 };
+    };
+    if !xf.is_finite() || !yf.is_finite() {
+        return if xf == yf { 1.0 } else { 0.0 };
+    }
+    if (xf - yf).abs() < f64::EPSILON {
+        return 1.0;
+    }
+    let scale = xf.abs().max(yf.abs());
+    if scale < f64::EPSILON {
+        return 1.0;
+    }
+    (1.0 - (xf - yf).abs() / scale).clamp(0.0, 1.0)
+}
+
+/// Similarity of two strings by whitespace-token overlap (Jaccard index).
+///
+/// Token overlap is the right granularity for the generated text these shadow
+/// comparisons carry: it is insensitive to token order, which two samplings of
+/// the same model legitimately differ in, while still separating "almost the
+/// same answer" from "a different answer".
+fn string_similarity(x: &str, y: &str) -> f64 {
+    if x == y {
+        return 1.0;
+    }
+    let left: std::collections::BTreeSet<&str> = x.split_whitespace().collect();
+    let right: std::collections::BTreeSet<&str> = y.split_whitespace().collect();
+    if left.is_empty() && right.is_empty() {
+        // Two different strings of pure whitespace: not equal, but they carry
+        // no tokens to disagree about.
+        return 1.0;
+    }
+    let intersection = left.intersection(&right).count() as f64;
+    let union = left.union(&right).count() as f64;
+    if union < f64::EPSILON {
+        return 0.0;
+    }
+    intersection / union
+}
+
 impl Clone for ShadowTestingService {
     fn clone(&self) -> Self {
         Self {
@@ -732,6 +1138,7 @@ impl Clone for ShadowTestingService {
             stats: Arc::clone(&self.stats),
             event_sender: self.event_sender.clone(),
             request_sender: self.request_sender.clone(),
+            invoker: self.invoker.clone(),
             task_handles: Arc::clone(&self.task_handles),
         }
     }
@@ -772,13 +1179,53 @@ mod tests {
         assert_eq!(stats.total_requests, 0);
     }
 
-    #[tokio::test]
-    async fn test_shadow_request_processing() {
+    fn shadow_config_with_one_model() -> ShadowConfig {
         let mut config = ShadowConfig::default();
         config.enabled = true;
         config.traffic_percentage = 100.0; // Always shadow
+        config.shadow_models.insert(
+            "candidate".to_string(),
+            ShadowModelConfig {
+                model_name: "candidate".to_string(),
+                version: "2.0.0".to_string(),
+                endpoint: None,
+                parameters: HashMap::new(),
+                enabled: true,
+                traffic_percentage: None,
+            },
+        );
+        config
+    }
 
-        let service = ShadowTestingService::new(config);
+    /// An invoker that performs a real, deterministic transformation of the
+    /// mirrored payload, so the comparison is between two genuinely different
+    /// computed values.
+    #[derive(Debug)]
+    struct UppercasingInvoker;
+
+    #[async_trait::async_trait]
+    impl ShadowModelInvoker for UppercasingInvoker {
+        async fn invoke(
+            &self,
+            model_name: &str,
+            _model_config: &ShadowModelConfig,
+            request: &ShadowRequest,
+        ) -> Result<serde_json::Value> {
+            let text = request
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("no text to shadow"))?;
+            Ok(serde_json::json!({ "text": text.to_uppercase(), "model": model_name }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shadow_request_processing() {
+        let service = ShadowTestingService::with_invoker(
+            shadow_config_with_one_model(),
+            Arc::new(UppercasingInvoker),
+        );
 
         let payload = serde_json::json!({"text": "test input"});
         let client_info = Some(ClientInfo {
@@ -789,7 +1236,13 @@ mod tests {
         });
 
         service
-            .process_request(payload, client_info, HashMap::new())
+            .process_request(
+                payload,
+                serde_json::json!({"text": "test output"}),
+                12.5,
+                client_info,
+                HashMap::new(),
+            )
             .await
             .expect("async operation should succeed in test");
 
@@ -798,5 +1251,224 @@ mod tests {
 
         let stats = service.get_stats().await;
         assert_eq!(stats.total_requests, 1);
+    }
+
+    /// Regression: both sides of a comparison must be real. The production side
+    /// used to be the literal `"Production response"` and the shadow side
+    /// `"Shadow response from {model}"`.
+    #[tokio::test]
+    async fn comparison_uses_real_responses_on_both_sides() {
+        let service = ShadowTestingService::with_invoker(
+            shadow_config_with_one_model(),
+            Arc::new(UppercasingInvoker),
+        );
+
+        let comparison = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello shadow"}),
+                serde_json::json!({"text": "hello production"}),
+                42.0,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("mirroring must succeed")
+            .expect("the request must be sampled at 100%");
+
+        // Production side is exactly what the caller recorded.
+        assert_eq!(
+            comparison.production_response.payload["text"],
+            serde_json::json!("hello production")
+        );
+        assert!((comparison.production_response.processing_time_ms - 42.0).abs() < 1e-9);
+        assert_ne!(
+            comparison.production_response.payload["text"],
+            serde_json::json!("Production response")
+        );
+
+        // Shadow side is what the invoker computed.
+        let shadow = comparison.shadow_responses.first().expect("one shadow response");
+        assert_eq!(shadow.payload["text"], serde_json::json!("HELLO SHADOW"));
+        assert!(!shadow.payload["text"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Shadow response from"));
+        assert_eq!(shadow.model_version, "2.0.0");
+    }
+
+    /// Regression: with no invoker the shadow side must record an error rather
+    /// than a synthesized payload.
+    #[tokio::test]
+    async fn missing_invoker_records_an_error_not_a_payload() {
+        let service = ShadowTestingService::new(shadow_config_with_one_model());
+        assert!(!service.has_invoker());
+
+        let comparison = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello"}),
+                serde_json::json!({"text": "produced"}),
+                10.0,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("mirroring must succeed")
+            .expect("the request must be sampled at 100%");
+
+        let shadow = comparison.shadow_responses.first().expect("one shadow response");
+        assert!(matches!(shadow.status, ShadowResponseStatus::Error));
+        assert!(shadow.error.as_deref().unwrap_or_default().contains("no shadow model invoker"));
+        assert_eq!(shadow.payload, serde_json::Value::Null);
+    }
+
+    /// Regression: a disabled service must report "not sampled", never a
+    /// fabricated comparison.
+    #[tokio::test]
+    async fn disabled_service_does_not_compare() {
+        let service = ShadowTestingService::new(ShadowConfig::default());
+        let outcome = service
+            .process_request_blocking(
+                serde_json::json!({"text": "hello"}),
+                serde_json::json!({"text": "produced"}),
+                10.0,
+                Duration::from_millis(200),
+            )
+            .await
+            .expect("call must succeed");
+        assert!(outcome.is_none());
+    }
+
+    // ── Regression tests: similarity used to be a constant ──
+
+    /// Regression: `calculate_similarity` returned a flat `0.8` for *every*
+    /// pair of differing payloads, and that number was averaged into
+    /// `ShadowStats::avg_similarity_score` and served over
+    /// `/shadow/stats`. A shadow model returning something unrelated must now
+    /// score far below one returning nearly the same answer.
+    #[test]
+    fn similarity_discriminates_between_near_and_unrelated_responses() {
+        let production = serde_json::json!({"text": "the quick brown fox jumps"});
+        let near = serde_json::json!({"text": "the quick brown fox leaps"});
+        let unrelated = serde_json::json!({"text": "unrelated content entirely here"});
+
+        let near_score = json_similarity(&production, &near);
+        let unrelated_score = json_similarity(&production, &unrelated);
+
+        assert!(
+            near_score > unrelated_score,
+            "a near-identical response must score higher: {near_score} vs {unrelated_score}"
+        );
+        // The old code gave both of these exactly 0.8.
+        assert_ne!(near_score, 0.8);
+        assert_ne!(unrelated_score, 0.8);
+        assert_eq!(unrelated_score, 0.0, "no shared tokens means no similarity");
+        assert!((0.0..=1.0).contains(&near_score));
+    }
+
+    #[test]
+    fn identical_payloads_score_one_and_different_kinds_score_zero() {
+        let value = serde_json::json!({"a": [1, 2, {"b": "c"}], "d": null});
+        assert_eq!(json_similarity(&value, &value.clone()), 1.0);
+
+        assert_eq!(
+            json_similarity(&serde_json::json!("1"), &serde_json::json!(1)),
+            0.0,
+            "a string and a number are not comparable"
+        );
+        assert_eq!(
+            json_similarity(&serde_json::json!([]), &serde_json::json!({})),
+            0.0
+        );
+    }
+
+    #[test]
+    fn numbers_score_by_relative_difference() {
+        let close = json_similarity(&serde_json::json!(100.0), &serde_json::json!(101.0));
+        let far = json_similarity(&serde_json::json!(1.0), &serde_json::json!(1000.0));
+        assert!(
+            close > 0.98,
+            "100 vs 101 should be nearly identical: {close}"
+        );
+        assert!(far < 0.01, "1 vs 1000 should be nearly unrelated: {far}");
+    }
+
+    #[test]
+    fn a_missing_object_key_lowers_the_score() {
+        let full = serde_json::json!({"a": 1, "b": 2});
+        let partial = serde_json::json!({"a": 1});
+        let score = json_similarity(&full, &partial);
+        assert!(
+            score > 0.0 && score < 1.0,
+            "a half-present object is neither identical nor unrelated: {score}"
+        );
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_truncated_array_lowers_the_score() {
+        let full = serde_json::json!([1, 2, 3, 4]);
+        let truncated = serde_json::json!([1, 2]);
+        let score = json_similarity(&full, &truncated);
+        assert!(
+            (score - 0.5).abs() < 1e-9,
+            "half the positions match: {score}"
+        );
+    }
+
+    /// Regression: `content_differences` was hardcoded to an empty vector and
+    /// `response_length_difference` to `0`, so a comparison never said what
+    /// diverged. Both must now be measured.
+    #[test]
+    fn differences_name_the_paths_that_actually_diverged() {
+        let production = serde_json::json!({"text": "hello", "tokens": 5, "model": "a"});
+        let shadow = serde_json::json!({"text": "goodbye", "tokens": 5, "extra": true});
+
+        let differences = describe_differences(&production, &shadow);
+        let joined = differences.join("\n");
+
+        assert!(
+            !differences.is_empty(),
+            "the old code always returned an empty list"
+        );
+        assert!(
+            joined.contains("/text"),
+            "the diverging field must be named: {joined}"
+        );
+        assert!(
+            joined.contains("/model") && joined.contains("missing from shadow"),
+            "a dropped field must be reported: {joined}"
+        );
+        assert!(
+            joined.contains("/extra") && joined.contains("only in shadow"),
+            "an added field must be reported: {joined}"
+        );
+        assert!(
+            !joined.contains("/tokens"),
+            "an identical field must not be reported as a difference: {joined}"
+        );
+    }
+
+    #[test]
+    fn identical_payloads_have_no_differences() {
+        let value = serde_json::json!({"text": "same", "n": [1, 2]});
+        assert!(describe_differences(&value, &value.clone()).is_empty());
+    }
+
+    #[test]
+    fn difference_reports_are_capped_and_say_so() {
+        let production: serde_json::Value = (0..100)
+            .map(|i| (format!("k{i}"), serde_json::json!(i)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let shadow: serde_json::Value = (0..100)
+            .map(|i| (format!("k{i}"), serde_json::json!(i + 1)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+
+        let differences = describe_differences(&production, &shadow);
+        assert!(differences.len() <= MAX_REPORTED_DIFFERENCES + 1);
+        let last = differences.last().expect("at least one difference");
+        assert!(
+            last.contains("further difference(s) not listed"),
+            "truncation must be stated, not silent: {last}"
+        );
     }
 }

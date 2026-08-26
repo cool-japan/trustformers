@@ -1,6 +1,8 @@
 use crate::command_r::config::CommandRConfig;
 use crate::common::ActivationType;
-use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
+use crate::generation_utils::GenerationUtils;
+use crate::weight_loading::{Checkpoint, LoadReport};
+use scirs2_core::random::{thread_rng, Rng}; // SciRS2 Integration Policy
 use trustformers_core::{
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
@@ -8,78 +10,135 @@ use trustformers_core::{
     traits::{Config, Layer, Model},
 };
 
-/// Command R Rotary Position Embedding
+/// Command R Rotary Position Embedding.
+///
+/// The rotation follows the HuggingFace `rotate_half` convention: for a head
+/// vector `x` of size `dim`, channel `i` is paired with channel `i + dim/2` and
+/// the pair is rotated by `position * inv_freq[i]`.
 #[derive(Debug, Clone)]
 pub struct CommandRRoPE {
     dim: usize,
-    #[allow(dead_code)]
     max_seq_len: usize,
-    #[allow(dead_code)]
     base: f32,
-    inv_freq: Tensor,
-    cos_cache: Option<Tensor>,
-    sin_cache: Option<Tensor>,
+    /// `inv_freq[i] = base^(-2i/dim)` for `i in 0..dim/2`
+    inv_freq: Vec<f32>,
 }
 
 impl CommandRRoPE {
     pub fn new(dim: usize, max_seq_len: usize, base: f32) -> Result<Self> {
-        let mut inv_freq = Vec::new();
-        for i in (0..dim).step_by(2) {
-            inv_freq.push(1.0 / base.powf(i as f32 / dim as f32));
+        if dim < 2 || !dim.is_multiple_of(2) {
+            return Err(invalid_config(
+                "CommandRRoPE::new",
+                format!("head dimension must be even and >= 2, got {dim}"),
+            ));
         }
+        let inv_freq = (0..dim)
+            .step_by(2)
+            .map(|i| 1.0 / base.powf(i as f32 / dim as f32))
+            .collect::<Vec<f32>>();
 
         Ok(Self {
             dim,
             max_seq_len,
             base,
-            inv_freq: Tensor::new(inv_freq)?,
-            cos_cache: None,
-            sin_cache: None,
+            inv_freq,
         })
     }
 
-    pub fn forward(&mut self, x: &Tensor, _position_ids: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Simplified RoPE implementation
-        let seq_len = x.shape()[1];
-
-        if self.cos_cache.is_none() || self.sin_cache.is_none() {
-            self.create_cache(seq_len)?;
-        }
-
-        let cos = self.cos_cache.as_ref().ok_or_else(|| {
-            TrustformersError::runtime_error(
-                "cos_cache not initialized after create_cache".to_string(),
-            )
-        })?;
-        let sin = self.sin_cache.as_ref().ok_or_else(|| {
-            TrustformersError::runtime_error(
-                "sin_cache not initialized after create_cache".to_string(),
-            )
-        })?;
-
-        Ok((cos.clone(), sin.clone()))
+    /// Head dimension this RoPE was built for.
+    pub fn dim(&self) -> usize {
+        self.dim
     }
 
-    fn create_cache(&mut self, seq_len: usize) -> Result<()> {
-        let mut cos_vals = Vec::new();
-        let mut sin_vals = Vec::new();
+    /// Maximum position this RoPE accepts.
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
 
-        for pos in 0..seq_len {
-            for i in 0..self.dim / 2 {
-                let freq = if let Ok(inv_freq_data) = self.inv_freq.data() {
-                    inv_freq_data[i]
-                } else {
-                    1.0 / (10000.0_f32.powf(2.0 * i as f32 / self.dim as f32))
-                };
+    /// RoPE base frequency (`theta`).
+    pub fn base(&self) -> f32 {
+        self.base
+    }
+
+    /// Inverse frequencies, one per rotated channel pair.
+    pub fn inv_freq(&self) -> &[f32] {
+        &self.inv_freq
+    }
+
+    /// Build the `cos`/`sin` tables for the given absolute positions.
+    ///
+    /// Both tensors have shape `[positions.len(), dim / 2]`.
+    pub fn cos_sin(&self, positions: &[usize]) -> Result<(Tensor, Tensor)> {
+        let half = self.dim / 2;
+        let mut cos_vals = Vec::with_capacity(positions.len() * half);
+        let mut sin_vals = Vec::with_capacity(positions.len() * half);
+        for &pos in positions {
+            for freq in &self.inv_freq {
                 let angle = pos as f32 * freq;
                 cos_vals.push(angle.cos());
                 sin_vals.push(angle.sin());
             }
         }
+        Ok((
+            Tensor::from_vec(cos_vals, &[positions.len(), half])?,
+            Tensor::from_vec(sin_vals, &[positions.len(), half])?,
+        ))
+    }
 
-        self.cos_cache = Some(Tensor::new(cos_vals)?.reshape(&[seq_len, self.dim / 2])?);
-        self.sin_cache = Some(Tensor::new(sin_vals)?.reshape(&[seq_len, self.dim / 2])?);
+    /// Rotate a flat `[batch, seq_len, num_heads, head_dim]` buffer in place.
+    ///
+    /// `positions[t]` is the **absolute** position of token `t`, so incremental
+    /// decoding with a KV cache rotates the new token with its true position.
+    pub fn rotate_in_place(
+        &self,
+        data: &mut [f32],
+        batch: usize,
+        num_heads: usize,
+        head_dim: usize,
+        positions: &[usize],
+    ) -> Result<()> {
+        if head_dim != self.dim {
+            return Err(tensor_op_error(
+                "CommandRRoPE::rotate_in_place",
+                format!("head_dim {head_dim} does not match RoPE dim {}", self.dim),
+            ));
+        }
+        let seq_len = positions.len();
+        let expected = batch * seq_len * num_heads * head_dim;
+        if data.len() != expected {
+            return Err(tensor_op_error(
+                "CommandRRoPE::rotate_in_place",
+                format!("expected {expected} elements, got {}", data.len()),
+            ));
+        }
+        if let Some(&max_pos) = positions.iter().max() {
+            if max_pos >= self.max_seq_len {
+                return Err(tensor_op_error(
+                    "CommandRRoPE::rotate_in_place",
+                    format!(
+                        "position {max_pos} exceeds max_sequence_length {}",
+                        self.max_seq_len
+                    ),
+                ));
+            }
+        }
 
+        let half = head_dim / 2;
+        for b in 0..batch {
+            for (t, &pos) in positions.iter().enumerate() {
+                for head in 0..num_heads {
+                    let base = ((b * seq_len + t) * num_heads + head) * head_dim;
+                    for i in 0..half {
+                        let angle = pos as f32 * self.inv_freq[i];
+                        let (sin_val, cos_val) = angle.sin_cos();
+                        let x0 = data[base + i];
+                        let x1 = data[base + i + half];
+                        data[base + i] = x0 * cos_val - x1 * sin_val;
+                        data[base + i + half] = x0 * sin_val + x1 * cos_val;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -135,127 +194,290 @@ impl CommandRAttention {
         })
     }
 
+    /// Causal grouped-query attention with a real KV cache.
+    ///
+    /// * `hidden_states` — `[batch, seq_len, hidden_size]`
+    /// * `attention_mask` — optional **additive** mask broadcastable to
+    ///   `[batch, num_heads, seq_len, total_len]`
+    /// * `position_ids` — absolute positions of the tokens in `hidden_states`;
+    ///   when it does not carry one entry per token the positions default to
+    ///   `past_len .. past_len + seq_len`
+    /// * `past_key_value` — cached keys/values shaped
+    ///   `[batch, past_len, num_key_value_heads, head_dim]`
+    ///
+    /// The returned cache is the **concatenation** of the past and the freshly
+    /// computed keys/values, so incremental decoding attends to every token seen
+    /// so far.
     pub fn forward(
-        &mut self,
+        &self,
         hidden_states: &Tensor,
         attention_mask: Option<&Tensor>,
         position_ids: &Tensor,
         past_key_value: Option<(&Tensor, &Tensor)>,
     ) -> Result<(Tensor, Option<(Tensor, Tensor)>)> {
-        let batch_size = hidden_states.shape()[0];
-        let seq_len = hidden_states.shape()[1];
+        let shape = hidden_states.shape().to_vec();
+        if shape.len() != 3 {
+            return Err(tensor_op_error(
+                "CommandRAttention::forward",
+                format!("expected [batch, seq_len, hidden_size], got {shape:?}"),
+            ));
+        }
+        let (batch_size, seq_len, hidden) = (shape[0], shape[1], shape[2]);
+        if hidden != self.hidden_size {
+            return Err(tensor_op_error(
+                "CommandRAttention::forward",
+                format!(
+                    "input hidden size {hidden} does not match config hidden size {}",
+                    self.hidden_size
+                ),
+            ));
+        }
 
-        // Project to queries, keys, and values
+        // Length of the cached prefix (0 when decoding from scratch).
+        let past_len = match past_key_value {
+            Some((past_key, past_value)) => {
+                let key_shape = past_key.shape().to_vec();
+                let value_shape = past_value.shape().to_vec();
+                let expected_trailing = [batch_size, self.num_key_value_heads, self.head_dim];
+                let valid = |s: &[usize]| {
+                    s.len() == 4
+                        && s[0] == expected_trailing[0]
+                        && s[2] == expected_trailing[1]
+                        && s[3] == expected_trailing[2]
+                };
+                if !valid(&key_shape) || !valid(&value_shape) || key_shape[1] != value_shape[1] {
+                    return Err(tensor_op_error(
+                        "CommandRAttention::forward",
+                        format!(
+                            "past key/value must be [{}, past_len, {}, {}], got {key_shape:?} / {value_shape:?}",
+                            batch_size, self.num_key_value_heads, self.head_dim
+                        ),
+                    ));
+                }
+                key_shape[1]
+            },
+            None => 0,
+        };
+
+        // Absolute positions for the incoming tokens.
+        let positions = Self::resolve_positions(position_ids, seq_len, past_len);
+
+        // Project to queries, keys, and values.
         let query_states = self.q_proj.forward(hidden_states.clone())?;
         let key_states = self.k_proj.forward(hidden_states.clone())?;
         let value_states = self.v_proj.forward(hidden_states.clone())?;
 
-        // Reshape for multi-head attention
-        let query_states =
-            query_states.reshape(&[batch_size, seq_len, self.num_heads, self.head_dim])?;
-        let key_states =
-            key_states.reshape(&[batch_size, seq_len, self.num_key_value_heads, self.head_dim])?;
-        let value_states = value_states.reshape(&[
+        // Apply RoPE to the queries and the *new* keys only (cached keys were
+        // already rotated when they were produced).
+        let mut query_data = query_states.data()?;
+        let mut key_data = key_states.data()?;
+        self.rope.rotate_in_place(
+            &mut query_data,
+            batch_size,
+            self.num_heads,
+            self.head_dim,
+            &positions,
+        )?;
+        self.rope.rotate_in_place(
+            &mut key_data,
+            batch_size,
+            self.num_key_value_heads,
+            self.head_dim,
+            &positions,
+        )?;
+
+        let new_key = Tensor::from_vec(
+            key_data,
+            &[batch_size, seq_len, self.num_key_value_heads, self.head_dim],
+        )?;
+        let new_value = value_states.reshape(&[
             batch_size,
             seq_len,
             self.num_key_value_heads,
             self.head_dim,
         ])?;
 
-        // Apply RoPE
-        let (cos, sin) = self.rope.forward(&query_states, position_ids)?;
-        let query_states = self.apply_rotary_pos_emb(&query_states, &cos, &sin)?;
-        let key_states = self.apply_rotary_pos_emb(&key_states, &cos, &sin)?;
-
-        // Handle past key-value states for caching
-        let (key_states, value_states) = if let Some((past_key, past_value)) = past_key_value {
-            (past_key.clone(), past_value.clone()) // Simplified - would concatenate in real implementation
-        } else {
-            (key_states, value_states)
+        // Append the new keys/values to the cache along the sequence axis.
+        let (key_cache, value_cache) = match past_key_value {
+            Some((past_key, past_value)) => (
+                Tensor::concat(&[past_key.clone(), new_key], 1)?,
+                Tensor::concat(&[past_value.clone(), new_value], 1)?,
+            ),
+            None => (new_key, new_value),
         };
 
-        // Perform attention
+        let total_len = past_len + seq_len;
         let attn_output = self.scaled_dot_product_attention(
-            &query_states,
-            &key_states,
-            &value_states,
+            &query_data,
+            &key_cache,
+            &value_cache,
+            batch_size,
+            seq_len,
+            total_len,
+            past_len,
             attention_mask,
         )?;
 
-        // Reshape and project output
         let attn_output = attn_output.reshape(&[batch_size, seq_len, self.hidden_size])?;
         let attn_output = self.o_proj.forward(attn_output)?;
 
-        // Return with key-value cache
-        let present_key_value = Some((key_states, value_states));
-
-        Ok((attn_output, present_key_value))
+        Ok((attn_output, Some((key_cache, value_cache))))
     }
 
-    fn apply_rotary_pos_emb(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        // Rotary Position Embedding implementation
-        // Split the last dimension in half for rotation
-        let shape = x.shape();
-        let d_model = shape[shape.len() - 1];
-        let half_d = d_model / 2;
-
-        // Split x into x1 (first half) and x2 (second half)
-        let x1 = x.slice(shape.len() - 1, 0, half_d)?;
-        let x2 = x.slice(shape.len() - 1, half_d, d_model)?;
-
-        // Apply rotation: x1 * cos - x2 * sin, x2 * cos + x1 * sin
-        let rotated_x1 = x1.mul(cos)?.sub(&x2.mul(sin)?)?;
-        let rotated_x2 = x2.mul(cos)?.add(&x1.mul(sin)?)?;
-
-        // Concatenate the rotated halves back together
-        let rotated = Tensor::concat(&[rotated_x1, rotated_x2], shape.len() - 1)?;
-        Ok(rotated)
+    /// Absolute positions for the incoming tokens.
+    ///
+    /// `position_ids` wins when it supplies one entry per token; otherwise the
+    /// positions continue the cached prefix.
+    fn resolve_positions(position_ids: &Tensor, seq_len: usize, past_len: usize) -> Vec<usize> {
+        if let Ok(values) = position_ids.data() {
+            if values.len() == seq_len {
+                return values.iter().map(|&p| p.max(0.0) as usize).collect();
+            }
+            if values.len() > seq_len && values.len() % seq_len == 0 {
+                // [batch, seq_len]: every row carries the same positions.
+                return values[..seq_len].iter().map(|&p| p.max(0.0) as usize).collect();
+            }
+        }
+        (past_len..past_len + seq_len).collect()
     }
 
+    /// `softmax(mask(Q Kᵀ) / sqrt(head_dim)) V` over the cached keys/values.
+    ///
+    /// Queries are the flat `[batch, seq_len, num_heads, head_dim]` buffer that
+    /// has already been rotated; keys/values are the full cache
+    /// `[batch, total_len, num_key_value_heads, head_dim]`. Query head `h` reads
+    /// KV head `h / num_query_groups`, which is grouped-query attention.
+    ///
+    /// Attention dropout is deliberately not applied: this is an inference path
+    /// and randomised logits would make generation non-reproducible.
+    #[allow(clippy::too_many_arguments)]
     fn scaled_dot_product_attention(
         &self,
-        query: &Tensor,
-        key: &Tensor,
-        value: &Tensor,
+        query_data: &[f32],
+        key_cache: &Tensor,
+        value_cache: &Tensor,
+        batch_size: usize,
+        seq_len: usize,
+        total_len: usize,
+        past_len: usize,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let _batch_size = query.shape()[0];
-        let _seq_len = query.shape()[1];
         let head_dim = self.head_dim;
+        let num_heads = self.num_heads;
+        let num_kv_heads = self.num_key_value_heads;
+        if num_kv_heads == 0 || !num_heads.is_multiple_of(num_kv_heads) {
+            return Err(invalid_config(
+                "CommandRAttention",
+                format!(
+                    "num_attention_heads {num_heads} must be a multiple of num_key_value_heads {num_kv_heads}"
+                ),
+            ));
+        }
+        let groups = num_heads / num_kv_heads;
 
-        // Transpose for attention computation
-        let query = query.transpose(1, 2)?; // [batch, heads, seq_len, head_dim]
-        let key = key.transpose(1, 2)?;
-        let value = value.transpose(1, 2)?;
+        let key_data = key_cache.data()?;
+        let value_data = value_cache.data()?;
 
-        // Scale by sqrt(head_dim)
-        let scale = 1.0 / (head_dim as f32).sqrt();
-        let query = query.mul_scalar(scale)?;
-
-        // Compute attention scores
-        let key_dims = key.shape().len();
-        let scores = query.matmul(&key.transpose(key_dims - 2, key_dims - 1)?)?;
-
-        // Apply attention mask if provided
-        let scores = if let Some(mask) = attention_mask { scores.add(mask)? } else { scores };
-
-        // Apply softmax
-        let attn_weights = scores.softmax(-1)?;
-
-        // Apply dropout if specified
-        let attn_weights = if self.attention_dropout > 0.0 {
-            attn_weights.dropout(self.attention_dropout)?
-        } else {
-            attn_weights
+        // Optional additive mask, indexed as [batch?, head?, query, key].
+        let mask_data = match attention_mask {
+            Some(mask) => Some(mask.data()?),
+            None => None,
         };
+        let mask_len = mask_data.as_ref().map(|m| m.len()).unwrap_or(0);
 
-        // Apply attention to values
-        let attn_output = attn_weights.matmul(&value)?;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut output = vec![0.0f32; batch_size * seq_len * num_heads * head_dim];
+        let mut scores = vec![0.0f32; total_len];
 
-        // Transpose back
-        let attn_output = attn_output.transpose(1, 2)?;
+        for b in 0..batch_size {
+            for head in 0..num_heads {
+                let kv_head = head / groups;
+                for q_idx in 0..seq_len {
+                    let q_base = ((b * seq_len + q_idx) * num_heads + head) * head_dim;
+                    // Causal limit: a query at cache slot past_len + q_idx may
+                    // read every key up to and including its own slot.
+                    let visible = past_len + q_idx + 1;
+                    let mut max_score = f32::NEG_INFINITY;
+                    for (key_idx, score) in scores.iter_mut().take(visible).enumerate() {
+                        let k_base =
+                            ((b * total_len + key_idx) * num_kv_heads + kv_head) * head_dim;
+                        let mut dot = 0.0f32;
+                        for d in 0..head_dim {
+                            dot += query_data[q_base + d] * key_data[k_base + d];
+                        }
+                        dot *= scale;
+                        if let Some(mask) = &mask_data {
+                            dot += Self::mask_value(
+                                mask, mask_len, b, head, q_idx, key_idx, batch_size, num_heads,
+                                seq_len, total_len,
+                            );
+                        }
+                        *score = dot;
+                        if dot > max_score {
+                            max_score = dot;
+                        }
+                    }
 
-        Ok(attn_output)
+                    let mut sum = 0.0f32;
+                    for score in scores.iter_mut().take(visible) {
+                        *score = (*score - max_score).exp();
+                        sum += *score;
+                    }
+                    let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+
+                    let out_base = ((b * seq_len + q_idx) * num_heads + head) * head_dim;
+                    for (key_idx, score) in scores.iter().take(visible).enumerate() {
+                        let weight = score * inv_sum;
+                        if weight == 0.0 {
+                            continue;
+                        }
+                        let v_base =
+                            ((b * total_len + key_idx) * num_kv_heads + kv_head) * head_dim;
+                        for d in 0..head_dim {
+                            output[out_base + d] += weight * value_data[v_base + d];
+                        }
+                    }
+                }
+            }
+        }
+
+        Tensor::from_vec(output, &[batch_size, seq_len, num_heads, head_dim])
+    }
+
+    /// Read an additive mask entry, tolerating the common broadcast layouts
+    /// (`[q, k]`, `[batch, q, k]`, `[batch, 1, q, k]`, `[batch, heads, q, k]`).
+    #[allow(clippy::too_many_arguments)]
+    fn mask_value(
+        mask: &[f32],
+        mask_len: usize,
+        batch: usize,
+        head: usize,
+        q_idx: usize,
+        key_idx: usize,
+        batch_size: usize,
+        num_heads: usize,
+        seq_len: usize,
+        total_len: usize,
+    ) -> f32 {
+        let plane = seq_len * total_len;
+        if mask_len == plane {
+            return mask[q_idx * total_len + key_idx];
+        }
+        if mask_len == batch_size * plane {
+            return mask[batch * plane + q_idx * total_len + key_idx];
+        }
+        if mask_len == batch_size * num_heads * plane {
+            return mask[((batch * num_heads + head) * seq_len + q_idx) * total_len + key_idx];
+        }
+        0.0
+    }
+
+    /// Configured attention-dropout probability.
+    ///
+    /// Dropout is a training-time regulariser; this inference path never applies
+    /// it so that decoding stays reproducible.
+    pub fn attention_dropout(&self) -> f32 {
+        self.attention_dropout
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -367,7 +589,7 @@ impl CommandRDecoderLayer {
     }
 
     pub fn forward(
-        &mut self,
+        &self,
         hidden_states: &Tensor,
         attention_mask: Option<&Tensor>,
         position_ids: &Tensor,
@@ -462,24 +684,42 @@ impl CommandRModel {
     }
 
     pub fn forward(
-        &mut self,
+        &self,
         input_ids: &Tensor,
         attention_mask: Option<&Tensor>,
         position_ids: Option<&Tensor>,
         past_key_values: Option<&[(Tensor, Tensor)]>,
     ) -> Result<CommandRModelOutput> {
-        let _batch_size = input_ids.shape()[0];
-        let seq_len = input_ids.shape()[1];
+        let input_shape = input_ids.shape().to_vec();
+        if input_shape.len() != 2 {
+            return Err(tensor_op_error(
+                "CommandRModel::forward",
+                format!("expected input ids of shape [batch, seq_len], got {input_shape:?}"),
+            ));
+        }
+        let batch_size = input_shape[0];
+        let seq_len = input_shape[1];
+
+        // Length of the cached prefix, so positions continue where it left off.
+        let past_len = past_key_values
+            .and_then(|pkv| pkv.first())
+            .map(|(key, _)| {
+                let shape = key.shape().to_vec();
+                if shape.len() == 4 {
+                    shape[1]
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
 
         // Create position IDs if not provided
         let position_ids = if let Some(pos_ids) = position_ids {
             pos_ids.clone()
         } else {
-            let mut pos_ids = Vec::new();
-            for i in 0..seq_len {
-                pos_ids.push(i as f32);
-            }
-            Tensor::new(pos_ids)?.reshape(&[1, seq_len])?
+            let pos_ids: Vec<f32> =
+                (past_len..past_len + seq_len).map(|position| position as f32).collect();
+            Tensor::from_vec(pos_ids, &[1, seq_len])?
         };
 
         // Token embeddings
@@ -493,11 +733,14 @@ impl CommandRModel {
                 ))
             },
         };
-        let mut hidden_states = self.embed_tokens.forward(input_ids_vec)?;
+        // Embedding lookup returns [batch * seq_len, hidden]; restore the batch axis.
+        let embedded = self.embed_tokens.forward(input_ids_vec)?;
+        let mut hidden_states =
+            embedded.reshape(&[batch_size, seq_len, self.config.hidden_size])?;
 
         // Process through transformer layers
         let mut present_key_values = Vec::new();
-        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
             let past_key_value = past_key_values.map(|pkv| (&pkv[layer_idx].0, &pkv[layer_idx].1));
 
             let (layer_output, present_key_value) = layer.forward(
@@ -540,13 +783,16 @@ impl Model for CommandRModel {
 
         // Pass through all decoder layers - note: layer.forward returns (hidden_states, past_key_value)
         // For the Model trait implementation, we ignore past_key_values and use default params
+        let seq_len = hidden_states.shape().get(1).copied().unwrap_or(0);
+        let position_ids = Tensor::from_vec(
+            (0..seq_len).map(|position| position as f32).collect(),
+            &[1, seq_len],
+        )?;
         for layer in &self.layers {
-            // Convert to mutable reference for layer.forward
-            let mut layer_mut = layer.clone();
-            let (new_hidden_states, _) = layer_mut.forward(
+            let (new_hidden_states, _) = layer.forward(
                 &hidden_states,
                 None, // attention_mask
-                &Tensor::zeros(&[hidden_states.shape()[0], hidden_states.shape()[1]])?, // position_ids
+                &position_ids,
                 None, // past_key_value
             )?;
             hidden_states = new_hidden_states;
@@ -558,73 +804,16 @@ impl Model for CommandRModel {
         Ok(hidden_states)
     }
 
+    /// Load a HuggingFace Command-R checkpoint (safetensors or `torch.save`).
+    ///
+    /// Every tensor is bound to a named parameter; nothing is invented. Tensors
+    /// the architecture does not know about make the load fail rather than being
+    /// logged and ignored, and parameters the checkpoint does not carry are
+    /// reported in the [`LoadReport`] instead of silently keeping their
+    /// randomly-initialised values.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read pretrained weights: {}",
-                e
-            ))
-        })?;
-
-        if buffer.is_empty() {
-            return Err(
-                trustformers_core::errors::TrustformersError::invalid_input_simple(
-                    "Pretrained weight data is empty".to_string(),
-                ),
-            );
-        }
-
-        // Basic weight loading implementation
-        // For now, we perform basic validation and return success
-        // A full implementation would parse the weight format and load into model layers
-
-        // Validate minimum expected weight file size (should contain at least some data)
-        if buffer.len() < 1024 {
-            return Err(
-                trustformers_core::errors::TrustformersError::invalid_input_simple(
-                    "Weight file appears too small to contain valid Command-R model weights"
-                        .to_string(),
-                ),
-            );
-        }
-
-        // Log successful weight data reading
-        println!(
-            "Successfully read {} bytes of Command-R model weights",
-            buffer.len()
-        );
-
-        // Parse the weight format and load tensors into model components
-        // First, try to detect the format based on file content
-        if self.is_safetensors_format(&buffer) {
-            self.load_safetensors_weights(&buffer)?;
-        } else if self.is_pytorch_format(&buffer) {
-            self.load_pytorch_weights(&buffer)?;
-        } else {
-            // Try JSON format (custom serialized weights)
-            if let Ok(json_str) = std::str::from_utf8(&buffer) {
-                if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    self.load_json_weights(&json_data)?;
-                } else {
-                    return Err(
-                        trustformers_core::errors::TrustformersError::invalid_input_simple(
-                            "Unable to parse weight data as SafeTensors, PyTorch, or JSON format"
-                                .to_string(),
-                        ),
-                    );
-                }
-            } else {
-                return Err(
-                    trustformers_core::errors::TrustformersError::invalid_input_simple(
-                        "Weight data appears to be in an unsupported binary format".to_string(),
-                    ),
-                );
-            }
-        }
-
-        println!("Successfully loaded Command-R model weights");
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
         Ok(())
     }
 
@@ -642,287 +831,110 @@ impl Model for CommandRModel {
 }
 
 impl CommandRModel {
-    // Helper methods for weight loading
-
-    /// Detect if the buffer contains SafeTensors format data
-    fn is_safetensors_format(&self, buffer: &[u8]) -> bool {
-        // SafeTensors files start with an 8-byte header containing the JSON metadata length
-        if buffer.len() < 8 {
-            return false;
-        }
-
-        // Check for SafeTensors magic bytes or JSON-like structure
-        // This is a simplified check - in a full implementation you'd use the safetensors crate
-        let header = &buffer[0..8];
-        let header_len = u64::from_le_bytes(header.try_into().unwrap_or([0; 8]));
-        if header_len > 0 && header_len < (buffer.len() as u64 - 8) {
-            // Check if the next bytes look like JSON metadata
-            let start_idx = 8;
-            let end_idx = std::cmp::min(start_idx + header_len as usize, buffer.len());
-            if let Ok(json_str) = std::str::from_utf8(&buffer[start_idx..end_idx]) {
-                return json_str.trim_start().starts_with('{');
-            }
-        }
-
-        false
-    }
-
-    /// Detect if the buffer contains PyTorch format data
-    fn is_pytorch_format(&self, buffer: &[u8]) -> bool {
-        // Check for Python pickle protocol markers
-        if buffer.len() < 4 {
-            return false;
-        }
-
-        // Common PyTorch pickle markers
-        let pickle_markers = [
-            b"\x80\x02", // Pickle protocol 2
-            b"\x80\x03", // Pickle protocol 3
-            b"\x80\x04", // Pickle protocol 4
-        ];
-
-        for marker in &pickle_markers {
-            if buffer.starts_with(*marker) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Load weights from SafeTensors format
-    fn load_safetensors_weights(&mut self, buffer: &[u8]) -> Result<()> {
-        println!("Detected SafeTensors format ({} bytes)", buffer.len());
-        println!("SafeTensors weight loading functionality would be implemented here");
-
-        // In a full implementation, this would:
-        // 1. Parse the SafeTensors header to get metadata
-        // 2. Extract individual tensors from the binary data
-        // 3. Load them into the model components using assign_tensor_to_component
-
-        // For now, we'll create some mock tensor assignments to demonstrate the infrastructure
-        self.create_mock_tensor_assignments()?;
-
-        Ok(())
-    }
-
-    /// Load weights from PyTorch format
-    fn load_pytorch_weights(&mut self, buffer: &[u8]) -> Result<()> {
-        println!("Detected PyTorch format ({} bytes)", buffer.len());
-        println!("PyTorch weight loading functionality would be implemented here");
-
-        // In a full implementation, this would:
-        // 1. Parse the Python pickle format
-        // 2. Extract the model state dictionary
-        // 3. Load individual tensors into model components using assign_tensor_to_component
-
-        // For now, we'll create some mock tensor assignments to demonstrate the infrastructure
-        self.create_mock_tensor_assignments()?;
-
-        Ok(())
-    }
-
-    /// Load weights from JSON format (custom serialization)
-    fn load_json_weights(&mut self, json_data: &serde_json::Value) -> Result<()> {
-        let tensors_obj = json_data.get("tensors").ok_or_else(|| {
-            trustformers_core::errors::TrustformersError::weight_load_error(
-                "Missing 'tensors' field in JSON data".to_string(),
-            )
-        })?;
-
-        if let Some(tensors) = tensors_obj.as_object() {
-            for (tensor_name, tensor_info) in tensors {
-                if let Err(e) = self.load_single_tensor_from_json(tensor_name, tensor_info) {
-                    eprintln!("Warning: Failed to load tensor '{}': {}", tensor_name, e);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Load a single tensor from JSON representation
-    fn load_single_tensor_from_json(
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// Accepts both `model.*`-prefixed (`CohereForCausalLM`) and bare
+    /// (`CohereModel`) HuggingFace layouts. `allowed_unused_prefixes` names the
+    /// checkpoint namespaces this base model legitimately ignores.
+    ///
+    /// Command-R shares one layer norm across the parallel attention/MLP block.
+    /// This implementation runs attention and MLP sequentially with two norms, so
+    /// a released Cohere checkpoint carries no `post_attention_layernorm`; that
+    /// norm keeps its unit scale and the block therefore does **not** reproduce
+    /// Cohere's parallel-residual arithmetic bit for bit. Every tensor the
+    /// checkpoint does carry is bound exactly, and nothing is invented.
+    pub fn load_checkpoint(
         &mut self,
-        name: &str,
-        tensor_info: &serde_json::Value,
-    ) -> Result<()> {
-        let shape = tensor_info.get("shape").and_then(|s| s.as_array()).ok_or_else(|| {
-            trustformers_core::errors::TrustformersError::weight_load_error(
-                "Missing or invalid 'shape' field".to_string(),
-            )
-        })?;
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
 
-        let shape_vec: Result<Vec<usize>> = shape
-            .iter()
-            .map(|v| {
-                v.as_u64().map(|u| u as usize).ok_or_else(|| {
-                    trustformers_core::errors::TrustformersError::weight_load_error(
-                        "Invalid shape dimension".to_string(),
-                    )
-                })
-            })
-            .collect();
-        let shape_vec = shape_vec?;
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim();
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_key_value_heads * head_dim;
+        let intermediate = self.config.intermediate_size;
 
-        let data = tensor_info.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
-            trustformers_core::errors::TrustformersError::weight_load_error(
-                "Missing or invalid 'data' field".to_string(),
-            )
-        })?;
-
-        let data_vec: Result<Vec<f32>> = data
-            .iter()
-            .map(|v| {
-                v.as_f64().map(|f| f as f32).ok_or_else(|| {
-                    trustformers_core::errors::TrustformersError::weight_load_error(
-                        "Invalid tensor data value".to_string(),
-                    )
-                })
-            })
-            .collect();
-        let data_vec = data_vec?;
-
-        // Create tensor from the loaded data
-        let arr = ArrayD::from_shape_vec(IxDyn(&shape_vec), data_vec).map_err(|e| {
-            trustformers_core::errors::TrustformersError::shape_error(e.to_string())
-        })?;
-        let tensor = trustformers_core::tensor::Tensor::F32(arr);
-
-        // Map tensor names to model components
-        self.assign_tensor_to_component(name, tensor)
-    }
-
-    /// Create mock tensor assignments for demonstration
-    fn create_mock_tensor_assignments(&mut self) -> Result<()> {
-        // Create some example tensor names that would typically be found in Command-R models
-        let mock_tensor_names = vec![
-            "embed_tokens.weight",
-            "layers.0.self_attn.q_proj.weight",
-            "layers.0.self_attn.k_proj.weight",
-            "layers.0.self_attn.v_proj.weight",
-            "layers.0.self_attn.o_proj.weight",
-            "layers.0.mlp.gate_proj.weight",
-            "layers.0.mlp.up_proj.weight",
-            "layers.0.mlp.down_proj.weight",
-            "layers.0.input_layernorm.weight",
-            "layers.0.post_attention_layernorm.weight",
-            "norm.weight",
-        ];
-
-        // Process each mock tensor name to demonstrate the assignment logic
-        for tensor_name in mock_tensor_names {
-            // Create a minimal mock tensor (just for demonstration)
-            let mock_data = vec![0.1f32; 128]; // Small mock tensor
-            let arr = ArrayD::from_shape_vec(IxDyn(&[128]), mock_data).map_err(|e| {
-                trustformers_core::errors::TrustformersError::shape_error(e.to_string())
-            })?;
-            let mock_tensor = trustformers_core::tensor::Tensor::F32(arr);
-
-            // Use the existing assignment logic
-            self.assign_tensor_to_component(tensor_name, mock_tensor)?;
+        if let Some(weight) =
+            binder.take_shaped("embed_tokens.weight", &[self.config.vocab_size, hidden])?
+        {
+            self.embed_tokens.set_weight(weight)?;
         }
 
-        Ok(())
-    }
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            if let Some(w) =
+                binder.take_shaped(&format!("{attn}.q_proj.weight"), &[q_width, hidden])?
+            {
+                layer.self_attn.q_proj.set_weight(w)?;
+            }
+            if let Some(w) =
+                binder.take_shaped(&format!("{attn}.k_proj.weight"), &[kv_width, hidden])?
+            {
+                layer.self_attn.k_proj.set_weight(w)?;
+            }
+            if let Some(w) =
+                binder.take_shaped(&format!("{attn}.v_proj.weight"), &[kv_width, hidden])?
+            {
+                layer.self_attn.v_proj.set_weight(w)?;
+            }
+            if let Some(w) =
+                binder.take_shaped(&format!("{attn}.o_proj.weight"), &[hidden, q_width])?
+            {
+                layer.self_attn.o_proj.set_weight(w)?;
+            }
 
-    /// Assign a loaded tensor to the appropriate model component
-    fn assign_tensor_to_component(
-        &mut self,
-        name: &str,
-        tensor: trustformers_core::tensor::Tensor,
-    ) -> Result<()> {
-        // Map common tensor names to model components
-        // This follows typical transformer model naming conventions
+            let mlp = format!("layers.{i}.mlp");
+            if let Some(w) =
+                binder.take_shaped(&format!("{mlp}.gate_proj.weight"), &[intermediate, hidden])?
+            {
+                layer.mlp.gate_proj.set_weight(w)?;
+            }
+            if let Some(w) =
+                binder.take_shaped(&format!("{mlp}.up_proj.weight"), &[intermediate, hidden])?
+            {
+                layer.mlp.up_proj.set_weight(w)?;
+            }
+            if let Some(w) =
+                binder.take_shaped(&format!("{mlp}.down_proj.weight"), &[hidden, intermediate])?
+            {
+                layer.mlp.down_proj.set_weight(w)?;
+            }
 
-        if name.contains("embed_tokens") || name == "embeddings.word_embeddings.weight" {
-            // Embedding layer weights
-            println!("Loading embedding weights from tensor: {}", name);
-            // Note: In a full implementation, you would assign the tensor to self.embed_tokens
-            // For now, we just log the successful identification
-        } else if name.starts_with("layers.") || name.contains("transformer.h.") {
-            // Layer weights (attention and feed-forward)
-            println!("Loading layer weights from tensor: {}", name);
-            // Parse layer index and component type from name
-            self.load_layer_tensor(name, tensor)?;
-        } else if name.contains("norm") || name.contains("ln_f") {
-            // Final layer normalization
-            println!("Loading normalization weights from tensor: {}", name);
-            // Note: In a full implementation, you would assign the tensor to self.norm
-        } else {
-            // Unknown tensor - log but don't fail
-            println!("Skipping unknown tensor: {}", name);
-        }
-
-        Ok(())
-    }
-
-    /// Load tensor into specific layer component
-    fn load_layer_tensor(
-        &mut self,
-        name: &str,
-        _tensor: trustformers_core::tensor::Tensor,
-    ) -> Result<()> {
-        // Parse layer index from tensor name
-        if let Some(layer_idx) = self.extract_layer_index(name) {
-            if layer_idx < self.layers.len() {
-                println!("Loading tensor '{}' into layer {}", name, layer_idx);
-
-                // Determine which component of the layer this tensor belongs to
-                if name.contains("self_attn") || name.contains("attention") {
-                    if name.contains("q_proj") || name.contains("query") {
-                        println!("  -> Query projection weights");
-                    } else if name.contains("k_proj") || name.contains("key") {
-                        println!("  -> Key projection weights");
-                    } else if name.contains("v_proj") || name.contains("value") {
-                        println!("  -> Value projection weights");
-                    } else if name.contains("o_proj") || name.contains("out") {
-                        println!("  -> Output projection weights");
-                    }
-                } else if name.contains("mlp") || name.contains("feed_forward") {
-                    if name.contains("gate_proj") || name.contains("w1") {
-                        println!("  -> Gate projection weights");
-                    } else if name.contains("up_proj") || name.contains("w3") {
-                        println!("  -> Up projection weights");
-                    } else if name.contains("down_proj") || name.contains("w2") {
-                        println!("  -> Down projection weights");
-                    }
-                } else if name.contains("input_layernorm") || name.contains("ln_1") {
-                    println!("  -> Input layer norm weights");
-                } else if name.contains("post_attention_layernorm") || name.contains("ln_2") {
-                    println!("  -> Post-attention layer norm weights");
-                }
-
-                // Note: In a full implementation, you would actually assign the tensor data
-                // to the appropriate Linear layer or LayerNorm component within layers[layer_idx]
+            if let Some(w) =
+                binder.take_shaped(&format!("layers.{i}.input_layernorm.weight"), &[hidden])?
+            {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if let Some(b) = binder.take_optional(&format!("layers.{i}.input_layernorm.bias")) {
+                layer.input_layernorm.set_bias(b)?;
+            }
+            // Cohere's decoder shares a single norm across the parallel
+            // attention/MLP block, so this parameter is genuinely absent from
+            // released checkpoints: request it optionally instead of reporting a
+            // spurious "missing" for every layer.
+            if let Some(w) =
+                binder.take_optional(&format!("layers.{i}.post_attention_layernorm.weight"))
+            {
+                layer.post_attention_layernorm.set_weight(w)?;
+            }
+            if let Some(b) =
+                binder.take_optional(&format!("layers.{i}.post_attention_layernorm.bias"))
+            {
+                layer.post_attention_layernorm.set_bias(b)?;
             }
         }
 
-        Ok(())
-    }
-
-    /// Extract layer index from tensor name
-    fn extract_layer_index(&self, name: &str) -> Option<usize> {
-        // Try different naming patterns
-        if let Some(captures) = name.find("layers.") {
-            let start = captures + "layers.".len();
-            if let Some(end) = name[start..].find('.') {
-                if let Ok(idx) = name[start..start + end].parse::<usize>() {
-                    return Some(idx);
-                }
-            }
+        if let Some(w) = binder.take_shaped("norm.weight", &[hidden])? {
+            self.norm.set_weight(w)?;
+        }
+        if let Some(b) = binder.take_optional("norm.bias") {
+            self.norm.set_bias(b)?;
         }
 
-        if let Some(captures) = name.find("transformer.h.") {
-            let start = captures + "transformer.h.".len();
-            if let Some(end) = name[start..].find('.') {
-                if let Ok(idx) = name[start..start + end].parse::<usize>() {
-                    return Some(idx);
-                }
-            }
-        }
-
-        None
+        binder.finish(allowed_unused_prefixes)
     }
 }
 
@@ -956,48 +968,21 @@ impl CommandRForCausalLM {
     }
 
     pub fn forward(
-        &mut self,
+        &self,
         input_ids: &Tensor,
         attention_mask: Option<&Tensor>,
         position_ids: Option<&Tensor>,
         past_key_values: Option<&[(Tensor, Tensor)]>,
         labels: Option<&Tensor>,
     ) -> Result<CommandRCausalLMOutput> {
-        let mut model_mut = self.model.clone();
-        let outputs = CommandRModel::forward(
-            &mut model_mut,
-            input_ids,
-            attention_mask,
-            position_ids,
-            past_key_values,
-        )?;
+        let outputs =
+            self.model.forward(input_ids, attention_mask, position_ids, past_key_values)?;
 
         let logits = self.lm_head.forward(outputs.last_hidden_state)?;
 
-        let loss = if let Some(labels) = labels {
-            // Implement cross-entropy loss for causal language modeling
-            // Shift labels so that tokens < n predict n
-            let vocab_size = logits.shape()[logits.shape().len() - 1];
-            let seq_len = logits.shape()[logits.shape().len() - 2];
-
-            // Flatten logits and labels for cross-entropy computation
-            let batch_size = logits.shape()[0];
-            let flat_logits = logits.reshape(&[batch_size * seq_len, vocab_size])?;
-            let _flat_labels = labels.reshape(&[batch_size * seq_len])?;
-
-            // Compute cross-entropy loss: -sum(labels * log_softmax(logits))
-            let _log_probs = flat_logits.softmax(-1)?.log()?;
-
-            // For now, compute a simplified loss as mean squared error
-            // A proper implementation would use gather operation for cross-entropy
-            let target_probs = Tensor::zeros(&flat_logits.shape())?;
-            // Convert labels to one-hot (simplified)
-            // In a full implementation, we'd use proper one-hot encoding and gather ops
-            let diff = flat_logits.sub(&target_probs)?;
-            let squared = diff.mul(&diff)?;
-            Some(squared.mean()?)
-        } else {
-            None
+        let loss = match labels {
+            Some(labels) => Some(Self::causal_lm_loss(&logits, labels)?),
+            None => None,
         };
 
         Ok(CommandRCausalLMOutput {
@@ -1009,6 +994,79 @@ impl CommandRForCausalLM {
         })
     }
 
+    /// Shifted causal-LM cross-entropy loss.
+    ///
+    /// `logits` is `[batch, seq_len, vocab]` and `labels` holds `batch * seq_len`
+    /// token ids. Position `t` predicts `labels[t + 1]`, so the loss is
+    /// `mean(-log softmax(logits[t])[labels[t+1]])` over the batch. Labels equal
+    /// to `-100` are ignored, matching the HuggingFace convention.
+    fn causal_lm_loss(logits: &Tensor, labels: &Tensor) -> Result<Tensor> {
+        let shape = logits.shape().to_vec();
+        if shape.len() != 3 {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::causal_lm_loss",
+                format!("expected logits [batch, seq_len, vocab], got {shape:?}"),
+            ));
+        }
+        let (batch_size, seq_len, vocab_size) = (shape[0], shape[1], shape[2]);
+
+        let label_values = labels.data()?;
+        if label_values.len() != batch_size * seq_len {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::causal_lm_loss",
+                format!(
+                    "expected {} labels, got {}",
+                    batch_size * seq_len,
+                    label_values.len()
+                ),
+            ));
+        }
+        if seq_len < 2 {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::causal_lm_loss",
+                "causal-LM loss needs at least two positions to shift".to_string(),
+            ));
+        }
+
+        let logit_values = logits.data()?;
+        let mut total = 0.0f32;
+        let mut counted = 0usize;
+        for b in 0..batch_size {
+            for t in 0..seq_len - 1 {
+                let target = label_values[b * seq_len + t + 1];
+                if target < 0.0 {
+                    continue; // ignore_index
+                }
+                let target_idx = target as usize;
+                if target_idx >= vocab_size {
+                    return Err(tensor_op_error(
+                        "CommandRForCausalLM::causal_lm_loss",
+                        format!("label {target_idx} is outside the vocabulary ({vocab_size})"),
+                    ));
+                }
+                let row = &logit_values[(b * seq_len + t) * vocab_size..][..vocab_size];
+                let max_logit = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let sum_exp: f32 = row.iter().map(|&x| (x - max_logit).exp()).sum();
+                let log_prob = row[target_idx] - max_logit - sum_exp.ln();
+                total -= log_prob;
+                counted += 1;
+            }
+        }
+
+        if counted == 0 {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::causal_lm_loss",
+                "every label was masked out; no loss could be computed".to_string(),
+            ));
+        }
+        Tensor::scalar(total / counted as f32)
+    }
+
+    /// Autoregressive generation with a real KV cache and real sampling.
+    ///
+    /// `temperature <= 0` selects greedy decoding; otherwise the logits are
+    /// temperature-scaled and passed to top-k / top-p / full multinomial
+    /// sampling from [`GenerationUtils`].
     pub fn generate(
         &mut self,
         input_ids: &Tensor,
@@ -1017,88 +1075,110 @@ impl CommandRForCausalLM {
         top_k: Option<usize>,
         top_p: Option<f32>,
     ) -> Result<Tensor> {
-        let mut current_ids = input_ids.clone();
-        let mut past_key_values = None;
+        let mut rng = thread_rng();
+        self.generate_with_rng(input_ids, max_length, temperature, top_k, top_p, &mut rng)
+    }
+
+    /// Same as [`generate`](Self::generate) but with a caller-supplied RNG so
+    /// sampling can be made reproducible in tests.
+    pub fn generate_with_rng(
+        &mut self,
+        input_ids: &Tensor,
+        max_length: usize,
+        temperature: f32,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+        rng: &mut impl Rng,
+    ) -> Result<Tensor> {
+        let input_shape = input_ids.shape().to_vec();
+        if input_shape.len() != 2 || input_shape[0] != 1 {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::generate",
+                format!("generation expects input ids of shape [1, seq_len], got {input_shape:?}"),
+            ));
+        }
+
+        let mut token_ids: Vec<i64> = match input_ids {
+            Tensor::I64(arr) => arr.iter().copied().collect(),
+            other => other.data()?.iter().map(|&value| value as i64).collect(),
+        };
+        if token_ids.is_empty() {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::generate",
+                "input_ids must not be empty".to_string(),
+            ));
+        }
+
+        let mut past_key_values: Option<Vec<(Tensor, Tensor)>> = None;
+        let mut step_input = Tensor::from_vec_i64(token_ids.clone(), &[1, token_ids.len()])?;
 
         for _ in 0..max_length {
             let outputs =
-                self.forward(&current_ids, None, None, past_key_values.as_deref(), None)?;
+                self.forward(&step_input, None, None, past_key_values.as_deref(), None)?;
 
-            let seq_len = outputs.logits.shape()[1];
-            let next_token_logits = outputs.logits.slice(1, seq_len - 1, seq_len)?;
-            let next_token_logits = next_token_logits.div_scalar(temperature)?;
+            let logits_shape = outputs.logits.shape().to_vec();
+            let vocab_size = logits_shape[logits_shape.len() - 1];
+            let step_len = logits_shape[1];
+            let all_logits = outputs.logits.data()?;
+            let mut next_logits = all_logits[(step_len - 1) * vocab_size..][..vocab_size].to_vec();
 
-            // Apply sampling
-            let next_token = self.sample_next_token(&next_token_logits, top_k, top_p)?;
+            if temperature > 0.0 {
+                GenerationUtils::apply_temperature(&mut next_logits, temperature);
+            }
+            let next_token = Self::sample_next_token(&next_logits, temperature, top_k, top_p, rng)?;
 
-            // Append to sequence
-            current_ids = Tensor::concat(&[current_ids, next_token.clone()], 1)?;
+            token_ids.push(next_token as i64);
             past_key_values = outputs.past_key_values;
 
-            // Check for EOS token
             if let Some(eos_id) = self.config.eos_token_id {
-                if let Ok(data) = next_token.data() {
-                    if data[0] as usize == eos_id {
-                        break;
-                    }
+                if next_token as usize == eos_id {
+                    break;
                 }
             }
+
+            // With a populated cache only the newly generated token is fed back.
+            step_input = if past_key_values.is_some() {
+                Tensor::from_vec_i64(vec![next_token as i64], &[1, 1])?
+            } else {
+                Tensor::from_vec_i64(token_ids.clone(), &[1, token_ids.len()])?
+            };
         }
 
-        Ok(current_ids)
+        let generated_len = token_ids.len();
+        Tensor::from_vec_i64(token_ids, &[1, generated_len])
     }
 
+    /// Pick the next token from (already temperature-scaled) logits.
+    ///
+    /// Delegates to the crate-wide [`GenerationUtils`] implementations instead of
+    /// re-deriving them: `top_k` and `top_p` are honoured, and with neither set
+    /// the token is drawn from the full softmax distribution. `temperature <= 0`
+    /// means deterministic greedy decoding.
     fn sample_next_token(
-        &self,
-        logits: &Tensor,
+        logits: &[f32],
+        temperature: f32,
         top_k: Option<usize>,
         top_p: Option<f32>,
-    ) -> Result<Tensor> {
-        let mut probs = logits.softmax(-1)?;
-
-        // Apply top-k sampling
+        rng: &mut impl Rng,
+    ) -> Result<u32> {
+        if logits.is_empty() {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::sample_next_token",
+                "logits must not be empty".to_string(),
+            ));
+        }
+        if temperature <= 0.0 {
+            return Ok(GenerationUtils::sample_greedy(logits));
+        }
         if let Some(k) = top_k {
-            probs = self.top_k_sampling(&probs, k)?;
+            let k = k.clamp(1, logits.len());
+            return GenerationUtils::sample_top_k(logits, k, rng);
         }
-
-        // Apply top-p (nucleus) sampling
         if let Some(p) = top_p {
-            probs = self.top_p_sampling(&probs, p)?;
+            return GenerationUtils::sample_top_p(logits, p, rng);
         }
-
-        // Sample from the distribution
-        let sampled_idx = self.categorical_sample(&probs)?;
-
-        Tensor::new(vec![sampled_idx as f32])?.reshape(&[1, 1])
-    }
-
-    fn top_k_sampling(&self, probs: &Tensor, _k: usize) -> Result<Tensor> {
-        // Simplified top-k sampling
-        // In practice, you'd want to properly implement this
-        Ok(probs.clone())
-    }
-
-    fn top_p_sampling(&self, probs: &Tensor, _p: f32) -> Result<Tensor> {
-        // Simplified top-p sampling
-        // In practice, you'd want to properly implement this
-        Ok(probs.clone())
-    }
-
-    fn categorical_sample(&self, probs: &Tensor) -> Result<usize> {
-        // Simplified categorical sampling
-        // In practice, you'd want to properly implement this with proper random sampling
-        let data = probs.data()?;
-        let mut max_idx = 0;
-        let mut max_prob = data[0];
-
-        for (i, &prob) in data.iter().enumerate() {
-            if prob > max_prob {
-                max_prob = prob;
-                max_idx = i;
-            }
-        }
-
-        Ok(max_idx)
+        let probs = GenerationUtils::softmax(logits);
+        Ok(GenerationUtils::sample_from_probs(&probs, rng)? as u32)
     }
 }
 
@@ -1118,8 +1198,10 @@ impl Model for CommandRForCausalLM {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Forward through the model to get hidden states
-        let hidden_states = self.model.forward(input)?;
+        // Forward through the model to get hidden states. The trait method takes
+        // hidden states (the inherent `CommandRModel::forward` takes token ids),
+        // so disambiguate explicitly.
+        let hidden_states = <CommandRModel as Model>::forward(&self.model, input)?;
 
         // Apply language modeling head to get logits
         let logits = self.lm_head.forward(hidden_states)?;
@@ -1127,56 +1209,44 @@ impl Model for CommandRForCausalLM {
         Ok(logits)
     }
 
+    /// Load a HuggingFace Command-R checkpoint into the base model and the head.
+    ///
+    /// Cohere checkpoints tie the LM head to the input embeddings, so a
+    /// checkpoint without `lm_head.weight` reuses the embedding matrix — that is
+    /// what the tied configuration means, not a fallback guess.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use std::io::Write;
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
 
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read pretrained weights: {}",
-                e
-            ))
-        })?;
-
-        if buffer.is_empty() {
-            return Err(
-                trustformers_core::errors::TrustformersError::invalid_input_simple(
-                    "Pretrained weight data is empty".to_string(),
+        let expected = [self.config.vocab_size, self.config.hidden_size];
+        let head = match checkpoint.get("lm_head.weight") {
+            Some(weight) => weight,
+            None => {
+                let embed_name = if checkpoint.contains("model.embed_tokens.weight") {
+                    "model.embed_tokens.weight"
+                } else {
+                    "embed_tokens.weight"
+                };
+                checkpoint.get(embed_name).ok_or_else(|| {
+                    tensor_op_error(
+                        "CommandRForCausalLM::load_pretrained",
+                        "checkpoint holds neither lm_head.weight nor an embedding matrix to tie it to"
+                            .to_string(),
+                    )
+                })?
+            },
+        };
+        if head.shape() != expected {
+            return Err(tensor_op_error(
+                "CommandRForCausalLM::load_pretrained",
+                format!(
+                    "language-model head has shape {:?} but this model expects {expected:?}",
+                    head.shape()
                 ),
-            );
+            ));
         }
-
-        // Create a temporary directory and file
-        let temp_dir = std::env::temp_dir();
-        let temp_file_path = temp_dir.join(format!(
-            "command_r_causal_weights_{}.bin",
-            std::process::id()
-        ));
-
-        // Write buffer to temporary file
-        {
-            let mut temp_file = std::fs::File::create(&temp_file_path).map_err(|e| {
-                trustformers_core::errors::TrustformersError::io_error(format!(
-                    "Failed to create temporary file: {}",
-                    e
-                ))
-            })?;
-            temp_file.write_all(&buffer).map_err(|e| {
-                trustformers_core::errors::TrustformersError::io_error(format!(
-                    "Failed to write to temporary file: {}",
-                    e
-                ))
-            })?;
-        }
-
-        // Use existing load_from_path method which has enhanced weight loading
-        let result = self.load_from_path(&temp_file_path);
-
-        // Clean up temporary file (ignore errors during cleanup)
-        let _ = std::fs::remove_file(&temp_file_path);
-
-        result
+        self.lm_head.set_weight(head.clone())?;
+        Ok(())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1191,13 +1261,23 @@ impl Model for CommandRForCausalLM {
 impl CommandRForCausalLM {
     /// Load model weights from a directory containing HuggingFace format weights
     pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
             memory_mapped: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
+
+    /// Load model weights with an explicit [`WeightLoadingConfig`](crate::weight_loading::WeightLoadingConfig).
+    pub fn load_from_path_with_config(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+        config: crate::weight_loading::WeightLoadingConfig,
+    ) -> Result<()> {
+        use crate::weight_loading::auto_create_loader;
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
@@ -1296,9 +1376,10 @@ impl CommandRForCausalLM {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -1325,7 +1406,7 @@ impl CommandRForCausalLM {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
 
-            println!("Attempting to download {}", file_url);
+            tracing::info!("Attempting to download {}", file_url);
 
             // Convert path to string once for both commands
             let file_path_str = file_path.to_str().ok_or_else(|| {
@@ -1345,18 +1426,18 @@ impl CommandRForCausalLM {
 
             match curl_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {}", file_name);
+                    tracing::info!("Successfully downloaded {}", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with curl: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("curl not available: {}", e);
+                    tracing::info!("curl not available: {}", e);
                 },
             }
 
@@ -1365,18 +1446,18 @@ impl CommandRForCausalLM {
 
             match wget_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {} with wget", file_name);
+                    tracing::info!("Successfully downloaded {} with wget", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with wget: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("wget not available: {}", e);
+                    tracing::info!("wget not available: {}", e);
                 },
             }
 
@@ -1389,19 +1470,24 @@ impl CommandRForCausalLM {
             }
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded model {} to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
         Ok(())
     }
 
-    /// Load weights with lazy loading for large models
-    pub fn load_with_lazy_loading(
-        &mut self,
-        model_path: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+    /// Load weights through a **memory-mapped** loader.
+    ///
+    /// The loading config asks for a memory-mapped reader, so tensors are
+    /// materialised one at a time out of the mapping instead of through an
+    /// intermediate copy of the whole checkpoint. It is *not* deferred loading:
+    /// when this call returns, every weight the model knows about is resident.
+    /// Model parameters are owned `Tensor`s, so there is nothing left to resolve
+    /// on first access.
+    pub fn load_with_mmap(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
@@ -1409,16 +1495,22 @@ impl CommandRForCausalLM {
             streaming: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
 
-        let _loader = auto_create_loader(&model_path, Some(config))?;
-
-        // For lazy loading, we set up the loader but don't load weights immediately
-        // Weights are loaded on-demand during forward passes
-        // This is useful for very large models that don't fit in memory
-
-        // Store the loader in the model for later use
-        // For now, just perform regular loading
-        self.load_from_path(model_path)
+    /// Deprecated alias for [`load_with_mmap`](Self::load_with_mmap).
+    ///
+    /// The old name promised on-demand tensor resolution that this loader has
+    /// never performed; it loads every tensor eagerly.
+    #[deprecated(
+        since = "0.2.1",
+        note = "renamed to `load_with_mmap`: loading is memory-mapped, not deferred"
+    )]
+    pub fn load_with_lazy_loading(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        self.load_with_mmap(model_path)
     }
 }
 
@@ -1433,127 +1525,5 @@ impl Config for CommandRConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Tests using tiny configuration for fast execution
-    #[test]
-    fn test_command_r_model_creation_tiny() {
-        let config = CommandRConfig::tiny();
-        let model = CommandRModel::new(&config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    fn test_command_r_causal_lm_creation_tiny() {
-        let config = CommandRConfig::tiny();
-        let model = CommandRForCausalLM::new(&config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Forward pass requires proper hidden state input - model's forward method is shadowed by Model trait"]
-    fn test_command_r_forward_pass_tiny() {
-        let config = CommandRConfig::tiny();
-        let model = CommandRModel::new(&config).expect("operation failed");
-
-        // The Model trait's forward expects hidden states (F32 tensor), not input_ids
-        // Create a proper hidden state tensor for testing
-        let batch_size = 1;
-        let seq_len = 4;
-        let hidden_states =
-            Tensor::zeros(&[batch_size, seq_len, config.hidden_size]).expect("operation failed");
-
-        let result = model.forward(hidden_states);
-        assert!(result.is_ok(), "Forward pass failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_command_r_attention_creation_tiny() {
-        let config = CommandRConfig::tiny();
-        let attention = CommandRAttention::new(&config);
-        assert!(attention.is_ok());
-    }
-
-    #[test]
-    fn test_command_r_mlp_creation_tiny() {
-        let config = CommandRConfig::tiny();
-        let mlp = CommandRMLP::new(&config);
-        assert!(mlp.is_ok());
-    }
-
-    #[test]
-    fn test_command_r_decoder_layer_creation_tiny() {
-        let config = CommandRConfig::tiny();
-        let layer = CommandRDecoderLayer::new(&config);
-        assert!(layer.is_ok());
-    }
-
-    #[test]
-    fn test_rope_creation() {
-        let rope = CommandRRoPE::new(128, 4096, 10000.0);
-        assert!(rope.is_ok());
-    }
-
-    // Full model size tests - ignored by default due to memory/time requirements
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_model_creation() {
-        let config = CommandRConfig::command_r();
-        let model = CommandRModel::new(&config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_plus_model_creation() {
-        let config = CommandRConfig::command_r_plus();
-        let model = CommandRModel::new(&config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_causal_lm_creation() {
-        let config = CommandRConfig::command_r();
-        let model = CommandRForCausalLM::new(&config);
-        assert!(model.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_forward_pass() {
-        let config = CommandRConfig::command_r();
-        let model = CommandRModel::new(&config).expect("operation failed");
-
-        // Use I64 tensor for input_ids (token IDs should be integers)
-        let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4], &[1, 4]).expect("operation failed");
-
-        let result = model.forward(input_ids);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_attention_creation() {
-        let config = CommandRConfig::command_r();
-        let attention = CommandRAttention::new(&config);
-        assert!(attention.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_mlp_creation() {
-        let config = CommandRConfig::command_r();
-        let mlp = CommandRMLP::new(&config);
-        assert!(mlp.is_ok());
-    }
-
-    #[test]
-    #[ignore = "Full model size test - requires significant memory and time"]
-    fn test_command_r_decoder_layer_creation() {
-        let config = CommandRConfig::command_r();
-        let layer = CommandRDecoderLayer::new(&config);
-        assert!(layer.is_ok());
-    }
-}
+#[path = "model_tests.rs"]
+mod tests;

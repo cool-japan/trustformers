@@ -263,16 +263,12 @@ impl Tokenizer for CustomVocabTokenizer {
     }
 
     fn get_vocab(&self) -> HashMap<String, u32> {
-        // For FlexibleVocab, we need to reconstruct the vocab map
-        // This is a simple implementation - in practice, we'd want to optimize this
-        match &self.vocab {
-            FlexibleVocab::Immediate(vocab) => vocab.get_vocab().clone(),
-            FlexibleVocab::Lazy(_) => {
-                // For lazy vocab, we return empty for now
-                // A proper implementation would load and iterate
-                HashMap::new()
-            },
-        }
+        // `Tokenizer::get_vocab` is infallible, so a load failure still has
+        // to degrade to an empty map (matching `vocab_size`'s `unwrap_or(0)`
+        // below) -- but unlike the old code, a *lazy* vocabulary is now
+        // actually loaded and returned on the (expected, common) success
+        // path instead of unconditionally coming back empty.
+        self.vocab.get_full_vocab().unwrap_or_default()
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
@@ -502,5 +498,54 @@ mod tests {
             tokenizer.token_to_id("[CLS]").expect("Operation failed in test"),
             Some(100)
         );
+    }
+
+    /// Regression test for the fabricated-empty-vocab bug: `get_vocab()` on
+    /// a tokenizer built from a `LazyVocab` used to unconditionally return
+    /// an empty map, indistinguishable from a tokenizer with a genuinely
+    /// empty vocabulary. It must now load and return the real vocabulary.
+    #[test]
+    fn test_get_vocab_loads_lazy_vocabulary_instead_of_returning_empty() {
+        let mut token_map = HashMap::new();
+        token_map.insert("hello".to_string(), 1);
+        token_map.insert("world".to_string(), 2);
+        token_map.insert("[UNK]".to_string(), 0);
+        let expected = token_map.clone();
+
+        let lazy_vocab = LazyVocab::new(move || Ok(Vocab::from_map(token_map.clone())));
+        assert!(
+            !lazy_vocab.is_loaded(),
+            "must not eagerly load on construction"
+        );
+
+        let tokenizer =
+            CustomVocabTokenizer::from_lazy_vocab(lazy_vocab).expect("Operation failed in test");
+
+        let vocab = tokenizer.get_vocab();
+        assert_eq!(
+            vocab.len(),
+            3,
+            "lazy vocabulary must be loaded and returned, not empty"
+        );
+        assert_eq!(vocab, expected);
+        assert_eq!(tokenizer.vocab_size().expect("Operation failed in test"), 3);
+    }
+
+    /// A `LazyVocab` whose loader fails must degrade to an empty map (the
+    /// only option available through `Tokenizer::get_vocab`'s infallible
+    /// signature), not panic.
+    #[test]
+    fn test_get_vocab_degrades_gracefully_when_lazy_loader_fails() {
+        let lazy_vocab: LazyVocab =
+            LazyVocab::new(|| Err(anyhow::anyhow!("simulated load failure")));
+        let tokenizer =
+            CustomVocabTokenizer::from_lazy_vocab(lazy_vocab).expect("Operation failed in test");
+
+        assert_eq!(tokenizer.get_vocab(), HashMap::new());
+        // `CustomVocabTokenizer` also has an inherent `vocab_size() ->
+        // AnyhowResult<usize>` that propagates the loader error directly;
+        // disambiguate to the `Tokenizer` trait method being regression
+        // tested here, whose infallible signature must degrade to 0.
+        assert_eq!(Tokenizer::vocab_size(&tokenizer), 0);
     }
 }

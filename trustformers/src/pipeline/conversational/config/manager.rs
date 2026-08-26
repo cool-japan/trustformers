@@ -200,7 +200,7 @@ impl ConfigurationManager {
             TrustformersError::invalid_input_simple(format!("Failed to read config file: {}", e))
         })?;
 
-        let config: ConversationalConfig = serde_yaml::from_str(&content).map_err(|e| {
+        let config: ConversationalConfig = serde_yaml_ng::from_str(&content).map_err(|e| {
             TrustformersError::runtime_error(format!("Failed to parse YAML config: {}", e))
         })?;
 
@@ -220,7 +220,7 @@ impl ConfigurationManager {
 
     /// Save configuration to YAML file
     pub fn save_to_yaml_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let content = serde_yaml::to_string(&self.config).map_err(|e| {
+        let content = serde_yaml_ng::to_string(&self.config).map_err(|e| {
             TrustformersError::runtime_error(format!("Failed to serialize config to YAML: {}", e))
         })?;
 
@@ -271,7 +271,7 @@ impl ConfigurationManager {
 
     /// Get configuration as YAML string
     pub fn to_yaml(&self) -> Result<String> {
-        serde_yaml::to_string(&self.config).map_err(|e| {
+        serde_yaml_ng::to_string(&self.config).map_err(|e| {
             TrustformersError::runtime_error(format!("Failed to serialize config to YAML: {}", e))
         })
     }
@@ -280,6 +280,21 @@ impl ConfigurationManager {
     pub fn with_preset(preset: ConfigurationPreset) -> Self {
         let config = ConfigurationPresets::get_preset(preset);
         Self::with_config(config).unwrap_or_else(|_| Self::new())
+    }
+
+    /// Names of `TRUSTFORMERS_*` environment variables present in the process
+    /// environment that [`Self::from_environment`] does not recognize (i.e.
+    /// absent from `Self::default_env_mappings`).
+    ///
+    /// Useful for surfacing a likely-misspelled override before it is
+    /// silently ignored by `from_environment`.
+    pub fn unrecognized_env_vars(&self) -> Vec<String> {
+        let known: std::collections::HashSet<&str> =
+            self.env_mappings.values().map(String::as_str).collect();
+        env::vars()
+            .map(|(key, _)| key)
+            .filter(|key| key.starts_with("TRUSTFORMERS_") && !known.contains(key.as_str()))
+            .collect()
     }
 
     /// Get default environment variable mappings
@@ -566,6 +581,27 @@ mod tests {
             manager.config().temperature > 0.0,
             "Manager should be properly initialised"
         );
+    }
+
+    #[test]
+    fn test_unrecognized_env_vars_flags_unknown_and_ignores_known() {
+        env::set_var("TRUSTFORMERS_TOTALLY_UNKNOWN_OPTION_XYZ", "1");
+        env::set_var("TRUSTFORMERS_TEMPERATURE", "0.5");
+
+        let manager = ConfigurationManager::new();
+        let unrecognized = manager.unrecognized_env_vars();
+
+        assert!(
+            unrecognized.iter().any(|v| v == "TRUSTFORMERS_TOTALLY_UNKNOWN_OPTION_XYZ"),
+            "an env var absent from env_mappings must be reported as unrecognized"
+        );
+        assert!(
+            !unrecognized.iter().any(|v| v == "TRUSTFORMERS_TEMPERATURE"),
+            "a mapped env var must not be reported as unrecognized"
+        );
+
+        env::remove_var("TRUSTFORMERS_TOTALLY_UNKNOWN_OPTION_XYZ");
+        env::remove_var("TRUSTFORMERS_TEMPERATURE");
     }
 
     // -------------------------------------------------------------------------

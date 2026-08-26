@@ -52,15 +52,12 @@ pub use types::{
     AggregationConfig,
     // Metrics and Analysis Types
     AggregationResult,
-    // Data Structure Types
-    AggregationWindow,
     // Monitoring Types
     AlertEvent,
     // Additional Support Types
     AlgorithmStatistics,
     BufferStatistics,
     CheckerStatistics,
-    CircularBuffer,
     ConfidenceIntervals,
     DistributionAnalysis,
     EnforcementLevel,
@@ -160,14 +157,23 @@ pub use collector::{
     SampleRateController,
 };
 
-// Re-export aggregator components for convenience
-pub use aggregator::RealTimeDataAggregator;
+// Re-export aggregator and collector components for convenience.
+// `AggregationWindow` and `CircularBuffer` now resolve to the implementations
+// the aggregator and collector actually use; until 0.2.1 these names resolved
+// to unused shadow copies in `types::data_structures`.
+pub use aggregator::{AggregationWindow, RealTimeDataAggregator};
+pub use collector::CircularBuffer;
 
-// Note: Threshold module components are not re-exported
-// The threshold module currently only has stub implementations (monitor.rs, alerts.rs, etc.)
-// Re-enabling these exports without implementations would cause 1,700+ compilation errors
-// See threshold.rs.bak2 for the original full implementation that needs restoration
-// pub use threshold::*;
+// The `threshold` module is compiled (see `pub mod threshold` above) and its
+// types are reachable at `real_time_metrics::threshold::*`. It is deliberately
+// not glob re-exported here because several of its names (`BufferStatistics`,
+// `AlertEvent`, ...) collide with names this module already exports.
+//
+// The note that stood here until 0.2.1 -- "the threshold module currently only
+// has stub implementations", "would cause 1,700+ compilation errors", "see
+// threshold.rs.bak2 for the original full implementation that needs
+// restoration" -- was stale: the module was restored, there is no
+// `threshold.rs.bak2` anywhere in the tree, and the module compiles.
 
 // Re-export optimization components for convenience
 pub use optimization::{

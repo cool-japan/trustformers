@@ -20,7 +20,6 @@
 //! println!("{}", answer.answer);
 //! ```
 
-use std::collections::HashMap;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -287,11 +286,31 @@ impl TableQaPipeline {
         if table.num_rows() == 0 || table.num_cols() == 0 {
             return Err(TableQaError::EmptyTable);
         }
+        let table_cells = table.num_rows() * table.num_cols();
+        if table_cells > self.config.max_table_cells {
+            return Err(TableQaError::ModelError(format!(
+                "table has {table_cells} cells, exceeding the configured max_table_cells of {}",
+                self.config.max_table_cells
+            )));
+        }
+
+        // Respect the configured question length bound rather than passing
+        // an arbitrarily long question through unbounded.
+        let question: &str = if question.len() > self.config.max_question_length {
+            let cutoff = (0..=self.config.max_question_length.min(question.len()))
+                .rev()
+                .find(|&i| question.is_char_boundary(i))
+                .unwrap_or(0);
+            &question[..cutoff]
+        } else {
+            question
+        };
 
         let q_lower = question.to_lowercase();
 
-        // Detect numeric question type.
-        let numeric_keyword = detect_numeric_keyword(&q_lower);
+        // Detect numeric question type, honoring `config.aggregation`.
+        let numeric_keyword =
+            if self.config.aggregation { detect_numeric_keyword(&q_lower) } else { None };
 
         if let Some(agg) = numeric_keyword {
             // Find first numeric column.
@@ -639,6 +658,40 @@ mod tests {
         let ans = pipe.answer("What is the sum of age?", &t).unwrap();
         assert!(!ans.answer.is_empty());
         assert_eq!(ans.aggregation, Some(Aggregation::Sum));
+    }
+
+    /// Regression test: `config.aggregation` used to be ignored, so a
+    /// numeric question always ran the aggregation path even when the
+    /// caller explicitly disabled it. With `aggregation: false`, the same
+    /// numeric question must fall back to value-lookup instead.
+    #[test]
+    fn answer_numeric_question_with_aggregation_disabled_falls_back_to_value_lookup() {
+        let config = TableQaConfig {
+            aggregation: false,
+            ..TableQaConfig::default()
+        };
+        let pipe = TableQaPipeline::new(config).expect("pipeline should build");
+        let t = sample_table();
+        let ans = pipe.answer("What is the sum of age?", &t).expect("answer should succeed");
+        assert_eq!(
+            ans.aggregation, None,
+            "aggregation must not run when config.aggregation is false"
+        );
+    }
+
+    /// Regression test: `config.max_table_cells` used to be ignored, so
+    /// tables of any size were processed regardless of the configured
+    /// bound.
+    #[test]
+    fn answer_rejects_table_larger_than_configured_max_cells() {
+        let config = TableQaConfig {
+            max_table_cells: 2,
+            ..TableQaConfig::default()
+        };
+        let pipe = TableQaPipeline::new(config).expect("pipeline should build");
+        let t = sample_table(); // 3 rows x 3 cols = 9 cells, over the limit of 2
+        let result = pipe.answer("What is the sum of age?", &t);
+        assert!(matches!(result, Err(TableQaError::ModelError(_))));
     }
 
     // 13. Value question matches a cell.

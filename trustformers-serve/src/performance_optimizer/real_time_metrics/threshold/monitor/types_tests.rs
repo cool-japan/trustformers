@@ -1,25 +1,7 @@
 //! Tests for threshold monitor types
 
 use super::*;
-use std::time::{Duration, Instant};
-
-struct Lcg {
-    state: u64,
-}
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg { state: seed }
-    }
-    fn next(&mut self) -> u64 {
-        self.state = self.state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        self.state
-    }
-    fn next_f32(&mut self) -> f32 {
-        (self.next() >> 11) as f32 / (1u64 << 53) as f32
-    }
-}
+use std::time::Duration;
 
 #[test]
 fn test_performance_analyzer_config_clone() {

@@ -52,7 +52,11 @@ impl SimulationAnalyzer {
             description: "Original input scenario".to_string(),
             features: base_input.clone(),
             prediction: base_prediction,
-            confidence: 1.0, // Assume high confidence for base scenario
+            // `confidence` here would be the MODEL's confidence in its own
+            // prediction, which `model_fn` (a bare `-> f64`) never reports --
+            // for the base scenario exactly as much as for a perturbed one. It
+            // used to be `1.0`, asserting perfect certainty.
+            confidence: None,
             changed_features: vec![],
             distance_from_base: 0.0,
             plausibility: 1.0,
@@ -239,7 +243,7 @@ impl SimulationAnalyzer {
         })
     }
 
-    // Helper methods (simplified implementations)
+    // Helper methods.
 
     async fn generate_what_if_scenarios(
         &self,
@@ -296,7 +300,10 @@ impl SimulationAnalyzer {
                 description: format!("What-if scenario {}", i),
                 features: scenario_input,
                 prediction,
-                confidence: 0.8, // Simplified confidence
+                // No confidence is derivable: `model_fn` returns a bare
+                // scalar prediction with no uncertainty, and the scenario is
+                // evaluated exactly once. Previously a flat 0.8.
+                confidence: None,
                 changed_features,
                 distance_from_base,
                 plausibility: 1.0 - (distance_from_base / 10.0).min(1.0), // Simple plausibility
@@ -385,7 +392,10 @@ impl SimulationAnalyzer {
                     / predictions.len() as f64
             },
             prediction_flips: prediction_flip_scenarios.len(),
-            stability_by_magnitude: HashMap::new(), // Simplified
+            // Per-magnitude stability would need the perturbation sweep
+            // re-run and bucketed by magnitude; this pass evaluates one
+            // magnitude per scenario, so there is nothing to bucket.
+            stability_by_magnitude: HashMap::new(),
         };
 
         ScenarioImpactAnalysis {
@@ -730,13 +740,27 @@ impl SimulationAnalyzer {
         let base_prediction = model_fn(base_input);
 
         for i in 0..self.config.num_adversarial_examples {
+            // `epsilon` grows with the example index so a batch sweeps a range
+            // of perturbation budgets instead of repeating one attack.
+            let epsilon = Self::FGSM_BASE_EPSILON * (i + 1) as f64;
             let adversarial_input = match method {
-                AdversarialMethod::FGSM => self.generate_fgsm_example(base_input, model_fn),
-                AdversarialMethod::PGD => self.generate_pgd_example(base_input, model_fn),
-                AdversarialMethod::CW => self.generate_cw_example(base_input, model_fn),
-                AdversarialMethod::DeepFool => self.generate_deepfool_example(base_input, model_fn),
-                AdversarialMethod::UAP => self.generate_uap_example(base_input, model_fn),
-                AdversarialMethod::Boundary => self.generate_boundary_example(base_input, model_fn),
+                AdversarialMethod::FGSM => Self::fgsm_example(base_input, model_fn, epsilon),
+                AdversarialMethod::PGD => Self::pgd_example(base_input, model_fn, epsilon),
+                // C&W (Carlini-Wagner), DeepFool, UAP and the Boundary attack
+                // are distinct algorithms -- a Lagrangian optimisation, an
+                // iterative linearisation to the decision boundary, a
+                // cross-input universal perturbation, and a decision-based
+                // random walk respectively. None is implemented here. They used
+                // to call `generate_fgsm_example` and be reported under their
+                // own names, so a caller comparing "six attacks" was really
+                // comparing six runs of the same one.
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "adversarial method {other:?} is not implemented; only FGSM and PGD have \
+                         real implementations (finite-difference gradient). Requesting {other:?} \
+                         used to silently run FGSM under that name."
+                    ))
+                },
             };
 
             let adversarial_prediction = model_fn(&adversarial_input);
@@ -751,7 +775,8 @@ impl SimulationAnalyzer {
 
             let perturbation_norm = perturbation.values().map(|&v| v.powi(2)).sum::<f64>().sqrt();
 
-            let is_successful = (adversarial_prediction - base_prediction).abs() > 0.1;
+            let is_successful =
+                (adversarial_prediction - base_prediction).abs() > Self::ATTACK_SUCCESS_THRESHOLD;
 
             examples.push(AdversarialExample {
                 id: format!("adv_{:?}_{}", method, i),
@@ -763,89 +788,111 @@ impl SimulationAnalyzer {
                 perturbation,
                 perturbation_norm,
                 is_successful,
-                confidence: 0.8, // Simplified confidence
+                // Real confidence: how far past the success threshold the
+                // prediction moved, saturating at 1. Previously a flat 0.8 for
+                // every example, successful or not.
+                confidence: ((adversarial_prediction - base_prediction).abs()
+                    / Self::ATTACK_SUCCESS_THRESHOLD)
+                    .clamp(0.0, 1.0),
             });
         }
 
         Ok(examples)
     }
 
-    // Simplified adversarial attack implementations
-    fn generate_fgsm_example(
-        &self,
-        base_input: &HashMap<String, f64>,
-        _model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
-    ) -> HashMap<String, f64> {
-        let epsilon = 0.01;
-        let mut adversarial_input = base_input.clone();
-        use scirs2_core::random::*; // SciRS2 Integration Policy
-        let mut rng = thread_rng();
+    /// Base L-infinity perturbation budget for the first generated example.
+    const FGSM_BASE_EPSILON: f64 = 0.01;
+    /// Prediction change beyond which an attack counts as successful.
+    const ATTACK_SUCCESS_THRESHOLD: f64 = 0.1;
+    /// Step size for the central-difference gradient estimate.
+    const GRADIENT_STEP: f64 = 1e-4;
+    /// Iterations for the PGD loop.
+    const PGD_ITERATIONS: usize = 10;
 
-        // Simplified FGSM: add small perturbation in gradient direction
-        for (_key, value) in adversarial_input.iter_mut() {
-            let sign = if rng.random::<f64>() > 0.5 { 1.0 } else { -1.0 };
+    /// Central-difference estimate of `d model_fn / d input[key]` for every
+    /// key, using `2 * d` model evaluations.
+    ///
+    /// The model is a black-box `Fn(&HashMap<String, f64>) -> f64`, so no
+    /// analytic gradient is available; the central difference has error
+    /// `O(h^2 * |f'''|)`, which is what makes this a real -- if numerical --
+    /// gradient rather than a guess.
+    fn numerical_gradient(
+        input: &HashMap<String, f64>,
+        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
+    ) -> HashMap<String, f64> {
+        let mut gradient = HashMap::with_capacity(input.len());
+        for key in input.keys() {
+            let mut probe = input.clone();
+            let original = input.get(key).copied().unwrap_or(0.0);
+
+            probe.insert(key.clone(), original + Self::GRADIENT_STEP);
+            let forward = model_fn(&probe);
+            probe.insert(key.clone(), original - Self::GRADIENT_STEP);
+            let backward = model_fn(&probe);
+
+            gradient.insert(
+                key.clone(),
+                (forward - backward) / (2.0 * Self::GRADIENT_STEP),
+            );
+        }
+        gradient
+    }
+
+    /// Real FGSM (Goodfellow, Shlens & Szegedy 2015): step `epsilon` along the
+    /// SIGN of the input gradient.
+    ///
+    /// The gradient comes from [`Self::numerical_gradient`]. The previous
+    /// implementation ignored `model_fn` entirely and stepped in a RANDOM sign
+    /// direction, which is a random perturbation, not a gradient attack -- and
+    /// so was uninformative about the model's actual sensitivity.
+    fn fgsm_example(
+        base_input: &HashMap<String, f64>,
+        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
+        epsilon: f64,
+    ) -> HashMap<String, f64> {
+        let gradient = Self::numerical_gradient(base_input, model_fn);
+        let mut adversarial = base_input.clone();
+        for (key, value) in adversarial.iter_mut() {
+            let sign = match gradient.get(key) {
+                Some(g) if *g > 0.0 => 1.0,
+                Some(g) if *g < 0.0 => -1.0,
+                // Zero (or missing) gradient: this input has no first-order
+                // influence, so perturbing it is not an attack.
+                _ => 0.0,
+            };
             *value += epsilon * sign;
         }
-
-        adversarial_input
+        adversarial
     }
 
-    fn generate_pgd_example(
-        &self,
+    /// Real PGD (Madry et al. 2018): iterated FGSM steps of size
+    /// `epsilon / iterations`, each projected back into the L-infinity ball of
+    /// radius `epsilon` around the original input.
+    ///
+    /// The previous implementation looped random-sign steps with no projection
+    /// at all, so the perturbation was an unbounded random walk.
+    fn pgd_example(
         base_input: &HashMap<String, f64>,
-        _model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
+        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
+        epsilon: f64,
     ) -> HashMap<String, f64> {
-        // Simplified PGD: iterative FGSM
-        let mut adversarial_input = base_input.clone();
-        let epsilon = 0.001;
-        let iterations = 10;
-        use scirs2_core::random::*; // SciRS2 Integration Policy
-        let mut rng = thread_rng();
-
-        for _ in 0..iterations {
-            for (_key, value) in adversarial_input.iter_mut() {
-                let sign = if rng.random::<f64>() > 0.5 { 1.0 } else { -1.0 };
-                *value += epsilon * sign;
+        let step = epsilon / Self::PGD_ITERATIONS as f64;
+        let mut adversarial = base_input.clone();
+        for _ in 0..Self::PGD_ITERATIONS {
+            let gradient = Self::numerical_gradient(&adversarial, model_fn);
+            for (key, value) in adversarial.iter_mut() {
+                let sign = match gradient.get(key) {
+                    Some(g) if *g > 0.0 => 1.0,
+                    Some(g) if *g < 0.0 => -1.0,
+                    _ => 0.0,
+                };
+                *value += step * sign;
+                // Projection onto the L-infinity ball around the original.
+                let origin = base_input.get(key).copied().unwrap_or(*value);
+                *value = value.clamp(origin - epsilon, origin + epsilon);
             }
         }
-
-        adversarial_input
-    }
-
-    fn generate_cw_example(
-        &self,
-        base_input: &HashMap<String, f64>,
-        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
-    ) -> HashMap<String, f64> {
-        // Simplified C&W: optimization-based attack
-        self.generate_fgsm_example(base_input, model_fn) // Fallback to FGSM for simplicity
-    }
-
-    fn generate_deepfool_example(
-        &self,
-        base_input: &HashMap<String, f64>,
-        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
-    ) -> HashMap<String, f64> {
-        // Simplified DeepFool
-        self.generate_fgsm_example(base_input, model_fn) // Fallback to FGSM for simplicity
-    }
-
-    fn generate_uap_example(
-        &self,
-        base_input: &HashMap<String, f64>,
-        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
-    ) -> HashMap<String, f64> {
-        // Simplified UAP
-        self.generate_fgsm_example(base_input, model_fn) // Fallback to FGSM for simplicity
-    }
-
-    fn generate_boundary_example(
-        &self,
-        base_input: &HashMap<String, f64>,
-        model_fn: &(dyn Fn(&HashMap<String, f64>) -> f64 + Send + Sync),
-    ) -> HashMap<String, f64> {
-        // Simplified Boundary attack
-        self.generate_fgsm_example(base_input, model_fn) // Fallback to FGSM for simplicity
+        adversarial
     }
 
     fn analyze_attack_success(
@@ -1114,6 +1161,95 @@ impl SimulationAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2: real gradient-based attacks ---------------
+
+    /// `f(x) = 3*a - 5*b`: gradient is (+3, -5), so FGSM must step `a` UP and
+    /// `b` DOWN by exactly epsilon. The old implementation stepped both in a
+    /// random direction and never consulted `model_fn` at all.
+    #[test]
+    fn fgsm_steps_along_the_real_gradient_sign() {
+        let model = |x: &HashMap<String, f64>| {
+            3.0 * x.get("a").copied().unwrap_or(0.0) - 5.0 * x.get("b").copied().unwrap_or(0.0)
+        };
+        let base: HashMap<String, f64> =
+            [("a".to_string(), 1.0), ("b".to_string(), 1.0)].into_iter().collect();
+
+        let adversarial = SimulationAnalyzer::fgsm_example(&base, &model, 0.1);
+        assert!(
+            (adversarial["a"] - 1.1).abs() < 1e-9,
+            "positive gradient => step up: {}",
+            adversarial["a"]
+        );
+        assert!(
+            (adversarial["b"] - 0.9).abs() < 1e-9,
+            "negative gradient => step down: {}",
+            adversarial["b"]
+        );
+        // And the attack must really increase the model output.
+        assert!(model(&adversarial) > model(&base));
+    }
+
+    #[test]
+    fn fgsm_leaves_gradient_free_inputs_untouched() {
+        // `c` does not appear in the model, so its gradient is 0 and
+        // perturbing it would not be an attack.
+        let model = |x: &HashMap<String, f64>| x.get("a").copied().unwrap_or(0.0);
+        let base: HashMap<String, f64> =
+            [("a".to_string(), 0.0), ("c".to_string(), 7.0)].into_iter().collect();
+        let adversarial = SimulationAnalyzer::fgsm_example(&base, &model, 0.5);
+        assert!(
+            (adversarial["c"] - 7.0).abs() < 1e-12,
+            "zero-gradient input must not move"
+        );
+        assert!((adversarial["a"] - 0.5).abs() < 1e-9);
+    }
+
+    /// PGD must project every iterate back into the L-infinity ball. The old
+    /// loop had no projection at all, so 10 random steps of `epsilon` each
+    /// wandered up to `10 * epsilon` away.
+    #[test]
+    fn pgd_stays_inside_the_l_infinity_ball() {
+        let model = |x: &HashMap<String, f64>| x.values().sum::<f64>();
+        let base: HashMap<String, f64> =
+            [("a".to_string(), 0.0), ("b".to_string(), 0.0)].into_iter().collect();
+        let epsilon = 0.05;
+        let adversarial = SimulationAnalyzer::pgd_example(&base, &model, epsilon);
+        for (key, value) in &adversarial {
+            let delta = (value - base[key]).abs();
+            assert!(
+                delta <= epsilon + 1e-9,
+                "{key} moved {delta}, outside the {epsilon} L-inf ball"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unimplemented_attacks_are_refused_not_aliased_to_fgsm() {
+        let analyzer = SimulationAnalyzer::new(SimulationConfig::default());
+        let model = |x: &HashMap<String, f64>| x.values().sum::<f64>();
+        let base: HashMap<String, f64> = [("a".to_string(), 1.0)].into_iter().collect();
+        for method in [
+            AdversarialMethod::CW,
+            AdversarialMethod::DeepFool,
+            AdversarialMethod::UAP,
+            AdversarialMethod::Boundary,
+        ] {
+            let err = analyzer
+                .generate_adversarial_examples(&base, &model, &method)
+                .await
+                .expect_err("{method:?} has no implementation");
+            assert!(
+                err.to_string().contains("not implemented"),
+                "{method:?}: {err}"
+            );
+        }
+        // FGSM and PGD really do run.
+        assert!(analyzer
+            .generate_adversarial_examples(&base, &model, &AdversarialMethod::FGSM)
+            .await
+            .is_ok());
+    }
 
     #[tokio::test]
     async fn test_simulation_analyzer_creation() {

@@ -29,14 +29,16 @@ impl ResourceConflictDetector {
         let mut algorithms: Vec<Box<dyn ConflictDetectionAlgorithm + Send + Sync>> = Vec::new();
         let mut strategies: Vec<Box<dyn ConflictResolutionStrategy + Send + Sync>> = Vec::new();
 
-        // Initialize detection algorithms
-        algorithms.push(Box::new(StaticConflictDetectionAlgorithm::new(true, 3)));
+        // Initialize detection algorithms.
+        //
+        // `MLConflictDetectionAlgorithm` used to be pushed here as a fourth
+        // entry; it was deleted in 0.2.1 because it named a model that does not
+        // exist in this crate and could only answer by inventing. The three
+        // that remain each derive their answer from the access patterns they
+        // are handed -- see `types::core::conflict_algorithms`.
+        algorithms.push(Box::new(StaticConflictDetectionAlgorithm::new(true, 0.8)));
         algorithms.push(Box::new(DynamicConflictDetectionAlgorithm::new(true, 0.1)));
         algorithms.push(Box::new(PredictiveConflictDetectionAlgorithm::new(5, 0.8)));
-        algorithms.push(Box::new(MLConflictDetectionAlgorithm::new(
-            "default".to_string(),
-            0.85,
-        )));
 
         // Initialize resolution strategies
         strategies.push(Box::new(AvoidanceResolutionStrategy::new(true, false)));
@@ -530,13 +532,13 @@ mod tests {
             probability: 0.8,
             performance_impact: ConflictImpact {
                 performance_degradation: 0.5,
-                reliability_impact: 0.3,
+                reliability_impact: Some(0.3),
                 resource_impact: std::collections::HashMap::new(),
-                user_experience_impact: 0.2,
-                stability_impact: 0.1,
-                recovery_time: std::time::Duration::from_secs(0),
-                cascade_potential: 0.4,
-                mitigation_effectiveness: 0.7,
+                user_experience_impact: Some(0.2),
+                stability_impact: Some(0.1),
+                recovery_time: None,
+                cascade_potential: Some(0.4),
+                mitigation_effectiveness: Some(0.7),
                 long_term_effects: Vec::new(),
                 confidence: 0.9,
             },

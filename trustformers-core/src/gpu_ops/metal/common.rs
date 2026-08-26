@@ -9,8 +9,7 @@ pub(crate) use crate::tensor::Tensor;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(crate) use metal::{
-    foreign_types::ForeignType, Buffer, CommandQueue, CompileOptions, Device as MetalDevice,
-    MTLResourceOptions,
+    Buffer, CommandQueue, CompileOptions, Device as MetalDevice, MTLResourceOptions,
 };
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -22,10 +21,7 @@ pub(crate) use std::mem;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(crate) use std::sync::Arc;
 
-// Re-export objc2 types commonly used in Metal backend
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(crate) use objc2::rc::Retained;
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(crate) use objc2::runtime::ProtocolObject;
-#[cfg(all(target_os = "macos", feature = "metal"))]
-pub(crate) use objc2_metal::MTLBuffer as ObjC2Buffer;
+// NOTE: the objc2 / objc2-metal re-exports that used to live here existed solely
+// for `buffer_to_objc2`, a dead `#[allow(dead_code)]` unsafe helper with no
+// callers. Both the helper and the two dependencies are gone; everything in this
+// backend goes through metal-rs.

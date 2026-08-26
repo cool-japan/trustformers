@@ -3,13 +3,12 @@
 //! This module provides the standard multi-head attention mechanism used in transformers,
 //! refactored to use shared components and utilities.
 
-#![allow(unused_variables)] // Multi-head attention
-
 use super::common::{
     AttentionConfig, AttentionOptimizationHints, AttentionProjections, AttentionUtils,
 };
+use super::flash_kernel::{flash_attention, FlashParams};
 use crate::device::Device;
-use crate::errors::{Result, TrustformersError};
+use crate::errors::Result;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
 
@@ -92,6 +91,26 @@ impl MultiHeadAttention {
         &self.config
     }
 
+    /// The four projection layers (`query`, `key`, `value`, `out_proj`).
+    ///
+    /// Exposed so a model can publish this attention block's parameters through
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors) without the
+    /// attention layer having to know any checkpoint naming convention.
+    pub fn projections(&self) -> &AttentionProjections {
+        &self.projections
+    }
+
+    /// Mutable counterpart of [`MultiHeadAttention::projections`].
+    ///
+    /// The four projections are separate fields of [`AttentionProjections`], so a
+    /// caller can borrow each of them mutably at once through this single handle —
+    /// which is what building a `Vec<(String, &mut Tensor)>` for
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut)
+    /// requires.
+    pub fn projections_mut(&mut self) -> &mut AttentionProjections {
+        &mut self.projections
+    }
+
     /// Get the optimization hints
     pub fn optimization_hints(&self) -> &AttentionOptimizationHints {
         &self.optimization_hints
@@ -100,6 +119,19 @@ impl MultiHeadAttention {
     /// Update optimization hints
     pub fn set_optimization_hints(&mut self, hints: AttentionOptimizationHints) {
         self.optimization_hints = hints;
+    }
+
+    /// Whether the layer is in training mode (which enables attention dropout).
+    pub fn is_training(&self) -> bool {
+        self.config.training
+    }
+
+    /// Switch between training and inference mode.
+    ///
+    /// Attention dropout is only applied in training mode, mirroring
+    /// [`crate::layers::Dropout`].
+    pub fn set_training(&mut self, training: bool) {
+        self.config.training = training;
     }
 
     /// Get the total number of parameters in this attention layer
@@ -170,9 +202,12 @@ impl MultiHeadAttention {
         causal: bool,
     ) -> Result<Tensor> {
         // Apply input projections
-        let query = self.projections.query.forward(query_input.clone())?;
-        let key = self.projections.key.forward(key_input.clone())?;
-        let value = self.projections.value.forward(value_input.clone())?;
+        // `forward_ref` borrows: self-attention passes the *same* hidden-state
+        // tensor three times, and the owning `forward` would deep-copy
+        // `[batch, seq, hidden]` once per projection.
+        let query = self.projections.query.forward_ref(query_input)?;
+        let key = self.projections.key.forward_ref(key_input)?;
+        let value = self.projections.value.forward_ref(value_input)?;
 
         // Split into attention heads
         let q = AttentionUtils::split_heads(&query, self.config.num_heads, self.config.head_dim)?;
@@ -231,24 +266,30 @@ impl MultiHeadAttention {
         causal: bool,
         scale: f32,
     ) -> Result<Tensor> {
-        // Compute attention weights
-        let attention_weights = AttentionUtils::compute_attention_weights(q, k, scale, causal)?;
+        // Pre-softmax scores, with causal masking already applied.
+        let scores = AttentionUtils::compute_attention_scores(q, k, scale, causal)?;
 
-        // Apply attention mask if provided
-        let masked_weights = if let Some(mask) = attention_mask {
-            self.apply_attention_mask(&attention_weights, mask)?
-        } else {
-            attention_weights
+        // Apply the attention mask *before* the softmax - adding a large
+        // negative penalty to an already-normalised probability is meaningless.
+        let masked_scores = match attention_mask {
+            Some(mask) => AttentionUtils::apply_attention_mask_to_scores(&scores, mask)?,
+            None => scores,
         };
 
+        let attention_weights = masked_scores.softmax(-1)?;
+
         // Apply dropout if training
-        let dropped_weights = self.apply_dropout(&masked_weights)?;
+        let dropped_weights = self.apply_dropout(&attention_weights)?;
 
         // Apply attention to values
         AttentionUtils::apply_attention(&dropped_weights, v)
     }
 
-    /// Memory-efficient flash attention computation
+    /// Memory-efficient FlashAttention computation.
+    ///
+    /// Delegates to the shared block-tiled kernel
+    /// ([`super::flash_kernel`]), which keeps per-query-row running softmax
+    /// statistics and never materialises the full attention matrix.
     fn compute_flash_attention(
         &self,
         q: &Tensor,
@@ -259,123 +300,31 @@ impl MultiHeadAttention {
         scale: f32,
     ) -> Result<Tensor> {
         let shape = q.shape();
-        let batch_size = shape[0];
-        let num_heads = shape[1];
         let seq_q = shape[2];
         let head_dim = shape[3];
         let seq_k = k.shape()[2];
 
-        // Determine optimal block size for tiling
         let block_size = self.compute_flash_block_size(seq_q, seq_k, head_dim);
-
-        let output = Tensor::zeros(&[batch_size, num_heads, seq_q, head_dim])?;
-
-        // Tile over the sequence dimension
-        let num_blocks_q = seq_q.div_ceil(block_size);
-        let num_blocks_k = seq_k.div_ceil(block_size);
-
-        for q_block_idx in 0..num_blocks_q {
-            let q_start = q_block_idx * block_size;
-            let q_end = (q_start + block_size).min(seq_q);
-
-            // Extract Q block
-            let q_block = q.slice_ranges(&[
-                (0, batch_size),
-                (0, num_heads),
-                (q_start, q_end),
-                (0, head_dim),
-            ])?;
-
-            // Initialize accumulator for this Q block
-            let mut block_output =
-                Tensor::zeros(&[batch_size, num_heads, q_end - q_start, head_dim])?;
-            let mut block_max = Tensor::full(
-                f32::NEG_INFINITY,
-                vec![batch_size, num_heads, q_end - q_start, 1],
-            )?;
-            let mut block_sum = Tensor::zeros(&[batch_size, num_heads, q_end - q_start, 1])?;
-
-            // Process each K block
-            for k_block_idx in 0..num_blocks_k {
-                let k_start = k_block_idx * block_size;
-                let k_end = (k_start + block_size).min(seq_k);
-
-                // Extract K and V blocks
-                let k_block = k.slice_ranges(&[
-                    (0, batch_size),
-                    (0, num_heads),
-                    (k_start, k_end),
-                    (0, head_dim),
-                ])?;
-                let v_block = v.slice_ranges(&[
-                    (0, batch_size),
-                    (0, num_heads),
-                    (k_start, k_end),
-                    (0, head_dim),
-                ])?;
-
-                // Compute attention scores for this block
-                let attention_scores = self.compute_block_scores(
-                    &q_block,
-                    &k_block,
-                    scale,
-                    q_start,
-                    k_start,
-                    attention_mask,
-                    causal,
-                )?;
-
-                // Online softmax computation with numerical stability
-                self.update_flash_statistics(
-                    &mut block_output,
-                    &mut block_max,
-                    &mut block_sum,
-                    &attention_scores,
-                    &v_block,
-                )?;
-            }
-
-            // Normalize the accumulated output for this Q block
-            let normalized_output = self.normalize_flash_output(&block_output, &block_sum)?;
-
-            // Store the result in the final output tensor (simplified approach)
-            // In a full implementation, this would use proper slice assignment
-            // For now, this is a placeholder since slice_assign is not available
+        let dropout = if self.config.training { Some(self.config.dropout_prob) } else { None };
+        let params = FlashParams {
+            scale,
+            causal,
+            block_q: block_size,
+            block_k: block_size,
+            dropout: None,
         }
-
-        Ok(output)
+        .with_dropout(dropout)?;
+        flash_attention(q, k, v, attention_mask, &params)
     }
 
-    /// Apply attention mask to attention weights
-    fn apply_attention_mask(&self, attention_weights: &Tensor, mask: &Tensor) -> Result<Tensor> {
-        let attention_shape = attention_weights.shape();
-        let mask_shape = mask.shape();
-
-        // Handle different mask shapes
-        let compatible_mask = if mask_shape.len() == 3 && attention_shape.len() == 4 {
-            // Mask is [batch, seq_q, seq_k], attention is [batch, num_heads, seq_q, seq_k]
-            // Reshape mask from [batch, seq_q, seq_k] to [batch, 1, seq_q, seq_k] for broadcasting
-            let batch_size = mask_shape[0];
-            let seq_q = mask_shape[1];
-            let seq_k = mask_shape[2];
-
-            mask.reshape(&[batch_size, 1, seq_q, seq_k])?
-        } else {
-            // Use mask as-is for other cases (2D, 4D, etc.)
-            mask.clone()
-        };
-
-        // Apply mask by adding large negative values where mask is 0
-        // The tensor addition should handle broadcasting automatically
-        let mask_value = Tensor::scalar(-1e9)?;
-        let inverted_mask = compatible_mask.sub(&Tensor::ones(&compatible_mask.shape())?)?;
-        let mask_additive = inverted_mask.mul(&mask_value)?;
-        attention_weights.add(&mask_additive)
-    }
-
-    /// Apply dropout to attention weights
+    /// Apply dropout to attention weights.
+    ///
+    /// Dropout is a training-time regulariser: applying it at inference would
+    /// make the logits stochastic, so it is gated on
+    /// [`MultiHeadAttention::is_training`] exactly like
+    /// [`crate::layers::Dropout`].
     fn apply_dropout(&self, attention_weights: &Tensor) -> Result<Tensor> {
-        if self.config.dropout_prob > 0.0 {
+        if self.config.training && self.config.dropout_prob > 0.0 {
             attention_weights.dropout(self.config.dropout_prob)
         } else {
             Ok(attention_weights.clone())
@@ -412,172 +361,28 @@ impl MultiHeadAttention {
         }
     }
 
-    /// Compute optimal block size for FlashAttention tiling
-    fn compute_flash_block_size(&self, seq_q: usize, seq_k: usize, head_dim: usize) -> usize {
-        // Adaptive block sizing based on sequence length and available memory
-        let base_size = 128; // Conservative default
+    /// Compute optimal block size for FlashAttention tiling.
+    ///
+    /// Starts from [`AttentionOptimizationHints::block_size`] and adapts it to
+    /// the sequence lengths. The result is always a valid tile size: at least
+    /// 1, never longer than the longest sequence.
+    ///
+    /// `_head_dim` is accepted for symmetry with the other block-size helpers;
+    /// the heuristic currently depends only on the sequence lengths.
+    fn compute_flash_block_size(&self, seq_q: usize, seq_k: usize, _head_dim: usize) -> usize {
+        let base_size = self.optimization_hints.block_size.max(1);
 
-        // For very long sequences, use larger blocks to reduce overhead
-        if seq_q > 2048 || seq_k > 2048 {
-            base_size * 2 // 256
+        let adaptive_size = if seq_q > 2048 || seq_k > 2048 {
+            // For very long sequences, use larger blocks to reduce overhead
+            base_size * 2
         } else if seq_q < 128 && seq_k < 128 {
-            // For short sequences, use smaller blocks
-            base_size / 2 // 64
+            // For short sequences, use smaller blocks for better granularity
+            (base_size / 2).max(1)
         } else {
             base_size
-        }
-    }
-
-    /// Compute attention scores for a block in FlashAttention
-    fn compute_block_scores(
-        &self,
-        q_block: &Tensor,
-        k_block: &Tensor,
-        scale: f32,
-        q_offset: usize,
-        k_offset: usize,
-        attention_mask: Option<&Tensor>,
-        causal: bool,
-    ) -> Result<Tensor> {
-        // Compute Q @ K^T
-        let scores = q_block.matmul(&k_block.transpose(2, 3)?)?;
-        let scaled_scores = scores.mul(&Tensor::scalar(scale)?)?;
-
-        // Apply causal masking if needed
-        let masked_scores = if causal {
-            self.apply_block_causal_mask(&scaled_scores, q_offset, k_offset)?
-        } else {
-            scaled_scores
         };
 
-        // Apply attention mask if provided
-        if let Some(mask) = attention_mask {
-            let mask_block = self.extract_attention_mask_block(
-                mask,
-                q_offset,
-                k_offset,
-                q_block.shape()[2],
-                k_block.shape()[2],
-            )?;
-            masked_scores.add(&mask_block)
-        } else {
-            Ok(masked_scores)
-        }
-    }
-
-    /// Apply causal mask to a specific block
-    fn apply_block_causal_mask(
-        &self,
-        scores: &Tensor,
-        q_offset: usize,
-        k_offset: usize,
-    ) -> Result<Tensor> {
-        let shape = scores.shape();
-        let q_block_size = shape[shape.len() - 2];
-        let k_block_size = shape[shape.len() - 1];
-
-        // Create causal mask for this block
-        let mut mask_data = vec![0.0f32; q_block_size * k_block_size];
-
-        for i in 0..q_block_size {
-            for j in 0..k_block_size {
-                let global_q_pos = q_offset + i;
-                let global_k_pos = k_offset + j;
-
-                if global_k_pos > global_q_pos {
-                    // Future position, mask it
-                    mask_data[i * k_block_size + j] = f32::NEG_INFINITY;
-                }
-            }
-        }
-
-        let causal_mask = Tensor::from_vec(mask_data, &[q_block_size, k_block_size])?;
-        scores.add(&causal_mask)
-    }
-
-    /// Extract attention mask block for current computation
-    fn extract_attention_mask_block(
-        &self,
-        mask: &Tensor,
-        q_offset: usize,
-        k_offset: usize,
-        q_block_size: usize,
-        k_block_size: usize,
-    ) -> Result<Tensor> {
-        let mask_shape = mask.shape();
-
-        // Handle different mask shapes
-        if mask_shape.len() == 2 {
-            // [seq_q, seq_k] mask
-            mask.slice_ranges(&[
-                (q_offset, q_offset + q_block_size),
-                (k_offset, k_offset + k_block_size),
-            ])
-        } else if mask_shape.len() == 3 {
-            // [batch, seq_q, seq_k] mask - broadcast over heads
-            mask.slice_ranges(&[
-                (0, mask_shape[0]),
-                (q_offset, q_offset + q_block_size),
-                (k_offset, k_offset + k_block_size),
-            ])
-        } else if mask_shape.len() == 4 {
-            // [batch, heads, seq_q, seq_k] mask
-            mask.slice_ranges(&[
-                (0, mask_shape[0]),
-                (0, mask_shape[1]),
-                (q_offset, q_offset + q_block_size),
-                (k_offset, k_offset + k_block_size),
-            ])
-        } else {
-            Err(TrustformersError::tensor_op_error(
-                &format!("Unsupported attention mask shape: {:?}", mask_shape),
-                "extract_attention_mask_block",
-            ))
-        }
-    }
-
-    /// Update FlashAttention statistics with online softmax
-    fn update_flash_statistics(
-        &self,
-        block_output: &mut Tensor,
-        block_max: &mut Tensor,
-        block_sum: &mut Tensor,
-        attention_scores: &Tensor,
-        v_block: &Tensor,
-    ) -> Result<()> {
-        // Compute new maximum values (simplified approach)
-        let scores_max_val = attention_scores.max_value()?;
-        let new_max = block_max.max(&scores_max_val)?;
-
-        // Compute normalized scores
-        let scores_shifted = attention_scores.sub(&new_max)?;
-        let scores_exp = scores_shifted.exp()?;
-
-        // Update running sum with correction for previous maximum
-        let old_sum_correction = block_max.sub(&new_max)?.exp()?;
-        let corrected_old_sum = block_sum.mul(&old_sum_correction)?;
-        let new_contribution = scores_exp.sum(None, false)?; // Simplified to global sum
-        let updated_sum = corrected_old_sum.add(&new_contribution)?;
-
-        // Update running output with correction
-        let old_output_correction = block_output.mul(&old_sum_correction)?;
-        let new_output_contribution = scores_exp.matmul(v_block)?;
-        let updated_output = old_output_correction.add(&new_output_contribution)?;
-
-        // Store updated values
-        *block_max = new_max;
-        *block_sum = updated_sum;
-        *block_output = updated_output;
-
-        Ok(())
-    }
-
-    /// Normalize FlashAttention output
-    fn normalize_flash_output(&self, block_output: &Tensor, block_sum: &Tensor) -> Result<Tensor> {
-        // Avoid division by zero
-        let epsilon = Tensor::scalar(1e-8)?;
-        let safe_sum = block_sum.add(&epsilon)?;
-        block_output.div(&safe_sum)
+        adaptive_size.clamp(1, seq_q.max(seq_k).max(1))
     }
 }
 
@@ -628,11 +433,264 @@ mod tests {
         assert!(memory_usage > 0);
     }
 
+    /// Deterministic pseudo-random tensor so assertions are reproducible.
+    fn deterministic(shape: &[usize], seed: u32) -> Tensor {
+        let count: usize = shape.iter().product();
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity(count);
+        for _ in 0..count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            data.push(unit * 2.0 - 1.0);
+        }
+        Tensor::from_vec(data, shape).expect("test tensor shape must be valid")
+    }
+
+    fn max_abs_difference(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "output length mismatch");
+        a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()))
+    }
+
+    fn attention_with_weights(hidden_size: usize, num_heads: usize) -> MultiHeadAttention {
+        let mut attention = MultiHeadAttention::new(hidden_size, num_heads, 0.0, true)
+            .expect("construction must succeed");
+        attention
+            .set_query_weight(deterministic(&[hidden_size, hidden_size], 1))
+            .expect("q weight");
+        attention
+            .set_key_weight(deterministic(&[hidden_size, hidden_size], 2))
+            .expect("k weight");
+        attention
+            .set_value_weight(deterministic(&[hidden_size, hidden_size], 3))
+            .expect("v weight");
+        attention
+            .set_out_proj_weight(deterministic(&[hidden_size, hidden_size], 4))
+            .expect("o weight");
+        attention.set_query_bias(deterministic(&[hidden_size], 5)).expect("q bias");
+        attention.set_key_bias(deterministic(&[hidden_size], 6)).expect("k bias");
+        attention.set_value_bias(deterministic(&[hidden_size], 7)).expect("v bias");
+        attention.set_out_proj_bias(deterministic(&[hidden_size], 8)).expect("o bias");
+        attention
+    }
+
+    #[test]
+    fn flash_path_matches_standard_path() {
+        // Regression test: the flash branch used to compute every block and
+        // then return the all-zero tensor it had allocated up front.
+        for causal in [false, true] {
+            let hidden_size = 64;
+            let attention = attention_with_weights(hidden_size, 8);
+            let input = deterministic(&[2, 21, hidden_size], 9);
+
+            let standard = attention
+                .forward_self_attention(&input, None, causal)
+                .expect("standard forward failed");
+
+            let mut flash_attention = attention.clone();
+            // A small tile forces several Q/K blocks for a 21-token sequence.
+            flash_attention.set_optimization_hints(AttentionOptimizationHints {
+                use_flash_attention: true,
+                block_size: 8,
+                ..Default::default()
+            });
+            let flash = flash_attention
+                .forward_self_attention(&input, None, causal)
+                .expect("flash forward failed");
+
+            let difference = max_abs_difference(
+                &standard.data().expect("standard data"),
+                &flash.data().expect("flash data"),
+            );
+            assert!(
+                difference < 1e-4,
+                "flash and standard attention disagree by {difference} (causal={causal})"
+            );
+            assert!(
+                flash.data().expect("flash data").iter().any(|x| x.abs() > 1e-6),
+                "flash attention must not return zeros"
+            );
+        }
+    }
+
+    #[test]
+    fn flash_path_honours_the_attention_mask() {
+        let hidden_size = 32;
+        let seq_len = 12;
+        let attention = attention_with_weights(hidden_size, 4);
+        let input = deterministic(&[1, seq_len, hidden_size], 10);
+
+        let mut keep = vec![1.0f32; seq_len];
+        keep[4] = 0.0;
+        keep[9] = 0.0;
+        let mask = Tensor::from_vec(keep, &[1, 1, 1, seq_len]).expect("mask shape");
+
+        let standard = attention
+            .forward_self_attention(&input, Some(&mask), false)
+            .expect("standard forward failed");
+
+        let mut flash_attention = attention.clone();
+        flash_attention.set_optimization_hints(AttentionOptimizationHints {
+            use_flash_attention: true,
+            block_size: 10,
+            ..Default::default()
+        });
+        let flash = flash_attention
+            .forward_self_attention(&input, Some(&mask), false)
+            .expect("flash forward failed");
+
+        let difference = max_abs_difference(
+            &standard.data().expect("standard data"),
+            &flash.data().expect("flash data"),
+        );
+        assert!(
+            difference < 1e-4,
+            "masked flash attention disagrees with the standard path by {difference}"
+        );
+
+        let unmasked = attention
+            .forward_self_attention(&input, None, false)
+            .expect("unmasked forward failed");
+        assert!(
+            max_abs_difference(
+                &standard.data().expect("standard data"),
+                &unmasked.data().expect("unmasked data")
+            ) > 1e-3,
+            "the mask must actually change the result"
+        );
+    }
+
+    #[test]
+    fn causal_attention_ignores_future_tokens() {
+        let hidden_size = 32;
+        let seq_len = 10;
+        let attention = attention_with_weights(hidden_size, 4);
+
+        let base_input = deterministic(&[1, seq_len, hidden_size], 11);
+        let mut perturbed = base_input.data().expect("input data");
+        for position in 5..seq_len {
+            for feature in 0..hidden_size {
+                perturbed[position * hidden_size + feature] += 2.5;
+            }
+        }
+        let perturbed_input = Tensor::from_vec(perturbed, &[1, seq_len, hidden_size])
+            .expect("perturbed tensor shape");
+
+        let base = attention
+            .forward_self_attention(&base_input, None, true)
+            .expect("base forward failed");
+        let changed = attention
+            .forward_self_attention(&perturbed_input, None, true)
+            .expect("perturbed forward failed");
+
+        let prefix = 5 * hidden_size;
+        let base_data = base.data().expect("base data");
+        let changed_data = changed.data().expect("changed data");
+        assert!(
+            max_abs_difference(&base_data[..prefix], &changed_data[..prefix]) < 1e-4,
+            "causal attention leaked information from future tokens"
+        );
+    }
+
+    #[test]
+    fn dropout_is_inert_at_inference_and_active_in_training() {
+        let hidden_size = 32;
+        let mut attention =
+            MultiHeadAttention::new(hidden_size, 4, 0.5, false).expect("construction must succeed");
+        let input = deterministic(&[1, 8, hidden_size], 12);
+
+        assert!(!attention.is_training());
+        let first = attention
+            .forward_self_attention(&input, None, false)
+            .expect("first inference pass");
+        let second = attention
+            .forward_self_attention(&input, None, false)
+            .expect("second inference pass");
+        assert!(
+            max_abs_difference(&first.data().expect("data"), &second.data().expect("data")) < 1e-6,
+            "inference must be deterministic with dropout_prob > 0"
+        );
+
+        attention.set_training(true);
+        let training =
+            attention.forward_self_attention(&input, None, false).expect("training pass");
+        assert!(
+            max_abs_difference(
+                &first.data().expect("data"),
+                &training.data().expect("data")
+            ) > 1e-4,
+            "training mode must actually apply dropout"
+        );
+    }
+
     #[test]
     fn test_optimization_hints_update() {
         let mut attention =
             MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         attention.update_optimization_hints(2, 2048, Some(1024));
         assert!(attention.optimization_hints.use_flash_attention);
+    }
+
+    /// The projections now run through `Layer::forward_ref` instead of
+    /// `forward(x.clone())`, removing three deep clones of the hidden state per
+    /// attention call. That is a pure performance change: the numbers must be
+    /// bit-identical to what the cloning path produced.
+    ///
+    /// The check is anchored on `Linear` directly, because that is the layer
+    /// whose `forward_ref` the attention path calls: `forward_ref(&x)` must
+    /// equal `forward(x.clone())` for every projection and every input shape the
+    /// attention layer feeds it.
+    #[test]
+    fn projection_forward_ref_matches_the_cloning_path() {
+        let hidden_size = 32;
+        let attention = attention_with_weights(hidden_size, 4);
+        let input = deterministic(&[2, 6, hidden_size], 77);
+        let projections = attention.projections();
+
+        for (label, layer) in [
+            ("query", &projections.query),
+            ("key", &projections.key),
+            ("value", &projections.value),
+            ("out_proj", &projections.out_proj),
+        ] {
+            let cloned = layer.forward(input.clone()).expect("owning forward");
+            let borrowed = layer.forward_ref(&input).expect("borrowing forward");
+            assert_eq!(cloned.shape(), borrowed.shape(), "{label} shape");
+            assert_eq!(
+                max_abs_difference(
+                    &cloned.data().expect("data"),
+                    &borrowed.data().expect("data")
+                ),
+                0.0,
+                "{label}: forward_ref must be bit-identical to forward"
+            );
+        }
+    }
+
+    /// End-to-end guard on the same change: the full attention output must not
+    /// have moved, and the input the caller still owns must be untouched.
+    #[test]
+    fn self_attention_output_is_unchanged_and_leaves_its_input_intact() {
+        let hidden_size = 32;
+        let attention = attention_with_weights(hidden_size, 4);
+        let input = deterministic(&[1, 5, hidden_size], 91);
+        let before = input.data().expect("input data");
+
+        let first = attention
+            .forward_self_attention(&input, None, false)
+            .expect("first attention pass");
+        let second = attention
+            .forward_self_attention(&input, None, false)
+            .expect("second attention pass");
+
+        assert_eq!(
+            max_abs_difference(&first.data().expect("data"), &second.data().expect("data")),
+            0.0,
+            "borrowing the input must not make attention non-deterministic"
+        );
+        assert_eq!(
+            max_abs_difference(&before, &input.data().expect("input data")),
+            0.0,
+            "forward_ref must not mutate the caller's tensor"
+        );
     }
 }

@@ -246,19 +246,18 @@ impl From<&TracyTrace> for ProfilingTrace {
 }
 
 impl From<&PerfettoTrace> for ProfilingTrace {
+    /// Convert every event in the Perfetto trace, in order, via
+    /// [`From<&PerfettoEvent> for TimingEvent`].
+    ///
+    /// This used to ignore `t` entirely and return an empty trace, so any
+    /// caller writing `let profiling: ProfilingTrace = (&perfetto).into();`
+    /// silently lost every event.
     fn from(t: &PerfettoTrace) -> Self {
-        // PerfettoTrace doesn't expose its internal Vec directly; we rebuild
-        // from the JSON round-trip is overkill — instead we use a to_string
-        // approach only as last resort.  Here we use the public API via
-        // export_to_string + manual parse.  Since PerfettoTrace has no
-        // `events()` accessor we build via a zero-copy approach instead:
-        // call `add_event` on a fresh trace.
-        //
-        // NOTE: PerfettoTrace itself is opaque, so we rely on From<TimingEvent>
-        // to bridge the types.  In practice callers will construct a
-        // `ProfilingTrace` directly via `add_event`.
-        let _ = t; // suppress unused warning — this path is documented as limited
-        Self::new()
+        let mut trace = Self::new();
+        for event in t.events() {
+            trace.add_event(TimingEvent::from(event));
+        }
+        trace
     }
 }
 
@@ -365,7 +364,7 @@ fn escape_json_string_local(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
                 let _ = write!(out, "\\u{:04x}", c as u32);
-            }
+            },
             c => out.push(c),
         }
     }
@@ -418,19 +417,17 @@ impl TraceExporter {
             ExportFormat::Perfetto | ExportFormat::ChromeTrace => {
                 let perf = trace.to_perfetto();
                 perf.export_to_file(path).map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Tracy => {
                 let tracy = trace.to_tracy();
                 tracy.export_to_file(path).map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Csv => {
-                CsvExporter::export_to_file(trace.events(), path)
-                    .map_err(ExportError::from)?;
-            }
+                CsvExporter::export_to_file(trace.events(), path).map_err(ExportError::from)?;
+            },
             ExportFormat::Json => {
-                JsonExporter::export_to_file(trace.events(), path)
-                    .map_err(ExportError::from)?;
-            }
+                JsonExporter::export_to_file(trace.events(), path).map_err(ExportError::from)?;
+            },
         }
         Ok(())
     }
@@ -449,11 +446,10 @@ impl TraceExporter {
             ExportFormat::Perfetto | ExportFormat::ChromeTrace => {
                 PerfettoExporter::export_profiler_report(report, path)
                     .map_err(ExportError::from)?;
-            }
+            },
             ExportFormat::Tracy => {
-                TracyExporter::export_profiler_report(report, path)
-                    .map_err(ExportError::from)?;
-            }
+                TracyExporter::export_profiler_report(report, path).map_err(ExportError::from)?;
+            },
             ExportFormat::Csv | ExportFormat::Json => {
                 let events: Vec<TimingEvent> = report
                     .slowest_layers
@@ -470,12 +466,12 @@ impl TraceExporter {
                     return Err(ExportError::EmptyTrace);
                 }
                 match &config.format {
-                    ExportFormat::Csv => CsvExporter::export_to_file(&events, path)
-                        .map_err(ExportError::from)?,
-                    _ => JsonExporter::export_to_file(&events, path)
-                        .map_err(ExportError::from)?,
+                    ExportFormat::Csv => {
+                        CsvExporter::export_to_file(&events, path).map_err(ExportError::from)?
+                    },
+                    _ => JsonExporter::export_to_file(&events, path).map_err(ExportError::from)?,
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -489,11 +485,60 @@ impl TraceExporter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn perfetto_to_profiling_conversion_keeps_every_event() {
+        let mut perfetto = PerfettoTrace::new();
+        for (index, name) in ["load", "forward", "backward"].iter().enumerate() {
+            perfetto.add_event(PerfettoEvent {
+                name: (*name).to_string(),
+                phase: PerfettoPhase::Complete,
+                timestamp_us: 1_000 * (index as u64 + 1),
+                duration_us: Some(500),
+                pid: 1,
+                tid: 7,
+                args: std::collections::HashMap::new(),
+            });
+        }
+
+        let profiling = ProfilingTrace::from(&perfetto);
+        // The old impl discarded `t` and returned an empty trace.
+        assert_eq!(
+            profiling.len(),
+            3,
+            "every event must survive the conversion"
+        );
+        let names: Vec<&str> = profiling.events().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["load", "forward", "backward"],
+            "order must be preserved"
+        );
+        assert_eq!(profiling.events()[0].thread_id, 7);
+        // Microseconds become nanoseconds.
+        assert_eq!(profiling.events()[0].timestamp_ns, 1_000_000);
+        assert_eq!(profiling.events()[0].duration_ns, 500_000);
+    }
+
     fn sample_events() -> Vec<TimingEvent> {
         vec![
-            TimingEvent { timestamp_ns: 0, duration_ns: 1_000_000, thread_id: 0, name: "attention".to_string() },
-            TimingEvent { timestamp_ns: 1_000_000, duration_ns: 2_000_000, thread_id: 1, name: "ffn".to_string() },
-            TimingEvent { timestamp_ns: 3_000_000, duration_ns: 500_000, thread_id: 0, name: "layer_norm".to_string() },
+            TimingEvent {
+                timestamp_ns: 0,
+                duration_ns: 1_000_000,
+                thread_id: 0,
+                name: "attention".to_string(),
+            },
+            TimingEvent {
+                timestamp_ns: 1_000_000,
+                duration_ns: 2_000_000,
+                thread_id: 1,
+                name: "ffn".to_string(),
+            },
+            TimingEvent {
+                timestamp_ns: 3_000_000,
+                duration_ns: 500_000,
+                thread_id: 0,
+                name: "layer_norm".to_string(),
+            },
         ]
     }
 
@@ -672,6 +717,8 @@ mod tests {
     fn test_export_error_display() {
         assert!(ExportError::EmptyTrace.to_string().contains("empty"));
         assert!(ExportError::UnsupportedFormat("xyz".to_string()).to_string().contains("xyz"));
-        assert!(ExportError::IoError("perm denied".to_string()).to_string().contains("perm denied"));
+        assert!(ExportError::IoError("perm denied".to_string())
+            .to_string()
+            .contains("perm denied"));
     }
 }

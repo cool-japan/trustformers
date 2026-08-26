@@ -13,10 +13,7 @@ impl Lcg {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
     }
     fn next_f64(&mut self) -> f64 {
@@ -110,7 +107,7 @@ fn test_statistical_analyzer_percentile_basic() {
     };
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let p50 = analyzer.percentile(&data, 0.5);
-    assert!(p50 >= 4.0 && p50 <= 6.0);
+    assert!((4.0..=6.0).contains(&p50));
 }
 
 #[test]
@@ -164,7 +161,7 @@ fn test_statistical_analyzer_descriptive_stats() {
             assert!((summary.mean - 5.0).abs() < 0.001);
             assert!(summary.standard_deviation > 0.0);
             assert!(summary.variance > 0.0);
-        }
+        },
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }
@@ -183,7 +180,7 @@ fn test_statistical_analyzer_descriptive_stats_empty() {
     };
     let data: Vec<f64> = vec![];
     match analyzer.calculate_descriptive_statistics(&data) {
-        Err(AnalyticsError::StatisticalAnalysisError { .. }) => {}
+        Err(AnalyticsError::StatisticalAnalysisError { .. }) => {},
         other => panic!("expected StatisticalAnalysisError, got {:?}", other),
     }
 }
@@ -203,8 +200,11 @@ fn test_statistical_analyzer_outlier_detection() {
     let data = vec![1.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 5.0, 100.0];
     match analyzer.detect_outliers(&data) {
         Ok(analysis) => {
-            assert!(!analysis.outliers.is_empty(), "should detect 100.0 as outlier");
-        }
+            assert!(
+                !analysis.outliers.is_empty(),
+                "should detect 100.0 as outlier"
+            );
+        },
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }
@@ -225,7 +225,7 @@ fn test_statistical_analyzer_outlier_detection_no_outliers() {
     match analyzer.detect_outliers(&data) {
         Ok(analysis) => {
             assert!(analysis.outliers.is_empty(), "no outliers in tight data");
-        }
+        },
         Err(e) => panic!("unexpected error: {:?}", e),
     }
 }

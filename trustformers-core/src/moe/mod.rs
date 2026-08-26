@@ -7,8 +7,8 @@
 //! - [`routing`]: Advanced routing strategies (Expert Choice, Hash, Switch Transformer, Random).
 //! - [`expert_parallel`]: Expert parallelism all-to-all communication simulator.
 
-pub mod routing;
 pub mod expert_parallel;
+pub mod routing;
 
 use std::fmt;
 
@@ -22,17 +22,11 @@ pub enum MoeError {
     /// `num_experts` must be ≥ 1.
     InvalidNumExperts(usize),
     /// `top_k` must be ≤ `num_experts`.
-    InvalidTopK {
-        top_k: usize,
-        num_experts: usize,
-    },
+    InvalidTopK { top_k: usize, num_experts: usize },
     /// Batch of token logits was empty.
     EmptyBatch,
     /// Logits vector length did not match `num_experts`.
-    LogitsDimensionMismatch {
-        expected: usize,
-        got: usize,
-    },
+    LogitsDimensionMismatch { expected: usize, got: usize },
 }
 
 impl fmt::Display for MoeError {
@@ -40,20 +34,17 @@ impl fmt::Display for MoeError {
         match self {
             MoeError::InvalidNumExperts(n) => {
                 write!(f, "invalid num_experts: {n} (must be ≥ 1)")
-            }
+            },
             MoeError::InvalidTopK { top_k, num_experts } => {
-                write!(
-                    f,
-                    "invalid top_k: {top_k} > num_experts: {num_experts}"
-                )
-            }
+                write!(f, "invalid top_k: {top_k} > num_experts: {num_experts}")
+            },
             MoeError::EmptyBatch => write!(f, "batch of token logits is empty"),
             MoeError::LogitsDimensionMismatch { expected, got } => {
                 write!(
                     f,
                     "logits dimension mismatch: expected {expected}, got {got}"
                 )
-            }
+            },
         }
     }
 }
@@ -66,10 +57,7 @@ impl std::error::Error for MoeError {}
 
 /// Numerically stable softmax over a slice.
 fn softmax(logits: &[f32]) -> Vec<f32> {
-    let max = logits
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp_vals: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
     let sum: f32 = exp_vals.iter().sum();
     if sum == 0.0 {
@@ -122,11 +110,7 @@ impl RouterOutput {
     ///
     /// Weights near zero are skipped to avoid `log(0)`.
     pub fn compute_entropy(weights: &[f32]) -> f32 {
-        weights
-            .iter()
-            .filter(|&&w| w > 1e-10)
-            .map(|&w| -w * w.ln())
-            .sum()
+        weights.iter().filter(|&&w| w > 1e-10).map(|&w| -w * w.ln()).sum()
     }
 
     /// Return `true` if a single expert received more than `threshold` of the
@@ -234,17 +218,11 @@ impl TopKRouter {
     /// Route a batch of tokens.
     ///
     /// `batch_logits[i]` must have length == `num_experts`.
-    pub fn route_batch(
-        &self,
-        batch_logits: &[Vec<f32>],
-    ) -> Result<Vec<RouterOutput>, MoeError> {
+    pub fn route_batch(&self, batch_logits: &[Vec<f32>]) -> Result<Vec<RouterOutput>, MoeError> {
         if batch_logits.is_empty() {
             return Err(MoeError::EmptyBatch);
         }
-        batch_logits
-            .iter()
-            .map(|logits| self.route(logits))
-            .collect()
+        batch_logits.iter().map(|logits| self.route(logits)).collect()
     }
 }
 
@@ -290,30 +268,25 @@ impl LoadBalanceStats {
 
         let fractions: Vec<f32> = counts
             .iter()
-            .map(|&c| {
-                if total_assignments == 0 {
-                    0.0
-                } else {
-                    c as f32 / total_assignments as f32
-                }
-            })
+            .map(
+                |&c| {
+                    if total_assignments == 0 {
+                        0.0
+                    } else {
+                        c as f32 / total_assignments as f32
+                    }
+                },
+            )
             .collect();
 
-        let ideal = if num_experts == 0 {
-            0.0
-        } else {
-            1.0 / num_experts as f32
-        };
+        let ideal = if num_experts == 0 { 0.0 } else { 1.0 / num_experts as f32 };
 
         let max_frac = fractions.iter().cloned().fold(0.0_f32, f32::max);
         let imbalance_ratio = if ideal > 0.0 { max_frac / ideal } else { 0.0 };
 
         // Mean and std for CV
         let mean = fractions.iter().sum::<f32>() / fractions.len().max(1) as f32;
-        let variance = fractions
-            .iter()
-            .map(|&f| (f - mean).powi(2))
-            .sum::<f32>()
+        let variance = fractions.iter().map(|&f| (f - mean).powi(2)).sum::<f32>()
             / fractions.len().max(1) as f32;
         let std_dev = variance.sqrt();
         let cv = if mean > 1e-10 { std_dev / mean } else { 0.0 };
@@ -377,11 +350,7 @@ impl LoadBalanceLoss {
     /// where:
     /// - `f_i` = fraction of tokens routed to expert `i`
     /// - `P_i` = mean gate probability assigned to expert `i` across the batch
-    pub fn compute_switch(
-        &self,
-        outputs: &[RouterOutput],
-        num_experts: usize,
-    ) -> f32 {
+    pub fn compute_switch(&self, outputs: &[RouterOutput], num_experts: usize) -> f32 {
         if outputs.is_empty() || num_experts == 0 {
             return 0.0;
         }
@@ -399,10 +368,7 @@ impl LoadBalanceLoss {
                 }
             }
         }
-        let fractions: Vec<f32> = counts
-            .iter()
-            .map(|&c| c as f32 / total_assignments)
-            .collect();
+        let fractions: Vec<f32> = counts.iter().map(|&c| c as f32 / total_assignments).collect();
 
         // P_i: mean gate probability per expert
         // For each token, the gate weight for expert i is the weight at the
@@ -415,16 +381,9 @@ impl LoadBalanceLoss {
                 }
             }
         }
-        let mean_probs: Vec<f32> = prob_sums
-            .iter()
-            .map(|&s| s / num_tokens as f32)
-            .collect();
+        let mean_probs: Vec<f32> = prob_sums.iter().map(|&s| s / num_tokens as f32).collect();
 
-        let dot: f32 = fractions
-            .iter()
-            .zip(mean_probs.iter())
-            .map(|(&f, &p)| f * p)
-            .sum();
+        let dot: f32 = fractions.iter().zip(mean_probs.iter()).map(|(&f, &p)| f * p).sum();
 
         self.alpha * num_experts as f32 * dot
     }
@@ -440,16 +399,8 @@ impl LoadBalanceLoss {
             .iter()
             .map(|logits| {
                 // log_sum_exp(logits) = log( sum( exp(logit_i) ) )
-                let max = logits
-                    .iter()
-                    .cloned()
-                    .fold(f32::NEG_INFINITY, f32::max);
-                let lse = logits
-                    .iter()
-                    .map(|&x| (x - max).exp())
-                    .sum::<f32>()
-                    .ln()
-                    + max;
+                let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let lse = logits.iter().map(|&x| (x - max).exp()).sum::<f32>().ln() + max;
                 lse * lse
             })
             .sum();
@@ -493,8 +444,7 @@ impl ExpertCapacity {
             return 0;
         }
         let exact =
-            self.capacity_factor * batch_size as f32 * self.top_k as f32
-                / self.num_experts as f32;
+            self.capacity_factor * batch_size as f32 * self.top_k as f32 / self.num_experts as f32;
         exact.ceil() as usize
     }
 
@@ -639,10 +589,8 @@ impl ExpertLoadBalancer {
                 dispatch_counts[idx] += 1;
             }
         }
-        let fractions: Vec<f32> = dispatch_counts
-            .iter()
-            .map(|&c| c as f32 / num_tokens as f32)
-            .collect();
+        let fractions: Vec<f32> =
+            dispatch_counts.iter().map(|&c| c as f32 / num_tokens as f32).collect();
 
         // P_i: mean router probability per expert
         let mut prob_sums = vec![0.0_f32; self.num_experts];
@@ -653,16 +601,9 @@ impl ExpertLoadBalancer {
                 }
             }
         }
-        let mean_probs: Vec<f32> = prob_sums
-            .iter()
-            .map(|&s| s / num_tokens as f32)
-            .collect();
+        let mean_probs: Vec<f32> = prob_sums.iter().map(|&s| s / num_tokens as f32).collect();
 
-        let dot: f32 = fractions
-            .iter()
-            .zip(mean_probs.iter())
-            .map(|(&f, &p)| f * p)
-            .sum();
+        let dot: f32 = fractions.iter().zip(mean_probs.iter()).map(|(&f, &p)| f * p).sum();
 
         self.num_experts as f32 * dot
     }
@@ -679,13 +620,7 @@ impl ExpertLoadBalancer {
         let mean = total as f32 / self.num_experts as f32;
         self.expert_counts
             .iter()
-            .map(|&c| {
-                if mean < 1e-10 {
-                    0.0
-                } else {
-                    c as f32 / mean
-                }
-            })
+            .map(|&c| if mean < 1e-10 { 0.0 } else { c as f32 / mean })
             .collect()
     }
 
@@ -834,8 +769,8 @@ pub fn upcycle_dense_to_moe(dense_ffn: &[f32], config: &UpcyclingConfig) -> Vec<
     (0..n)
         .map(|expert_idx| {
             // Each expert starts from a different LCG seed based on its index
-            let mut state: u64 = (expert_idx as u64).wrapping_mul(2_654_435_761)
-                .wrapping_add(1_013_904_223);
+            let mut state: u64 =
+                (expert_idx as u64).wrapping_mul(2_654_435_761).wrapping_add(1_013_904_223);
 
             let base: &[f32] = if config.copy_dense_to_all || expert_idx == 0 {
                 // Use dense weights as base (or zero-pad if dense is shorter)
@@ -918,7 +853,10 @@ mod tests {
         let logits = vec![1e30_f32, 1e30, 1e30];
         let probs = softmax(&logits);
         for &p in &probs {
-            assert!(p.is_finite(), "softmax should be finite even for large inputs");
+            assert!(
+                p.is_finite(),
+                "softmax should be finite even for large inputs"
+            );
         }
         let sum: f32 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5);
@@ -982,10 +920,7 @@ mod tests {
     #[test]
     fn test_top_k_router_batch() {
         let router = TopKRouter::new(4, 1);
-        let batch = vec![
-            vec![1.0_f32, 2.0, 0.5, 0.1],
-            vec![0.1_f32, 0.2, 5.0, 0.3],
-        ];
+        let batch = vec![vec![1.0_f32, 2.0, 0.5, 0.1], vec![0.1_f32, 0.2, 5.0, 0.3]];
         let outs = router.route_batch(&batch).expect("batch route ok");
         assert_eq!(outs.len(), 2);
         assert_eq!(outs[0].expert_indices[0], 1); // highest in first token
@@ -1042,7 +977,11 @@ mod tests {
         let num_experts = 4;
         let outputs = make_uniform_outputs(8, num_experts);
         let stats = LoadBalanceStats::from_batch(&outputs, num_experts);
-        assert!(stats.cv < 1e-5, "cv should be 0 for uniform, got {}", stats.cv);
+        assert!(
+            stats.cv < 1e-5,
+            "cv should be 0 for uniform, got {}",
+            stats.cv
+        );
     }
 
     #[test]
@@ -1081,10 +1020,7 @@ mod tests {
     #[test]
     fn test_load_balance_loss_z_loss() {
         let loss_fn = LoadBalanceLoss::new(1e-4);
-        let batch_logits = vec![
-            vec![1.0_f32, 2.0, 3.0],
-            vec![0.5_f32, 0.5, 0.5],
-        ];
+        let batch_logits = vec![vec![1.0_f32, 2.0, 3.0], vec![0.5_f32, 0.5, 0.5]];
         let z = loss_fn.compute_z_loss(&batch_logits);
         assert!(z > 0.0, "z-loss should be positive");
         assert!(z.is_finite(), "z-loss should be finite");
@@ -1104,10 +1040,30 @@ mod tests {
         // 4 tokens, 2 experts, top-1 each, capacity = 2 per expert → no overflow
         let ec = ExpertCapacity::new(2, 1, 1.0);
         let outputs: Vec<RouterOutput> = vec![
-            RouterOutput { expert_indices: vec![0], gate_weights: vec![1.0], raw_logits: vec![1.0, 0.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![1], gate_weights: vec![1.0], raw_logits: vec![0.0, 1.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![0], gate_weights: vec![1.0], raw_logits: vec![1.0, 0.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![1], gate_weights: vec![1.0], raw_logits: vec![0.0, 1.0], entropy: 0.0 },
+            RouterOutput {
+                expert_indices: vec![0],
+                gate_weights: vec![1.0],
+                raw_logits: vec![1.0, 0.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![1],
+                gate_weights: vec![1.0],
+                raw_logits: vec![0.0, 1.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![0],
+                gate_weights: vec![1.0],
+                raw_logits: vec![1.0, 0.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![1],
+                gate_weights: vec![1.0],
+                raw_logits: vec![0.0, 1.0],
+                entropy: 0.0,
+            },
         ];
         let (result, dropped) = ec.apply_capacity(&outputs, 4);
         assert_eq!(dropped, 0, "no tokens should be dropped");
@@ -1120,10 +1076,30 @@ mod tests {
         // Tokens 0,1,2,3 → experts 0,0,1,1 → experts 0 and 1 overflow on 2nd assignment each
         let ec = ExpertCapacity::new(2, 1, 0.5); // capacity = ceil(0.5 * 4 * 1 / 2) = 1
         let outputs: Vec<RouterOutput> = vec![
-            RouterOutput { expert_indices: vec![0], gate_weights: vec![1.0], raw_logits: vec![1.0, 0.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![0], gate_weights: vec![1.0], raw_logits: vec![1.0, 0.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![1], gate_weights: vec![1.0], raw_logits: vec![0.0, 1.0], entropy: 0.0 },
-            RouterOutput { expert_indices: vec![1], gate_weights: vec![1.0], raw_logits: vec![0.0, 1.0], entropy: 0.0 },
+            RouterOutput {
+                expert_indices: vec![0],
+                gate_weights: vec![1.0],
+                raw_logits: vec![1.0, 0.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![0],
+                gate_weights: vec![1.0],
+                raw_logits: vec![1.0, 0.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![1],
+                gate_weights: vec![1.0],
+                raw_logits: vec![0.0, 1.0],
+                entropy: 0.0,
+            },
+            RouterOutput {
+                expert_indices: vec![1],
+                gate_weights: vec![1.0],
+                raw_logits: vec![0.0, 1.0],
+                entropy: 0.0,
+            },
         ];
         let (_result, dropped) = ec.apply_capacity(&outputs, 4);
         assert!(dropped > 0, "some tokens should be dropped due to overflow");
@@ -1233,8 +1209,14 @@ mod tests {
         let mut balancer = ExpertLoadBalancer::new(2, 2.0);
         // 4 tokens, 2 experts → mean = 2.0, capacity = ceil(2.0 * 2.0) = 4
         balancer.record_routing(&[0, 1, 0, 1]);
-        assert!(!balancer.is_overloaded(0), "expert 0 should not be overloaded");
-        assert!(!balancer.is_overloaded(1), "expert 1 should not be overloaded");
+        assert!(
+            !balancer.is_overloaded(0),
+            "expert 0 should not be overloaded"
+        );
+        assert!(
+            !balancer.is_overloaded(1),
+            "expert 1 should not be overloaded"
+        );
     }
 
     #[test]
@@ -1263,9 +1245,7 @@ mod tests {
         // With 4 tokens and uniform probabilities:
         // f_i ≈ 0.25, P_i = 0.25 for all i
         // loss = 4 * (4 * 0.25 * 0.25) = 4 * 0.25 = 1.0
-        let uniform: Vec<Vec<f32>> = (0..4)
-            .map(|_| vec![0.25_f32; 4])
-            .collect();
+        let uniform: Vec<Vec<f32>> = (0..4).map(|_| vec![0.25_f32; 4]).collect();
         let loss = balancer.load_balance_loss(&uniform);
         assert!(loss > 0.0, "load balance loss must be positive");
         assert!(loss.is_finite(), "loss must be finite");
@@ -1324,7 +1304,11 @@ mod tests {
     fn test_expert_dropout_preserves_shape() {
         let outputs: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32; 8]).collect();
         let result = expert_dropout(&outputs, 0.5, true, 7);
-        assert_eq!(result.len(), outputs.len(), "output count must be preserved");
+        assert_eq!(
+            result.len(),
+            outputs.len(),
+            "output count must be preserved"
+        );
         for (orig, dropped) in outputs.iter().zip(result.iter()) {
             assert_eq!(orig.len(), dropped.len(), "vector length must be preserved");
         }
@@ -1345,7 +1329,11 @@ mod tests {
         let dense = vec![0.1_f32; 16];
         let config = UpcyclingConfig::new(4, 16);
         let experts = upcycle_dense_to_moe(&dense, &config);
-        assert_eq!(experts.len(), 4, "must produce num_experts expert weight vectors");
+        assert_eq!(
+            experts.len(),
+            4,
+            "must produce num_experts expert weight vectors"
+        );
         for (i, e) in experts.iter().enumerate() {
             assert_eq!(e.len(), 16, "expert {} must have size expert_size", i);
         }
@@ -1385,7 +1373,8 @@ mod tests {
                 assert!(
                     (w - base).abs() < 0.1,
                     "with small perturbation expert weight {} should be close to base {}",
-                    w, base
+                    w,
+                    base
                 );
             }
         }

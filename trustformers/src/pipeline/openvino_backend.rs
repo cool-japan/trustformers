@@ -9,10 +9,38 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use trustformers_core::errors::{Result as CoreResult, TrustformersError as CoreTrustformersError};
 use trustformers_core::traits::{Model, Tokenizer};
-// Note: Using mock types since actual OpenVINO runtime types need implementation
-// For now, using placeholder types for compilation
+// # Why every real code path here fails
+//
+// Intel's OpenVINO is a closed-source C++ runtime; there is no pure-Rust
+// implementation of it anywhere in this workspace (compare
+// `trustformers_core::export::openvino`, which only *writes* an IR pair from a
+// model's parameters and refuses to invent one — see that module's docs). This
+// file used to construct a `OpenVINOModel` that echoed its inputs back as
+// "inference", reported a fixed `avg_latency_ms: 1.0` benchmark regardless of
+// what ran, and answered device queries with `{"type": "mock"}`. None of that
+// survives: every method that would need the real runtime now returns a
+// structured [`TrustformersError::FeatureUnavailable`] naming it, and no
+// method fabricates a tensor, a timing, or a device fact.
+const OPENVINO_UNAVAILABLE_REASON: &str =
+    "OpenVINO inference requires Intel's OpenVINO runtime (C++), which this pure-Rust build \
+     does not link. No pure-Rust OpenVINO IR interpreter exists in trustformers-core.";
 
-// Mock OpenVINO types - replace with actual implementation
+fn openvino_unavailable(feature: &str) -> TrustformersError {
+    TrustformersError::FeatureUnavailable {
+        message: OPENVINO_UNAVAILABLE_REASON.to_string(),
+        feature: feature.to_string(),
+        suggestion: Some(
+            "Export the model to ONNX and use trustformers::pipeline::onnx_backend instead; \
+             it runs on a real pure-Rust CPU interpreter."
+                .to_string(),
+        ),
+        alternatives: vec!["onnx_backend".to_string()],
+    }
+}
+
+/// OpenVINO client handle. Holding one claims nothing about model or device
+/// state — only [`OpenVINORuntime::load_model`] and friends would make (and
+/// honestly refuse) that claim.
 #[derive(Debug, Clone)]
 pub struct OpenVINORuntime;
 
@@ -74,8 +102,9 @@ pub struct MemoryInfo {
     pub free_memory: u64,
 }
 
-// Mock implementations
 impl OpenVINORuntime {
+    /// Constructing a client handle claims nothing about a specific model or
+    /// device, so this alone can honestly stay infallible.
     pub fn new(_config: OpenVINOConfig) -> Result<Self> {
         Ok(Self)
     }
@@ -88,41 +117,29 @@ impl Default for OpenVINORuntime {
 }
 
 impl OpenVINORuntime {
+    /// Always fails: see the module docs for why no build of this crate can
+    /// actually load an OpenVINO IR model.
     pub fn load_model(&self, _path: &PathBuf) -> Result<OpenVINOModel> {
-        // Create a mock OpenVINOModel for compilation
-        let config = OpenVINOBackendConfig::default();
-        let input_names = vec!["input_ids".to_string()];
-        let output_names = vec!["logits".to_string()];
-        let runtime = Arc::new(OpenVINORuntime);
-
-        // Create a mock model with simplified structure
-        let model = OpenVINOModel {
-            model: None, // Simplified: no circular dependency
-            config: config.clone(),
-            input_names: input_names.clone(),
-            output_names: output_names.clone(),
-            runtime: runtime.clone(),
-        };
-
-        Ok(model)
+        Err(openvino_unavailable("openvino_model_load"))
     }
 
     pub fn load_model_with_weights(
         &self,
-        _model_path: &PathBuf,
+        model_path: &PathBuf,
         _weights_path: &PathBuf,
     ) -> Result<OpenVINOModel> {
-        self.load_model(_model_path)
+        self.load_model(model_path)
     }
 
+    /// Always fails: there is no OpenVINO runtime here to enumerate devices
+    /// with. The old `vec!["CPU", "GPU"]` claimed hardware nothing here can
+    /// actually drive.
     pub fn get_available_devices(&self) -> Result<Vec<String>> {
-        Ok(vec!["CPU".to_string(), "GPU".to_string()])
+        Err(openvino_unavailable("device_enumeration"))
     }
 
     pub fn get_device_properties(&self, _device: &str) -> Result<HashMap<String, String>> {
-        let mut props = HashMap::new();
-        props.insert("type".to_string(), "mock".to_string());
-        Ok(props)
+        Err(openvino_unavailable("device_properties"))
     }
 }
 
@@ -263,15 +280,15 @@ impl Default for OpenVINOModel {
 }
 
 impl OpenVINOModel {
+    /// Always fails: the old body returned `Tensor::zeros(&[1, 10])` as
+    /// "inference". `self.model` is always `None` (only
+    /// [`OpenVINORuntime::load_model`] would populate it, and that always
+    /// errors), so there is nothing here to run inference with.
     pub fn infer(
         &self,
         _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
     ) -> Result<HashMap<String, trustformers_core::tensor::Tensor>> {
-        // Mock implementation - return empty result
-        let mut outputs = HashMap::new();
-        let mock_tensor = trustformers_core::tensor::Tensor::zeros(&[1, 10])?;
-        outputs.insert("logits".to_string(), mock_tensor);
-        Ok(outputs)
+        Err(openvino_unavailable("openvino_inference"))
     }
 
     pub fn infer_with_device(
@@ -289,25 +306,28 @@ impl OpenVINOModel {
         self.infer(inputs)
     }
 
+    /// Always fails: there is no real execution to time.
     pub fn benchmark_mock(
         &self,
         _inputs: HashMap<String, trustformers_core::tensor::Tensor>,
         _num_runs: usize,
         _warmup_runs: usize,
     ) -> Result<BenchmarkResults> {
-        Ok(BenchmarkResults {
-            avg_latency_ms: 50.0,
-            throughput: 20.0,
-            memory_usage: 1024 * 1024 * 1024, // 1GB
-        })
+        Err(openvino_unavailable("openvino_benchmark"))
     }
 
+    /// Always fails: there is no loaded OpenVINO model to report memory for.
     pub fn get_memory_info(&self) -> Result<MemoryInfo> {
-        Ok(MemoryInfo {
-            total_memory: 8 * 1024 * 1024 * 1024, // 8GB
-            used_memory: 2 * 1024 * 1024 * 1024,  // 2GB
-            free_memory: 6 * 1024 * 1024 * 1024,  // 6GB
-        })
+        Err(openvino_unavailable("memory_info"))
+    }
+
+    /// The nested model wrapper, when this instance was built with one (see
+    /// [`Self::new_with_wrapper`] and friends). `infer`/`benchmark_mock`
+    /// never consult it — there is no real execution engine to hand it to —
+    /// so this is purely for callers that want to inspect what a
+    /// wrapper-carrying constructor actually built.
+    pub fn wrapper(&self) -> Option<&OpenVINOModelWrapper> {
+        self.model.as_deref()
     }
 }
 use trustformers_core::tensor::Tensor;
@@ -566,6 +586,35 @@ impl Default for OpenVINOModelWrapper {
 }
 
 impl OpenVINOModelWrapper {
+    /// The `OpenVINOModel` this wrapper was nested under, when constructed
+    /// with one.
+    pub fn inner_model(&self) -> Option<&OpenVINOModel> {
+        self.model.as_deref()
+    }
+
+    /// The backend configuration this wrapper was built with.
+    pub fn config(&self) -> &OpenVINOBackendConfig {
+        &self.config
+    }
+
+    /// Input tensor names this wrapper reports.
+    pub fn input_names(&self) -> &[String] {
+        &self.input_names
+    }
+
+    /// Output tensor names this wrapper reports.
+    pub fn output_names(&self) -> &[String] {
+        &self.output_names
+    }
+
+    /// The (always-unavailable, see [`OpenVINORuntime`]) runtime this
+    /// wrapper is bound to.
+    pub fn runtime(&self) -> &Arc<OpenVINORuntime> {
+        &self.runtime
+    }
+}
+
+impl OpenVINOModelWrapper {
     /// Create a wrapper with no inner model (simplest form, no nesting).
     pub fn new_empty() -> Self {
         OpenVINOModelWrapper {
@@ -744,20 +793,21 @@ impl OpenVINOModel {
         &self.output_names
     }
 
-    /// Run inference
-    pub fn forward(&self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        // Simplified mock implementation since model is None
-        Ok(inputs) // Just return inputs as a mock
+    /// Run inference. Always fails: see the module docs. The previous body
+    /// echoed `inputs` straight back as "output", which downstream code (this
+    /// pipeline's `sample_next_token`, softmax, ...) would happily decode into
+    /// a confident-looking, entirely fabricated classification or generation.
+    pub fn forward(&self, _inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        Err(openvino_unavailable("openvino_inference"))
     }
 
-    /// Run inference with specific device
+    /// Run inference with specific device. Always fails, for the same reason.
     pub fn forward_with_device(
         &self,
-        inputs: HashMap<String, Tensor>,
+        _inputs: HashMap<String, Tensor>,
         _device: OpenVINODevice,
     ) -> Result<HashMap<String, Tensor>> {
-        // Simplified mock implementation since model is None
-        Ok(inputs) // Just return inputs as a mock
+        Err(openvino_unavailable("openvino_inference"))
     }
 
     /// Run asynchronous inference
@@ -768,29 +818,22 @@ impl OpenVINOModel {
         self.infer_async(inputs).await
     }
 
-    /// Benchmark the model
+    /// Benchmark the model. Always fails: with no real backend there is
+    /// nothing to time. The previous body reported a fixed `1.0 ms` /
+    /// `1000.0 ops/sec` regardless of `inputs`, `num_runs`, or the host.
     pub fn benchmark(
         &self,
-        inputs: HashMap<String, Tensor>,
-        num_runs: usize,
-        warmup_runs: usize,
+        _inputs: HashMap<String, Tensor>,
+        _num_runs: usize,
+        _warmup_runs: usize,
     ) -> Result<BenchmarkResults> {
-        // Simplified mock implementation since model is None
-        Ok(BenchmarkResults {
-            avg_latency_ms: 1.0,
-            throughput: 1000.0,
-            memory_usage: 1024,
-        })
+        Err(openvino_unavailable("openvino_benchmark"))
     }
 
-    /// Get memory usage information
+    /// Get memory usage information. Always fails: there is no loaded model
+    /// to report memory for.
     pub fn memory_info(&self) -> Result<MemoryInfo> {
-        // Simplified mock implementation since model is None
-        Ok(MemoryInfo {
-            total_memory: 1024,
-            used_memory: 512,
-            free_memory: 512,
-        })
+        Err(openvino_unavailable("memory_info"))
     }
 
     /// Get supported devices
@@ -888,18 +931,18 @@ impl Model for OpenVINOModel {
     type Input = HashMap<String, Tensor>;
     type Output = HashMap<String, Tensor>;
 
-    /// Forward pass implementation for Model trait
-    fn forward(&self, inputs: Self::Input) -> CoreResult<Self::Output> {
-        // Mock implementation - return empty outputs
-        let mut outputs = HashMap::new();
-        let mock_tensor = Tensor::zeros(&[1, 10])?;
-        outputs.insert("logits".to_string(), mock_tensor);
-        Ok(outputs)
+    /// Forward pass implementation for Model trait. Always fails: see the
+    /// module docs for why no OpenVINO execution path exists in this build.
+    fn forward(&self, _inputs: Self::Input) -> CoreResult<Self::Output> {
+        Err(CoreTrustformersError::other(
+            OPENVINO_UNAVAILABLE_REASON.to_string(),
+        ))
     }
 
-    /// Load pretrained weights (not applicable for mock OpenVINO models)
+    /// Load pretrained weights. No-op: an `OpenVINOModel` can never be
+    /// constructed with real state in this build (see [`OpenVINOModel::from_config`]),
+    /// so there is nothing for this to load into.
     fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> CoreResult<()> {
-        // Mock implementation - no-op
         Ok(())
     }
 
@@ -912,11 +955,13 @@ impl Model for OpenVINOModel {
         &CONFIG
     }
 
-    /// Get the number of parameters in the model
+    /// Get the number of parameters in the model.
+    ///
+    /// Honestly `0`: no build of this crate can load real OpenVINO IR weights
+    /// (see [`OpenVINOModel::from_config`]), so there are never any real
+    /// parameters behind an `OpenVINOModel` value to count.
     fn num_parameters(&self) -> usize {
-        // For OpenVINO models, we can't easily determine this without parsing the model
-        // Return a placeholder value or implement actual parameter counting if needed
-        0 // Placeholder - would need OpenVINO model introspection
+        0
     }
 }
 
@@ -1537,6 +1582,29 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_openvino_model_wrapper_accessor_returns_nested_wrapper() {
+        let model = OpenVINOModel::new_with_wrapper();
+        let wrapper = model.wrapper().expect("new_with_wrapper must nest a wrapper");
+        assert_eq!(
+            wrapper.input_names().to_vec(),
+            vec!["input_ids".to_string()]
+        );
+        assert_eq!(wrapper.output_names().to_vec(), vec!["logits".to_string()]);
+        assert!(
+            wrapper.inner_model().is_none(),
+            "the nested wrapper must not itself nest a model"
+        );
+        let _ = wrapper.config();
+        let _ = wrapper.runtime();
+    }
+
+    #[test]
+    fn test_openvino_model_wrapper_accessor_is_none_without_a_wrapper() {
+        let model = OpenVINOModel::new_empty_model();
+        assert!(model.wrapper().is_none());
+    }
+
+    #[test]
     fn test_openvino_backend_config() {
         let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
@@ -1654,5 +1722,132 @@ mod tests {
         let config = OpenVINOBackendConfig::cpu_optimized(model_path.clone()).with_timeout(5000);
 
         assert_eq!(config.inference_timeout, Some(5000));
+    }
+
+    // ── Honesty regression tests ──────────────────────────────────────────────
+    //
+    // None of these can be driven through a *successfully constructed*
+    // `OpenVINOModel`, because no build of this crate can construct one: that
+    // is exactly the point being tested.
+
+    /// Regression test for `OpenVINORuntime::load_model` unconditionally
+    /// returning `Ok`.
+    #[test]
+    fn load_model_always_fails() {
+        let runtime = OpenVINORuntime::new(OpenVINOConfig {
+            device: OpenVINODevice::CPU,
+            precision: OpenVINOPrecision::FP32,
+            execution_mode: OpenVINOExecutionMode::Sync,
+            num_threads: None,
+            num_streams: None,
+            enable_profiling: false,
+            cache_dir: None,
+            performance_hint: "LATENCY".to_string(),
+            execution_priority: "MEDIUM".to_string(),
+            inference_timeout: None,
+        })
+        .expect("client handle construction is infallible");
+
+        let err = runtime
+            .load_model(&PathBuf::from("model.xml"))
+            .expect_err("no OpenVINO runtime is linked into this build");
+        assert!(!err.to_string().is_empty());
+    }
+
+    /// Regression test for `get_available_devices` returning a fixed
+    /// `["CPU", "GPU"]` regardless of what is actually installed.
+    #[test]
+    fn get_available_devices_is_honest_about_having_none() {
+        let runtime = OpenVINORuntime;
+        assert!(runtime.get_available_devices().is_err());
+    }
+
+    /// Regression test for `get_device_properties` returning `{"type": "mock"}`.
+    #[test]
+    fn get_device_properties_is_honest() {
+        let runtime = OpenVINORuntime;
+        assert!(runtime.get_device_properties("CPU").is_err());
+    }
+
+    /// Regression test: `from_config` must refuse every real model path, since
+    /// no build of this crate can load one.
+    #[test]
+    fn from_config_always_fails_even_for_an_existing_file() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.xml");
+        fs::write(&model_path, b"<net></net>").expect("write dummy IR file");
+
+        let config = OpenVINOBackendConfig::cpu_optimized(model_path);
+        let err = OpenVINOModel::from_config(config)
+            .expect_err("no OpenVINO runtime is linked into this build");
+        assert!(!err.to_string().is_empty());
+    }
+
+    /// Regression test: the public pipeline factory must fail loudly rather
+    /// than build a classifier whose `__call__` only fails (or, previously,
+    /// echoed inputs as fake logits) on first use.
+    #[test]
+    fn openvino_text_classification_pipeline_fails_loudly() {
+        let temp_dir = tempdir().expect("temp dir");
+        let model_path = temp_dir.path().join("model.xml");
+        fs::write(&model_path, b"<net></net>").expect("write dummy IR file");
+
+        struct StubTokenizer;
+        impl Clone for StubTokenizer {
+            fn clone(&self) -> Self {
+                StubTokenizer
+            }
+        }
+        impl Tokenizer for StubTokenizer {
+            fn encode(&self, _text: &str) -> CoreResult<TokenizedInput> {
+                Ok(TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]))
+            }
+            fn encode_pair(&self, text: &str, _text2: &str) -> CoreResult<TokenizedInput> {
+                self.encode(text)
+            }
+            fn decode(&self, ids: &[u32]) -> CoreResult<String> {
+                Ok(format!("{ids:?}"))
+            }
+            fn vocab_size(&self) -> usize {
+                10
+            }
+            fn get_vocab(&self) -> std::collections::HashMap<String, u32> {
+                std::collections::HashMap::new()
+            }
+            fn token_to_id(&self, _token: &str) -> Option<u32> {
+                None
+            }
+            fn id_to_token(&self, _id: u32) -> Option<String> {
+                None
+            }
+        }
+
+        let result = openvino_text_classification_pipeline(&model_path, StubTokenizer, None);
+        assert!(result.is_err());
+    }
+
+    /// Regression test for `OpenVINOModel::forward` returning `Ok(inputs)`
+    /// unchanged ("echo as inference") and for `benchmark`/`memory_info`/
+    /// `infer` returning fixed mock numbers. Exercised directly against the
+    /// zero-nesting `new_mock()` constructor, since `from_config` can never
+    /// succeed (see above).
+    #[test]
+    fn model_methods_never_fabricate_output_or_metrics() {
+        let model = OpenVINOModel::new_mock();
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "input_ids".to_string(),
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("tensor"),
+        );
+
+        let forward_err = model
+            .forward(inputs.clone())
+            .expect_err("forward must not echo inputs back as inference");
+        assert!(!forward_err.to_string().is_empty());
+
+        assert!(model.benchmark(inputs.clone(), 5, 2).is_err());
+        assert!(model.memory_info().is_err());
+        assert!(model.infer(inputs).is_err());
     }
 }

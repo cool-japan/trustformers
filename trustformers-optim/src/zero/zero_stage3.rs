@@ -214,12 +214,12 @@ impl<T: Optimizer> ZeROStage3<T> {
         // Create parameter access schedule
         self.create_access_schedule(&parameters)?;
 
-        println!("ZeRO Stage 3: Registered {} parameters", parameters.len());
-        println!(
+        tracing::info!("ZeRO Stage 3: Registered {} parameters", parameters.len());
+        tracing::debug!(
             "  Parameter partitions: {}",
             self.parameter_partitions.len()
         );
-        println!("  Access schedule layers: {}", self.access_schedule.len());
+        tracing::debug!("  Access schedule layers: {}", self.access_schedule.len());
 
         Ok(())
     }
@@ -533,7 +533,7 @@ impl<T: Optimizer> ZeROStage3<T> {
             self.release_parameter(&param_name)?;
         }
 
-        println!(
+        tracing::info!(
             "ZeRO Stage 3: Garbage collection completed. Memory usage: {:.1}%",
             self.memory_usage_percent()
         );

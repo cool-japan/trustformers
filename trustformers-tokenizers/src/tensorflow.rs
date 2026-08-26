@@ -765,62 +765,294 @@ impl TensorFlowDataset {
     }
 }
 
-/// Iterator for TensorFlow tf.data.Dataset compatibility
+/// How many full passes over the (transformed) dataset [`TfDataIterator`]
+/// produces. Mirrors `tf.data.Dataset.repeat`: the *last* `.repeat()` call
+/// in a chain governs the whole pipeline (calling it twice replaces the
+/// setting rather than compounding it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TfRepeat {
+    /// Exactly one pass -- the default, un-repeated behavior.
+    Once,
+    /// Exactly `n` passes back to back. `Times(0)` yields nothing.
+    Times(usize),
+    /// Passes forever. Legal (like `std::iter::repeat`), but the caller
+    /// must bound consumption itself (e.g. `.take(n)`); see
+    /// [`TfDataIterator::size_hint`].
+    Infinite,
+}
+
+/// A small, fast, deterministic pseudo-random generator (SplitMix64), used
+/// only to shuffle batch order reproducibly. Not cryptographic.
+///
+/// `scirs2_core::random` (this workspace's usual RNG) is not usable here:
+/// its `random` module is behind scirs2-core's own `random` cargo feature,
+/// which this crate's `scirs2-core` dependency does not enable (only
+/// `parallel` is enabled -- see this crate's Cargo.toml; enabling `random`
+/// there is a Cargo.toml change, tracked as a follow-up, not something this
+/// file can do by itself). A small local generator is an established
+/// pattern in this workspace for exactly this situation -- see
+/// `trustformers-models/src/bert/config.rs`'s in-tree LCG for test-fixture
+/// generation.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A uniformly-distributed value in `0..bound` (for `bound > 0`), via
+    /// Lemire's debiased-modulo method (<https://arxiv.org/abs/1805.10941>;
+    /// the same rejection strategy `rand`'s `Uniform` uses) -- a single
+    /// 64x64->128 multiply on the common path, no division.
+    fn next_below(&mut self, bound: u64) -> u64 {
+        if bound == 0 {
+            return 0;
+        }
+        let mut m = u128::from(self.next_u64()) * u128::from(bound);
+        let mut low = m as u64;
+        if low < bound {
+            let threshold = bound.wrapping_neg() % bound;
+            while low < threshold {
+                m = u128::from(self.next_u64()) * u128::from(bound);
+                low = m as u64;
+            }
+        }
+        (m >> 64) as u64
+    }
+}
+
+/// A best-effort, non-deterministic seed for the *unseeded*
+/// [`TfDataIterator::shuffle`] entry point; callers who need
+/// reproducibility use [`TfDataIterator::shuffle_seeded`] instead.
+/// Not cryptographic: `RandomState`'s per-process random keys are the
+/// standard library's own source of ambient randomness (the same
+/// mechanism that makes `HashMap` iteration order unpredictable), reused
+/// here so an unseeded shuffle looks shuffled without adding a dependency.
+fn entropy_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish()
+}
+
+/// Iterator for TensorFlow tf.data.Dataset compatibility, with real
+/// `.map()`, `.repeat()` and `.shuffle()`.
+///
+/// # Design
+///
+/// `map`/`repeat`/`shuffle` record a small pipeline description
+/// (`transforms`, `repeat_spec`, `shuffle_spec`) rather than eagerly
+/// running, so they compose in any call order --
+/// `.shuffle(n).repeat(k).map(f)` and `.map(f).shuffle(n).repeat(k)` behave
+/// the same. Every `.map()` call appends one function to `transforms`,
+/// applied to each text in a batch in the order added; `.repeat()` and
+/// `.shuffle()`/`.shuffle_seeded()` each *replace* the previous call of the
+/// same kind, mirroring `tf.data`, where the last call of a given kind
+/// governs the whole upstream pipeline.
+///
+/// Each pass re-derives its batches directly from the original `texts`
+/// (nothing is ever materialized into a buffered `Vec` beyond the shuffle
+/// reservoir, which is capped at `buffer_size`), so `.repeat(None)` -- a
+/// genuinely infinite iterator, like `std::iter::repeat` -- cannot hang a
+/// caller that bounds consumption (e.g. with `.take(n)`); see
+/// [`TfDataIterator::size_hint`]. Shuffling does not mix batches across a
+/// `repeat()`'s pass boundaries: each pass's reservoir is drained before
+/// the next pass starts filling, and (when a fixed seed was given) is
+/// reseeded deterministically per pass so a repeated, seeded shuffle is
+/// reproducible across runs without being identical on every single pass.
 pub struct TfDataIterator<'a> {
     texts: &'a [String],
     batch_size: usize,
-    current_index: usize,
     // reason: stored from the constructor; reserved for planned per-batch
     // TensorFlow configuration that the iterator does not yet consume.
     #[allow(dead_code)]
     config: TensorFlowConfig,
+    transforms: Vec<Box<dyn Fn(&str) -> String + 'a>>,
+    shuffle_spec: Option<(usize, Option<u64>)>,
+    repeat_spec: TfRepeat,
+
+    // Runtime state.
+    pass: usize,
+    cursor: usize,
+    shuffle_rng: Option<SplitMix64>,
+    shuffle_buf: Vec<Vec<String>>,
+    finished: bool,
 }
 
 impl<'a> TfDataIterator<'a> {
     fn new(texts: &'a [String], batch_size: usize, config: TensorFlowConfig) -> Self {
         Self {
             texts,
-            batch_size,
-            current_index: 0,
+            // A batch size of 0 would make every batch empty forever;
+            // clamp to 1 so this iterator always makes real progress
+            // instead of hanging a caller that iterates it fully.
+            batch_size: batch_size.max(1),
             config,
+            transforms: Vec::new(),
+            shuffle_spec: None,
+            repeat_spec: TfRepeat::Once,
+            pass: 0,
+            cursor: 0,
+            shuffle_rng: None,
+            shuffle_buf: Vec::new(),
+            finished: false,
         }
     }
 
-    /// Apply mapping function (similar to tf.data.Dataset.map)
-    pub fn map<F>(self, _func: F) -> Self
+    /// Apply `func` to every text in every yielded batch (similar to
+    /// `tf.data.Dataset.map`). Composable: a second `.map()` call applies
+    /// its function *after* the first, to each already-mapped text.
+    pub fn map<F>(mut self, func: F) -> Self
     where
-        F: Fn(&str) -> String,
+        F: Fn(&str) -> String + 'a,
     {
-        // In a real implementation, would apply the function
+        self.transforms.push(Box::new(func));
         self
     }
 
-    /// Repeat dataset
-    pub fn repeat(self, _count: Option<usize>) -> Self {
-        // In a real implementation, would repeat the dataset
+    /// Replay the (transformed) dataset `count` times back to back;
+    /// `None` repeats forever. See the type-level doc for the iterator
+    /// contract this guarantees (no materialization, so an infinite
+    /// repeat cannot hang a bounded consumer).
+    pub fn repeat(mut self, count: Option<usize>) -> Self {
+        self.repeat_spec = match count {
+            None => TfRepeat::Infinite,
+            Some(n) => TfRepeat::Times(n),
+        };
         self
     }
 
-    /// Shuffle dataset
-    pub fn shuffle(self, _buffer_size: usize) -> Self {
-        // In a real implementation, would shuffle the dataset
+    /// Maintain a real reservoir of up to `buffer_size` yielded batches,
+    /// draining a uniformly-random one on every pull and backfilling from
+    /// upstream, seeded from process entropy (unpredictable, not
+    /// reproducible). Use [`Self::shuffle_seeded`] for deterministic
+    /// shuffling (e.g. in tests).
+    pub fn shuffle(self, buffer_size: usize) -> Self {
+        self.shuffle_seeded(buffer_size, None)
+    }
+
+    /// Like [`Self::shuffle`], but with an explicit seed: the same seed
+    /// always produces the same permutation of the same multiset of
+    /// batches.
+    pub fn shuffle_seeded(mut self, buffer_size: usize, seed: Option<u64>) -> Self {
+        self.shuffle_spec = Some((buffer_size.max(1), seed));
+        self.shuffle_rng = None; // re-derive lazily from the (possibly new) seed
+        self.shuffle_buf.clear();
         self
+    }
+
+    fn current_pass_is_valid(&self) -> bool {
+        match self.repeat_spec {
+            TfRepeat::Once => self.pass == 0,
+            TfRepeat::Times(n) => self.pass < n,
+            TfRepeat::Infinite => true,
+        }
+    }
+
+    fn next_raw_batch(&mut self) -> Option<Vec<String>> {
+        if self.cursor >= self.texts.len() {
+            return None;
+        }
+        let end = (self.cursor + self.batch_size).min(self.texts.len());
+        let batch = self.texts[self.cursor..end].to_vec();
+        self.cursor = end;
+        Some(batch)
+    }
+
+    fn apply_transforms(&self, batch: Vec<String>) -> Vec<String> {
+        if self.transforms.is_empty() {
+            return batch;
+        }
+        batch
+            .into_iter()
+            .map(|text| self.transforms.iter().fold(text, |acc, f| f(acc.as_str())))
+            .collect()
+    }
+
+    fn next_shuffle_index(&mut self, len: usize) -> usize {
+        if self.shuffle_rng.is_none() {
+            let seed = self.shuffle_spec.and_then(|(_, seed)| seed).unwrap_or_else(entropy_seed);
+            self.shuffle_rng = Some(SplitMix64::new(seed));
+        }
+        let rng = self.shuffle_rng.as_mut().expect("just initialized above");
+        rng.next_below(len as u64) as usize
+    }
+
+    fn pop_random_from_shuffle_buf(&mut self) -> Vec<String> {
+        let len = self.shuffle_buf.len();
+        let idx = self.next_shuffle_index(len);
+        self.shuffle_buf.swap_remove(idx)
+    }
+
+    fn start_next_pass(&mut self) {
+        self.pass += 1;
+        self.cursor = 0;
+        if let Some((_, Some(seed))) = self.shuffle_spec {
+            self.shuffle_rng = Some(SplitMix64::new(seed.wrapping_add(self.pass as u64)));
+        }
     }
 }
 
 impl<'a> Iterator for TfDataIterator<'a> {
-    type Item = &'a [String];
+    type Item = Vec<String>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index >= self.texts.len() {
-            return None;
+        loop {
+            if self.finished {
+                return None;
+            }
+            if !self.current_pass_is_valid() {
+                self.finished = true;
+                return None;
+            }
+
+            if let Some(batch) = self.next_raw_batch() {
+                let mapped = self.apply_transforms(batch);
+                match self.shuffle_spec {
+                    None => return Some(mapped),
+                    Some((buffer_size, _)) => {
+                        self.shuffle_buf.push(mapped);
+                        if self.shuffle_buf.len() >= buffer_size {
+                            return Some(self.pop_random_from_shuffle_buf());
+                        }
+                        // Reservoir not yet full: keep pulling before
+                        // yielding anything.
+                        continue;
+                    },
+                }
+            } else if self.shuffle_spec.is_some() && !self.shuffle_buf.is_empty() {
+                // This pass's raw batches are exhausted; drain the
+                // reservoir (also in random order) before moving on.
+                return Some(self.pop_random_from_shuffle_buf());
+            } else {
+                self.start_next_pass();
+                // Loop back around: the top-of-loop `current_pass_is_valid`
+                // check decides whether the new pass actually runs.
+                continue;
+            }
         }
+    }
 
-        let end_index = (self.current_index + self.batch_size).min(self.texts.len());
-        let batch = &self.texts[self.current_index..end_index];
-        self.current_index = end_index;
-
-        Some(batch)
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.repeat_spec {
+            // Honest per the `Iterator` contract: unbounded, so a caller
+            // relying on `size_hint` (e.g. before eagerly collecting) is
+            // told not to.
+            TfRepeat::Infinite => (usize::MAX, None),
+            // The exact remaining count depends on runtime cursor/reservoir
+            // state that is not cheap to compute in advance; no lower bound
+            // beyond the trivial one is claimed.
+            _ => (0, None),
+        }
     }
 }
 
@@ -881,9 +1113,19 @@ impl TensorFlowUtils {
         inputs
     }
 
-    /// Export batch to TensorFlow SavedModel format (conceptual)
-    pub fn export_to_saved_model_format(batch: &TensorFlowBatch) -> Result<String> {
-        // In a real implementation, this would create actual TensorFlow SavedModel files
+    /// Serialize a batch's serving input signature (names, shapes, dtypes --
+    /// see [`Self::create_serving_signature`]) to pretty-printed JSON.
+    ///
+    /// This is *not* a TensorFlow SavedModel export: a real SavedModel is a
+    /// directory of protobuf files (`saved_model.pb`, a `variables/`
+    /// checkpoint, optional `assets/`) written by TensorFlow's own C++
+    /// SavedModel writer, which this pure-Rust, FFI-free crate does not
+    /// link (and has no from-scratch protobuf encoder for). What this
+    /// function actually produces -- the input signature as JSON -- is
+    /// useful on its own for inspecting or hand-authoring a serving
+    /// signature, but callers expecting real SavedModel files must export
+    /// them from an actual TensorFlow installation.
+    pub fn export_serving_signature_as_json(batch: &TensorFlowBatch) -> Result<String> {
         let signature = Self::create_serving_signature(batch);
         serde_json::to_string_pretty(&signature)
             .map_err(|e| anyhow!("Failed to serialize signature: {}", e))
@@ -999,6 +1241,25 @@ mod tests {
         assert!(batch.attention_mask.is_some());
     }
 
+    /// Regression: this used to be named `export_to_saved_model_format` while
+    /// only ever producing the serving-signature JSON, never real SavedModel
+    /// protobuf files. Locks in that the renamed function still round-trips
+    /// through `create_serving_signature`'s own keys.
+    #[test]
+    fn export_serving_signature_as_json_contains_the_real_signature_keys() {
+        let tokenizer = create_test_char_tokenizer();
+        let tf_tokenizer = TensorFlowTokenizer::from_tokenizer(tokenizer);
+        let batch = tf_tokenizer.encode_to_tensors("hello").expect("encode must succeed");
+
+        let json = TensorFlowUtils::export_serving_signature_as_json(&batch)
+            .expect("signature serialization must succeed");
+
+        let parsed: HashMap<String, HashMap<String, String>> =
+            serde_json::from_str(&json).expect("output must be valid JSON");
+        assert!(parsed.contains_key("input_ids"));
+        assert_eq!(parsed, TensorFlowUtils::create_serving_signature(&batch));
+    }
+
     #[test]
     fn test_batch_encoding() {
         let tokenizer = create_test_char_tokenizer();
@@ -1040,6 +1301,177 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 2);
         assert_eq!(batches[1].len(), 1);
+    }
+
+    // ---- TfDataIterator: map / repeat / shuffle actually do something ----
+    //
+    // Regression coverage for the previous implementation, where
+    // `.map(f)`/`.repeat(n)`/`.shuffle(n)` all discarded their arguments
+    // and returned `self` unchanged, so a chained `.shuffle().repeat()
+    // .map(f)` silently yielded the original, untransformed batches.
+
+    fn three_texts() -> Vec<String> {
+        vec!["hello".to_string(), "world".to_string(), "test".to_string()]
+    }
+
+    #[test]
+    fn map_transforms_every_text_in_every_batch() {
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts.clone(), TensorFlowConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.tf_data_iter(2).map(|s| s.to_uppercase()).collect();
+
+        let flattened: Vec<String> = batches.into_iter().flatten().collect();
+        let expected: Vec<String> = texts.iter().map(|s| s.to_uppercase()).collect();
+        assert_eq!(
+            flattened, expected,
+            "map must apply the function, not discard it"
+        );
+    }
+
+    #[test]
+    fn chained_map_calls_compose_in_order() {
+        let texts = vec!["a".to_string()];
+        let dataset = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset
+            .tf_data_iter(1)
+            .map(|s| format!("{s}1"))
+            .map(|s| format!("{s}2"))
+            .collect();
+
+        assert_eq!(batches, vec![vec!["a12".to_string()]]);
+    }
+
+    #[test]
+    fn repeat_two_doubles_the_batch_and_element_count() {
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts.clone(), TensorFlowConfig::default());
+
+        let once: Vec<Vec<String>> = dataset.tf_data_iter(2).collect();
+        let dataset2 = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+        let repeated: Vec<Vec<String>> = dataset2.tf_data_iter(2).repeat(Some(2)).collect();
+
+        assert_eq!(
+            repeated.len(),
+            once.len() * 2,
+            "repeat(2) must double the batch count"
+        );
+        let flattened: Vec<&String> = repeated.iter().flatten().collect();
+        assert_eq!(
+            flattened.len(),
+            6,
+            "repeat(2) must double the element count (3 -> 6)"
+        );
+    }
+
+    #[test]
+    fn repeat_zero_yields_nothing() {
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.tf_data_iter(2).repeat(Some(0)).collect();
+        assert!(
+            batches.is_empty(),
+            "repeat(Some(0)) must yield no batches at all"
+        );
+    }
+
+    #[test]
+    fn repeat_none_is_infinite_but_take_terminates() {
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+
+        // Regression guard for the iterator contract: this must not hang.
+        // `usize::MAX` low bound signals "unbounded" honestly via size_hint.
+        let iter = dataset.tf_data_iter(2).repeat(None);
+        assert_eq!(iter.size_hint(), (usize::MAX, None));
+        let batches: Vec<Vec<String>> = iter.take(100).collect();
+        assert_eq!(batches.len(), 100);
+    }
+
+    #[test]
+    fn shuffle_seeded_is_deterministic_for_a_fixed_seed() {
+        let texts: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+
+        let dataset_a = TensorFlowDataset::new(texts.clone(), TensorFlowConfig::default());
+        let a: Vec<Vec<String>> = dataset_a.tf_data_iter(1).shuffle_seeded(5, Some(42)).collect();
+
+        let dataset_b = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+        let b: Vec<Vec<String>> = dataset_b.tf_data_iter(1).shuffle_seeded(5, Some(42)).collect();
+
+        assert_eq!(a, b, "the same seed must produce the same permutation");
+    }
+
+    #[test]
+    fn shuffle_seeded_yields_the_same_multiset_reordered() {
+        let texts: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let dataset = TensorFlowDataset::new(texts.clone(), TensorFlowConfig::default());
+
+        let mut shuffled: Vec<String> =
+            dataset.tf_data_iter(1).shuffle_seeded(5, Some(7)).flatten().collect();
+        let mut original = texts;
+
+        assert_ne!(
+            shuffled, original,
+            "a real shuffle over 20 items must reorder them"
+        );
+        shuffled.sort();
+        original.sort();
+        assert_eq!(
+            shuffled, original,
+            "shuffling must not lose or invent any element"
+        );
+    }
+
+    #[test]
+    fn chained_shuffle_repeat_map_all_take_effect_together() {
+        // The exact pattern the previous no-op implementation silently
+        // defeated: `.shuffle().repeat().map(f)`.
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts.clone(), TensorFlowConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset
+            .tf_data_iter(1)
+            .shuffle_seeded(2, Some(1))
+            .repeat(Some(2))
+            .map(|s| s.to_uppercase())
+            .collect();
+
+        let flattened: Vec<String> = batches.into_iter().flatten().collect();
+        assert_eq!(
+            flattened.len(),
+            6,
+            "repeat(2) over 3 texts must yield 6 elements"
+        );
+        assert!(
+            flattened
+                .iter()
+                .all(|s| s.chars().all(|c| c.is_uppercase() || !c.is_alphabetic())),
+            "map must have run: every element must be uppercase: {flattened:?}"
+        );
+        let mut expected_multiset: Vec<String> = texts
+            .iter()
+            .map(|s| s.to_uppercase())
+            .chain(texts.iter().map(|s| s.to_uppercase()))
+            .collect();
+        let mut got = flattened;
+        expected_multiset.sort();
+        got.sort();
+        assert_eq!(
+            got, expected_multiset,
+            "repeat must not lose or duplicate beyond 2x"
+        );
+    }
+
+    #[test]
+    fn zero_batch_size_is_clamped_and_does_not_hang() {
+        let texts = three_texts();
+        let dataset = TensorFlowDataset::new(texts, TensorFlowConfig::default());
+
+        let batches: Vec<Vec<String>> = dataset.tf_data_iter(0).collect();
+        // Clamped to 1: three texts, one per batch.
+        assert_eq!(batches.len(), 3);
     }
 
     #[test]

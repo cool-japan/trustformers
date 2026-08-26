@@ -2,9 +2,9 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::pipeline::{Pipeline, PipelineOptions, PipelineOutput};
+use crate::pipeline::{Pipeline, PipelineOutput};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::functions::{GatingNetwork, Router};
 use super::types::{BootstrapStats, ModelSelectionInfo, ModelSelectionStrategy, ModelWeight};

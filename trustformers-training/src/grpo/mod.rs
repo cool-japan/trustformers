@@ -168,11 +168,7 @@ impl ResponseGroup {
             return 0.0;
         }
         let mean = self.mean_reward();
-        let variance: f64 = self
-            .responses
-            .iter()
-            .map(|r| (r.reward - mean).powi(2))
-            .sum::<f64>()
+        let variance: f64 = self.responses.iter().map(|r| (r.reward - mean).powi(2)).sum::<f64>()
             / self.responses.len() as f64;
         variance.sqrt()
     }
@@ -208,15 +204,9 @@ impl GrpoLoss {
     /// clipped_ratio  = clip(ratio, 1−ε, 1+ε)
     /// loss           = −min(ratio × A, clipped_ratio × A)
     /// ```
-    pub fn policy_gradient_loss(
-        &self,
-        log_prob: f64,
-        old_log_prob: f64,
-        advantage: f64,
-    ) -> f64 {
+    pub fn policy_gradient_loss(&self, log_prob: f64, old_log_prob: f64, advantage: f64) -> f64 {
         let ratio = (log_prob - old_log_prob).exp();
-        let clipped_ratio =
-            ratio.max(1.0 - self.config.epsilon).min(1.0 + self.config.epsilon);
+        let clipped_ratio = ratio.max(1.0 - self.config.epsilon).min(1.0 + self.config.epsilon);
         let unclipped = ratio * advantage;
         let clipped = clipped_ratio * advantage;
         -unclipped.min(clipped)
@@ -235,10 +225,7 @@ impl GrpoLoss {
     /// - `token_loss = pg_loss + kl`
     ///
     /// Response loss = mean over tokens; Group loss = mean over responses.
-    pub fn compute_loss(
-        &mut self,
-        group: &ResponseGroup,
-    ) -> Result<GrpoLossResult, GrpoError> {
+    pub fn compute_loss(&mut self, group: &ResponseGroup) -> Result<GrpoLossResult, GrpoError> {
         if group.responses.is_empty() {
             return Err(GrpoError::EmptyGroup);
         }
@@ -322,8 +309,7 @@ impl GrpoLoss {
         let mean_advantage = if group.responses.is_empty() {
             0.0
         } else {
-            group.responses.iter().map(|r| r.advantage).sum::<f64>()
-                / group.responses.len() as f64
+            group.responses.iter().map(|r| r.advantage).sum::<f64>() / group.responses.len() as f64
         };
 
         self.step += 1;
@@ -429,7 +415,11 @@ impl GrpoSample {
         if completions.len() != rewards.len() {
             return Err(GrpoError::LengthMismatch(0));
         }
-        Ok(Self { prompt, completions, rewards })
+        Ok(Self {
+            prompt,
+            completions,
+            rewards,
+        })
     }
 
     /// Number of completions in this sample.
@@ -627,7 +617,11 @@ pub struct GrpoTrainer {
 impl GrpoTrainer {
     /// Create a new trainer from the given configuration.
     pub fn new(config: GrpoLossConfig) -> Self {
-        Self { config, iteration: 0, history: Vec::new() }
+        Self {
+            config,
+            iteration: 0,
+            history: Vec::new(),
+        }
     }
 
     /// Process one batch of GRPO samples and return aggregated statistics.
@@ -761,9 +755,12 @@ mod tests {
         let mut group = ResponseGroup::new("prompt".into(), vec![r1, r2, r3]);
         group.compute_advantages();
         // mean = 3, std = sqrt((4+0+4)/3) = sqrt(8/3)
-        let mean_adv: f64 =
-            group.responses.iter().map(|r| r.advantage).sum::<f64>() / 3.0;
-        assert!(mean_adv.abs() < 1e-9, "mean advantage should be ≈ 0, got {}", mean_adv);
+        let mean_adv: f64 = group.responses.iter().map(|r| r.advantage).sum::<f64>() / 3.0;
+        assert!(
+            mean_adv.abs() < 1e-9,
+            "mean advantage should be ≈ 0, got {}",
+            mean_adv
+        );
     }
 
     // ── Test 4: compute_advantages std ────────────────────────────────────
@@ -781,9 +778,8 @@ mod tests {
     // ── Test 5: equal rewards → zero advantage ────────────────────────────
     #[test]
     fn test_equal_rewards_zero_advantage() {
-        let responses: Vec<GroupResponse> = (0..4)
-            .map(|i| make_response(i, vec![-0.5], vec![-0.5], 2.0))
-            .collect();
+        let responses: Vec<GroupResponse> =
+            (0..4).map(|i| make_response(i, vec![-0.5], vec![-0.5], 2.0)).collect();
         let mut group = ResponseGroup::new("prompt".into(), responses);
         group.compute_advantages();
         for resp in &group.responses {
@@ -806,7 +802,10 @@ mod tests {
     // ── Test 7: policy_gradient_loss clipping (ratio > 1+ε) ───────────────
     #[test]
     fn test_pg_loss_clipped_high() {
-        let config = GrpoConfig { epsilon: 0.2, ..Default::default() };
+        let config = GrpoConfig {
+            epsilon: 0.2,
+            ..Default::default()
+        };
         let loss_fn = GrpoLoss::new(config);
         // log_prob = 0, old_log_prob = -2 → ratio = e^2 ≈ 7.39 >> 1.2
         // advantage > 0 so clipping should kick in
@@ -817,13 +816,20 @@ mod tests {
         assert!(ratio > 1.2, "ratio should exceed 1+ε");
         let loss = loss_fn.policy_gradient_loss(log_prob, old_log_prob, advantage);
         // clipped_ratio = 1.2, so loss = -(1.2 * 1.0) = -1.2
-        assert!((loss - (-1.2)).abs() < 1e-6, "clipped loss should be -1.2, got {}", loss);
+        assert!(
+            (loss - (-1.2)).abs() < 1e-6,
+            "clipped loss should be -1.2, got {}",
+            loss
+        );
     }
 
     // ── Test 8: policy_gradient_loss unclipped ────────────────────────────
     #[test]
     fn test_pg_loss_unclipped() {
-        let config = GrpoConfig { epsilon: 0.2, ..Default::default() };
+        let config = GrpoConfig {
+            epsilon: 0.2,
+            ..Default::default()
+        };
         let loss_fn = GrpoLoss::new(config);
         // ratio ≈ 1 (no change), advantage = 0.5
         let log_prob = -1.0_f64;
@@ -837,7 +843,10 @@ mod tests {
     // ── Test 9: kl_penalty beta scaling ───────────────────────────────────
     #[test]
     fn test_kl_penalty_beta_scaling() {
-        let config = GrpoConfig { beta: 0.05, ..Default::default() };
+        let config = GrpoConfig {
+            beta: 0.05,
+            ..Default::default()
+        };
         let loss_fn = GrpoLoss::new(config);
         let kl = loss_fn.kl_penalty(-1.0, -1.5);
         // 0.05 * (-1.0 - (-1.5)) = 0.05 * 0.5 = 0.025
@@ -862,7 +871,11 @@ mod tests {
     // ── Test 11: compute_loss clip_fraction ───────────────────────────────
     #[test]
     fn test_compute_loss_clip_fraction() {
-        let config = GrpoConfig { epsilon: 0.2, use_kl_penalty: false, ..Default::default() };
+        let config = GrpoConfig {
+            epsilon: 0.2,
+            use_kl_penalty: false,
+            ..Default::default()
+        };
         let mut loss_fn = GrpoLoss::new(config);
         // log_prob = 0, ref_log_prob = -3 → ratio = e^3 ≈ 20 >> 1.2 → all clipped
         let r1 = make_response(0, vec![0.0, 0.0], vec![-3.0, -3.0], 2.0);
@@ -888,8 +901,14 @@ mod tests {
             response_lengths: vec![10, 12],
         };
         let s = format!("{}", result);
-        assert!(s.contains("total_loss"), "display should contain 'total_loss'");
-        assert!(s.contains("1.2300"), "display should contain formatted loss");
+        assert!(
+            s.contains("total_loss"),
+            "display should contain 'total_loss'"
+        );
+        assert!(
+            s.contains("1.2300"),
+            "display should contain formatted loss"
+        );
     }
 
     // ── Test 13: empty group error ────────────────────────────────────────
@@ -918,8 +937,14 @@ mod tests {
     // ── Test 15: use_kl_penalty=false ────────────────────────────────────
     #[test]
     fn test_no_kl_penalty() {
-        let config_kl = GrpoConfig { use_kl_penalty: true, ..Default::default() };
-        let config_no_kl = GrpoConfig { use_kl_penalty: false, ..Default::default() };
+        let config_kl = GrpoConfig {
+            use_kl_penalty: true,
+            ..Default::default()
+        };
+        let config_no_kl = GrpoConfig {
+            use_kl_penalty: false,
+            ..Default::default()
+        };
         let mut loss_kl = GrpoLoss::new(config_kl);
         let mut loss_no_kl = GrpoLoss::new(config_no_kl);
 
@@ -935,7 +960,10 @@ mod tests {
         let res_no_kl = loss_no_kl.compute_loss(&build_group()).expect("should not fail");
 
         // With KL penalty, kl term is non-zero; without, it is exactly 0
-        assert!((res_no_kl.kl_penalty).abs() < 1e-10, "kl_penalty should be 0.0");
+        assert!(
+            (res_no_kl.kl_penalty).abs() < 1e-10,
+            "kl_penalty should be 0.0"
+        );
         // The total losses should differ when ref_log_probs differ from log_probs
         // (they do: -1.0 vs -2.0)
         assert!(
@@ -951,7 +979,10 @@ mod tests {
         let advs = compute_group_advantages(&rewards, 1e-8);
         assert_eq!(advs.len(), 3);
         let mean: f32 = advs.iter().sum::<f32>() / 3.0;
-        assert!(mean.abs() < 1e-5, "mean advantage should be ≈ 0, got {mean}");
+        assert!(
+            mean.abs() < 1e-5,
+            "mean advantage should be ≈ 0, got {mean}"
+        );
     }
 
     // ── Test 17: compute_group_advantages equal rewards → zeros ─────────
@@ -970,8 +1001,16 @@ mod tests {
         // rewards = [0, 2] → mean=1, std=1 → advantages = [-1, 1]
         let rewards = [0.0f32, 2.0];
         let advs = compute_group_advantages(&rewards, 1e-8);
-        assert!((advs[0] - (-1.0f32)).abs() < 1e-5, "expected -1, got {}", advs[0]);
-        assert!((advs[1] - 1.0f32).abs() < 1e-5, "expected 1, got {}", advs[1]);
+        assert!(
+            (advs[0] - (-1.0f32)).abs() < 1e-5,
+            "expected -1, got {}",
+            advs[0]
+        );
+        assert!(
+            (advs[1] - 1.0f32).abs() < 1e-5,
+            "expected 1, got {}",
+            advs[1]
+        );
     }
 
     // ── Test 19: compute_grpo_loss unclipped positive advantage ──────────
@@ -981,11 +1020,19 @@ mod tests {
         let log_probs = [0.0f32];
         let ref_log_probs = [0.0f32];
         let advantages = [1.0f32];
-        let config = GrpoLossConfig { clip_range: 0.2, kl_coef: 0.0, ..Default::default() };
+        let config = GrpoLossConfig {
+            clip_range: 0.2,
+            kl_coef: 0.0,
+            ..Default::default()
+        };
         let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config)
             .expect("should not fail");
         // loss = -min(1*1, clip(1,0.8,1.2)*1) = -min(1,1) = -1
-        assert!((result.policy_loss - (-1.0f32)).abs() < 1e-5, "expected -1.0, got {}", result.policy_loss);
+        assert!(
+            (result.policy_loss - (-1.0f32)).abs() < 1e-5,
+            "expected -1.0, got {}",
+            result.policy_loss
+        );
     }
 
     // ── Test 20: compute_grpo_loss clipped ratio ──────────────────────────
@@ -996,10 +1043,18 @@ mod tests {
         let log_probs = [0.0f32];
         let ref_log_probs = [-5.0f32];
         let advantages = [1.0f32];
-        let config = GrpoLossConfig { clip_range: 0.2, kl_coef: 0.0, ..Default::default() };
+        let config = GrpoLossConfig {
+            clip_range: 0.2,
+            kl_coef: 0.0,
+            ..Default::default()
+        };
         let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config)
             .expect("should not fail");
-        assert!((result.policy_loss - (-1.2f32)).abs() < 1e-5, "clipped policy_loss expected -1.2, got {}", result.policy_loss);
+        assert!(
+            (result.policy_loss - (-1.2f32)).abs() < 1e-5,
+            "clipped policy_loss expected -1.2, got {}",
+            result.policy_loss
+        );
     }
 
     // ── Test 21: compute_grpo_loss KL component ───────────────────────────
@@ -1010,10 +1065,18 @@ mod tests {
         let log_probs = [-1.0f32];
         let ref_log_probs = [-2.0f32];
         let advantages = [0.0f32];
-        let config = GrpoLossConfig { kl_coef: 0.05, clip_range: 0.2, ..Default::default() };
+        let config = GrpoLossConfig {
+            kl_coef: 0.05,
+            clip_range: 0.2,
+            ..Default::default()
+        };
         let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config)
             .expect("should not fail");
-        assert!((result.kl_loss - 0.05f32).abs() < 1e-5, "kl_loss expected 0.05, got {}", result.kl_loss);
+        assert!(
+            (result.kl_loss - 0.05f32).abs() < 1e-5,
+            "kl_loss expected 0.05, got {}",
+            result.kl_loss
+        );
     }
 
     // ── Test 22: compute_grpo_loss total_loss = policy + kl ─────────────
@@ -1026,8 +1089,10 @@ mod tests {
         let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config)
             .expect("should not fail");
         let expected = result.policy_loss + result.kl_loss;
-        assert!((result.total_loss - expected).abs() < 1e-5,
-            "total_loss should equal policy_loss + kl_loss");
+        assert!(
+            (result.total_loss - expected).abs() < 1e-5,
+            "total_loss should equal policy_loss + kl_loss"
+        );
     }
 
     // ── Test 23: GrpoSample construction ─────────────────────────────────
@@ -1037,7 +1102,8 @@ mod tests {
             vec![1, 2, 3],
             vec![vec![4, 5], vec![6, 7]],
             vec![1.0f32, 2.0],
-        ).expect("should construct");
+        )
+        .expect("should construct");
         assert_eq!(sample.group_size(), 2);
         assert_eq!(sample.prompt.len(), 3);
     }
@@ -1048,8 +1114,9 @@ mod tests {
         let err = GrpoSample::new(
             vec![1],
             vec![vec![2, 3], vec![4, 5]],
-            vec![1.0f32],  // only 1 reward for 2 completions
-        ).unwrap_err();
+            vec![1.0f32], // only 1 reward for 2 completions
+        )
+        .unwrap_err();
         assert!(matches!(err, GrpoError::LengthMismatch(_)));
     }
 
@@ -1059,14 +1126,13 @@ mod tests {
         let config = GrpoLossConfig::default();
         let mut trainer = GrpoTrainer::new(config);
 
-        let samples = vec![
-            GrpoSample::new(vec![1], vec![vec![2], vec![3]], vec![1.0f32, 3.0])
-                .expect("ok"),
-        ];
+        let samples =
+            vec![GrpoSample::new(vec![1], vec![vec![2], vec![3]], vec![1.0f32, 3.0]).expect("ok")];
         let log_probs = vec![vec![-1.0f32, -1.0]];
         let ref_log_probs = vec![vec![-1.0f32, -1.5]];
 
-        let stats = trainer.train_step(&samples, &log_probs, &ref_log_probs)
+        let stats = trainer
+            .train_step(&samples, &log_probs, &ref_log_probs)
             .expect("should not fail");
 
         assert_eq!(stats.iteration, 0);
@@ -1105,15 +1171,18 @@ mod tests {
         // positive advantage → loss should decrease as log_prob increases toward ref
         // ratio > 1 and advantage > 0 → would be clipped → loss = -(1+ε)*adv
         let lp_high = [0.5f32];
-        let lp_low  = [-0.5f32];
-        let ref_lp  = [0.0f32];
-        let advs    = [1.0f32];
-        let config = GrpoLossConfig { clip_range: 0.2, kl_coef: 0.0, ..Default::default() };
+        let lp_low = [-0.5f32];
+        let ref_lp = [0.0f32];
+        let advs = [1.0f32];
+        let config = GrpoLossConfig {
+            clip_range: 0.2,
+            kl_coef: 0.0,
+            ..Default::default()
+        };
 
-        let loss_high = compute_grpo_loss(&lp_high, &ref_lp, &advs, &config)
-            .expect("ok").total_loss;
-        let loss_low = compute_grpo_loss(&lp_low, &ref_lp, &advs, &config)
-            .expect("ok").total_loss;
+        let loss_high =
+            compute_grpo_loss(&lp_high, &ref_lp, &advs, &config).expect("ok").total_loss;
+        let loss_low = compute_grpo_loss(&lp_low, &ref_lp, &advs, &config).expect("ok").total_loss;
 
         // lp_high is further above ref → more clipped → same clipped loss; but
         // lp_low has ratio < 1, so unclipped. The high-ratio case is clipped more:
@@ -1134,9 +1203,15 @@ mod tests {
         let mean = advs.iter().sum::<f32>() / n;
         let var = advs.iter().map(|a| (a - mean) * (a - mean)).sum::<f32>() / n;
         let std = var.sqrt();
-        assert!(mean.abs() < 1e-4, "mean advantage should be ≈ 0, got {mean}");
+        assert!(
+            mean.abs() < 1e-4,
+            "mean advantage should be ≈ 0, got {mean}"
+        );
         // std is close to 1 (the normalization denominator is std + eps, so not exactly 1)
-        assert!(std > 0.9 && std <= 1.0 + 1e-3, "std should be ≈ 1, got {std}");
+        assert!(
+            std > 0.9 && std <= 1.0 + 1e-3,
+            "std should be ≈ 1, got {std}"
+        );
     }
 
     // Test: GRPO loss with all same rewards — std=0 edge case → advantages all zero
@@ -1150,25 +1225,39 @@ mod tests {
         // Loss should still work (just all zero advantages)
         let log_probs = vec![-1.0f32; 6];
         let ref_log_probs = vec![-1.0f32; 6];
-        let config = GrpoLossConfig { kl_coef: 0.0, ..Default::default() };
+        let config = GrpoLossConfig {
+            kl_coef: 0.0,
+            ..Default::default()
+        };
         let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advs, &config).expect("ok");
-        assert!(result.policy_loss.is_finite(), "loss should be finite even with zero advantages");
+        assert!(
+            result.policy_loss.is_finite(),
+            "loss should be finite even with zero advantages"
+        );
     }
 
     // Test: clip fraction — ratio outside [1-ε, 1+ε]
     #[test]
     fn test_clip_fraction_ratio_outside_bounds() {
         // log_prob much higher than ref → ratio >> 1+ε → should be clipped
-        let log_probs = vec![5.0f32; 4];    // ratio = e^10 >> 1.2
+        let log_probs = vec![5.0f32; 4]; // ratio = e^10 >> 1.2
         let ref_log_probs = vec![-5.0f32; 4];
         let advantages = vec![1.0f32; 4];
-        let config = GrpoLossConfig { clip_range: 0.2, kl_coef: 0.0, ..Default::default() };
-        let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
+        let config = GrpoLossConfig {
+            clip_range: 0.2,
+            kl_coef: 0.0,
+            ..Default::default()
+        };
+        let result =
+            compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
         // All tokens have ratio >> 1.2, all should be clipped
         // The clipped loss should equal -(1+eps)*adv for all tokens
         let expected_pg = -(1.0 + 0.2) * 1.0_f32; // -(1+ε)*A
-        assert!((result.policy_loss - expected_pg).abs() < 1e-4,
-            "fully clipped policy loss should be -(1+ε)*A={expected_pg}, got {}", result.policy_loss);
+        assert!(
+            (result.policy_loss - expected_pg).abs() < 1e-4,
+            "fully clipped policy loss should be -(1+ε)*A={expected_pg}, got {}",
+            result.policy_loss
+        );
     }
 
     // Test: KL divergence component is 0 when log_probs = ref_log_probs
@@ -1177,9 +1266,18 @@ mod tests {
         let log_probs = vec![-1.0f32, -2.0, -0.5];
         let ref_log_probs = log_probs.clone();
         let advantages = vec![1.0f32, -0.5, 0.3];
-        let config = GrpoLossConfig { kl_coef: 1.0, clip_range: 0.2, ..Default::default() };
-        let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
-        assert!(result.kl_loss.abs() < 1e-6, "KL should be 0 when policy = ref, got {}", result.kl_loss);
+        let config = GrpoLossConfig {
+            kl_coef: 1.0,
+            clip_range: 0.2,
+            ..Default::default()
+        };
+        let result =
+            compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
+        assert!(
+            result.kl_loss.abs() < 1e-6,
+            "KL should be 0 when policy = ref, got {}",
+            result.kl_loss
+        );
     }
 
     // Test: total loss = policy_loss + β * kl_loss
@@ -1188,11 +1286,20 @@ mod tests {
         let log_probs = vec![-1.0f32, -0.5, -1.5];
         let ref_log_probs = vec![-1.5f32, -1.0, -2.0];
         let advantages = vec![0.5f32, -0.3, 1.0];
-        let config = GrpoLossConfig { kl_coef: 0.05, clip_range: 0.2, ..Default::default() };
-        let result = compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
+        let config = GrpoLossConfig {
+            kl_coef: 0.05,
+            clip_range: 0.2,
+            ..Default::default()
+        };
+        let result =
+            compute_grpo_loss(&log_probs, &ref_log_probs, &advantages, &config).expect("ok");
         let expected_total = result.policy_loss + result.kl_loss;
-        assert!((result.total_loss - expected_total).abs() < 1e-5,
-            "total_loss should equal policy_loss + kl_loss: {} vs {}", result.total_loss, expected_total);
+        assert!(
+            (result.total_loss - expected_total).abs() < 1e-5,
+            "total_loss should equal policy_loss + kl_loss: {} vs {}",
+            result.total_loss,
+            expected_total
+        );
     }
 
     // Test: group_size=1 degenerate case — single response, advantage=0
@@ -1201,7 +1308,10 @@ mod tests {
         let rewards = [3.0f32];
         let advs = compute_group_advantages(&rewards, 1e-8);
         assert_eq!(advs.len(), 1);
-        assert_eq!(advs[0], 0.0, "single response has std=0, advantage should be 0");
+        assert_eq!(
+            advs[0], 0.0,
+            "single response has std=0, advantage should be 0"
+        );
     }
 
     // Test: GrpoSample construction and group_size()
@@ -1211,7 +1321,8 @@ mod tests {
             vec![1_u32, 2, 3],
             vec![vec![4_u32, 5], vec![6_u32, 7], vec![8_u32, 9]],
             vec![1.0f32, 2.0, 3.0],
-        ).expect("ok");
+        )
+        .expect("ok");
         assert_eq!(sample.group_size(), 3);
         assert_eq!(sample.prompt.len(), 3);
         assert_eq!(sample.completions.len(), 3);
@@ -1227,11 +1338,22 @@ mod tests {
         let advs_g1 = compute_group_advantages(&rewards_g1, 1e-8);
         let advs_g2 = compute_group_advantages(&rewards_g2, 1e-8);
         // Group 1 advantage for lower reward = -1
-        assert!((advs_g1[0] - (-1.0_f32)).abs() < 1e-4, "g1 low adv={}", advs_g1[0]);
+        assert!(
+            (advs_g1[0] - (-1.0_f32)).abs() < 1e-4,
+            "g1 low adv={}",
+            advs_g1[0]
+        );
         // Group 2 advantage for lower reward = -1
-        assert!((advs_g2[0] - (-1.0_f32)).abs() < 1e-4, "g2 low adv={}", advs_g2[0]);
+        assert!(
+            (advs_g2[0] - (-1.0_f32)).abs() < 1e-4,
+            "g2 low adv={}",
+            advs_g2[0]
+        );
         // Cross-group: g2 rewards don't affect g1 normalization
-        assert!((advs_g1[1] - 1.0_f32).abs() < 1e-4, "g1 high adv should be 1.0");
+        assert!(
+            (advs_g1[1] - 1.0_f32).abs() < 1e-4,
+            "g1 high adv should be 1.0"
+        );
     }
 
     // Test: advantage direction — positive reward → positive advantage relative to mean
@@ -1240,11 +1362,23 @@ mod tests {
         let rewards = [0.0f32, 5.0, 10.0]; // mean=5
         let advs = compute_group_advantages(&rewards, 1e-8);
         // reward=10 > mean=5 → positive advantage
-        assert!(advs[2] > 0.0, "above-mean reward should have positive advantage, got {}", advs[2]);
+        assert!(
+            advs[2] > 0.0,
+            "above-mean reward should have positive advantage, got {}",
+            advs[2]
+        );
         // reward=0 < mean=5 → negative advantage
-        assert!(advs[0] < 0.0, "below-mean reward should have negative advantage, got {}", advs[0]);
+        assert!(
+            advs[0] < 0.0,
+            "below-mean reward should have negative advantage, got {}",
+            advs[0]
+        );
         // reward=5 = mean → zero advantage
-        assert!(advs[1].abs() < 1e-5, "at-mean reward should have ≈0 advantage, got {}", advs[1]);
+        assert!(
+            advs[1].abs() < 1e-5,
+            "at-mean reward should have ≈0 advantage, got {}",
+            advs[1]
+        );
     }
 
     // Test: trainer history accumulation — multiple train_step calls

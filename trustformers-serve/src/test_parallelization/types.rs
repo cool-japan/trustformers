@@ -562,12 +562,21 @@ pub struct ResourceAllocation {
     pub allocated_at: DateTime<Utc>,
     /// Deallocation timestamp
     pub deallocated_at: Option<DateTime<Utc>>,
-    /// Allocation duration
+    /// Allocation duration. Zero while the allocation is still live; set to the
+    /// real elapsed time when the allocation is released.
     pub duration: Duration,
-    /// Resource utilization during allocation
-    pub utilization: f32,
-    /// Allocation efficiency
-    pub efficiency: f32,
+    /// Measured resource utilization over the life of this allocation, as a
+    /// fraction in `0.0..=1.0`.
+    ///
+    /// `None` means "not observed". Nothing in this crate samples per-allocation
+    /// utilization today, so allocations produced by the parallel execution
+    /// engine always carry `None` here rather than a fabricated figure; a future
+    /// sampler is expected to fill it in at release time.
+    pub utilization: Option<f32>,
+    /// Measured allocation efficiency (useful work over reserved capacity).
+    ///
+    /// `None` means "not observed", for the same reason as [`Self::utilization`].
+    pub efficiency: Option<f32>,
 }
 /// Failure handling strategy
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -230,10 +230,21 @@ impl SustainabilityAdvisor {
             priority,
             title,
             description,
+            // The measured gap between where this goal stands and where it is
+            // supposed to end up. The previous text multiplied that gap by an
+            // invented 0.2 ("Assume 20% progress") and formatted the product as
+            // a percentage of target -- a number nothing had estimated, in
+            // units the goal does not use.
             potential_impact: format!(
-                "Could help achieve {:.1}% of target",
-                (goal.target_value - goal.current_value) * 0.2
-            ), // Assume 20% progress
+                "Closes the remaining gap to target: {:.1} of {:.1} ({:.1}% of the way there today)",
+                (goal.target_value - goal.current_value).max(0.0),
+                goal.target_value,
+                if goal.target_value > 0.0 {
+                    (goal.current_value / goal.target_value * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                },
+            ),
             implementation_steps,
         })
     }
@@ -281,8 +292,10 @@ impl SustainabilityAdvisor {
     async fn get_regional_optimization_recommendation(
         &self,
     ) -> Result<Option<SustainabilityRecommendation>> {
-        // This would be customized based on current region configuration
-        // For now, return a general recommendation
+        // Region-independent advice: the analyzer holds no per-region
+        // configuration to tailor it with, so the same recommendation is
+        // returned for every deployment rather than one dressed up as
+        // region-specific.
         Ok(Some(SustainabilityRecommendation {
             category: RecommendationCategory::Sustainability,
             priority: RecommendationPriority::Medium,

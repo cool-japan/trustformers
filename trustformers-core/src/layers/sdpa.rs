@@ -1,8 +1,22 @@
-#![allow(unused_variables)] // SDPA implementation with reserved parameters
+//! Optimized Scaled Dot-Product Attention (SDPA) kernels.
+//!
+//! This module provides CPU implementations of `softmax(Q K^T / sqrt(d) + mask) V`:
+//!
+//! * [`SDPA::attention`] dispatches on sequence length,
+//! * a dense kernel that materialises one `seq_q x seq_k` score matrix per
+//!   `(batch, head)` pair (fast for short and medium sequences),
+//! * a memory-efficient tiled kernel with online softmax for long sequences.
+//!
+//! Both kernels parallelise over the flattened `(batch, head)` index space via
+//! `scirs2_core::parallel_ops` and write directly into disjoint slices of the
+//! output buffer.
 
 use crate::errors::{Result, TrustformersError};
+use crate::layers::attention::flash_kernel::head_matrix;
+use crate::layers::attention::mask::MaskView;
 use crate::tensor::Tensor;
-use scirs2_core::ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, Array1, Array2, ArrayD, ArrayView1, CowArray, Ix2, IxDyn};
+use scirs2_core::parallel_ops::*;
 use scirs2_core::simd::activation::simd_softmax_f32;
 #[cfg(not(target_os = "macos"))]
 use scirs2_core::simd_ops::SimdUnifiedOps;
@@ -13,10 +27,13 @@ const MIN_SIZE_FOR_BLAS: usize = 32;
 /// Minimum size threshold for SIMD softmax
 const MIN_SIZE_FOR_SIMD_SOFTMAX: usize = 64;
 
-/// Direct BLAS GEMM using OxiBLAS for maximum performance
+/// Row-major GEMM: `C(m x n) = alpha * A(m x k) * B(k x n) + beta * C`.
+///
+/// On macOS this bridges to OxiBLAS (pure Rust); elsewhere it falls back to
+/// the scirs2-core SIMD GEMM.
 #[cfg(target_os = "macos")]
 #[inline]
-fn blas_sgemm(
+pub(crate) fn blas_sgemm(
     alpha: f32,
     a: &[f32],
     b: &[f32],
@@ -34,9 +51,9 @@ fn blas_sgemm(
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = alpha·Bᵀ·Aᵀ + beta·Cᵀ = (alpha·A·B + beta·C)ᵀ. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = alpha * Bᵀ * Aᵀ + beta * Cᵀ
     gemm(alpha, b_t, a_t, beta, c_t);
@@ -45,7 +62,7 @@ fn blas_sgemm(
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM
 #[cfg(not(target_os = "macos"))]
 #[inline]
-fn blas_sgemm(
+pub(crate) fn blas_sgemm(
     alpha: f32,
     a: &[f32],
     b: &[f32],
@@ -78,14 +95,149 @@ fn blas_sgemm(
     }
 }
 
+/// Row-major GEMM with a transposed right operand:
+/// `C(m x n) = alpha * A(m x k) * B(n x k)^T + beta * C`.
+///
+/// Attention needs `Q K^T` where both operands are stored as
+/// `[sequence, head_dim]`; this variant consumes `K` in place instead of
+/// materialising its transpose.
+#[cfg(target_os = "macos")]
+#[inline]
+pub(crate) fn blas_sgemm_nt(
+    alpha: f32,
+    a: &[f32],
+    b: &[f32],
+    beta: f32,
+    c: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    use oxiblas_blas::level3::gemm::gemm_transposed;
+    use oxiblas_blas::level3::Trans;
+    use oxiblas_matrix::{MatMut, MatRef};
+
+    // Row-major A(m×k) reinterpreted as col-major is Aᵀ(k×m), lda=k.
+    // Row-major B(n×k) reinterpreted as col-major is Bᵀ(k×n), lda=k.
+    // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
+    // We need Cᵀ = (A·Bᵀ)ᵀ = B·Aᵀ, and B = (Bᵀ)ᵀ, so the left operand is the
+    // *transposed* view of `b_t`.
+    //
+    // `gemm_transposed` reads the transposed operand with swapped indices while
+    // packing (no copy). A plain `MatRef::transpose()` view would NOT work here:
+    // the `NoTrans` packing path assumes a unit row-to-row stride, which a
+    // transposed view does not have.
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, k, n).expect("B slice must hold n*k elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
+
+    // Cᵀ = alpha * (Bᵀ)ᵀ * Aᵀ + beta * Cᵀ  ⇒  C = alpha * A * Bᵀ + beta * C. ✓
+    gemm_transposed(Trans::Trans, Trans::NoTrans, alpha, b_t, a_t, beta, c_t);
+}
+
+/// Fallback for non-macOS: materialise `Bᵀ` and defer to the SIMD GEMM.
+#[cfg(not(target_os = "macos"))]
+#[inline]
+pub(crate) fn blas_sgemm_nt(
+    alpha: f32,
+    a: &[f32],
+    b: &[f32],
+    beta: f32,
+    c: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let b_arr =
+        scirs2_core::ndarray::ArrayView2::from_shape((n, k), b).expect("BLAS input shape mismatch");
+    let b_transposed = b_arr.t().to_owned();
+    let b_data = b_transposed.as_slice().expect("freshly allocated transpose is contiguous");
+    blas_sgemm(alpha, a, b_data, beta, c, m, k, n);
+}
+
+/// Borrow a `[batch, heads, seq, head_dim]` F32 tensor, or fail with a
+/// structured error.
+fn attention_operand<'a>(tensor: &'a Tensor, name: &str) -> Result<&'a ArrayD<f32>> {
+    match tensor {
+        Tensor::F32(array) if array.ndim() == 4 => Ok(array),
+        Tensor::F32(array) => Err(TrustformersError::tensor_op_error(
+            &format!(
+                "SDPA expects 4-D [batch, heads, seq, head_dim] tensors; {} has shape {:?}",
+                name,
+                array.shape()
+            ),
+            "SDPA",
+        )),
+        other => Err(TrustformersError::tensor_op_error(
+            &format!(
+                "SDPA supports F32 tensors only; {} has dtype {:?}",
+                name,
+                other.dtype()
+            ),
+            "SDPA",
+        )),
+    }
+}
+
+/// Apply post-softmax dropout in place, scaling survivors by `1/(1-p)`.
+fn apply_attention_dropout(probabilities: &mut [f32], dropout_prob: f32) {
+    use scirs2_core::random::*;
+
+    let mut rng = thread_rng();
+    let scale = 1.0 / (1.0 - dropout_prob);
+    for value in probabilities.iter_mut() {
+        if rng.random::<f32>() < dropout_prob {
+            *value = 0.0;
+        } else {
+            *value *= scale;
+        }
+    }
+}
+
+/// Row-wise softmax over a flat `rows x columns` buffer, tolerating
+/// `-inf` entries produced by masking.
+fn softmax_rows_in_place(scores: &mut [f32], rows: usize, columns: usize, allow_simd: bool) {
+    if allow_simd && columns >= MIN_SIZE_FOR_SIMD_SOFTMAX {
+        for row in 0..rows {
+            let slice = &mut scores[row * columns..(row + 1) * columns];
+            let view = ArrayView1::from(&*slice);
+            let softmaxed: Array1<f32> = simd_softmax_f32(&view);
+            for (destination, value) in slice.iter_mut().zip(softmaxed.iter()) {
+                *destination = *value;
+            }
+        }
+        return;
+    }
+
+    for row in 0..rows {
+        let slice = &mut scores[row * columns..(row + 1) * columns];
+        let max = slice.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+        if max == f32::NEG_INFINITY {
+            // Fully masked row: no key is reachable, emit an all-zero
+            // distribution rather than NaNs.
+            slice.fill(0.0);
+            continue;
+        }
+        let mut sum = 0.0f32;
+        for value in slice.iter_mut() {
+            let exponential = (*value - max).exp();
+            *value = exponential;
+            sum += exponential;
+        }
+        let inverse = 1.0 / sum.max(f32::MIN_POSITIVE);
+        for value in slice.iter_mut() {
+            *value *= inverse;
+        }
+    }
+}
+
 /// Optimized Scaled Dot-Product Attention (SDPA) kernels
 ///
 /// This module provides various optimized implementations of scaled dot-product attention
 /// for different hardware and use cases:
-/// - Basic SDPA for CPU
-/// - Memory-efficient SDPA with tiling
-/// - Optimized kernels for specific sequence lengths
-/// - Fused attention operations
+/// - Dense SDPA for short and medium sequences
+/// - Memory-efficient tiled SDPA with online softmax for long sequences
+/// - Optional post-softmax attention dropout
 pub struct SDPA;
 
 impl SDPA {
@@ -95,7 +247,7 @@ impl SDPA {
     ///   q: Query tensor [batch, heads, seq_q, head_dim]
     ///   k: Key tensor [batch, heads, seq_k, head_dim]
     ///   v: Value tensor [batch, heads, seq_k, head_dim]
-    ///   attn_mask: Optional attention mask [batch, heads, seq_q, seq_k]
+    ///   attn_mask: Optional attention mask, see [`crate::layers::attention::mask`]
     ///   causal: Whether to apply causal masking
     pub fn attention(
         q: &Tensor,
@@ -104,657 +256,410 @@ impl SDPA {
         attn_mask: Option<&Tensor>,
         causal: bool,
     ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_q = q_shape[2];
-        let head_dim = q_shape[3];
+        Self::attention_with_dropout(q, k, v, attn_mask, causal, None)
+    }
 
-        let k_shape = k.shape();
-        let seq_k = k_shape[2];
+    /// Scaled dot-product attention with optional post-softmax dropout.
+    ///
+    /// `dropout_prob` must be in `[0, 1)`; `None` disables dropout entirely.
+    pub fn attention_with_dropout(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        attn_mask: Option<&Tensor>,
+        causal: bool,
+        dropout_prob: Option<f32>,
+    ) -> Result<Tensor> {
+        if let Some(prob) = dropout_prob {
+            if !(0.0..1.0).contains(&prob) {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("Attention dropout probability must be in [0, 1), got {prob}"),
+                    "SDPA::attention_with_dropout",
+                ));
+            }
+        }
+        let dropout_prob = dropout_prob.filter(|&prob| prob > 0.0);
 
-        if seq_q <= 512 && seq_k <= 512 {
-            // Use optimized kernel for small sequences
-            Self::small_sequence_attention(q, k, v, attn_mask, causal)
-        } else if seq_q > 2048 || seq_k > 2048 {
-            // Use memory-efficient tiled attention for long sequences
-            Self::tiled_attention(q, k, v, attn_mask, causal)
+        let seq_q = attention_operand(q, "query")?.shape()[2];
+        let seq_k = attention_operand(k, "key")?.shape()[2];
+
+        if seq_q > 2048 || seq_k > 2048 {
+            // Memory-efficient tiled attention for long sequences
+            Self::tiled_attention(q, k, v, attn_mask, causal, dropout_prob)
         } else {
-            // Use standard attention for medium sequences
-            Self::standard_attention(q, k, v, attn_mask, causal)
+            Self::dense_attention(q, k, v, attn_mask, causal, dropout_prob)
         }
     }
 
-    /// Standard SDPA implementation
-    fn standard_attention(
+    /// Validate Q/K/V and return `(batch, heads, seq_q, seq_k, head_dim)`.
+    fn attention_dims(
+        q: &ArrayD<f32>,
+        k: &ArrayD<f32>,
+        v: &ArrayD<f32>,
+    ) -> Result<(usize, usize, usize, usize, usize)> {
+        let q_shape = q.shape();
+        let k_shape = k.shape();
+        let v_shape = v.shape();
+
+        if k_shape[0] != q_shape[0]
+            || v_shape[0] != q_shape[0]
+            || k_shape[1] != q_shape[1]
+            || v_shape[1] != q_shape[1]
+        {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "Q/K/V batch and head counts must match, got {:?} / {:?} / {:?}",
+                    q_shape, k_shape, v_shape
+                ),
+                "SDPA",
+            ));
+        }
+        if k_shape[2] != v_shape[2] {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "Key and value sequence lengths must match, got {} and {}",
+                    k_shape[2], v_shape[2]
+                ),
+                "SDPA",
+            ));
+        }
+        if k_shape[3] != q_shape[3] || v_shape[3] != q_shape[3] {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "Q/K/V head dimensions must match, got {} / {} / {}",
+                    q_shape[3], k_shape[3], v_shape[3]
+                ),
+                "SDPA",
+            ));
+        }
+
+        Ok((q_shape[0], q_shape[1], q_shape[2], k_shape[2], q_shape[3]))
+    }
+
+    /// Dense SDPA: one `seq_q x seq_k` score matrix per `(batch, head)` pair.
+    ///
+    /// Work is distributed over `(batch, head)` and each worker writes straight
+    /// into its own contiguous slice of the output buffer.
+    fn dense_attention(
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
         attn_mask: Option<&Tensor>,
         causal: bool,
+        dropout_prob: Option<f32>,
     ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_q = q_shape[2];
-        let head_dim = q_shape[3];
-
-        let k_shape = k.shape();
-        let seq_k = k_shape[2];
+        let q_arr = attention_operand(q, "query")?;
+        let k_arr = attention_operand(k, "key")?;
+        let v_arr = attention_operand(v, "value")?;
+        let (batch_size, num_heads, seq_q, seq_k, head_dim) =
+            Self::attention_dims(q_arr, k_arr, v_arr)?;
 
         let scale = 1.0 / (head_dim as f32).sqrt();
+        let mask_view = match attn_mask {
+            Some(mask) => Some(MaskView::new(mask, batch_size, num_heads, seq_q, seq_k)?),
+            None => None,
+        };
 
-        match (q, k, v) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
-                let mut output = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_q, head_dim]));
+        let mut output = vec![0.0f32; batch_size * num_heads * seq_q * head_dim];
+        if output.is_empty() {
+            return Self::finish(output, batch_size, num_heads, seq_q, head_dim);
+        }
 
-                for b in 0..batch_size {
-                    for h in 0..num_heads {
-                        // Extract matrices for this batch and head
-                        let q_batch = q_arr.index_axis(Axis(0), b);
-                        let k_batch = k_arr.index_axis(Axis(0), b);
-                        let v_batch = v_arr.index_axis(Axis(0), b);
-                        let q_bh = q_batch.index_axis(Axis(0), h);
-                        let k_bh = k_batch.index_axis(Axis(0), h);
-                        let v_bh = v_batch.index_axis(Axis(0), h);
+        let use_blas = seq_q >= MIN_SIZE_FOR_BLAS
+            && seq_k >= MIN_SIZE_FOR_BLAS
+            && head_dim >= MIN_SIZE_FOR_BLAS;
 
-                        // Convert to owned 2D arrays for BLAS operations
-                        let q_2d: Array2<f32> = q_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_q, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                        let k_2d: Array2<f32> = k_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_k, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                        let v_2d: Array2<f32> = v_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_k, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+        output.par_chunks_mut(seq_q * head_dim).enumerate().try_for_each(
+            |(flat_index, out_chunk)| -> Result<()> {
+                let batch_index = flat_index / num_heads;
+                let head_index = flat_index % num_heads;
 
-                        // Compute QK^T using BLAS gemm: Q @ K^T
-                        // Q: [seq_q, head_dim], K^T: [head_dim, seq_k] => scores: [seq_q, seq_k]
-                        let k_t = k_2d.t();
-                        let k_t_owned: Array2<f32> = k_t.to_owned();
+                let q_2d = head_matrix(q_arr, batch_index, head_index)?;
+                let k_2d = head_matrix(k_arr, batch_index, head_index)?;
+                let v_2d = head_matrix(v_arr, batch_index, head_index)?;
 
-                        let scores = if seq_q >= MIN_SIZE_FOR_BLAS
-                            && seq_k >= MIN_SIZE_FOR_BLAS
-                            && head_dim >= MIN_SIZE_FOR_BLAS
-                        {
-                            // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let q_data = q_2d.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "standard_attention",
-                                    "q_2d is standard layout",
-                                )
-                            })?;
-                            let k_t_data = k_t_owned.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "standard_attention",
-                                    "k_t_owned is standard layout",
-                                )
-                            })?;
-                            let mut result_vec = vec![0.0f32; seq_q * seq_k];
-                            blas_sgemm(
-                                scale,
-                                q_data,
-                                k_t_data,
-                                0.0,
-                                &mut result_vec,
-                                seq_q,
-                                head_dim,
-                                seq_k,
-                            );
-                            Array2::from_shape_vec((seq_q, seq_k), result_vec)
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                        } else {
-                            // Use ndarray dot for smaller matrices
-                            let mut result = q_2d.dot(&k_t_owned);
-                            result.mapv_inplace(|x| x * scale);
-                            result
-                        };
+                let mut scores = vec![0.0f32; seq_q * seq_k];
+                if use_blas {
+                    let q_data = Self::contiguous(&q_2d, "query head")?;
+                    let k_data = Self::contiguous(&k_2d, "key head")?;
+                    blas_sgemm_nt(
+                        scale,
+                        q_data,
+                        k_data,
+                        0.0,
+                        &mut scores,
+                        seq_q,
+                        head_dim,
+                        seq_k,
+                    );
+                } else {
+                    let product = q_2d.dot(&k_2d.t());
+                    for (destination, &value) in scores.iter_mut().zip(product.iter()) {
+                        *destination = value * scale;
+                    }
+                }
 
-                        let mut scores = scores;
-
-                        // Apply causal mask
-                        if causal {
-                            for i in 0..seq_q {
-                                for j in i + 1..seq_k {
-                                    scores[[i, j]] = f32::NEG_INFINITY;
-                                }
-                            }
-                        }
-
-                        // Apply attention mask if provided
-                        if let Some(Tensor::F32(mask_arr)) = attn_mask {
-                            let mask_batch = mask_arr.index_axis(Axis(0), b);
-                            let mask_bh = mask_batch.index_axis(Axis(0), h);
-                            for i in 0..seq_q {
-                                for j in 0..seq_k {
-                                    if mask_bh[[i, j]] == 0.0 {
-                                        scores[[i, j]] = f32::NEG_INFINITY;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Softmax (row-wise) with SIMD optimization
-                        if seq_k >= MIN_SIZE_FOR_SIMD_SOFTMAX && !causal && attn_mask.is_none() {
-                            // Fast path: No masking, use SIMD softmax
-                            for i in 0..seq_q {
-                                let row = scores.row(i);
-                                let softmax_row = simd_softmax_f32(&row);
-                                for j in 0..seq_k {
-                                    scores[[i, j]] = softmax_row[j];
-                                }
-                            }
-                        } else {
-                            // Standard path: Handle masking (NEG_INFINITY values)
-                            for i in 0..seq_q {
-                                let max_score =
-                                    scores.row(i).fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                                let mut sum = 0.0f32;
-                                for j in 0..seq_k {
-                                    let exp_val = (scores[[i, j]] - max_score).exp();
-                                    scores[[i, j]] = exp_val;
-                                    sum += exp_val;
-                                }
-                                let inv_sum = 1.0 / sum.max(f32::MIN_POSITIVE);
-                                for j in 0..seq_k {
-                                    scores[[i, j]] *= inv_sum;
-                                }
-                            }
-                        }
-
-                        // Apply attention to values using BLAS gemm: scores @ V
-                        // scores: [seq_q, seq_k], V: [seq_k, head_dim] => output: [seq_q, head_dim]
-                        let attn_output = if seq_q >= MIN_SIZE_FOR_BLAS
-                            && seq_k >= MIN_SIZE_FOR_BLAS
-                            && head_dim >= MIN_SIZE_FOR_BLAS
-                        {
-                            // Use direct BLAS (Accelerate on macOS) for larger matrices
-                            let scores_data = scores.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "standard_attention",
-                                    "scores is standard layout",
-                                )
-                            })?;
-                            let v_data = v_2d.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "standard_attention",
-                                    "v_2d is standard layout",
-                                )
-                            })?;
-                            let mut result_vec = vec![0.0f32; seq_q * head_dim];
-                            blas_sgemm(
-                                1.0,
-                                scores_data,
-                                v_data,
-                                0.0,
-                                &mut result_vec,
-                                seq_q,
-                                seq_k,
-                                head_dim,
-                            );
-                            Array2::from_shape_vec((seq_q, head_dim), result_vec)
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                        } else {
-                            // Use ndarray dot for smaller matrices
-                            scores.dot(&v_2d)
-                        };
-
-                        // Copy to output
-                        for i in 0..seq_q {
-                            for d in 0..head_dim {
-                                output[[b, h, i, d]] = attn_output[[i, d]];
+                if causal {
+                    for row in 0..seq_q {
+                        let allowed = (row + 1).min(seq_k);
+                        scores[row * seq_k + allowed..(row + 1) * seq_k].fill(f32::NEG_INFINITY);
+                    }
+                }
+                if let Some(mask) = mask_view.as_ref() {
+                    for row in 0..seq_q {
+                        for column in 0..seq_k {
+                            let penalty = mask.additive(batch_index, head_index, row, column);
+                            if penalty != 0.0 {
+                                scores[row * seq_k + column] += penalty;
                             }
                         }
                     }
                 }
 
-                Ok(Tensor::F32(output))
-            },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor types for SDPA",
-                "SDPA::forward",
-            )),
-        }
-    }
+                // The SIMD softmax has no `-inf` handling, so it is only used
+                // when nothing has been masked out.
+                let allow_simd = !causal && mask_view.is_none();
+                softmax_rows_in_place(&mut scores, seq_q, seq_k, allow_simd);
 
-    /// Optimized SDPA for small sequences (≤512 tokens)
-    /// Uses more aggressive optimizations and better cache locality
-    fn small_sequence_attention(
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        attn_mask: Option<&Tensor>,
-        causal: bool,
-    ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_q = q_shape[2];
-        let head_dim = q_shape[3];
+                if let Some(prob) = dropout_prob {
+                    apply_attention_dropout(&mut scores, prob);
+                }
 
-        let k_shape = k.shape();
-        let seq_k = k_shape[2];
-
-        let scale = 1.0 / (head_dim as f32).sqrt();
-
-        match (q, k, v) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
-                let mut output = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_q, head_dim]));
-
-                for b in 0..batch_size {
-                    for h in 0..num_heads {
-                        // Extract and transpose for better cache locality
-                        let q_batch = q_arr.index_axis(Axis(0), b);
-                        let k_batch = k_arr.index_axis(Axis(0), b);
-                        let v_batch = v_arr.index_axis(Axis(0), b);
-                        let q_bh = q_batch.index_axis(Axis(0), h);
-                        let k_bh = k_batch.index_axis(Axis(0), h);
-                        let v_bh = v_batch.index_axis(Axis(0), h);
-
-                        // Convert to owned 2D arrays for BLAS operations
-                        let q_2d: Array2<f32> = q_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_q, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                        let k_2d: Array2<f32> = k_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_k, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                        // Compute QK^T using BLAS gemm (faster than blocked impl for any size)
-                        let k_t = k_2d.t();
-                        let k_t_owned: Array2<f32> = k_t.to_owned();
-
-                        let mut scores = if seq_q >= MIN_SIZE_FOR_BLAS
-                            && seq_k >= MIN_SIZE_FOR_BLAS
-                            && head_dim >= MIN_SIZE_FOR_BLAS
-                        {
-                            // Use direct BLAS (Accelerate on macOS)
-                            let q_data = q_2d.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "small_sequence_attention",
-                                    "q_2d is standard layout",
-                                )
-                            })?;
-                            let k_t_data = k_t_owned.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "small_sequence_attention",
-                                    "k_t_owned is standard layout",
-                                )
-                            })?;
-                            let mut result_vec = vec![0.0f32; seq_q * seq_k];
-                            blas_sgemm(
-                                scale,
-                                q_data,
-                                k_t_data,
-                                0.0,
-                                &mut result_vec,
-                                seq_q,
-                                head_dim,
-                                seq_k,
-                            );
-                            Array2::from_shape_vec((seq_q, seq_k), result_vec)
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                        } else {
-                            let mut result = q_2d.dot(&k_t_owned);
-                            result.mapv_inplace(|x| x * scale);
-                            result
-                        };
-
-                        // Apply masks and softmax (same as standard)
-                        if causal {
-                            for i in 0..seq_q {
-                                for j in i + 1..seq_k {
-                                    scores[[i, j]] = f32::NEG_INFINITY;
-                                }
-                            }
-                        }
-
-                        if let Some(Tensor::F32(mask_arr)) = attn_mask {
-                            let mask_batch = mask_arr.index_axis(Axis(0), b);
-                            let mask_bh = mask_batch.index_axis(Axis(0), h);
-                            for i in 0..seq_q {
-                                for j in 0..seq_k {
-                                    if mask_bh[[i, j]] == 0.0 {
-                                        scores[[i, j]] = f32::NEG_INFINITY;
-                                    }
-                                }
-                            }
-                        }
-
-                        // Softmax (row-wise) with SIMD optimization
-                        if seq_k >= MIN_SIZE_FOR_SIMD_SOFTMAX && !causal && attn_mask.is_none() {
-                            // Fast path: No masking, use SIMD softmax
-                            for i in 0..seq_q {
-                                let row = scores.row(i);
-                                let softmax_row = simd_softmax_f32(&row);
-                                for j in 0..seq_k {
-                                    scores[[i, j]] = softmax_row[j];
-                                }
-                            }
-                        } else {
-                            // Standard path: Handle masking
-                            for i in 0..seq_q {
-                                let max_score =
-                                    scores.row(i).fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                                let mut sum = 0.0f32;
-                                for j in 0..seq_k {
-                                    let exp_val = (scores[[i, j]] - max_score).exp();
-                                    scores[[i, j]] = exp_val;
-                                    sum += exp_val;
-                                }
-                                let inv_sum = 1.0 / sum.max(f32::MIN_POSITIVE);
-                                for j in 0..seq_k {
-                                    scores[[i, j]] *= inv_sum;
-                                }
-                            }
-                        }
-
-                        // Apply attention to values using BLAS gemm: scores @ V
-                        let v_2d: Array2<f32> = v_bh
-                            .to_owned()
-                            .into_shape_with_order((seq_k, head_dim))
-                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                        let attn_output = if seq_q >= MIN_SIZE_FOR_BLAS
-                            && seq_k >= MIN_SIZE_FOR_BLAS
-                            && head_dim >= MIN_SIZE_FOR_BLAS
-                        {
-                            // Use direct BLAS (Accelerate on macOS)
-                            let scores_data = scores.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "small_sequence_attention",
-                                    "scores is standard layout",
-                                )
-                            })?;
-                            let v_data = v_2d.as_slice().ok_or_else(|| {
-                                crate::errors::compute_error(
-                                    "small_sequence_attention",
-                                    "v_2d is standard layout",
-                                )
-                            })?;
-                            let mut result_vec = vec![0.0f32; seq_q * head_dim];
-                            blas_sgemm(
-                                1.0,
-                                scores_data,
-                                v_data,
-                                0.0,
-                                &mut result_vec,
-                                seq_q,
-                                seq_k,
-                                head_dim,
-                            );
-                            Array2::from_shape_vec((seq_q, head_dim), result_vec)
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                        } else {
-                            scores.dot(&v_2d)
-                        };
-
-                        // Copy to output
-                        for i in 0..seq_q {
-                            for d in 0..head_dim {
-                                output[[b, h, i, d]] = attn_output[[i, d]];
-                            }
-                        }
+                if use_blas {
+                    let v_data = Self::contiguous(&v_2d, "value head")?;
+                    blas_sgemm(1.0, &scores, v_data, 0.0, out_chunk, seq_q, seq_k, head_dim);
+                } else {
+                    let weights = Array2::from_shape_vec((seq_q, seq_k), scores)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let product = weights.dot(&v_2d);
+                    for (destination, &value) in out_chunk.iter_mut().zip(product.iter()) {
+                        *destination = value;
                     }
                 }
 
-                Ok(Tensor::F32(output))
+                Ok(())
             },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor types for small sequence SDPA",
-                "SDPA::small_sequence_attention",
-            )),
-        }
+        )?;
+
+        Self::finish(output, batch_size, num_heads, seq_q, head_dim)
     }
 
-    /// Memory-efficient tiled SDPA for long sequences (>2048 tokens)
-    /// Uses tiling to reduce memory complexity
+    /// Memory-efficient tiled SDPA with online softmax for long sequences.
+    ///
+    /// Never materialises the full `seq_q x seq_k` score matrix: peak extra
+    /// memory is one `tile x tile` block per worker.
     fn tiled_attention(
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
         attn_mask: Option<&Tensor>,
         causal: bool,
+        dropout_prob: Option<f32>,
     ) -> Result<Tensor> {
-        let q_shape = q.shape();
-        let batch_size = q_shape[0];
-        let num_heads = q_shape[1];
-        let seq_q = q_shape[2];
-        let head_dim = q_shape[3];
-
-        let k_shape = k.shape();
-        let seq_k = k_shape[2];
+        let q_arr = attention_operand(q, "query")?;
+        let k_arr = attention_operand(k, "key")?;
+        let v_arr = attention_operand(v, "value")?;
+        let (batch_size, num_heads, seq_q, seq_k, head_dim) =
+            Self::attention_dims(q_arr, k_arr, v_arr)?;
 
         let scale = 1.0 / (head_dim as f32).sqrt();
+        let tile_size = 256.min(seq_q.max(1)).max(1);
+        let key_tile_size = 256.min(seq_k.max(1)).max(1);
 
-        // Tile size for memory efficiency
-        let tile_size = 256;
+        let mask_view = match attn_mask {
+            Some(mask) => Some(MaskView::new(mask, batch_size, num_heads, seq_q, seq_k)?),
+            None => None,
+        };
 
-        match (q, k, v) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
-                let mut output = ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_q, head_dim]));
+        let mut output = vec![0.0f32; batch_size * num_heads * seq_q * head_dim];
+        if output.is_empty() {
+            return Self::finish(output, batch_size, num_heads, seq_q, head_dim);
+        }
 
-                for b in 0..batch_size {
-                    for h in 0..num_heads {
-                        let q_batch = q_arr.index_axis(Axis(0), b);
-                        let k_batch = k_arr.index_axis(Axis(0), b);
-                        let v_batch = v_arr.index_axis(Axis(0), b);
-                        let q_bh = q_batch.index_axis(Axis(0), h);
-                        let k_bh = k_batch.index_axis(Axis(0), h);
-                        let v_bh = v_batch.index_axis(Axis(0), h);
+        output.par_chunks_mut(seq_q * head_dim).enumerate().try_for_each(
+            |(flat_index, out_chunk)| -> Result<()> {
+                let batch_index = flat_index / num_heads;
+                let head_index = flat_index % num_heads;
 
-                        // Process in tiles to reduce memory usage
-                        for q_start in (0..seq_q).step_by(tile_size) {
-                            let q_end = (q_start + tile_size).min(seq_q);
-                            let q_tile_size = q_end - q_start;
+                let q_2d = head_matrix(q_arr, batch_index, head_index)?;
+                let k_2d = head_matrix(k_arr, batch_index, head_index)?;
+                let v_2d = head_matrix(v_arr, batch_index, head_index)?;
 
-                            // Initialize tile outputs
-                            let mut o_tile = Array2::<f32>::zeros((q_tile_size, head_dim));
-                            let mut l_tile = Array1::<f32>::zeros(q_tile_size);
-                            let mut m_tile =
-                                Array1::<f32>::from_elem(q_tile_size, f32::NEG_INFINITY);
+                let mut scores = vec![0.0f32; tile_size * key_tile_size];
+                let mut accumulator = vec![0.0f32; tile_size * head_dim];
+                let mut row_max = vec![f32::NEG_INFINITY; tile_size];
+                let mut row_sum = vec![0.0f32; tile_size];
 
-                            for k_start in (0..seq_k).step_by(tile_size) {
-                                let k_end = (k_start + tile_size).min(seq_k);
-                                let k_tile_size = k_end - k_start;
+                for q_start in (0..seq_q).step_by(tile_size) {
+                    let q_end = (q_start + tile_size).min(seq_q);
+                    let q_rows = q_end - q_start;
 
-                                // Skip future tiles for causal attention
-                                if causal && k_start >= q_end {
-                                    break;
-                                }
+                    row_max[..q_rows].fill(f32::NEG_INFINITY);
+                    row_sum[..q_rows].fill(0.0);
+                    accumulator[..q_rows * head_dim].fill(0.0);
 
-                                // Extract tiles
-                                let q_tile = q_bh.slice(s![q_start..q_end, ..]).to_owned();
-                                let k_tile = k_bh.slice(s![k_start..k_end, ..]).to_owned();
-                                let v_tile = v_bh.slice(s![k_start..k_end, ..]).to_owned();
+                    let q_tile = q_2d.slice(s![q_start..q_end, ..]);
+                    let q_data = q_tile.as_slice().ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "query tile must be contiguous for GEMM",
+                            "SDPA::tiled_attention",
+                        )
+                    })?;
 
-                                // Compute scores for this tile using BLAS gemm
-                                let q_tile_2d: Array2<f32> = q_tile
-                                    .into_shape_with_order((q_tile_size, head_dim))
-                                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                                let k_tile_2d: Array2<f32> = k_tile
-                                    .into_shape_with_order((k_tile_size, head_dim))
-                                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                                let k_tile_t = k_tile_2d.t().to_owned();
+                    for k_start in (0..seq_k).step_by(key_tile_size) {
+                        let k_end = (k_start + key_tile_size).min(seq_k);
+                        let k_rows = k_end - k_start;
 
-                                let mut scores_tile = if q_tile_size >= MIN_SIZE_FOR_BLAS
-                                    && k_tile_size >= MIN_SIZE_FOR_BLAS
-                                    && head_dim >= MIN_SIZE_FOR_BLAS
-                                {
-                                    // Use direct BLAS (Accelerate on macOS)
-                                    let q_data = q_tile_2d.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "tiled_attention",
-                                            "q_tile_2d is standard layout",
-                                        )
-                                    })?;
-                                    let k_t_data = k_tile_t.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "tiled_attention",
-                                            "k_tile_t is standard layout",
-                                        )
-                                    })?;
-                                    let mut result_vec = vec![0.0f32; q_tile_size * k_tile_size];
-                                    blas_sgemm(
-                                        scale,
-                                        q_data,
-                                        k_t_data,
-                                        0.0,
-                                        &mut result_vec,
-                                        q_tile_size,
-                                        head_dim,
-                                        k_tile_size,
-                                    );
-                                    Array2::from_shape_vec((q_tile_size, k_tile_size), result_vec)
-                                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                                } else {
-                                    let mut result = q_tile_2d.dot(&k_tile_t);
-                                    result.mapv_inplace(|x| x * scale);
-                                    result
-                                };
+                        if causal && k_start >= q_end {
+                            break;
+                        }
 
-                                // Apply causal mask within tile
-                                if causal {
-                                    for i in 0..q_tile_size {
-                                        for j in 0..k_tile_size {
-                                            let global_q = q_start + i;
-                                            let global_k = k_start + j;
-                                            if global_q < global_k {
-                                                scores_tile[[i, j]] = f32::NEG_INFINITY;
-                                            }
-                                        }
-                                    }
-                                }
+                        let k_tile = k_2d.slice(s![k_start..k_end, ..]);
+                        let v_tile = v_2d.slice(s![k_start..k_end, ..]);
+                        let k_data = k_tile.as_slice().ok_or_else(|| {
+                            TrustformersError::tensor_op_error(
+                                "key tile must be contiguous for GEMM",
+                                "SDPA::tiled_attention",
+                            )
+                        })?;
+                        let v_data = v_tile.as_slice().ok_or_else(|| {
+                            TrustformersError::tensor_op_error(
+                                "value tile must be contiguous for GEMM",
+                                "SDPA::tiled_attention",
+                            )
+                        })?;
 
-                                // Apply mask if provided
-                                if let Some(Tensor::F32(mask_arr)) = attn_mask {
-                                    let mask_batch = mask_arr.index_axis(Axis(0), b);
-                                    let mask_bh = mask_batch.index_axis(Axis(0), h);
-                                    for i in 0..q_tile_size {
-                                        for j in 0..k_tile_size {
-                                            let global_q = q_start + i;
-                                            let global_k = k_start + j;
-                                            if mask_bh[[global_q, global_k]] == 0.0 {
-                                                scores_tile[[i, j]] = f32::NEG_INFINITY;
-                                            }
-                                        }
-                                    }
-                                }
+                        let score_tile = &mut scores[..q_rows * k_rows];
+                        blas_sgemm_nt(
+                            scale, q_data, k_data, 0.0, score_tile, q_rows, head_dim, k_rows,
+                        );
 
-                                // Online softmax update (similar to FlashAttention)
-                                let m_new = scores_tile.fold_axis(
-                                    Axis(1),
-                                    f32::NEG_INFINITY,
-                                    |&acc, &x| acc.max(x),
-                                );
-                                let m_prev = m_tile.clone();
-                                let m_combined = Array1::<f32>::from_shape_fn(q_tile_size, |i| {
-                                    m_tile[i].max(m_new[i])
-                                });
-
-                                let mut exp_scores =
-                                    Array2::<f32>::zeros((q_tile_size, k_tile_size));
-                                for i in 0..q_tile_size {
-                                    for j in 0..k_tile_size {
-                                        exp_scores[[i, j]] =
-                                            (scores_tile[[i, j]] - m_combined[i]).exp();
-                                    }
-                                }
-
-                                let exp_prev = Array1::<f32>::from_shape_fn(q_tile_size, |i| {
-                                    (m_prev[i] - m_combined[i]).exp()
-                                });
-
-                                // Update denominators
-                                let l_new = exp_scores.sum_axis(Axis(1));
-                                for i in 0..q_tile_size {
-                                    l_tile[i] = l_tile[i] * exp_prev[i] + l_new[i];
-                                }
-
-                                // Update outputs
-                                for i in 0..q_tile_size {
-                                    for d in 0..head_dim {
-                                        o_tile[[i, d]] *= exp_prev[i];
-                                    }
-                                }
-
-                                // Add new contribution using BLAS gemm: exp_scores @ V
-                                let v_tile_2d: Array2<f32> = v_tile
-                                    .into_shape_with_order((k_tile_size, head_dim))
-                                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                                if q_tile_size >= MIN_SIZE_FOR_BLAS
-                                    && k_tile_size >= MIN_SIZE_FOR_BLAS
-                                    && head_dim >= MIN_SIZE_FOR_BLAS
-                                {
-                                    // Use direct BLAS with beta=1.0 to add to existing o_tile
-                                    let exp_data = exp_scores.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "tiled_attention",
-                                            "exp_scores is standard layout",
-                                        )
-                                    })?;
-                                    let v_data = v_tile_2d.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "tiled_attention",
-                                            "v_tile_2d is standard layout",
-                                        )
-                                    })?;
-                                    let o_slice = o_tile.as_slice_mut().ok_or_else(|| {
-                                        TrustformersError::tensor_op_error(
-                                            "Failed to get mutable slice from output tile",
-                                            "SDPA::tiled_attention",
-                                        )
-                                    })?;
-                                    blas_sgemm(
-                                        1.0,
-                                        exp_data,
-                                        v_data,
-                                        1.0,
-                                        o_slice,
-                                        q_tile_size,
-                                        k_tile_size,
-                                        head_dim,
-                                    );
-                                } else {
-                                    // Fallback to ndarray dot for small tiles
-                                    let new_contrib = exp_scores.dot(&v_tile_2d);
-                                    for i in 0..q_tile_size {
-                                        for d in 0..head_dim {
-                                            o_tile[[i, d]] += new_contrib[[i, d]];
-                                        }
-                                    }
-                                }
-
-                                m_tile = m_combined;
-                            }
-
-                            // Normalize and store tile output
-                            for i in 0..q_tile_size {
-                                let inv_l = if l_tile[i] > 0.0 { 1.0 / l_tile[i] } else { 0.0 };
-                                for d in 0..head_dim {
-                                    output[[b, h, q_start + i, d]] = o_tile[[i, d]] * inv_l;
+                        if causal {
+                            for row in 0..q_rows {
+                                let allowed =
+                                    (q_start + row + 1).saturating_sub(k_start).min(k_rows);
+                                if allowed < k_rows {
+                                    score_tile[row * k_rows + allowed..(row + 1) * k_rows]
+                                        .fill(f32::NEG_INFINITY);
                                 }
                             }
+                        }
+                        if let Some(mask) = mask_view.as_ref() {
+                            for row in 0..q_rows {
+                                for column in 0..k_rows {
+                                    let penalty = mask.additive(
+                                        batch_index,
+                                        head_index,
+                                        q_start + row,
+                                        k_start + column,
+                                    );
+                                    if penalty != 0.0 {
+                                        score_tile[row * k_rows + column] += penalty;
+                                    }
+                                }
+                            }
+                        }
+
+                        for row in 0..q_rows {
+                            let row_slice = &mut score_tile[row * k_rows..(row + 1) * k_rows];
+                            let tile_max =
+                                row_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                            let previous_max = row_max[row];
+                            let combined_max = previous_max.max(tile_max);
+
+                            if combined_max == f32::NEG_INFINITY {
+                                row_slice.fill(0.0);
+                                continue;
+                            }
+
+                            let correction = if previous_max == f32::NEG_INFINITY {
+                                0.0
+                            } else {
+                                (previous_max - combined_max).exp()
+                            };
+
+                            let mut tile_sum = 0.0f32;
+                            for value in row_slice.iter_mut() {
+                                let exponential = (*value - combined_max).exp();
+                                *value = exponential;
+                                tile_sum += exponential;
+                            }
+
+                            // The running denominator uses the *undropped*
+                            // weights, so scaling the numerator below yields
+                            // exactly post-softmax dropout.
+                            row_sum[row] = row_sum[row] * correction + tile_sum;
+                            row_max[row] = combined_max;
+
+                            if let Some(prob) = dropout_prob {
+                                apply_attention_dropout(row_slice, prob);
+                            }
+
+                            if correction != 1.0 {
+                                for slot in
+                                    accumulator[row * head_dim..(row + 1) * head_dim].iter_mut()
+                                {
+                                    *slot *= correction;
+                                }
+                            }
+                        }
+
+                        blas_sgemm(
+                            1.0,
+                            score_tile,
+                            v_data,
+                            1.0,
+                            &mut accumulator[..q_rows * head_dim],
+                            q_rows,
+                            k_rows,
+                            head_dim,
+                        );
+                    }
+
+                    for row in 0..q_rows {
+                        let inverse = if row_sum[row] > 0.0 { 1.0 / row_sum[row] } else { 0.0 };
+                        let source = &accumulator[row * head_dim..(row + 1) * head_dim];
+                        let destination = &mut out_chunk
+                            [(q_start + row) * head_dim..(q_start + row + 1) * head_dim];
+                        for (slot, &value) in destination.iter_mut().zip(source.iter()) {
+                            *slot = value * inverse;
                         }
                     }
                 }
 
-                Ok(Tensor::F32(output))
+                Ok(())
             },
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor types for tiled SDPA",
-                "SDPA::tiled_attention",
-            )),
-        }
+        )?;
+
+        Self::finish(output, batch_size, num_heads, seq_q, head_dim)
     }
 
-    /// Fused SDPA kernel that combines attention computation with common post-processing
+    fn contiguous<'a>(matrix: &'a CowArray<'_, f32, Ix2>, what: &str) -> Result<&'a [f32]> {
+        matrix.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error(
+                &format!("{what} must be contiguous for GEMM"),
+                "SDPA",
+            )
+        })
+    }
+
+    fn finish(
+        data: Vec<f32>,
+        batch_size: usize,
+        num_heads: usize,
+        seq_q: usize,
+        head_dim: usize,
+    ) -> Result<Tensor> {
+        let array = ArrayD::from_shape_vec(IxDyn(&[batch_size, num_heads, seq_q, head_dim]), data)
+            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+        Ok(Tensor::F32(array))
+    }
+
+    /// Fused SDPA kernel with post-softmax attention dropout.
+    ///
+    /// Dropout is applied to the attention probabilities (as in the reference
+    /// transformer implementations) and only when `training` is true;
+    /// at inference the call is exactly [`SDPA::attention`].
     pub fn fused_attention_dropout(
         q: &Tensor,
         k: &Tensor,
@@ -764,9 +669,8 @@ impl SDPA {
         dropout_prob: f32,
         training: bool,
     ) -> Result<Tensor> {
-        // For now, just use standard attention (would add dropout in actual implementation)
-        let _ = (dropout_prob, training); // Suppress unused warnings
-        Self::attention(q, k, v, attn_mask, causal)
+        let dropout = if training { Some(dropout_prob) } else { None };
+        Self::attention_with_dropout(q, k, v, attn_mask, causal, dropout)
     }
 }
 
@@ -774,121 +678,344 @@ impl SDPA {
 mod tests {
     use super::*;
     use crate::tensor::Tensor;
-    use std::panic;
 
-    #[test]
-    fn test_standard_attention() {
-        // Wrap in catch_unwind to handle potential scirs2-core SIMD panics
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
-
-            let output = SDPA::attention(&q, &k, &v, None, false);
-            assert!(output.is_ok());
-
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![2, 4, 32, 64]);
-        });
-
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
+    /// Deterministic pseudo-random tensor so assertions are reproducible.
+    fn deterministic(shape: &[usize], seed: u32) -> Tensor {
+        let count: usize = shape.iter().product();
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity(count);
+        for _ in 0..count {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / (1u32 << 24) as f32;
+            data.push(unit * 2.0 - 1.0);
         }
+        Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(shape), data).expect("test tensor shape must be valid"),
+        )
+    }
+
+    /// Naive `softmax(scale * Q K^T + mask) V` reference.
+    fn naive_attention(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        mask: Option<&Tensor>,
+        causal: bool,
+    ) -> Vec<f32> {
+        let (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) = (q, k, v) else {
+            panic!("reference implementation requires F32 tensors");
+        };
+        let batch = q_arr.shape()[0];
+        let heads = q_arr.shape()[1];
+        let seq_q = q_arr.shape()[2];
+        let head_dim = q_arr.shape()[3];
+        let seq_k = k_arr.shape()[2];
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mask_view =
+            mask.map(|m| MaskView::new(m, batch, heads, seq_q, seq_k).expect("valid test mask"));
+
+        let mut out = vec![0.0f32; batch * heads * seq_q * head_dim];
+        for b in 0..batch {
+            for h in 0..heads {
+                for i in 0..seq_q {
+                    let mut scores = vec![f32::NEG_INFINITY; seq_k];
+                    for (j, score) in scores.iter_mut().enumerate() {
+                        if causal && j > i {
+                            continue;
+                        }
+                        let mut dot = 0.0f32;
+                        for d in 0..head_dim {
+                            dot += q_arr[[b, h, i, d]] * k_arr[[b, h, j, d]];
+                        }
+                        let mut value = dot * scale;
+                        if let Some(view) = mask_view.as_ref() {
+                            value += view.additive(b, h, i, j);
+                        }
+                        *score = value;
+                    }
+                    let max = scores.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+                    if max == f32::NEG_INFINITY {
+                        continue;
+                    }
+                    let exponentials: Vec<f32> = scores.iter().map(|&s| (s - max).exp()).collect();
+                    let sum: f32 = exponentials.iter().sum();
+                    for d in 0..head_dim {
+                        let mut acc = 0.0f32;
+                        for (j, &weight) in exponentials.iter().enumerate() {
+                            acc += weight * v_arr[[b, h, j, d]];
+                        }
+                        out[((b * heads + h) * seq_q + i) * head_dim + d] = acc / sum;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn max_abs_difference(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "output length mismatch");
+        a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()))
     }
 
     #[test]
-    fn test_small_sequence_attention() {
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
+    fn blas_sgemm_matches_reference_product() {
+        // C(2x3) = 2.0 * A(2x4) * B(4x3) + 1.0 * C
+        let a: Vec<f32> = (0..8).map(|x| x as f32 * 0.5 - 1.0).collect();
+        let b: Vec<f32> = (0..12).map(|x| 1.0 - x as f32 * 0.25).collect();
+        let mut c = vec![0.5f32; 6];
 
-            let output = SDPA::small_sequence_attention(&q, &k, &v, None, false);
-            assert!(output.is_ok());
-
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![1, 8, 128, 64]);
-        });
-
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
+        let a_arr = Array2::from_shape_vec((2, 4), a.clone()).expect("shape");
+        let b_arr = Array2::from_shape_vec((4, 3), b.clone()).expect("shape");
+        let mut expected = a_arr.dot(&b_arr);
+        expected.mapv_inplace(|x| x * 2.0);
+        for (slot, previous) in expected.iter_mut().zip(c.iter()) {
+            *slot += previous;
         }
+
+        blas_sgemm(2.0, &a, &b, 1.0, &mut c, 2, 4, 3);
+        let expected_data: Vec<f32> = expected.iter().copied().collect();
+        assert!(
+            max_abs_difference(&c, &expected_data) < 1e-5,
+            "blas_sgemm mismatch: {c:?} vs {expected_data:?}"
+        );
     }
 
     #[test]
-    fn test_tiled_attention() {
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
+    fn blas_sgemm_nt_matches_transposed_product() {
+        // C(3x2) = A(3x5) * B(2x5)^T
+        let a: Vec<f32> = (0..15).map(|x| (x as f32).sin()).collect();
+        let b: Vec<f32> = (0..10).map(|x| (x as f32).cos()).collect();
+        let mut c = vec![0.0f32; 6];
 
-            let output = SDPA::tiled_attention(&q, &k, &v, None, false);
-            assert!(output.is_ok());
+        let a_arr = Array2::from_shape_vec((3, 5), a.clone()).expect("shape");
+        let b_arr = Array2::from_shape_vec((2, 5), b.clone()).expect("shape");
+        let expected = a_arr.dot(&b_arr.t());
 
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![1, 4, 512, 64]);
-        });
-
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
-        }
+        blas_sgemm_nt(1.0, &a, &b, 0.0, &mut c, 3, 5, 2);
+        let expected_data: Vec<f32> = expected.iter().copied().collect();
+        assert!(
+            max_abs_difference(&c, &expected_data) < 1e-5,
+            "blas_sgemm_nt mismatch: {c:?} vs {expected_data:?}"
+        );
     }
 
     #[test]
-    fn test_causal_attention() {
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+    fn blas_sgemm_nt_accumulates_with_beta() {
+        let a: Vec<f32> = (0..6).map(|x| x as f32).collect();
+        let b: Vec<f32> = (0..6).map(|x| (x as f32) * 0.5).collect();
+        let mut c = vec![1.0f32; 4];
 
-            let output = SDPA::attention(&q, &k, &v, None, true);
-            assert!(output.is_ok());
-
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![1, 2, 16, 32]);
-        });
-
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
+        let a_arr = Array2::from_shape_vec((2, 3), a.clone()).expect("shape");
+        let b_arr = Array2::from_shape_vec((2, 3), b.clone()).expect("shape");
+        let mut expected = a_arr.dot(&b_arr.t());
+        for slot in expected.iter_mut() {
+            *slot += 1.0;
         }
+
+        blas_sgemm_nt(1.0, &a, &b, 1.0, &mut c, 2, 3, 2);
+        let expected_data: Vec<f32> = expected.iter().copied().collect();
+        assert!(
+            max_abs_difference(&c, &expected_data) < 1e-5,
+            "blas_sgemm_nt beta accumulation mismatch: {c:?} vs {expected_data:?}"
+        );
+    }
+
+    fn check_dense_against_reference(
+        shape: (usize, usize, usize, usize, usize),
+        causal: bool,
+        mask: Option<Tensor>,
+    ) {
+        let (batch, heads, seq_q, seq_k, head_dim) = shape;
+        let q = deterministic(&[batch, heads, seq_q, head_dim], 1);
+        let k = deterministic(&[batch, heads, seq_k, head_dim], 2);
+        let v = deterministic(&[batch, heads, seq_k, head_dim], 3);
+
+        let output = SDPA::attention(&q, &k, &v, mask.as_ref(), causal)
+            .expect("SDPA attention must succeed");
+        assert_eq!(output.shape(), vec![batch, heads, seq_q, head_dim]);
+
+        let expected = naive_attention(&q, &k, &v, mask.as_ref(), causal);
+        let actual = output.data().expect("output data must be readable");
+        let difference = max_abs_difference(&actual, &expected);
+        assert!(
+            difference < 1e-4,
+            "SDPA deviates from the naive reference by {difference} for shape {shape:?}"
+        );
     }
 
     #[test]
-    fn test_attention_with_mask() {
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
-            let mask = Tensor::ones(&[1, 2, 16, 16]).expect("Failed to create ones tensor");
-
-            let output = SDPA::attention(&q, &k, &v, Some(&mask), false);
-            assert!(output.is_ok());
-
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![1, 2, 16, 32]);
-        });
-
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
-        }
+    fn dense_attention_matches_reference() {
+        check_dense_against_reference((2, 4, 32, 32, 64), false, None);
     }
 
     #[test]
-    fn test_fused_attention_dropout() {
-        let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
-            let k = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
-            let v = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
+    fn dense_attention_matches_reference_small_matrices() {
+        // Below MIN_SIZE_FOR_BLAS: exercises the ndarray fallback path.
+        check_dense_against_reference((1, 2, 5, 7, 4), false, None);
+    }
 
-            let output = SDPA::fused_attention_dropout(&q, &k, &v, None, false, 0.1, true);
-            assert!(output.is_ok());
+    #[test]
+    fn dense_attention_matches_reference_causal() {
+        check_dense_against_reference((1, 2, 16, 16, 32), true, None);
+    }
 
-            let output = output.expect("operation failed in test");
-            assert_eq!(output.shape(), vec![1, 4, 64, 32]);
-        });
+    #[test]
+    fn dense_attention_simd_softmax_path_matches_reference() {
+        // seq_k >= MIN_SIZE_FOR_SIMD_SOFTMAX, no masking: SIMD softmax path.
+        check_dense_against_reference((1, 2, 64, 64, 32), false, None);
+    }
 
-        if result.is_err() {
-            eprintln!("Skipping SDPA test: SIMD operation failed (scirs2-core issue)");
+    #[test]
+    fn dense_attention_matches_reference_with_mask() {
+        let seq = 16;
+        let mut data = vec![1.0f32; seq];
+        data[5] = 0.0;
+        data[9] = 0.0;
+        let mask = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 1, 1, seq]), data).expect("valid mask shape"),
+        );
+        check_dense_against_reference((1, 2, seq, seq, 32), false, Some(mask));
+    }
+
+    #[test]
+    fn tiled_attention_matches_reference() {
+        let (batch, heads, seq, head_dim) = (1, 2, 300, 32);
+        let q = deterministic(&[batch, heads, seq, head_dim], 4);
+        let k = deterministic(&[batch, heads, seq, head_dim], 5);
+        let v = deterministic(&[batch, heads, seq, head_dim], 6);
+
+        let tiled = SDPA::tiled_attention(&q, &k, &v, None, true, None)
+            .expect("tiled attention must succeed");
+        assert_eq!(tiled.shape(), vec![batch, heads, seq, head_dim]);
+
+        let expected = naive_attention(&q, &k, &v, None, true);
+        let actual = tiled.data().expect("output data must be readable");
+        let difference = max_abs_difference(&actual, &expected);
+        assert!(
+            difference < 1e-4,
+            "tiled SDPA deviates from the naive reference by {difference}"
+        );
+    }
+
+    #[test]
+    fn tiled_and_dense_agree() {
+        let q = deterministic(&[1, 2, 300, 16], 7);
+        let k = deterministic(&[1, 2, 300, 16], 8);
+        let v = deterministic(&[1, 2, 300, 16], 9);
+
+        let dense = SDPA::dense_attention(&q, &k, &v, None, false, None).expect("dense");
+        let tiled = SDPA::tiled_attention(&q, &k, &v, None, false, None).expect("tiled");
+        let difference = max_abs_difference(
+            &dense.data().expect("dense data"),
+            &tiled.data().expect("tiled data"),
+        );
+        assert!(
+            difference < 1e-4,
+            "dense and tiled SDPA disagree by {difference}"
+        );
+    }
+
+    #[test]
+    fn causal_attention_ignores_future_tokens() {
+        let seq = 24;
+        let head_dim = 16;
+        let q = deterministic(&[1, 1, seq, head_dim], 10);
+        let k = deterministic(&[1, 1, seq, head_dim], 11);
+        let v = deterministic(&[1, 1, seq, head_dim], 12);
+
+        let base = SDPA::attention(&q, &k, &v, None, true).expect("baseline");
+        let (Tensor::F32(k_arr), Tensor::F32(v_arr)) = (&k, &v) else {
+            panic!("expected F32 tensors");
+        };
+        let mut k_perturbed = k_arr.clone();
+        let mut v_perturbed = v_arr.clone();
+        for position in seq / 2..seq {
+            for dim in 0..head_dim {
+                k_perturbed[[0, 0, position, dim]] += 2.0;
+                v_perturbed[[0, 0, position, dim]] -= 3.0;
+            }
         }
+        let perturbed = SDPA::attention(
+            &q,
+            &Tensor::F32(k_perturbed),
+            &Tensor::F32(v_perturbed),
+            None,
+            true,
+        )
+        .expect("perturbed");
+
+        let base_data = base.data().expect("base data");
+        let perturbed_data = perturbed.data().expect("perturbed data");
+        let prefix = (seq / 2) * head_dim;
+        assert!(
+            max_abs_difference(&base_data[..prefix], &perturbed_data[..prefix]) < 1e-5,
+            "causal SDPA leaked future information"
+        );
+    }
+
+    #[test]
+    fn attention_mask_removes_masked_keys() {
+        // Attending over two keys where the second is masked out must return
+        // exactly the first value row.
+        let q = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 1, 1, 2]), vec![1.0, 0.0]).expect("shape"),
+        );
+        let k = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 1, 2, 2]), vec![1.0, 0.0, 1.0, 0.0]).expect("shape"),
+        );
+        let v = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 1, 2, 2]), vec![5.0, 7.0, -11.0, -13.0])
+                .expect("shape"),
+        );
+        let mask = Tensor::F32(
+            ArrayD::from_shape_vec(IxDyn(&[1, 1, 1, 2]), vec![1.0, 0.0]).expect("shape"),
+        );
+
+        let output = SDPA::attention(&q, &k, &v, Some(&mask), false).expect("masked attention");
+        let data = output.data().expect("output data");
+        assert!((data[0] - 5.0).abs() < 1e-5, "got {data:?}");
+        assert!((data[1] - 7.0).abs() < 1e-5, "got {data:?}");
+    }
+
+    #[test]
+    fn fused_attention_dropout_actually_drops() {
+        let q = deterministic(&[1, 2, 64, 32], 13);
+        let k = deterministic(&[1, 2, 64, 32], 14);
+        let v = deterministic(&[1, 2, 64, 32], 15);
+
+        let inference = SDPA::fused_attention_dropout(&q, &k, &v, None, false, 0.5, false)
+            .expect("inference pass");
+        let baseline = SDPA::attention(&q, &k, &v, None, false).expect("baseline");
+        assert!(
+            max_abs_difference(
+                &inference.data().expect("data"),
+                &baseline.data().expect("data")
+            ) < 1e-6,
+            "dropout must be inert outside training"
+        );
+
+        let training = SDPA::fused_attention_dropout(&q, &k, &v, None, false, 0.5, true)
+            .expect("training pass");
+        assert!(
+            max_abs_difference(
+                &training.data().expect("data"),
+                &baseline.data().expect("data")
+            ) > 1e-3,
+            "dropout_prob and training must actually change the result"
+        );
+    }
+
+    #[test]
+    fn fused_attention_dropout_rejects_invalid_probability() {
+        let q = deterministic(&[1, 1, 4, 4], 16);
+        assert!(SDPA::fused_attention_dropout(&q, &q, &q, None, false, 1.0, true).is_err());
+        assert!(SDPA::fused_attention_dropout(&q, &q, &q, None, false, -0.1, true).is_err());
+    }
+
+    #[test]
+    fn rejects_mismatched_shapes() {
+        let q = deterministic(&[1, 2, 4, 8], 17);
+        let k = deterministic(&[1, 2, 4, 4], 18);
+        assert!(SDPA::attention(&q, &k, &k, None, false).is_err());
     }
 }

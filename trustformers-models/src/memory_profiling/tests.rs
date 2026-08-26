@@ -18,29 +18,148 @@ async fn test_profiler_creation() {
 
 #[tokio::test]
 async fn test_metrics_collection() {
-    let metrics = profiler::MemoryProfiler::collect_memory_metrics()
-        .await
-        .expect("operation failed");
+    let metrics =
+        profiler::MemoryProfiler::collect_memory_metrics(system::TrackedAllocationStats::default())
+            .await
+            .expect("operation failed");
     assert!(metrics.total_memory_mb > 0.0);
     assert!(metrics.timestamp > UNIX_EPOCH);
+}
+
+/// The collected metrics must be *measurements*, not a fabricated curve: the
+/// reported resident set size has to agree with what the OS reports for this
+/// process, and it must be bounded by the machine's physical memory.
+#[tokio::test]
+async fn test_metrics_are_real_process_measurements() {
+    let system_info =
+        profiler::MemoryProfiler::get_system_memory_info().expect("system memory must be readable");
+    let metrics =
+        profiler::MemoryProfiler::collect_memory_metrics(system::TrackedAllocationStats::default())
+            .await
+            .expect("metrics collection must succeed");
+
+    let total_mb = system_info.total_memory as f64 / (1024.0 * 1024.0);
+    assert!(
+        total_mb > 64.0,
+        "the machine must report a plausible amount of RAM, got {total_mb} MB"
+    );
+    // The 16 GB / 8 GB constants the previous implementation returned would only
+    // match a real machine by coincidence; assert against the live reading instead.
+    assert!(system_info.available_memory <= system_info.total_memory);
+    assert!(system_info.cached_memory.is_none());
+
+    let process = profiler::MemoryProfiler::get_process_memory_info()
+        .expect("process memory must be readable");
+    assert!(process.resident_mb > 0.0);
+    assert!(process.resident_mb < total_mb);
+    assert!(process.peak_resident_mb >= process.resident_mb);
+    assert!(
+        (metrics.total_memory_mb - process.resident_mb).abs() < 256.0,
+        "collected RSS {} MB must track the live reading {} MB",
+        metrics.total_memory_mb,
+        process.resident_mb
+    );
+
+    // Fields with no portable data source must be absent, not invented.
+    assert!(metrics.heap_memory_mb.is_none());
+    assert!(metrics.stack_memory_mb.is_none());
+    assert!(metrics.gpu_memory_mb.is_none());
+    assert_eq!(metrics.allocated_objects, 0);
+}
+
+/// Two consecutive samples must not differ by a synthetic sine wave: with no
+/// work in between, the resident set size is essentially unchanged.
+#[tokio::test]
+async fn test_repeated_samples_track_the_process() {
+    let first =
+        profiler::MemoryProfiler::collect_memory_metrics(system::TrackedAllocationStats::default())
+            .await
+            .expect("first sample");
+    let second =
+        profiler::MemoryProfiler::collect_memory_metrics(system::TrackedAllocationStats::default())
+            .await
+            .expect("second sample");
+
+    let delta = (second.total_memory_mb - first.total_memory_mb).abs();
+    assert!(
+        delta < 64.0,
+        "an idle process must not swing by {delta} MB between samples"
+    );
+}
+
+/// Allocation counters must come from real registrations.
+#[tokio::test]
+async fn test_allocation_counters_are_registered_events() {
+    // Keep the profiler's report directory out of the working tree.
+    let config = types::ProfilerConfig {
+        output_dir: std::env::temp_dir()
+            .join("trustformers_memory_profiler_alloc_test")
+            .to_string_lossy()
+            .into_owned(),
+        ..types::ProfilerConfig::default()
+    };
+    let profiler = profiler::MemoryProfiler::new(config).expect("profiler creation");
+
+    assert_eq!(
+        profiler.allocation_stats().expect("stats").allocated_objects,
+        0
+    );
+
+    let info = types::AllocationInfo {
+        id: uuid::Uuid::new_v4(),
+        timestamp: SystemTime::now(),
+        size_bytes: 4096,
+        location: "test".to_string(),
+        stack_trace: Vec::new(),
+        object_type: "Vec<f32>".to_string(),
+        is_leaked: false,
+    };
+    let id = profiler.record_allocation(info).expect("record allocation");
+
+    let stats = profiler.allocation_stats().expect("stats");
+    assert_eq!(stats.allocated_objects, 1);
+    assert_eq!(stats.active_allocations, 1);
+    assert_eq!(stats.active_bytes, 4096);
+    assert_eq!(stats.deallocated_objects, 0);
+
+    assert!(profiler.record_deallocation(id).expect("record deallocation"));
+    let stats = profiler.allocation_stats().expect("stats");
+    assert_eq!(stats.allocated_objects, 1);
+    assert_eq!(stats.deallocated_objects, 1);
+    assert_eq!(stats.active_allocations, 0);
+
+    // Unknown ids must not inflate the counters.
+    assert!(!profiler.record_deallocation(uuid::Uuid::new_v4()).expect("record deallocation"));
+    assert_eq!(
+        profiler.allocation_stats().expect("stats").deallocated_objects,
+        1
+    );
 }
 
 #[test]
 fn test_fragmentation_calculation() {
     let info = system::ProcessMemoryInfo {
-        total_mb: 1000.0,
-        heap_mb: 800.0,
-        stack_mb: 64.0,
-        peak_mb: 1200.0,
-        allocated_objects: 1000,
-        deallocated_objects: 500,
-        active_allocations: 500,
-        gc_collections: 10,
-        gc_time_ms: 150.0,
+        resident_mb: 1000.0,
+        virtual_mb: 2000.0,
+        peak_resident_mb: 1200.0,
     };
 
-    let fragmentation = profiler::MemoryProfiler::calculate_fragmentation_ratio(&info);
-    assert!((0.0..=1.0).contains(&fragmentation));
+    // Nothing tracked -> nothing to claim.
+    let untracked = profiler::MemoryProfiler::calculate_fragmentation_ratio(
+        &info,
+        system::TrackedAllocationStats::default(),
+    );
+    assert_eq!(untracked, 0.0);
+
+    // 250 MB of tracked allocations inside a 1000 MB resident set.
+    let tracked = system::TrackedAllocationStats {
+        allocated_objects: 10,
+        deallocated_objects: 0,
+        active_allocations: 10,
+        active_bytes: 250 * 1024 * 1024,
+    };
+    let fragmentation = profiler::MemoryProfiler::calculate_fragmentation_ratio(&info, tracked);
+    assert!((fragmentation - 0.75).abs() < 1e-6, "got {fragmentation}");
 }
 
 #[tokio::test]
@@ -102,16 +221,15 @@ async fn test_alert_analysis_optimization() {
     let high_memory_metrics = types::MemoryMetrics {
         timestamp: SystemTime::now(),
         total_memory_mb: 2000.0, // Above default threshold of 1024
-        heap_memory_mb: 1800.0,
-        stack_memory_mb: 64.0,
+        virtual_memory_mb: 2000.0,
+        heap_memory_mb: Some(1800.0),
+        stack_memory_mb: Some(64.0),
         gpu_memory_mb: None,
         peak_memory_mb: 2000.0,
         allocated_objects: 1000,
         deallocated_objects: 500,
         active_allocations: 500,
         memory_fragmentation_ratio: 0.1,
-        gc_collections: 10,
-        gc_time_ms: 100.0,
         memory_growth_rate_mb_per_sec: 60.0, // Above default threshold of 50.0
     };
 
@@ -186,16 +304,15 @@ fn test_metrics_history_bounded() {
         history.push_back(types::MemoryMetrics {
             timestamp: SystemTime::now(),
             total_memory_mb: i as f64,
-            heap_memory_mb: i as f64,
-            stack_memory_mb: 64.0,
+            virtual_memory_mb: i as f64,
+            heap_memory_mb: Some(i as f64),
+            stack_memory_mb: Some(64.0),
             gpu_memory_mb: None,
             peak_memory_mb: i as f64,
             allocated_objects: i,
             deallocated_objects: 0,
             active_allocations: i,
             memory_fragmentation_ratio: 0.1,
-            gc_collections: 0,
-            gc_time_ms: 0.0,
             memory_growth_rate_mb_per_sec: 0.0,
         });
 
@@ -230,16 +347,15 @@ async fn test_adaptive_thresholds_system() {
     let high_memory_metrics = types::MemoryMetrics {
         timestamp: SystemTime::now() + std::time::Duration::from_secs(360),
         total_memory_mb: 2000.0, // Much higher than base threshold
-        heap_memory_mb: 1800.0,
-        stack_memory_mb: 64.0,
+        virtual_memory_mb: 2000.0,
+        heap_memory_mb: Some(1800.0),
+        stack_memory_mb: Some(64.0),
         gpu_memory_mb: None,
         peak_memory_mb: 2000.0,
         allocated_objects: 1000,
         deallocated_objects: 500,
         active_allocations: 500,
-        memory_fragmentation_ratio: 0.5, // High fragmentation
-        gc_collections: 10,
-        gc_time_ms: 100.0,
+        memory_fragmentation_ratio: 0.5,     // High fragmentation
         memory_growth_rate_mb_per_sec: 25.0, // Very high growth
     };
 
@@ -278,16 +394,15 @@ async fn test_memory_prediction_system() {
             let metrics = types::MemoryMetrics {
                 timestamp: base_time + Duration::from_secs(i * 10),
                 total_memory_mb: 1000.0 + (i as f64 * 2.0), // Steadily increasing
-                heap_memory_mb: 900.0 + (i as f64 * 1.8),
-                stack_memory_mb: 64.0,
+                virtual_memory_mb: 1000.0 + (i as f64 * 2.0),
+                heap_memory_mb: Some(900.0 + (i as f64 * 1.8)),
+                stack_memory_mb: Some(64.0),
                 gpu_memory_mb: None,
                 peak_memory_mb: 1000.0 + (i as f64 * 2.0),
                 allocated_objects: 1000 + i * 10,
                 deallocated_objects: 500,
                 active_allocations: 500 + i * 10,
                 memory_fragmentation_ratio: 0.1,
-                gc_collections: 10,
-                gc_time_ms: 100.0,
                 memory_growth_rate_mb_per_sec: 2.0,
             };
             history.push_back(metrics);
@@ -298,16 +413,15 @@ async fn test_memory_prediction_system() {
     let latest_metrics = types::MemoryMetrics {
         timestamp: base_time + Duration::from_secs(700),
         total_memory_mb: 1140.0,
-        heap_memory_mb: 1026.0,
-        stack_memory_mb: 64.0,
+        virtual_memory_mb: 1140.0,
+        heap_memory_mb: Some(1026.0),
+        stack_memory_mb: Some(64.0),
         gpu_memory_mb: None,
         peak_memory_mb: 1140.0,
         allocated_objects: 1700,
         deallocated_objects: 500,
         active_allocations: 1200,
         memory_fragmentation_ratio: 0.1,
-        gc_collections: 10,
-        gc_time_ms: 100.0,
         memory_growth_rate_mb_per_sec: 2.0,
     };
 
@@ -442,16 +556,15 @@ async fn test_adaptive_threshold_edge_cases() {
     let extreme_metrics = types::MemoryMetrics {
         timestamp: SystemTime::now() + std::time::Duration::from_secs(360),
         total_memory_mb: 100000.0, // 100 GB
-        heap_memory_mb: 95000.0,
-        stack_memory_mb: 64.0,
+        virtual_memory_mb: 100000.0,
+        heap_memory_mb: Some(95000.0),
+        stack_memory_mb: Some(64.0),
         gpu_memory_mb: None,
         peak_memory_mb: 100000.0,
         allocated_objects: 1000000,
         deallocated_objects: 500000,
         active_allocations: 500000,
         memory_fragmentation_ratio: 0.8, // Very high fragmentation
-        gc_collections: 100,
-        gc_time_ms: 5000.0,                    // 5 seconds of GC
         memory_growth_rate_mb_per_sec: 1000.0, // Extremely rapid growth
     };
 
@@ -473,16 +586,15 @@ async fn test_adaptive_threshold_edge_cases() {
     let minimal_metrics = types::MemoryMetrics {
         timestamp: SystemTime::now(),
         total_memory_mb: 1.0, // Very low
-        heap_memory_mb: 0.5,
-        stack_memory_mb: 0.5,
+        virtual_memory_mb: 1.0,
+        heap_memory_mb: Some(0.5),
+        stack_memory_mb: Some(0.5),
         gpu_memory_mb: None,
         peak_memory_mb: 1.0,
         allocated_objects: 1,
         deallocated_objects: 0,
         active_allocations: 1,
         memory_fragmentation_ratio: 0.0, // No fragmentation
-        gc_collections: 0,
-        gc_time_ms: 0.0,
         memory_growth_rate_mb_per_sec: 0.0,
     };
 
@@ -550,16 +662,15 @@ fn test_statistical_analyzer() {
         metrics.push(types::MemoryMetrics {
             timestamp: SystemTime::now(),
             total_memory_mb: memory_mb,
-            heap_memory_mb: memory_mb * 0.8,
-            stack_memory_mb: memory_mb * 0.1,
+            virtual_memory_mb: memory_mb,
+            heap_memory_mb: Some(memory_mb * 0.8),
+            stack_memory_mb: Some(memory_mb * 0.1),
             gpu_memory_mb: Some(memory_mb * 0.5),
             peak_memory_mb: memory_mb * 1.2,
             allocated_objects: (1000 + i) as u64,
             deallocated_objects: (900 + i) as u64,
             active_allocations: 100,
             memory_fragmentation_ratio: 0.15,
-            gc_collections: 10,
-            gc_time_ms: 5.0,
             memory_growth_rate_mb_per_sec: 2.0,
         });
     }
@@ -590,16 +701,15 @@ fn test_anomaly_detection() {
         metrics.push(types::MemoryMetrics {
             timestamp: SystemTime::now(),
             total_memory_mb: memory_mb,
-            heap_memory_mb: memory_mb * 0.8,
-            stack_memory_mb: memory_mb * 0.1,
+            virtual_memory_mb: memory_mb,
+            heap_memory_mb: Some(memory_mb * 0.8),
+            stack_memory_mb: Some(memory_mb * 0.1),
             gpu_memory_mb: Some(memory_mb * 0.5),
             peak_memory_mb: memory_mb * 1.2,
             allocated_objects: (1000 + i) as u64,
             deallocated_objects: (900 + i) as u64,
             active_allocations: 100,
             memory_fragmentation_ratio: 0.15,
-            gc_collections: 10,
-            gc_time_ms: 5.0,
             memory_growth_rate_mb_per_sec: 2.0,
         });
     }
@@ -631,16 +741,15 @@ fn test_sustained_growth_detection() {
         metrics.push(types::MemoryMetrics {
             timestamp: SystemTime::now(),
             total_memory_mb: memory_mb,
-            heap_memory_mb: memory_mb * 0.8,
-            stack_memory_mb: memory_mb * 0.1,
+            virtual_memory_mb: memory_mb,
+            heap_memory_mb: Some(memory_mb * 0.8),
+            stack_memory_mb: Some(memory_mb * 0.1),
             gpu_memory_mb: Some(memory_mb * 0.5),
             peak_memory_mb: memory_mb * 1.2,
             allocated_objects: (1000 + i) as u64,
             deallocated_objects: (900 + i) as u64,
             active_allocations: 100,
             memory_fragmentation_ratio: 0.15,
-            gc_collections: 10,
-            gc_time_ms: 5.0,
             memory_growth_rate_mb_per_sec: 2.0,
         });
     }

@@ -177,6 +177,7 @@ mod tests {
     use crate::auto::types::{
         AudioMetadata, DocumentFormat, DocumentMetadata, FeatureInput, ImageFormat, ImageMetadata,
     };
+    use crate::error::TrustformersError;
 
     #[test]
     fn test_vision_feature_extractor() {
@@ -205,12 +206,14 @@ mod tests {
             }),
         };
 
-        let result = extractor.extract_features(&input);
-        assert!(result.is_ok());
-
-        let output = result.expect("operation failed in test");
-        assert_eq!(output.features.len(), 768);
-        assert_eq!(output.shape, vec![768]);
+        // The vision extractor owns no encoder, so it reports the request as
+        // unserviceable instead of returning an all-zero 768-d embedding.
+        let err = extractor.extract_features(&input).expect_err("no vision encoder is attached");
+        assert!(
+            matches!(err, TrustformersError::FeatureUnavailable { .. })
+                || matches!(err, TrustformersError::InvalidInput { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

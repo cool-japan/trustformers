@@ -227,9 +227,14 @@ impl QuantumClassicalModel {
                 }
             },
             QuantumHybridArchitectureModel::QuantumApproximateOptimization(optimizer) => {
-                let optimized_output = optimizer.optimize(&hidden_states)?;
+                // A forward pass measures the circuit with the current
+                // parameters. Optimizing the variational angles is an explicit
+                // training step (`QuantumOptimizer::optimize`), not something a
+                // forward pass may do implicitly — that would run
+                // `max_quantum_iterations` full circuit optimizations per call.
+                let measured_output = optimizer.forward(&hidden_states)?;
                 QuantumClassicalModelOutput {
-                    hidden_states: optimized_output,
+                    hidden_states: measured_output,
                     quantum_measurements: None,
                     classical_activations: Some(hidden_states),
                     quantum_attention_weights: None,
@@ -270,10 +275,14 @@ impl QuantumClassicalModel {
         self.config.get_quantum_advantage_factor()
     }
 
-    /// Get quantum fidelity
-    pub fn get_quantum_fidelity(&self) -> f64 {
-        // Simplified fidelity calculation
-        1.0 - self.config.quantum_noise_variance
+    /// State fidelity `|⟨0…0|ψ(θ)⟩|²` of the model's variational circuit.
+    ///
+    /// This runs the configured ansatz on an exact statevector simulator with
+    /// the optimizer's current rotation angles and reports the measured
+    /// overlap with the all-zero reference state. It is a computed quantity;
+    /// an error is returned when the circuit cannot be simulated.
+    pub fn get_quantum_fidelity(&self) -> Result<f64> {
+        self.quantum_optimizer.reference_fidelity()
     }
 
     /// Get parameter count
@@ -398,20 +407,23 @@ pub struct QuantumClassicalModelStats {
 }
 
 impl QuantumClassicalModel {
-    /// Get model statistics
-    pub fn get_stats(&self) -> QuantumClassicalModelStats {
+    /// Get model statistics.
+    ///
+    /// Errors when the quantum fidelity cannot be measured, rather than
+    /// substituting a placeholder value.
+    pub fn get_stats(&self) -> Result<QuantumClassicalModelStats> {
         let total_params = self.parameter_count();
         let quantum_params = self.quantum_layers.len() * self.config.get_quantum_parameters_count();
-        let classical_params = total_params - quantum_params;
+        let classical_params = total_params.saturating_sub(quantum_params);
 
-        QuantumClassicalModelStats {
+        Ok(QuantumClassicalModelStats {
             total_parameters: total_params,
             classical_parameters: classical_params,
             quantum_parameters: quantum_params,
             memory_usage_mb: self.memory_usage(),
             quantum_advantage_factor: self.get_quantum_advantage(),
-            quantum_fidelity: self.get_quantum_fidelity(),
+            quantum_fidelity: self.get_quantum_fidelity()?,
             architecture_type: self.config.architecture.clone(),
-        }
+        })
     }
 }

@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
-use super::functions::{CollectionErrorHandler, PublishErrorHandler, SampleRateAlgorithm};
+use super::functions::{CollectionErrorHandler, SampleRateAlgorithm};
 
 #[derive(Debug, Default)]
 pub struct RateControllerStats {
@@ -1231,8 +1231,6 @@ pub struct MetricsPublisher {
     publish_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Message queue for batching
     message_queue: Arc<Mutex<VecDeque<PublishMessage>>>,
-    /// Error handler
-    error_handler: Arc<Mutex<Box<dyn PublishErrorHandler + Send + Sync>>>,
     /// Rate limiter
     rate_limiter: Arc<PublishRateLimiter>,
 }
@@ -1247,7 +1245,6 @@ impl MetricsPublisher {
             health: Arc::new(AtomicBool::new(true)),
             publish_task: Arc::new(Mutex::new(None)),
             message_queue: Arc::new(Mutex::new(VecDeque::new())),
-            error_handler: Arc::new(Mutex::new(Box::new(DefaultPublishErrorHandler::new()))),
             rate_limiter: Arc::new(PublishRateLimiter::new()),
         }
     }
@@ -1388,8 +1385,6 @@ pub struct PerformanceImpactMonitor {
     current_overhead: Arc<RwLock<OverheadMeasurement>>,
     /// Impact analysis results
     impact_analysis: Arc<RwLock<ImpactAnalysis>>,
-    /// Monitor configuration
-    config: Arc<RwLock<ImpactMonitorConfig>>,
     /// Impact threshold alerts
     alerts: Arc<Mutex<VecDeque<ImpactAlert>>>,
     /// Impact trend analyzer
@@ -1407,7 +1402,6 @@ impl PerformanceImpactMonitor {
             baseline: Arc::new(RwLock::new(PerformanceBaseline::default())),
             current_overhead: Arc::new(RwLock::new(OverheadMeasurement::default())),
             impact_analysis: Arc::new(RwLock::new(ImpactAnalysis::default())),
-            config: Arc::new(RwLock::new(ImpactMonitorConfig)),
             alerts: Arc::new(Mutex::new(VecDeque::new())),
             trend_analyzer: Arc::new(ImpactTrendAnalyzer::new()),
             recommendation_engine: Arc::new(ImpactRecommendationEngine::new()),

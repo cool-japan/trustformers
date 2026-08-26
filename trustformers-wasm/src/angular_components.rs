@@ -337,9 +337,22 @@ export interface ModelState {{
 
 export interface ModelConfig {{
   modelUrl: string;
+  vocabUrl?: string;
+  modelType: string;
   autoLoad: boolean;
   debugMode: boolean;
 }}
+
+// Maps a friendly model-type string to the real `wasmModule.ModelArchitecture`
+// enum variant (mirrors `resolve_model_architecture` in `lib.rs`).
+const MODEL_ARCHITECTURES: Record<string, string> = {{
+  bert: 'Bert',
+  gpt2: 'GPT2',
+  gpt: 'GPT2',
+  t5: 'T5',
+  llama: 'Llama',
+  mistral: 'Mistral'
+}};
 
 @Injectable({{
   providedIn: 'root'
@@ -347,6 +360,11 @@ export interface ModelConfig {{
 export class TrustFormerModelService {{
   private wasmModule: any = null;
   private session: any = null;
+  // Real `TextGenerationPipeline` (WasmModel + WasmTokenizer, both loaded
+  // with real data), built only when `vocabUrl` is configured - never with
+  // a fabricated vocabulary. `TrustFormerInferenceService`/
+  // `TrustFormerStreamingService` read this via `getPipeline()`.
+  private pipeline: any = null;
 
   private modelStateSubject = new BehaviorSubject<ModelState>({{
     isLoading: false,
@@ -359,6 +377,8 @@ export class TrustFormerModelService {{
 
   private config: ModelConfig = {{
     modelUrl: '{}',
+    vocabUrl: undefined,
+    modelType: 'gpt2',
     autoLoad: {},
     debugMode: {}
   }};
@@ -390,10 +410,8 @@ export class TrustFormerModelService {{
         await this.wasmModule.default();
       }}
 
-      // Create inference session
-      this.session = new this.wasmModule.InferenceSession('transformer');
-
-      // Initialize with auto device selection
+      // Create the higher-level tensor-in/tensor-out inference session.
+      this.session = new this.wasmModule.InferenceSession(this.config.modelType);
       await this.session.initialize_with_auto_device();
 
       // Enable debug logging if configured
@@ -408,9 +426,34 @@ export class TrustFormerModelService {{
         'model_' + url.split('/').pop(),
         url,
         'TrustFormer Model',
-        'transformer',
+        this.config.modelType,
         '1.0.0'
       );
+
+      // Build a real text-generation pipeline for the inference/streaming
+      // services.
+      if (this.config.vocabUrl) {{
+        const modelResponse = await fetch(url);
+        if (!modelResponse.ok) {{
+          throw new Error(`Failed to fetch model weights: HTTP ${{modelResponse.status}}`);
+        }}
+        const modelBytes = new Uint8Array(await modelResponse.arrayBuffer());
+
+        const architectureName = MODEL_ARCHITECTURES[this.config.modelType.toLowerCase()] ?? 'GPT2';
+        const modelConfig = new this.wasmModule.ModelConfig(this.wasmModule.ModelArchitecture[architectureName]);
+        const model = new this.wasmModule.WasmModel(modelConfig);
+        await model.load_weights(modelBytes);
+
+        const vocabResponse = await fetch(this.config.vocabUrl);
+        if (!vocabResponse.ok) {{
+          throw new Error(`Failed to fetch vocabulary: HTTP ${{vocabResponse.status}}`);
+        }}
+        const vocab = await vocabResponse.json();
+        const tokenizer = new this.wasmModule.WasmTokenizer(this.wasmModule.TokenizerType.BPE);
+        tokenizer.load_vocab(vocab);
+
+        this.pipeline = new this.wasmModule.TextGenerationPipeline(model, tokenizer);
+      }}
 
       this.updateModelState({{
         isLoading: false,
@@ -430,6 +473,12 @@ export class TrustFormerModelService {{
 
   getSession(): any {{
     return this.session;
+  }}
+
+  // Real `TextGenerationPipeline`, or `null` if no `vocabUrl` was
+  // configured (see `loadModel`).
+  getPipeline(): any {{
+    return this.pipeline;
   }}
 
   getCurrentState(): ModelState {{
@@ -493,9 +542,21 @@ export class TrustFormerInferenceService {
 
   constructor(private modelService: TrustFormerModelService) {}
 
+  // Real (non-streaming) text generation, driven by the real
+  // `TextGenerationPipeline` built by `TrustFormerModelService` (requires
+  // it to have been configured with a `vocabUrl`). Runs the pipeline's
+  // actual autoregressive `encode` -> `next_token` -> `decode` loop instead
+  // of fabricating a canned response string.
   async generateText(prompt: string, options: GenerationOptions = {}): Promise<InferenceResult> {
     if (!this.modelService.getCurrentState().modelLoaded) {
       throw new Error('Model not loaded. Please load a model first.');
+    }
+
+    const pipeline = this.modelService.getPipeline();
+    if (!pipeline) {
+      throw new Error(
+        'No generation pipeline available - configure TrustFormerModelService with a vocabUrl first'
+      );
     }
 
     this.updateInferenceState({
@@ -504,31 +565,30 @@ export class TrustFormerInferenceService {
     });
 
     const startTime = performance.now();
+    const maxLength = options.maxLength ?? 100;
 
     try {
-      const session = this.modelService.getSession();
-      if (!session) {
-        throw new Error('No active session');
+      // Real generation: encode the prompt, then repeatedly call the
+      // pipeline's real `next_token` (the same autoregressive step
+      // `StreamingGenerator` drives internally) until `maxLength` tokens
+      // have been produced.
+      let contextIds = Array.from(pipeline.encode(prompt, true)) as number[];
+      const generatedIds: number[] = [];
+
+      for (let i = 0; i < maxLength; i++) {
+        const nextId = pipeline.next_token(Uint32Array.from(contextIds));
+        generatedIds.push(nextId);
+        contextIds = [...contextIds, nextId];
       }
 
-      // Create a simple tensor for the prompt (this is simplified)
-      // In a real implementation, you'd tokenize the prompt properly
-      const wasmModule = await import('trustformers-wasm');
-      const inputTensor = new wasmModule.WasmTensor([prompt.length], new Float32Array(prompt.length));
-
-      // Perform inference (simplified)
-      const result = inputTensor; // In reality, this would be actual model inference
-
+      const generatedText = pipeline.decode(Uint32Array.from(generatedIds), true);
       const endTime = performance.now();
       const inferenceTime = endTime - startTime;
-
-      // Simulate text generation result
-      const generatedText = `Generated response for: "${prompt}"`;
 
       const inferenceResult: InferenceResult = {
         text: generatedText,
         inferenceTime: Math.round(inferenceTime),
-        tokenCount: generatedText.split(' ').length
+        tokenCount: generatedIds.length
       };
 
       this.updateInferenceState({
@@ -558,7 +618,8 @@ export class TrustFormerInferenceService {
     this.inferenceStateSubject.next({ ...currentState, ...update });
   }
 }
-"#.to_string()
+"#
+        .to_string()
     }
 
     /// Generate TrustFormer Streaming Service
@@ -566,7 +627,8 @@ export class TrustFormerInferenceService {
         r#"
 import { Injectable } from '@angular/core';
 import { BehaviorSubject, Observable, Subject } from 'rxjs';
-import { TrustFormerInferenceService, GenerationOptions } from './inference.service';
+import { TrustFormerModelService } from './model.service';
+import { GenerationOptions } from './inference.service';
 
 export interface StreamState {
   isStreaming: boolean;
@@ -597,9 +659,26 @@ export class TrustFormerStreamingService {
   private tokenSubject = new Subject<StreamToken>();
   public tokens$ = this.tokenSubject.asObservable();
 
-  constructor(private inferenceService: TrustFormerInferenceService) {}
+  private generator: any = null;
 
+  constructor(private modelService: TrustFormerModelService) {}
+
+  // Real streaming generation, driven by the real `StreamingGenerator`
+  // (see `streaming_generation.rs`) attached to the `TextGenerationPipeline`
+  // built by `TrustFormerModelService`. This used to fake streaming
+  // entirely with a hardcoded canned string revealed word-by-word via
+  // `setTimeout`. Every token below instead comes from
+  // `StreamingGenerator.start_streaming`'s real autoregressive loop,
+  // reported through its `on_token`/`on_complete`/`on_error` callbacks.
   async startStreaming(prompt: string, options: GenerationOptions = {}): Promise<void> {
+    const pipeline = this.modelService.getPipeline();
+    if (!pipeline) {
+      this.updateStreamState({
+        error: 'No generation pipeline available - configure TrustFormerModelService with a vocabUrl first'
+      });
+      throw new Error(this.streamStateSubject.value.error ?? 'No generation pipeline available');
+    }
+
     this.updateStreamState({
       isStreaming: true,
       partialResult: '',
@@ -608,36 +687,41 @@ export class TrustFormerStreamingService {
     });
 
     try {
-      // Simulate streaming by gradually revealing text
-      const fullText = `This is a simulated streaming response for: "${prompt}". The text is revealed token by token to simulate real streaming generation.`;
-      const tokens = fullText.split(' ');
+      const wasmModule = await import('trustformers-wasm');
 
-      for (let i = 0; i < tokens.length; i++) {
-        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay per token
+      const config = new wasmModule.StreamingConfig();
+      config.set_max_tokens(options.maxLength ?? 100);
+      config.set_temperature(options.temperature ?? 0.7);
+      if (options.topP !== undefined) config.set_top_p(options.topP);
+      if (options.topK !== undefined) config.set_top_k(options.topK);
 
-        const token = tokens[i];
-        const partialText = tokens.slice(0, i + 1).join(' ');
-        const isComplete = i === tokens.length - 1;
+      this.generator = new wasmModule.StreamingGenerator(config);
+      this.generator.set_pipeline(pipeline);
 
-        // Emit token
-        this.tokenSubject.next({
-          token,
-          index: i,
-          isComplete
-        });
+      let accumulated = '';
+      let index = 0;
 
-        // Update partial result
+      this.generator.on_token((token: any) => {
+        accumulated += token.token;
+        this.tokenSubject.next({ token: token.token, index: index++, isComplete: false });
+        this.updateStreamState({ partialResult: accumulated });
+      });
+
+      this.generator.on_complete(() => {
         this.updateStreamState({
-          partialResult: partialText
+          isStreaming: false,
+          completeResult: accumulated
         });
+      });
 
-        if (isComplete) {
-          this.updateStreamState({
-            isStreaming: false,
-            completeResult: fullText
-          });
-        }
-      }
+      this.generator.on_error((error: any) => {
+        this.updateStreamState({
+          isStreaming: false,
+          error: String(error)
+        });
+      });
+
+      await this.generator.start_streaming(prompt);
 
     } catch (error: any) {
       this.updateStreamState({
@@ -648,6 +732,9 @@ export class TrustFormerStreamingService {
   }
 
   stopStreaming(): void {
+    if (this.generator) {
+      this.generator.stop_streaming();
+    }
     this.updateStreamState({
       isStreaming: false
     });
@@ -742,6 +829,7 @@ export interface Generation {{
 }})
 export class TrustFormerTextGeneratorComponent implements OnInit, OnDestroy {{
   @Input() modelUrl: string = '{}';
+  @Input() vocabUrl: string = '';
   @Input() placeholder: string = 'Enter your prompt...';
   @Input() maxLength: number = 100;
   @Input() temperature: number = 0.7;
@@ -801,6 +889,9 @@ export class TrustFormerTextGeneratorComponent implements OnInit, OnDestroy {{
   }}
 
   loadModel(): void {{
+    if (this.vocabUrl) {{
+      this.modelService.updateConfig({{ vocabUrl: this.vocabUrl }});
+    }}
     this.modelService.loadModel(this.modelUrl);
   }}
 
@@ -935,6 +1026,7 @@ export interface Message {{
 }})
 export class TrustFormerChatInterfaceComponent implements OnInit, OnDestroy, AfterViewChecked {{
   @Input() modelUrl: string = '{}';
+  @Input() vocabUrl: string = '';
   @Input() placeholder: string = 'Type your message...';
   @Input() systemPrompt: string = 'You are a helpful AI assistant.';
   @Input() maxTokens: number = 150;
@@ -1004,6 +1096,9 @@ export class TrustFormerChatInterfaceComponent implements OnInit, OnDestroy, Aft
   }}
 
   loadModel(): void {{
+    if (this.vocabUrl) {{
+      this.modelService.updateConfig({{ vocabUrl: this.vocabUrl }});
+    }}
     this.modelService.loadModel(this.modelUrl);
   }}
 
@@ -1285,6 +1380,8 @@ export interface Generation {
 
 export interface ModelConfig {
   modelUrl: string;
+  vocabUrl?: string;
+  modelType: string;
   autoLoad: boolean;
   debugMode: boolean;
 }
@@ -1295,6 +1392,7 @@ export interface ITrustFormerModelService {
   modelState$: Observable<ModelState>;
   loadModel(modelUrl?: string): Promise<void>;
   getSession(): any;
+  getPipeline(): any;
   getCurrentState(): ModelState;
   updateConfig(config: Partial<ModelConfig>): void;
 }
@@ -1856,5 +1954,33 @@ mod tests {
 
         let text_generator = factory.generate_text_generator_component();
         assert!(text_generator.contains("@Component"));
+    }
+
+    /// Regression guard: `TrustFormerInferenceService.generateText` and
+    /// `TrustFormerStreamingService.startStreaming` used to fabricate their
+    /// output entirely (a hardcoded response string and a canned
+    /// "streaming response" revealed via `setTimeout`) rather than calling
+    /// any real WASM generation API. The generated services must now call
+    /// the real `TextGenerationPipeline`/`StreamingGenerator` exports and
+    /// must not contain either fabricated phrase.
+    #[test]
+    fn test_angular_services_call_real_generation_api_not_fabricated_text() {
+        let config = AngularConfig::new();
+        let factory = AngularServiceFactory::new(config);
+
+        let inference_service = factory.generate_inference_service();
+        assert!(!inference_service.contains("Generated response for"));
+        assert!(!inference_service.contains("In reality, this would be actual model inference"));
+        assert!(inference_service.contains("pipeline.encode"));
+        assert!(inference_service.contains("pipeline.next_token"));
+        assert!(inference_service.contains("pipeline.decode"));
+
+        let streaming_service = factory.generate_streaming_service();
+        assert!(!streaming_service.contains("simulated streaming response"));
+        assert!(streaming_service.contains("wasmModule.StreamingGenerator"));
+        assert!(streaming_service.contains("this.generator.set_pipeline"));
+        assert!(streaming_service.contains("start_streaming"));
+        assert!(streaming_service.contains("on_token"));
+        assert!(streaming_service.contains("on_complete"));
     }
 }

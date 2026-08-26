@@ -486,6 +486,11 @@ impl AutoProcessor {
         result.quality_score =
             (1.0 - (error_count as f32 * 0.5) - (warning_count as f32 * 0.1)).max(0.0);
 
+        result.metadata.insert(
+            "validation_time_ms".to_string(),
+            start_time.elapsed().as_millis().to_string(),
+        );
+
         Ok(result)
     }
 
@@ -781,11 +786,26 @@ impl AutoProcessor {
     ) -> TrustformersResult<()> {
         // Basic format detection already done, add more detailed validation
         if let Some(image_config) = &self.image_config {
-            // Would integrate with actual image processing library for detailed validation
+            // Would integrate with actual image processing library for
+            // detailed validation (real dimension/format detection from the
+            // decoded bytes). Until then, this records the *configured*
+            // expectations as real data, distinct from measurements that
+            // genuinely aren't available yet.
             result.detected_format = Some("image".to_string());
             result.metadata.insert("size_bytes".to_string(), input.len().to_string());
+            result.metadata.insert(
+                "configured_supported_formats".to_string(),
+                image_config.supported_formats.join(","),
+            );
+            result.metadata.insert(
+                "configured_target_size".to_string(),
+                format!(
+                    "{}x{}",
+                    image_config.target_size.0, image_config.target_size.1
+                ),
+            );
 
-            // Placeholder for actual image dimension checking
+            // Not yet measured from the (undecoded) input bytes.
             result.metadata.insert("width".to_string(), "unknown".to_string());
             result.metadata.insert("height".to_string(), "unknown".to_string());
         }
@@ -801,8 +821,16 @@ impl AutoProcessor {
         if let Some(audio_config) = &self.audio_config {
             result.detected_format = Some("audio".to_string());
             result.metadata.insert("size_bytes".to_string(), input.len().to_string());
+            result.metadata.insert(
+                "configured_supported_formats".to_string(),
+                audio_config.supported_formats.join(","),
+            );
+            result.metadata.insert(
+                "configured_sample_rate".to_string(),
+                audio_config.sample_rate.to_string(),
+            );
 
-            // Placeholder for actual audio analysis
+            // Not yet measured from the (undecoded) input bytes.
             result.metadata.insert("duration".to_string(), "unknown".to_string());
             result.metadata.insert("sample_rate".to_string(), "unknown".to_string());
         }
@@ -818,8 +846,19 @@ impl AutoProcessor {
         if let Some(video_config) = &self.video_config {
             result.detected_format = Some("video".to_string());
             result.metadata.insert("size_bytes".to_string(), input.len().to_string());
+            result.metadata.insert(
+                "configured_supported_codecs".to_string(),
+                video_config.supported_codecs.join(","),
+            );
+            result.metadata.insert(
+                "configured_target_resolution".to_string(),
+                format!(
+                    "{}x{}",
+                    video_config.target_resolution.0, video_config.target_resolution.1
+                ),
+            );
 
-            // Placeholder for actual video analysis
+            // Not yet measured from the (undecoded) input bytes.
             result.metadata.insert("duration".to_string(), "unknown".to_string());
             result.metadata.insert("fps".to_string(), "unknown".to_string());
             result.metadata.insert("resolution".to_string(), "unknown".to_string());

@@ -14,14 +14,8 @@ impl Lcg {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
-    }
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() % 10000) as f32 / 10000.0
     }
 }
 

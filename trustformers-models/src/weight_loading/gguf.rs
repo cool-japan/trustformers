@@ -12,7 +12,11 @@ use trustformers_core::{
 };
 
 use super::config::WeightDataType;
+use super::gguf_dequant::{block_geometry, dequantize};
 use super::huggingface::{TensorMetadata, WeightLoader};
+
+/// Default tensor-data alignment when `general.alignment` is absent.
+const DEFAULT_GGUF_ALIGNMENT: u64 = 32;
 
 /// GGUF metadata value types
 #[derive(Debug, Clone)]
@@ -128,43 +132,31 @@ impl GGMLType {
         }
     }
 
+    /// Average bytes per element for this type.
+    ///
+    /// Derived from the exact block geometry rather than from a nominal
+    /// bits-per-weight figure: a `Q4_K` super-block spends 144 bytes on 256
+    /// elements (0.5625 B/elem), not the 0.5 that "4-bit" suggests, because it
+    /// also carries `d`, `dmin` and twelve packed 6-bit scale bytes. Sizing a
+    /// read with the nominal figure truncates every K-quant tensor.
     pub fn element_size(&self) -> f32 {
-        match self {
-            Self::F32 => 4.0,
-            Self::F16 => 2.0,
-            Self::Q4_0 => 0.5,
-            Self::Q4_1 => 0.5,
-            Self::Q5_0 => 0.625,
-            Self::Q5_1 => 0.625,
-            Self::Q8_0 => 1.0,
-            Self::Q8_1 => 1.0,
-            Self::Q2K => 0.25,
-            Self::Q3K => 0.375,
-            Self::Q4K => 0.5,
-            Self::Q5K => 0.625,
-            Self::Q6K => 0.75,
-            Self::Q8K => 1.0,
-            Self::Iq2Xxs => 0.125,
-            Self::Iq2Xs => 0.25,
-            Self::Iq3Xxs => 0.1875,
-            Self::Iq1S => 0.0625,
-            Self::Iq4Nl => 0.5,
-            Self::Iq3S => 0.375,
-            Self::Iq2S => 0.25,
-            Self::Iq4Xs => 0.5,
-        }
+        let geometry = block_geometry(self);
+        geometry.bytes_per_block as f32 / geometry.elements_per_block as f32
     }
 
-    /// Get the block size for quantized types
+    /// Number of tensor elements encoded by one block of this type.
     pub fn block_size(&self) -> usize {
-        match self {
-            Self::F32 | Self::F16 => 1,
-            Self::Q4_0 | Self::Q4_1 => 32,
-            Self::Q5_0 | Self::Q5_1 => 32,
-            Self::Q8_0 | Self::Q8_1 => 32,
-            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => 256,
-            _ => 32, // Default block size for other types
-        }
+        block_geometry(self).elements_per_block
+    }
+
+    /// Number of bytes one block of this type occupies on disk.
+    pub fn bytes_per_block(&self) -> usize {
+        block_geometry(self).bytes_per_block
+    }
+
+    /// Exact on-disk byte size of a tensor with `elements` values.
+    pub fn storage_size(&self, elements: usize) -> usize {
+        block_geometry(self).bytes_for(elements)
     }
 }
 
@@ -191,7 +183,14 @@ impl GGUFLoader {
         let metadata = Self::read_metadata(&mut file, header.metadata_kv_count)?;
 
         // Read tensor info
-        let (tensors, tensor_data_offset) = Self::read_tensor_info(&mut file, header.tensor_count)?;
+        let (tensors, info_end) = Self::read_tensor_info(&mut file, header.tensor_count)?;
+
+        // The tensor data section starts at the first offset at or after the end
+        // of the tensor-info table that is a multiple of `general.alignment`
+        // (32 by default). Using the raw stream position instead reads every
+        // tensor from a few bytes before its real start.
+        let alignment = Self::read_alignment(&metadata)?;
+        let tensor_data_offset = info_end.div_ceil(alignment) * alignment;
 
         Ok(Self {
             file,
@@ -200,6 +199,26 @@ impl GGUFLoader {
             metadata,
             tensor_data_offset,
         })
+    }
+
+    /// Tensor-data alignment declared by the file, or the GGUF default of 32.
+    fn read_alignment(metadata: &HashMap<String, serde_json::Value>) -> Result<u64> {
+        let Some(value) = metadata.get("general.alignment") else {
+            return Ok(DEFAULT_GGUF_ALIGNMENT);
+        };
+        let alignment = value.as_u64().ok_or_else(|| {
+            invalid_format(
+                "general.alignment",
+                format!("expected an unsigned integer, got {value}"),
+            )
+        })?;
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(invalid_format(
+                "general.alignment",
+                format!("expected a power of two, got {alignment}"),
+            ));
+        }
+        Ok(alignment)
     }
 
     fn read_header(reader: &mut BufReader<File>) -> Result<GGUFHeader> {
@@ -345,9 +364,46 @@ impl GGUFLoader {
                 ))
             },
             GGUFValueType::Array => {
-                // For arrays, we'd need to read the array type and length, then read each element
-                // This is a simplified implementation that creates an empty array
-                Ok(serde_json::Value::Array(vec![]))
+                // An array value is `[element type: u32][count: u64][elements...]`.
+                // Every element must be consumed: skipping them leaves the reader
+                // mispositioned, so every metadata key after the first array —
+                // and then the whole tensor-info table — would be parsed from
+                // the wrong offset.
+                let mut element_type_bytes = [0u8; 4];
+                reader.read_exact(&mut element_type_bytes).map_err(|e| {
+                    TrustformersError::weight_load_error(format!(
+                        "Failed to read GGUF array element type: {}",
+                        e
+                    ))
+                })?;
+                let element_type_u32 = u32::from_le_bytes(element_type_bytes);
+                let element_type = GGUFValueType::from_u32(element_type_u32).ok_or_else(|| {
+                    invalid_format(
+                        "GGUF value type",
+                        format!("Unknown GGUF array element type: {}", element_type_u32),
+                    )
+                })?;
+
+                let mut count_bytes = [0u8; 8];
+                reader.read_exact(&mut count_bytes).map_err(|e| {
+                    TrustformersError::weight_load_error(format!(
+                        "Failed to read GGUF array length: {}",
+                        e
+                    ))
+                })?;
+                let count = u64::from_le_bytes(count_bytes);
+
+                let mut items = Vec::with_capacity(count.min(4096) as usize);
+                for index in 0..count {
+                    let item =
+                        Self::read_metadata_value(reader, element_type.clone()).map_err(|e| {
+                            TrustformersError::weight_load_error(format!(
+                                "Failed to read GGUF array element {index} of {count}: {e}"
+                            ))
+                        })?;
+                    items.push(item);
+                }
+                Ok(serde_json::Value::Array(items))
             },
         }
     }
@@ -453,212 +509,53 @@ impl GGUFLoader {
         Ok((tensors, tensor_data_offset))
     }
 
-    fn dequantize_tensor(&self, tensor_info: &GGUFTensorInfo, data: &[u8]) -> Result<Tensor> {
-        let ggml_type = GGMLType::from_u32(tensor_info.ggml_type).ok_or_else(|| {
+    /// Row-major tensor shape for a GGUF tensor descriptor.
+    ///
+    /// GGUF stores `ne[0]` as the fastest-varying dimension (the row length),
+    /// which is the reverse of the row-major shape ndarray expects: a tensor
+    /// written as `ne = [n_embd, n_vocab]` is an `[n_vocab, n_embd]` matrix.
+    fn row_major_shape(tensor_info: &GGUFTensorInfo) -> Vec<usize> {
+        tensor_info.dimensions.iter().rev().map(|&d| d as usize).collect()
+    }
+
+    /// Number of elements a GGUF tensor descriptor declares.
+    fn element_count(tensor_info: &GGUFTensorInfo) -> usize {
+        tensor_info.dimensions.iter().map(|&d| d as usize).product()
+    }
+
+    /// Resolve the ggml type id of a tensor descriptor.
+    fn ggml_type_of(tensor_info: &GGUFTensorInfo) -> Result<GGMLType> {
+        GGMLType::from_u32(tensor_info.ggml_type).ok_or_else(|| {
             invalid_format(
                 "GGML type",
-                format!("Unsupported GGML type: {}", tensor_info.ggml_type),
+                format!(
+                    "Unsupported GGML type id {} for tensor {}",
+                    tensor_info.ggml_type, tensor_info.name
+                ),
             )
+        })
+    }
+
+    /// Dequantize a tensor payload into an f32 tensor.
+    ///
+    /// Every ggml type goes through [`super::gguf_dequant::dequantize`], which
+    /// implements the real block layouts and returns an error for the types it
+    /// does not implement. There is no generic fallback: a previous revision
+    /// mapped unhandled types to `(byte - 128) / 128` and reported the result as
+    /// a successfully loaded weight.
+    fn dequantize_tensor(&self, tensor_info: &GGUFTensorInfo, data: &[u8]) -> Result<Tensor> {
+        let ggml_type = Self::ggml_type_of(tensor_info)?;
+        let shape = Self::row_major_shape(tensor_info);
+        let total_elements = Self::element_count(tensor_info);
+
+        let values = dequantize(&ggml_type, data, total_elements).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Failed to dequantize tensor {}: {}",
+                tensor_info.name, e
+            ))
         })?;
 
-        let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-        let total_elements: usize = shape.iter().product();
-
-        match ggml_type {
-            GGMLType::F32 => {
-                // Already in F32 format
-                let mut f32_data = vec![0.0f32; total_elements];
-                for (i, chunk) in data.chunks_exact(4).enumerate() {
-                    if i >= total_elements {
-                        break;
-                    }
-                    f32_data[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                }
-                Tensor::from_vec(f32_data, &shape)
-            },
-            GGMLType::F16 => {
-                // Convert from F16 to F32
-                let mut f32_data = vec![0.0f32; total_elements];
-                for (i, chunk) in data.chunks_exact(2).enumerate() {
-                    if i >= total_elements {
-                        break;
-                    }
-                    let f16_bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    f32_data[i] = half::f16::from_bits(f16_bits).to_f32();
-                }
-                Tensor::from_vec(f32_data, &shape)
-            },
-            GGMLType::Q4_0 => self.dequantize_q4_0(data, &shape),
-            GGMLType::Q4_1 => self.dequantize_q4_1(data, &shape),
-            GGMLType::Q8_0 => self.dequantize_q8_0(data, &shape),
-            _ => {
-                // For other quantized formats, use a simplified dequantization
-                self.dequantize_generic_quantized(data, &shape, &ggml_type)
-            },
-        }
-    }
-
-    fn dequantize_q4_0(&self, data: &[u8], shape: &[usize]) -> Result<Tensor> {
-        let total_elements: usize = shape.iter().product();
-        let mut f32_data = vec![0.0f32; total_elements];
-
-        let block_size = 32;
-        let expected_blocks = total_elements.div_ceil(block_size);
-        let bytes_per_block = 2 + 16; // 2 bytes for scale (f16) + 16 bytes for 32 4-bit values
-
-        if data.len() < expected_blocks * bytes_per_block {
-            return Err(TrustformersError::weight_load_error(
-                "Insufficient data for Q4_0 dequantization".to_string(),
-            ));
-        }
-
-        let mut data_idx = 0;
-        for block_idx in 0..expected_blocks {
-            // Read scale (f16)
-            let scale_bits = u16::from_le_bytes([data[data_idx], data[data_idx + 1]]);
-            let scale = half::f16::from_bits(scale_bits).to_f32();
-            data_idx += 2;
-
-            // Process 32 4-bit values (16 bytes)
-            for byte_idx in 0..16 {
-                let byte_val = data[data_idx + byte_idx];
-
-                // Extract two 4-bit values from each byte
-                let val1 = ((byte_val & 0x0F) as i8) - 8; // Convert to signed
-                let val2 = (((byte_val >> 4) & 0x0F) as i8) - 8; // Convert to signed
-
-                let output_idx1 = block_idx * block_size + byte_idx * 2;
-                let output_idx2 = output_idx1 + 1;
-
-                if output_idx1 < total_elements {
-                    f32_data[output_idx1] = (val1 as f32) * scale;
-                }
-                if output_idx2 < total_elements {
-                    f32_data[output_idx2] = (val2 as f32) * scale;
-                }
-            }
-            data_idx += 16;
-        }
-
-        Tensor::from_vec(f32_data, shape)
-    }
-
-    fn dequantize_q4_1(&self, data: &[u8], shape: &[usize]) -> Result<Tensor> {
-        let total_elements: usize = shape.iter().product();
-        let mut f32_data = vec![0.0f32; total_elements];
-
-        let block_size = 32;
-        let expected_blocks = total_elements.div_ceil(block_size);
-        let bytes_per_block = 2 + 2 + 16; // 2 bytes for scale (f16) + 2 bytes for min (f16) + 16 bytes for 32 4-bit values
-
-        if data.len() < expected_blocks * bytes_per_block {
-            return Err(TrustformersError::weight_load_error(
-                "Insufficient data for Q4_1 dequantization".to_string(),
-            ));
-        }
-
-        let mut data_idx = 0;
-        for block_idx in 0..expected_blocks {
-            // Read scale (f16)
-            let scale_bits = u16::from_le_bytes([data[data_idx], data[data_idx + 1]]);
-            let scale = half::f16::from_bits(scale_bits).to_f32();
-            data_idx += 2;
-
-            // Read min (f16)
-            let min_bits = u16::from_le_bytes([data[data_idx], data[data_idx + 1]]);
-            let min_val = half::f16::from_bits(min_bits).to_f32();
-            data_idx += 2;
-
-            // Process 32 4-bit values (16 bytes)
-            for byte_idx in 0..16 {
-                let byte_val = data[data_idx + byte_idx];
-
-                // Extract two 4-bit values from each byte
-                let val1 = (byte_val & 0x0F) as f32;
-                let val2 = ((byte_val >> 4) & 0x0F) as f32;
-
-                let output_idx1 = block_idx * block_size + byte_idx * 2;
-                let output_idx2 = output_idx1 + 1;
-
-                if output_idx1 < total_elements {
-                    f32_data[output_idx1] = val1 * scale + min_val;
-                }
-                if output_idx2 < total_elements {
-                    f32_data[output_idx2] = val2 * scale + min_val;
-                }
-            }
-            data_idx += 16;
-        }
-
-        Tensor::from_vec(f32_data, shape)
-    }
-
-    fn dequantize_q8_0(&self, data: &[u8], shape: &[usize]) -> Result<Tensor> {
-        let total_elements: usize = shape.iter().product();
-        let mut f32_data = vec![0.0f32; total_elements];
-
-        let block_size = 32;
-        let expected_blocks = total_elements.div_ceil(block_size);
-        let bytes_per_block = 2 + 32; // 2 bytes for scale (f16) + 32 bytes for 32 8-bit values
-
-        if data.len() < expected_blocks * bytes_per_block {
-            return Err(TrustformersError::weight_load_error(
-                "Insufficient data for Q8_0 dequantization".to_string(),
-            ));
-        }
-
-        let mut data_idx = 0;
-        for block_idx in 0..expected_blocks {
-            // Read scale (f16)
-            let scale_bits = u16::from_le_bytes([data[data_idx], data[data_idx + 1]]);
-            let scale = half::f16::from_bits(scale_bits).to_f32();
-            data_idx += 2;
-
-            // Process 32 8-bit values
-            for i in 0..32 {
-                let val = data[data_idx + i] as i8; // Signed 8-bit
-                let output_idx = block_idx * block_size + i;
-
-                if output_idx < total_elements {
-                    f32_data[output_idx] = (val as f32) * scale;
-                }
-            }
-            data_idx += 32;
-        }
-
-        Tensor::from_vec(f32_data, shape)
-    }
-
-    fn dequantize_generic_quantized(
-        &self,
-        data: &[u8],
-        shape: &[usize],
-        ggml_type: &GGMLType,
-    ) -> Result<Tensor> {
-        // Generic dequantization for unsupported quantized formats
-        // This is a simplified approach that creates reasonable values based on the format
-        let total_elements: usize = shape.iter().product();
-        let mut f32_data = vec![0.0f32; total_elements];
-
-        let element_size = ggml_type.element_size();
-        let bytes_per_element = if element_size < 1.0 {
-            1 // For sub-byte quantization, process in bytes
-        } else {
-            element_size as usize
-        };
-
-        // Simple conversion based on available data
-        for (i, chunk) in data.chunks(bytes_per_element).enumerate() {
-            if i >= total_elements {
-                break;
-            }
-
-            // Convert bytes to a normalized float value
-            let byte_val = if !chunk.is_empty() { chunk[0] } else { 0 };
-            f32_data[i] = (byte_val as f32 - 128.0) / 128.0; // Normalize to [-1, 1]
-        }
-
-        Tensor::from_vec(f32_data, shape)
+        Tensor::from_vec(values, &shape)
     }
 
     pub fn get_metadata(&self) -> &HashMap<String, serde_json::Value> {
@@ -668,60 +565,36 @@ impl GGUFLoader {
 
 impl WeightLoader for GGUFLoader {
     fn load_tensor(&mut self, name: &str) -> Result<Tensor> {
-        if let Some(tensor_info) = self.tensors.get(name) {
-            // Calculate tensor data size
-            let ggml_type = GGMLType::from_u32(tensor_info.ggml_type).ok_or_else(|| {
-                invalid_format(
-                    "GGML type",
-                    format!("Unsupported GGML type: {}", tensor_info.ggml_type),
-                )
-            })?;
+        let tensor_info = self
+            .tensors
+            .get(name)
+            .cloned()
+            .ok_or_else(|| runtime_error(format!("Tensor not found: {}", name)))?;
 
-            let total_elements: usize =
-                tensor_info.dimensions.iter().map(|&d| d as usize).product();
+        let ggml_type = Self::ggml_type_of(&tensor_info)?;
+        let total_elements = Self::element_count(&tensor_info);
 
-            // Calculate actual data size based on quantization format
-            let data_size = match ggml_type {
-                GGMLType::F32 => total_elements * 4,
-                GGMLType::F16 => total_elements * 2,
-                GGMLType::Q4_0 => {
-                    let blocks = total_elements.div_ceil(32);
-                    blocks * (2 + 16) // 2 bytes scale + 16 bytes data per block
-                },
-                GGMLType::Q4_1 => {
-                    let blocks = total_elements.div_ceil(32);
-                    blocks * (2 + 2 + 16) // 2 bytes scale + 2 bytes min + 16 bytes data per block
-                },
-                GGMLType::Q8_0 => {
-                    let blocks = total_elements.div_ceil(32);
-                    blocks * (2 + 32) // 2 bytes scale + 32 bytes data per block
-                },
-                _ => {
-                    // Estimate size for other formats
-                    (total_elements as f32 * ggml_type.element_size()) as usize
-                },
-            };
+        // Exact on-disk size from the ggml block geometry. An approximation here
+        // truncates the payload of every K-quant tensor, because their
+        // super-blocks carry scales and mins on top of the packed weights.
+        let data_size = ggml_type.storage_size(total_elements);
 
-            // Seek to tensor data
-            let absolute_offset = self.tensor_data_offset + tensor_info.offset;
-            self.file.seek(SeekFrom::Start(absolute_offset)).map_err(|e| {
-                TrustformersError::weight_load_error(format!(
-                    "Failed to seek to tensor data: {}",
-                    e
-                ))
-            })?;
+        // Seek to tensor data
+        let absolute_offset = self.tensor_data_offset + tensor_info.offset;
+        self.file.seek(SeekFrom::Start(absolute_offset)).map_err(|e| {
+            TrustformersError::weight_load_error(format!("Failed to seek to tensor data: {}", e))
+        })?;
 
-            // Read tensor data
-            let mut data = vec![0u8; data_size];
-            self.file.read_exact(&mut data).map_err(|e| {
-                TrustformersError::weight_load_error(format!("Failed to read tensor data: {}", e))
-            })?;
+        // Read tensor data
+        let mut data = vec![0u8; data_size];
+        self.file.read_exact(&mut data).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Failed to read {data_size} bytes of data for tensor {name}: {e}"
+            ))
+        })?;
 
-            // Dequantize and return tensor
-            self.dequantize_tensor(tensor_info, &data)
-        } else {
-            Err(runtime_error(format!("Tensor not found: {}", name)))
-        }
+        // Dequantize and return tensor
+        self.dequantize_tensor(&tensor_info, &data)
     }
 
     fn list_tensors(&self) -> Result<Vec<String>> {
@@ -730,22 +603,19 @@ impl WeightLoader for GGUFLoader {
 
     fn tensor_info(&self, name: &str) -> Result<Option<TensorMetadata>> {
         if let Some(tensor_info) = self.tensors.get(name) {
-            let ggml_type = GGMLType::from_u32(tensor_info.ggml_type).ok_or_else(|| {
-                invalid_format(
-                    "GGML type",
-                    format!("Unsupported GGML type: {}", tensor_info.ggml_type),
-                )
-            })?;
+            let ggml_type = Self::ggml_type_of(tensor_info)?;
 
             let dtype = match ggml_type {
                 GGMLType::F32 => WeightDataType::Float32,
                 GGMLType::F16 => WeightDataType::Float16,
-                _ => WeightDataType::Int8, // Quantized types mapped to Int8 for simplicity
+                // Every quantized ggml type is an integer-coded block format;
+                // the loader materialises them as f32 after dequantization.
+                _ => WeightDataType::Int8,
             };
 
-            let shape: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-            let total_elements: usize = shape.iter().product();
-            let size_bytes = (total_elements as f32 * ggml_type.element_size()) as u64;
+            let shape = Self::row_major_shape(tensor_info);
+            let total_elements = Self::element_count(tensor_info);
+            let size_bytes = ggml_type.storage_size(total_elements) as u64;
 
             Ok(Some(TensorMetadata {
                 shape,
@@ -977,5 +847,253 @@ mod tests {
         let t3 = GGMLType::Q4_0;
         assert_eq!(t1, t2);
         assert_ne!(t1, t3);
+    }
+
+    // ── End-to-end tests against real GGUF byte streams ──────────────────────
+
+    use crate::weight_loading::test_support::{
+        build_gguf, write_temp_file, GgufMetaValue, GgufTensor,
+    };
+
+    fn f32_tensor_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    struct TempGguf {
+        path: std::path::PathBuf,
+    }
+
+    impl TempGguf {
+        fn new(bytes: &[u8]) -> Self {
+            Self {
+                path: write_temp_file("gguf", "gguf", bytes),
+            }
+        }
+    }
+
+    impl Drop for TempGguf {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn gguf_loads_f32_tensor_with_exact_values_and_row_major_shape() {
+        // ne = [3, 2] in ggml order is a [2, 3] row-major matrix.
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let bytes = build_gguf(
+            &[(
+                "general.architecture".to_string(),
+                GgufMetaValue::Str("llama".to_string()),
+            )],
+            &[GgufTensor {
+                name: "token_embd.weight".to_string(),
+                ggml_type: 0,
+                dimensions: vec![3, 2],
+                data: f32_tensor_bytes(&values),
+            }],
+            32,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+
+        let tensor = loader.load_tensor("token_embd.weight").expect("tensor must load");
+        assert_eq!(tensor.shape(), vec![2, 3]);
+        match tensor {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), values);
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gguf_metadata_arrays_are_read_and_keep_the_stream_in_sync() {
+        // Regression: array values used to be returned as an empty array without
+        // consuming their bytes, which desynchronised every later key and the
+        // whole tensor-info table.
+        let tokens = vec!["<s>".to_string(), "hello".to_string(), "world".to_string()];
+        let scores = vec![-1.0f32, 0.5, 2.25];
+        let bytes = build_gguf(
+            &[
+                (
+                    "tokenizer.ggml.tokens".to_string(),
+                    GgufMetaValue::StrArray(tokens.clone()),
+                ),
+                (
+                    "tokenizer.ggml.scores".to_string(),
+                    GgufMetaValue::F32Array(scores.clone()),
+                ),
+                (
+                    "llama.attention.head_count".to_string(),
+                    GgufMetaValue::U32(8),
+                ),
+            ],
+            &[GgufTensor {
+                name: "output.weight".to_string(),
+                ggml_type: 0,
+                dimensions: vec![4],
+                data: f32_tensor_bytes(&[9.0, 8.0, 7.0, 6.0]),
+            }],
+            32,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+
+        let metadata = loader.get_metadata();
+        let read_tokens = metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.as_array())
+            .expect("token array must be present");
+        assert_eq!(read_tokens.len(), 3);
+        assert_eq!(read_tokens[1].as_str(), Some("hello"));
+
+        let read_scores = metadata
+            .get("tokenizer.ggml.scores")
+            .and_then(|v| v.as_array())
+            .expect("score array must be present");
+        assert_eq!(read_scores.len(), 3);
+        let decoded: Vec<f32> =
+            read_scores.iter().filter_map(|v| v.as_f64()).map(|v| v as f32).collect();
+        assert_eq!(decoded, scores);
+
+        // The key written after the arrays must still be readable, which only
+        // holds if the array element bytes were consumed.
+        assert_eq!(
+            metadata.get("llama.attention.head_count").and_then(|v| v.as_u64()),
+            Some(8)
+        );
+
+        // And the tensor table, which follows the metadata, must still be valid.
+        let tensor = loader.load_tensor("output.weight").expect("tensor must load");
+        match tensor {
+            Tensor::F32(arr) => {
+                assert_eq!(
+                    arr.iter().copied().collect::<Vec<f32>>(),
+                    vec![9.0, 8.0, 7.0, 6.0]
+                );
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gguf_honours_a_non_default_alignment() {
+        let values: Vec<f32> = vec![0.5, -0.5, 1.5, -1.5];
+        let bytes = build_gguf(
+            &[(
+                "general.architecture".to_string(),
+                GgufMetaValue::Str("test".to_string()),
+            )],
+            &[GgufTensor {
+                name: "w".to_string(),
+                ggml_type: 0,
+                dimensions: vec![4],
+                data: f32_tensor_bytes(&values),
+            }],
+            64,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+        match loader.load_tensor("w").expect("tensor must load") {
+            Tensor::F32(arr) => assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), values),
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gguf_reads_a_q4_k_tensor_with_the_exact_super_block_size() {
+        // 256 elements of Q4_K occupy exactly 144 bytes. The old size estimate
+        // (0.5 bytes/element = 128) would truncate the read.
+        let mut block = vec![0u8; 144];
+        block[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+        block[2..4].copy_from_slice(&half::f16::from_f32(0.0).to_bits().to_le_bytes());
+        block[4] = 2; // scale for the first 32-value group
+        block[5] = 1; // scale for the second group
+        block[16] = 0x36; // qs[0]: low nibble 6 -> element 0, high nibble 3 -> element 32
+
+        let bytes = build_gguf(
+            &[],
+            &[GgufTensor {
+                name: "blk.0.attn_q.weight".to_string(),
+                ggml_type: 12, // Q4_K
+                dimensions: vec![256],
+                data: block,
+            }],
+            32,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+
+        let info = loader
+            .tensor_info("blk.0.attn_q.weight")
+            .expect("tensor info must resolve")
+            .expect("tensor must exist");
+        assert_eq!(info.size_bytes, 144);
+
+        match loader.load_tensor("blk.0.attn_q.weight").expect("tensor must load") {
+            Tensor::F32(arr) => {
+                let values: Vec<f32> = arr.iter().copied().collect();
+                assert_eq!(values.len(), 256);
+                assert_eq!(values[0], 2.0 * 6.0);
+                assert_eq!(values[32], 1.0 * 3.0);
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gguf_rejects_a_quantization_it_cannot_decode() {
+        // IQ2_XXS has no dequantizer here; the loader must say so instead of
+        // returning normalised byte noise.
+        let bytes = build_gguf(
+            &[],
+            &[GgufTensor {
+                name: "blk.0.ffn_down.weight".to_string(),
+                ggml_type: 16, // IQ2_XXS
+                dimensions: vec![256],
+                data: vec![0x5A; 66],
+            }],
+            32,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+        let err = loader
+            .load_tensor("blk.0.ffn_down.weight")
+            .expect_err("an unimplemented quantization must fail loudly");
+        assert!(
+            err.to_string().contains("Iq2Xxs"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn gguf_q4_0_round_trips_through_the_file_reader() {
+        let mut block = Vec::new();
+        block.extend_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
+        block.push(0x9A); // low nibble 10 -> element 0, high nibble 9 -> element 16
+        block.extend_from_slice(&[0x88u8; 15]);
+
+        let bytes = build_gguf(
+            &[],
+            &[GgufTensor {
+                name: "w".to_string(),
+                ggml_type: 2, // Q4_0
+                dimensions: vec![32],
+                data: block,
+            }],
+            32,
+        );
+        let file = TempGguf::new(&bytes);
+        let mut loader = GGUFLoader::new(&file.path).expect("GGUF fixture must load");
+        match loader.load_tensor("w").expect("tensor must load") {
+            Tensor::F32(arr) => {
+                let values: Vec<f32> = arr.iter().copied().collect();
+                assert_eq!(values[0], 2.0);
+                assert_eq!(values[16], 1.0);
+                assert_eq!(values[1], 0.0);
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
     }
 }

@@ -1,4 +1,5 @@
 use crate::common::{OptimizerState, StateMemoryStats};
+use crate::param_id::ParamId;
 use crate::traits::StatefulOptimizer;
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -63,9 +64,39 @@ impl SGD {
     }
 }
 
-impl Optimizer for SGD {
-    fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
-        match (parameter, grad) {
+impl SGD {
+    /// Updates one parameter identified by a stable caller-supplied name.
+    ///
+    /// Prefer this over [`Optimizer::update`] whenever the surrounding API carries
+    /// parameter names: SGD replaces the parameter's buffer when weight decay is on,
+    /// so an address-derived key would drift. See [`crate::param_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported tensor dtypes or a momentum-buffer size
+    /// mismatch.
+    pub fn update_named(
+        &mut self,
+        name: &str,
+        parameter: &mut Tensor,
+        grad: &Tensor,
+    ) -> Result<()> {
+        let id = self.state.params.id_for_named_tensor(name, parameter)?;
+        self.update_with_id(id, parameter, grad)
+    }
+
+    /// Shared update body, given an already-resolved stable parameter identity.
+    fn update_with_id(&mut self, id: ParamId, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        // Resolve the key *before* touching the parameter: the weight-decay step below
+        // replaces the underlying buffer.
+        let param_id = self
+            .state
+            .params
+            .key(id)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("p:{}", id.index()));
+
+        let result = match (&mut *parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
                 if self.config.weight_decay != 0.0 {
                     let decay = &*param * self.config.weight_decay;
@@ -75,7 +106,6 @@ impl Optimizer for SGD {
                 let mut d_p = grad_arr.clone();
 
                 if self.config.momentum != 0.0 {
-                    let param_id = format!("{:p}", param.as_ptr());
                     let buf = self
                         .state
                         .momentum
@@ -111,7 +141,20 @@ impl Optimizer for SGD {
                 "Unsupported tensor types for SGD",
                 "sgd_update",
             )),
-        }
+        };
+
+        result?;
+        // The subtractions above allocate fresh buffers, so the identity cache has to
+        // follow the parameter to its new address.
+        self.state.params.rebind(id, parameter)?;
+        Ok(())
+    }
+}
+
+impl Optimizer for SGD {
+    fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        let id = self.state.params.id_for_tensor(parameter)?;
+        self.update_with_id(id, parameter, grad)
     }
 
     fn zero_grad(&mut self) {}

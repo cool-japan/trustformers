@@ -1,11 +1,80 @@
 use crate::distilbert::config::DistilBertConfig;
 use crate::distilbert::model::DistilBertModel;
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
+
+/// Bind a `[out, in]` head projection and its bias from a checkpoint.
+///
+/// An absent head is legitimate (a pretrained backbone ships without a
+/// fine-tuned head) and is recorded in [`LoadReport::missing`]; a head that *is*
+/// present must reach the model rather than being silently ignored.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+fn bind_head_linear(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    weight_shape: [usize; 2],
+    layer: &mut Linear,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &weight_shape)? {
+        Some(weight) => {
+            layer.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[weight_shape[0]])? {
+        Some(bias) => {
+            layer.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
+}
+
+/// Bind a head layer norm from a checkpoint, recording what was found.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+fn bind_head_layer_norm(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    hidden_size: usize,
+    norm: &mut trustformers_core::layers::LayerNorm,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &[hidden_size])? {
+        Some(weight) => {
+            norm.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[hidden_size])? {
+        Some(bias) => {
+            norm.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct DistilBertForSequenceClassification {
@@ -47,6 +116,11 @@ impl DistilBertForSequenceClassification {
     pub fn device(&self) -> Device {
         self.device
     }
+
+    /// The classification head's weight matrix.
+    pub fn classifier_weight(&self) -> &Tensor {
+        self.classifier.weight()
+    }
 }
 
 #[derive(Debug)]
@@ -77,7 +151,7 @@ impl Model for DistilBertForSequenceClassification {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.distilbert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -85,8 +159,43 @@ impl Model for DistilBertForSequenceClassification {
     }
 
     fn num_parameters(&self) -> usize {
-        // Delegate to underlying model
         self.distilbert.num_parameters()
+            + self.pre_classifier.parameter_count()
+            + self.classifier.parameter_count()
+    }
+}
+
+impl DistilBertForSequenceClassification {
+    /// Load the encoder and, when the checkpoint carries them, the classifier
+    /// projections.
+    ///
+    /// A previous revision delegated straight to `DistilBertModel::load_pretrained`
+    /// (itself a no-op at the time), so a fine-tuned checkpoint's
+    /// `pre_classifier.*` / `classifier.*` tensors never reached the model.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.distilbert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.distilbert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "pre_classifier",
+            [hidden, hidden],
+            &mut self.pre_classifier,
+        )?;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
     }
 }
 
@@ -157,7 +266,7 @@ impl Model for DistilBertForMaskedLM {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.distilbert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -165,8 +274,46 @@ impl Model for DistilBertForMaskedLM {
     }
 
     fn num_parameters(&self) -> usize {
-        // Delegate to underlying model
         self.distilbert.num_parameters()
+            + self.vocab_transform.parameter_count()
+            + self.vocab_layer_norm.parameter_count()
+            + self.vocab_projector.parameter_count()
+    }
+}
+
+impl DistilBertForMaskedLM {
+    /// Load the encoder and, when present, the masked-LM head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.distilbert.load_from_checkpoint(&checkpoint)?;
+        let config = self.distilbert.get_config().clone();
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "vocab_transform",
+            [config.hidden_size, config.hidden_size],
+            &mut self.vocab_transform,
+        )?;
+        bind_head_layer_norm(
+            &checkpoint,
+            &mut report,
+            "vocab_layer_norm",
+            config.hidden_size,
+            &mut self.vocab_layer_norm,
+        )?;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "vocab_projector",
+            [config.vocab_size, config.hidden_size],
+            &mut self.vocab_projector,
+        )?;
+        Ok(report)
     }
 }
 
@@ -233,7 +380,7 @@ impl Model for DistilBertForTokenClassification {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.distilbert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -241,8 +388,29 @@ impl Model for DistilBertForTokenClassification {
     }
 
     fn num_parameters(&self) -> usize {
-        // Delegate to underlying model
-        self.distilbert.num_parameters()
+        self.distilbert.num_parameters() + self.classifier.parameter_count()
+    }
+}
+
+impl DistilBertForTokenClassification {
+    /// Load the encoder and, when present, the token-classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.distilbert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.distilbert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
     }
 }
 
@@ -314,7 +482,7 @@ impl Model for DistilBertForQuestionAnswering {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.distilbert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -322,7 +490,28 @@ impl Model for DistilBertForQuestionAnswering {
     }
 
     fn num_parameters(&self) -> usize {
-        // Delegate to underlying model
-        self.distilbert.num_parameters()
+        self.distilbert.num_parameters() + self.qa_outputs.parameter_count()
+    }
+}
+
+impl DistilBertForQuestionAnswering {
+    /// Load the encoder and, when present, the span-prediction head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.distilbert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.distilbert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "qa_outputs",
+            [2, hidden],
+            &mut self.qa_outputs,
+        )?;
+        Ok(report)
     }
 }

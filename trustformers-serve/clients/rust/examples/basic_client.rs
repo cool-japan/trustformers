@@ -4,11 +4,24 @@
 //! This example demonstrates the basic usage of the TrustformeRS Rust client library,
 //! including authentication, health checks, model information, and inference operations.
 
-use std::collections::HashMap;
 use std::time::Duration;
 use trustformers_client::{
-    TrustformersClient, InferenceRequest, InferenceOptions, BatchInferenceRequest, Result,
+    BatchInferenceRequest, InferenceOptions, InferenceRequest, Result, StreamingChunk,
+    TrustformersClient,
 };
+
+/// Print the text carried by one streaming chunk, if it carries any.
+fn print_streaming_chunk(chunk: &StreamingChunk) {
+    use std::io::Write;
+
+    let Some(content) = chunk.choices.first().and_then(|choice| choice.delta.content.as_ref())
+    else {
+        return;
+    };
+    print!("{content}");
+    // Streaming output is best-effort: a failed flush must not abort the demo.
+    let _ = std::io::stdout().flush();
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -147,15 +160,7 @@ async fn main() -> Result<()> {
             use futures_util::StreamExt;
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
-                    Ok(chunk) => {
-                        if let Some(choice) = chunk.choices.first() {
-                            if let Some(content) = &choice.delta.content {
-                                print!("{}", content);
-                                use std::io::{self, Write};
-                                let _ = io::stdout().flush(); // Ignore flush errors in streaming output
-                            }
-                        }
-                    }
+                    Ok(chunk) => print_streaming_chunk(&chunk),
                     Err(e) => {
                         println!("\n   ❌ Streaming error: {}", e);
                         break;

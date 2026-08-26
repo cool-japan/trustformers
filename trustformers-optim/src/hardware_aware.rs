@@ -321,8 +321,16 @@ impl MobileOptimizer {
         }
     }
 
-    /// Compress gradients for mobile efficiency
-    fn compress_gradients(&self, gradients: &[Tensor]) -> Result<Vec<Tensor>> {
+    /// Compresses gradients to the configured precision for mobile deployment.
+    ///
+    /// The returned tensors carry the reduced dtype (`F16` for
+    /// [`CompressionRatio::Half`]), so the memory saving is real and observable via
+    /// [`Tensor::size_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a gradient's dtype cannot be converted.
+    pub fn compress_gradients(&self, gradients: &[Tensor]) -> Result<Vec<Tensor>> {
         let mut compressed = Vec::new();
 
         for grad in gradients {
@@ -337,33 +345,24 @@ impl MobileOptimizer {
         Ok(compressed)
     }
 
+    /// Converts an `f32` tensor to a genuine IEEE-754 binary16 tensor.
+    ///
+    /// The result is a [`Tensor::F16`], so the storage really is halved and the
+    /// mantissa really is reduced. `half::f16::from_f32` performs round-to-nearest-even
+    /// and preserves NaN and ±∞ (an overflowing finite value becomes ±∞, as IEEE-754
+    /// requires) instead of the previous clamp to ±65504.
     fn to_fp16(&self, tensor: &Tensor) -> Result<Tensor> {
-        // Convert to 16-bit floating point
         match tensor {
-            Tensor::F32(data) => {
-                // Convert f32 to f16 using IEEE 754 half-precision format
-                let fp16_data: Vec<f32> = data
-                    .iter()
-                    .map(|&x| {
-                        // Simple f32 to f16 conversion (approximation)
-                        // In a real implementation, you'd use proper f16 conversion
-                        if x.is_nan() {
-                            f32::NAN
-                        } else if x.is_infinite() {
-                            if x > 0.0 {
-                                65504.0
-                            } else {
-                                -65504.0
-                            } // Max f16 value
-                        } else {
-                            // Clamp to f16 range and round
-                            x.clamp(-65504.0, 65504.0)
-                        }
-                    })
-                    .collect();
-                Ok(Tensor::new(fp16_data)?)
-            },
-            _ => Ok(tensor.clone()),
+            Tensor::F32(data) => Ok(Tensor::F16(data.mapv(half::f16::from_f32))),
+            // Already half precision: nothing to do.
+            Tensor::F16(_) => Ok(tensor.clone()),
+            Tensor::F64(data) => Ok(Tensor::F16(data.mapv(half::f16::from_f64))),
+            other => Err(
+                trustformers_core::errors::TrustformersError::tensor_op_error(
+                    &format!("cannot convert dtype {:?} to f16", other.dtype()),
+                    "MixedPrecisionOptimizer::to_fp16",
+                ),
+            ),
         }
     }
 

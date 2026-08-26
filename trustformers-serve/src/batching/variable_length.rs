@@ -133,7 +133,7 @@ impl VariableLengthBatcher {
     ///    **or** whose item count reached `max_batch_size`.
     ///
     /// For use with `drop_last: false`, partial buckets are also returned by
-    /// [`flush_all`].
+    /// [`flush_all`][VariableLengthBatcher::flush_all].
     pub fn next_batch(&mut self) -> Option<PaddedBatch> {
         for bucket_idx in 0..self.buckets.len() {
             if self.buckets[bucket_idx].is_empty() {
@@ -153,9 +153,7 @@ impl VariableLengthBatcher {
             // flush_all).  A bucket is "full" when we can extract exactly
             // `limit` items.
             if self.buckets[bucket_idx].len() >= limit {
-                let items: Vec<SequenceItem> = self.buckets[bucket_idx]
-                    .drain(..limit)
-                    .collect();
+                let items: Vec<SequenceItem> = self.buckets[bucket_idx].drain(..limit).collect();
                 let batch = self.make_batch(items, padded_len, bucket_idx);
                 return Some(batch);
             }
@@ -190,8 +188,7 @@ impl VariableLengthBatcher {
                     break;
                 }
 
-                let items: Vec<SequenceItem> =
-                    self.buckets[bucket_idx].drain(..take).collect();
+                let items: Vec<SequenceItem> = self.buckets[bucket_idx].drain(..take).collect();
                 let batch = self.make_batch(items, padded_len, bucket_idx);
                 out.push(batch);
             }
@@ -235,25 +232,13 @@ impl VariableLengthBatcher {
     fn padded_length_for_bucket(&self, bucket_idx: usize) -> usize {
         if self.config.pad_to_bucket {
             // Use the bucket boundary, or a sentinel for the overflow bucket.
-            self.config
-                .bucket_boundaries
-                .get(bucket_idx)
-                .copied()
-                .unwrap_or_else(|| {
-                    // Overflow: use the largest sequence currently queued.
-                    self.buckets[bucket_idx]
-                        .iter()
-                        .map(|s| s.length)
-                        .max()
-                        .unwrap_or(1)
-                })
+            self.config.bucket_boundaries.get(bucket_idx).copied().unwrap_or_else(|| {
+                // Overflow: use the largest sequence currently queued.
+                self.buckets[bucket_idx].iter().map(|s| s.length).max().unwrap_or(1)
+            })
         } else {
             // Dynamic: pad only to the max length in the queue.
-            self.buckets[bucket_idx]
-                .iter()
-                .map(|s| s.length)
-                .max()
-                .unwrap_or(1)
+            self.buckets[bucket_idx].iter().map(|s| s.length).max().unwrap_or(1)
         }
     }
 
@@ -527,8 +512,8 @@ mod tests {
     #[test]
     fn test_bucket_counts_reflect_in_flight_items() {
         let mut batcher = default_batcher();
-        batcher.add(make_item(1, 10));  // bucket 0
-        batcher.add(make_item(2, 50));  // bucket 1
+        batcher.add(make_item(1, 10)); // bucket 0
+        batcher.add(make_item(2, 50)); // bucket 1
         batcher.add(make_item(3, 100)); // bucket 2
         let stats = batcher.stats();
         assert_eq!(stats.bucket_counts[0], 1);

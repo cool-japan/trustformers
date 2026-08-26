@@ -232,22 +232,22 @@ impl PluginLoader {
             .map_err(|e| TrustformersError::serialization_error(format!("Invalid metadata: {}", e)))
     }
 
-    /// Loads embedded metadata from a plugin file.
+    /// Read plugin metadata embedded in the plugin file itself.
+    ///
+    /// Not supported: this crate defines no embedded-metadata section and
+    /// cannot read one out of an arbitrary shared object. Inventing
+    /// `PluginInfo::new(filename, "1.0.0", ...)` would report a version and
+    /// dependency set that were never declared, which downstream
+    /// version/dependency checks would then trust. Ship a companion
+    /// `<plugin>.json` describing the plugin instead.
     fn load_embedded_metadata<P: AsRef<Path>>(&self, path: P) -> Result<PluginInfo> {
-        // This is a simplified implementation
-        // In a real implementation, you would read metadata from the plugin file
-        // For now, we'll create basic info from the filename
         let path = path.as_ref();
-        let name = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
-            TrustformersError::plugin_error("Invalid plugin filename".to_string())
-        })?;
-
-        Ok(PluginInfo::new(
-            name,
-            "1.0.0",
-            "Dynamically loaded plugin",
-            &[],
-        ))
+        Err(TrustformersError::plugin_error(format!(
+            "{} has no companion metadata file and this loader cannot read embedded metadata; \
+             provide {}.json describing the plugin (name, version, description, dependencies)",
+            path.display(),
+            path.with_extension("").display()
+        )))
     }
 
     /// Loads a plugin as a dynamic library.
@@ -322,15 +322,23 @@ impl LibraryHandle {
     /// # Returns
     ///
     /// A library handle if loading succeeds.
+    /// Load a plugin's shared library.
+    ///
+    /// Not implemented: `trustformers-core` links no dynamic loader, so no
+    /// library can be opened. Returning a handle for a library that was never
+    /// opened — and then caching it — meant `unload_library` reported success
+    /// for a library that never existed.
+    ///
+    /// Register plugins statically with
+    /// [`PluginLoader::register_static_plugin`] instead.
     fn load(info: &PluginInfo) -> Result<Self> {
-        // This is a simplified implementation
-        // In a real implementation, you would use libloading or similar
-        // to actually load the dynamic library
-
-        Ok(Self {
-            name: info.name().to_string(),
-            _entry_point: info.entry_point().to_string(),
-        })
+        Err(TrustformersError::plugin_error(format!(
+            "cannot load plugin '{}' from {}: dynamic library loading is not implemented in \
+             trustformers-core. Register the plugin with \
+             PluginLoader::register_static_plugin instead.",
+            info.name(),
+            info.entry_point()
+        )))
     }
 
     /// Creates a plugin instance from this library.
@@ -338,14 +346,15 @@ impl LibraryHandle {
     /// # Returns
     ///
     /// A boxed plugin instance.
+    /// Instantiate the plugin from its loaded library.
+    ///
+    /// Unreachable while [`Self::load`] refuses to open a library; kept so the
+    /// symbol-resolution step has a home when a loader is wired up.
     fn create_plugin(&self) -> Result<Box<dyn Plugin>> {
-        // This is a simplified implementation
-        // In a real implementation, you would resolve the plugin factory symbol
-        // and call it to create the plugin instance
-
-        Err(TrustformersError::plugin_error(
-            "Dynamic plugin loading not implemented in this example".to_string(),
-        ))
+        Err(TrustformersError::plugin_error(format!(
+            "cannot instantiate plugin '{}': dynamic symbol resolution is not implemented",
+            self.name
+        )))
     }
 }
 
@@ -471,4 +480,141 @@ macro_rules! register_static_plugin {
             let _ = loader.register_static_plugin($name, register_plugin);
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal plugin used to prove the static path still works.
+    #[derive(Debug, Default, Clone)]
+    struct StaticTestPlugin {
+        config: HashMap<String, serde_json::Value>,
+    }
+
+    impl Plugin for StaticTestPlugin {
+        fn name(&self) -> &str {
+            "static-one"
+        }
+
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+
+        fn description(&self) -> &str {
+            "statically registered test plugin"
+        }
+
+        fn configure(&mut self, config: HashMap<String, serde_json::Value>) -> Result<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        fn get_config(&self) -> &HashMap<String, serde_json::Value> {
+            &self.config
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn forward(&self, input: crate::tensor::Tensor) -> Result<crate::tensor::Tensor> {
+            Ok(input)
+        }
+    }
+
+    fn make_static_plugin() -> Result<Box<dyn Plugin>> {
+        Ok(Box::new(StaticTestPlugin::default()))
+    }
+
+    /// Regression test: `LibraryHandle::load` returned a handle without opening
+    /// anything and cached it, and `create_plugin` reported an error saying
+    /// "not implemented in this example".
+    #[test]
+    fn test_dynamic_loading_is_refused_and_nothing_is_cached() {
+        let loader = PluginLoader::new();
+        let info = PluginInfo::new("ghost", "0.1.0", "never loaded", &[]);
+
+        let error = loader.load_plugin(&info).expect_err("no dynamic loader is linked");
+        let message = error.to_string();
+        assert!(
+            message.contains("register_static_plugin"),
+            "the error must point at the supported path: {message}"
+        );
+        assert!(
+            !message.contains("in this example"),
+            "user-facing errors must not mention an example: {message}"
+        );
+
+        // Nothing was cached for a library that was never opened.
+        let cache = loader.library_cache.lock().expect("lock");
+        assert!(
+            cache.is_empty(),
+            "a failed load must not populate the cache"
+        );
+    }
+
+    /// Regression test: `load_embedded_metadata` invented
+    /// `PluginInfo::new(filename, "1.0.0", "Dynamically loaded plugin", &[])`.
+    #[test]
+    fn test_embedded_metadata_is_refused() {
+        let loader = PluginLoader::new();
+        let path =
+            std::env::temp_dir().join(format!("trustformers_plugin_{}.so", std::process::id()));
+        std::fs::write(&path, b"not a real plugin").expect("write failed");
+
+        let error = loader
+            .load_plugin_info(&path)
+            .expect_err("no metadata file exists and none can be read from the binary");
+        assert!(
+            error.to_string().contains(".json"),
+            "the error must say what is missing: {error}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A companion metadata file is still read.
+    #[test]
+    fn test_companion_metadata_is_read() {
+        let loader = PluginLoader::new();
+        let base =
+            std::env::temp_dir().join(format!("trustformers_plugin_meta_{}", std::process::id()));
+        let library = base.with_extension("so");
+        let metadata = base.with_extension("json");
+
+        std::fs::write(&library, b"binary").expect("write failed");
+        std::fs::write(
+            &metadata,
+            serde_json::to_string(&PluginInfo::new("real", "2.1.0", "declared", &[]))
+                .expect("serialize failed"),
+        )
+        .expect("write failed");
+
+        let info = loader.load_plugin_info(&library).expect("metadata file must be read");
+        assert_eq!(info.name(), "real");
+        assert_eq!(
+            info.version().to_string(),
+            "2.1.0",
+            "the version must come from the file, not a hardcoded 1.0.0"
+        );
+
+        std::fs::remove_file(&library).ok();
+        std::fs::remove_file(&metadata).ok();
+    }
+
+    /// A statically registered plugin still loads.
+    #[test]
+    fn test_static_plugins_still_load() {
+        let loader = PluginLoader::new();
+        loader
+            .register_static_plugin("static-one", make_static_plugin)
+            .expect("registration failed");
+
+        let info = PluginInfo::new("static-one", "1.0.0", "static", &[]);
+        assert!(
+            loader.load_plugin(&info).is_ok(),
+            "static registration is the supported path and must work"
+        );
+    }
 }

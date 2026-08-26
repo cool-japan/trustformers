@@ -8,6 +8,162 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Duration};
 
+/// Read the host's CPU cache hierarchy as `(levels, total bytes)`.
+///
+/// Linux: every cache visible to CPU 0 is published under
+/// `/sys/devices/system/cpu/cpu0/cache/index*/`, with `level` and a `size`
+/// written as e.g. `32K` or `8192K`. Distinct levels are counted once, and the
+/// sizes are summed.
+///
+/// macOS: `sysctl` reports `hw.l1dcachesize`, `hw.l2cachesize` and
+/// `hw.l3cachesize` in bytes; a level is present when its size is non-zero.
+///
+/// Anything else gets [`MeasurementUnavailable`] rather than a guess.
+fn detect_host_cache_hierarchy() -> anyhow::Result<(u8, usize)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::collections::BTreeSet;
+
+        let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
+        let entries = std::fs::read_dir(base).map_err(|error| {
+            MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "the kernel does not publish /sys/devices/system/cpu/cpu0/cache",
+            )
+            .context(error.to_string())
+        })?;
+
+        let mut levels = BTreeSet::new();
+        let mut total = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(level) = std::fs::read_to_string(path.join("level")) else {
+                continue;
+            };
+            let Ok(level) = level.trim().parse::<u8>() else {
+                continue;
+            };
+            let Ok(size) = std::fs::read_to_string(path.join("size")) else {
+                continue;
+            };
+            let Some(bytes) = parse_sysfs_cache_size(size.trim()) else {
+                continue;
+            };
+            levels.insert(level);
+            total += bytes;
+        }
+
+        if levels.is_empty() {
+            return Err(MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "the kernel published no readable cache index for CPU 0",
+            ));
+        }
+        return Ok((levels.len() as u8, total));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut levels = 0u8;
+        let mut total = 0usize;
+        for key in ["hw.l1dcachesize", "hw.l2cachesize", "hw.l3cachesize"] {
+            let output = std::process::Command::new("sysctl").args(["-n", key]).output();
+            let Ok(output) = output else { continue };
+            if !output.status.success() {
+                continue;
+            }
+            let Ok(text) = String::from_utf8(output.stdout) else {
+                continue;
+            };
+            let Ok(bytes) = text.trim().parse::<usize>() else {
+                continue;
+            };
+            if bytes > 0 {
+                levels += 1;
+                total += bytes;
+            }
+        }
+
+        if levels == 0 {
+            return Err(MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "sysctl reported no non-zero hw.l*cachesize value",
+            ));
+        }
+        return Ok((levels, total));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(MeasurementUnavailable::raise(
+            "the CPU cache hierarchy",
+            "this platform exposes no cache-topology interface known to this crate",
+        ))
+    }
+}
+
+/// Parse a Linux sysfs cache `size` value such as `32K`, `1M` or `512` into
+/// bytes.
+///
+/// Compiled on Linux, where the detector calls it, and under `cfg(test)`
+/// everywhere else so the parser stays under test on other platforms.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_sysfs_cache_size(value: &str) -> Option<usize> {
+    let value = value.trim();
+    let (digits, multiplier) = match value.chars().last()? {
+        'K' | 'k' => (&value[..value.len() - 1], 1024),
+        'M' | 'm' => (&value[..value.len() - 1], 1024 * 1024),
+        'G' | 'g' => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+        _ => (value, 1),
+    };
+    digits.trim().parse::<usize>().ok().map(|n| n * multiplier)
+}
+
+/// Median of `values`, or `0.0` for an empty slice.
+pub(crate) fn median_of(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+/// Raised when a measurement has no backend on this build.
+///
+/// Several analyses in this module describe hardware behaviour — cache latency,
+/// synthetic benchmark scores, workload characterisation — that cannot be
+/// obtained without either a platform-specific counter API or an actual
+/// benchmark harness. `trustformers-serve` carries neither. Each such analysis
+/// returns this error rather than the constant it used to return.
+#[derive(Debug, thiserror::Error)]
+#[error("{measurement} cannot be measured on this build: {reason}")]
+pub struct MeasurementUnavailable {
+    /// What was asked for.
+    pub measurement: &'static str,
+    /// Why no value can be produced.
+    pub reason: &'static str,
+}
+
+impl MeasurementUnavailable {
+    /// Build the boxed error for `measurement`.
+    ///
+    /// Returns `anyhow::Error` rather than `Self` because every caller
+    /// immediately wraps it in `Err(..)`; naming it `new` would suggest a
+    /// constructor, so it is `raise`.
+    pub(crate) fn raise(measurement: &'static str, reason: &'static str) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            measurement,
+            reason,
+        })
+    }
+}
+
 // ============================================================================
 // Benchmark Suite Types
 // ============================================================================
@@ -47,13 +203,13 @@ impl SyntheticBenchmarkSuite {
         &self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would execute actual synthetic benchmarks
-        let mut results = HashMap::new();
-        results.insert("cpu_score".to_string(), 100.0);
-        results.insert("memory_bandwidth".to_string(), self.memory_bandwidth);
-        results.insert("storage_iops".to_string(), self.storage_iops as f64);
-        results.insert("network_bandwidth".to_string(), self.network_bandwidth);
-        Ok(results)
+        // The scores this used to return — a constant 100.0 CPU score plus the
+        // struct's own default-initialised fields echoed back — were never
+        // produced by running anything.
+        Err(MeasurementUnavailable::raise(
+            "the synthetic benchmark suite",
+            "no benchmark harness is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -81,13 +237,12 @@ impl RealWorkloadAnalyzer {
         &mut self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would analyze actual workload patterns
-        self.patterns_analyzed += 1;
-        let mut results = HashMap::new();
-        results.insert("patterns_found".to_string(), self.patterns_analyzed as f64);
-        results.insert("accuracy".to_string(), self.accuracy);
-        results.insert("workload_efficiency".to_string(), 85.0);
-        Ok(results)
+        // `workload_efficiency` was the literal 85.0 and `patterns_found` was
+        // a count of how many times this method had been called.
+        Err(MeasurementUnavailable::raise(
+            "workload pattern analysis",
+            "no workload tracing source is wired into this analyzer",
+        ))
     }
 }
 
@@ -107,20 +262,20 @@ impl MicroBenchmarkEngine {
     }
 
     /// Execute micro-benchmarks with given configuration
+    ///
+    /// Returns [`MeasurementUnavailable`]: the `avg_latency_ns` of `100.0` and
+    /// `throughput_ops_sec` of `1_000_000.0` this used to report were literals
+    /// that no timing loop produced, and `benchmarks_run` counted calls to
+    /// this method rather than benchmarks. Nothing was executed, so nothing is
+    /// reported.
     pub async fn execute_micro_benchmarks(
         &mut self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would execute actual micro-benchmarks
-        self.benchmarks_executed += 1;
-        let mut results = HashMap::new();
-        results.insert(
-            "benchmarks_run".to_string(),
-            self.benchmarks_executed as f64,
-        );
-        results.insert("avg_latency_ns".to_string(), 100.0);
-        results.insert("throughput_ops_sec".to_string(), 1000000.0);
-        Ok(results)
+        Err(MeasurementUnavailable::raise(
+            "micro-benchmark timings",
+            "no micro-benchmark harness is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -230,12 +385,20 @@ impl CacheDetectionEngine {
         Self::default()
     }
 
-    /// Detect cache hierarchy
+    /// Detect the CPU cache hierarchy, returning `(levels, total bytes)`.
+    ///
+    /// Read from the operating system: Linux publishes every cache index under
+    /// `/sys/devices/system/cpu/cpu0/cache/`, and macOS answers
+    /// `hw.l1dcachesize` / `hw.l2cachesize` / `hw.l3cachesize` through `sysctl`.
+    /// Platforms that expose neither get [`MeasurementUnavailable`].
+    ///
+    /// Before 0.2.1 this assigned `3` levels and `8 MiB` unconditionally and
+    /// reported them as a detection result.
     pub fn detect_cache_hierarchy(&mut self) -> anyhow::Result<(u8, usize)> {
-        // Placeholder - would detect actual cache hierarchy
-        self.cache_levels = 3; // L1, L2, L3
-        self.total_cache_size = 8 * 1024 * 1024; // 8MB
-        Ok((self.cache_levels, self.total_cache_size))
+        let (levels, total) = detect_host_cache_hierarchy()?;
+        self.cache_levels = levels;
+        self.total_cache_size = total;
+        Ok((levels, total))
     }
 }
 
@@ -256,31 +419,40 @@ impl CachePerformanceTester {
 
     /// Test all cache levels
     pub fn test_all_cache_levels(&mut self) -> anyhow::Result<(f64, f64)> {
-        // Placeholder - would test actual cache levels
-        self.hit_rate = 95.0;
-        self.miss_penalty = 100.0;
-        Ok((self.hit_rate, self.miss_penalty))
+        // A 95% hit rate and a 100-cycle miss penalty were written here by
+        // hand; nothing sampled a performance counter.
+        Err(MeasurementUnavailable::raise(
+            "cache hit rate and miss penalty",
+            "reading them needs hardware performance counters (perf_event / \
+             kperf), which this crate does not open",
+        ))
     }
 
     /// Test L1 cache performance
     pub async fn test_l1_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L1 cache performance
-        let l1_latency = 1.0; // ~1 cycle
-        Ok(l1_latency)
+        Err(MeasurementUnavailable::raise(
+            "L1 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 
     /// Test L2 cache performance
     pub async fn test_l2_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L2 cache performance
-        let l2_latency = 4.0; // ~4 cycles
-        Ok(l2_latency)
+        Err(MeasurementUnavailable::raise(
+            "L2 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 
     /// Test L3 cache performance
     pub async fn test_l3_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L3 cache performance
-        let l3_latency = 40.0; // ~40 cycles
-        Ok(l3_latency)
+        Err(MeasurementUnavailable::raise(
+            "L3 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 }
 
@@ -301,10 +473,11 @@ impl CacheOptimizationAnalyzer {
 
     /// Analyze optimization opportunities
     pub fn analyze_optimization_opportunities(&mut self) -> anyhow::Result<(u32, f64)> {
-        // Placeholder - would analyze actual optimization opportunities
-        self.opportunities = 5;
-        self.estimated_improvement = 15.0;
-        Ok((self.opportunities, self.estimated_improvement))
+        // "5 opportunities, 15% improvement" was written here as a literal.
+        Err(MeasurementUnavailable::raise(
+            "cache optimization opportunities",
+            "there is no cache access trace to analyse",
+        ))
     }
 }
 
@@ -325,10 +498,11 @@ impl CacheModelingEngine {
 
     /// Model cache behavior
     pub fn model_cache_behavior(&mut self) -> anyhow::Result<(f64, f64)> {
-        // Placeholder - would model actual cache behavior
-        self.accuracy = 92.5;
-        self.confidence = 88.0;
-        Ok((self.accuracy, self.confidence))
+        // 92.5% accuracy and 88% confidence for a model that was never fitted.
+        Err(MeasurementUnavailable::raise(
+            "cache behaviour modelling",
+            "no cache model is fitted, so it has no accuracy to report",
+        ))
     }
 }
 
@@ -377,6 +551,15 @@ impl StatisticalAnalysisEngine {
     }
 
     /// Analyze results with statistical methods
+    ///
+    /// Returns [`MeasurementUnavailable`]. The `mean: 100.0`, `stddev: 10.0`,
+    /// `median: 98.0` and `confidence_interval: 95.0` this used to return were
+    /// the same four literals for every input — the `results` argument was
+    /// never read. Summary statistics also have nothing to summarise here:
+    /// `ProfileResult` is an enum of per-subsystem profile structs, not a
+    /// numeric sample, so there is no population to take a mean over even in
+    /// principle. Producing statistics from it needs a defined metric
+    /// extraction that this crate does not have.
     pub async fn analyze_results(
         &mut self,
         _results: &HashMap<
@@ -384,14 +567,10 @@ impl StatisticalAnalysisEngine {
             crate::performance_optimizer::resource_modeling::performance_profiler::ProfileResult,
         >,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would perform statistical analysis
-        self.analyses_performed += 1;
-        let mut stats = HashMap::new();
-        stats.insert("mean".to_string(), 100.0);
-        stats.insert("stddev".to_string(), 10.0);
-        stats.insert("median".to_string(), 98.0);
-        stats.insert("confidence_interval".to_string(), 95.0);
-        Ok(stats)
+        Err(MeasurementUnavailable::raise(
+            "summary statistics over profiling results",
+            "profile results carry no numeric sample to summarise",
+        ))
     }
 }
 
@@ -411,6 +590,12 @@ impl TrendAnalysisEngine {
     }
 
     /// Analyze performance trends from results
+    ///
+    /// Returns [`MeasurementUnavailable`]. A trend needs a time series, and
+    /// this is handed a single snapshot: the previous implementation reported
+    /// `trend_direction: 1.0` ("improving") and `trend_strength: 0.8` on every
+    /// call without reading `results` at all, so it declared improvement it
+    /// had no way to observe.
     pub async fn analyze_performance_trends(
         &mut self,
         _results: &HashMap<
@@ -418,16 +603,10 @@ impl TrendAnalysisEngine {
             crate::performance_optimizer::resource_modeling::performance_profiler::ProfileResult,
         >,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would analyze performance trends
-        self.trends_detected += 1;
-        let mut trends = HashMap::new();
-        trends.insert("trend_direction".to_string(), 1.0); // 1.0 = improving
-        trends.insert("trend_strength".to_string(), 0.8);
-        trends.insert(
-            "prediction_confidence".to_string(),
-            self.prediction_accuracy,
-        );
-        Ok(trends)
+        Err(MeasurementUnavailable::raise(
+            "performance trends",
+            "a single profiling snapshot contains no time series to trend",
+        ))
     }
 }
 
@@ -447,22 +626,22 @@ impl OptimizationRecommender {
     }
 
     /// Generate optimization recommendations based on results
+    ///
+    /// Returns [`MeasurementUnavailable`]. The three sentences this used to
+    /// return ("Consider increasing thread pool size", ...) were a fixed list
+    /// emitted regardless of `results`, carried `estimated_impact` figures of
+    /// `0.8 / 0.6 / 0.4` that no experiment produced, and would have been
+    /// identical on a machine where every one of them was the wrong advice.
+    /// Advice presented as derived from measurements has to be derived from
+    /// measurements.
     pub async fn generate_recommendations(
         &mut self,
         _results: &HashMap<String, f64>,
     ) -> anyhow::Result<OptimizationRecommendations> {
-        // Placeholder implementation - would generate actual recommendations
-        self.recommendations_generated += 1;
-        let recommendations = vec![
-            "Consider increasing thread pool size".to_string(),
-            "Enable CPU affinity for better cache locality".to_string(),
-            "Optimize memory allocation patterns".to_string(),
-        ];
-        Ok(OptimizationRecommendations {
-            recommendations,
-            priority_order: vec!["high".to_string(), "medium".to_string(), "low".to_string()],
-            estimated_impact: vec![0.8, 0.6, 0.4],
-        })
+        Err(MeasurementUnavailable::raise(
+            "optimization recommendations",
+            "no rule set maps profiling statistics to recommendations on this build",
+        ))
     }
 }
 
@@ -481,21 +660,38 @@ impl ReportGenerator {
         Self::default()
     }
 
-    /// Generate detailed report from profiling data
+    /// Render the supplied profiling statistics as a report.
+    ///
+    /// The report now contains the caller's data and nothing else. It used to
+    /// ignore `data` entirely and emit the fixed lines "System performance
+    /// metrics analyzed" and "Recommendations: See optimization section" —
+    /// a report that read the same whether the machine was healthy or on fire,
+    /// and that pointed at an "optimization section" it did not produce.
+    ///
+    /// Keys are emitted in sorted order so that two reports over the same
+    /// statistics compare equal.
     pub async fn generate_detailed_report(
         &mut self,
-        _data: &HashMap<String, f64>,
+        data: &HashMap<String, f64>,
     ) -> anyhow::Result<String> {
-        // Placeholder implementation - would generate actual detailed report
         self.reports_generated += 1;
-        let report = format!(
-            "Performance Profiling Report #{}\n\
-             Format: {}\n\
-             Summary: System performance metrics analyzed\n\
-             Recommendations: See optimization section\n",
+        let format = if self.format.is_empty() { "text" } else { &self.format };
+        let mut entries: Vec<(&String, &f64)> = data.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut report = format!(
+            "Performance Profiling Report #{}\nFormat: {}\nMetrics: {}\n",
             self.reports_generated,
-            if self.format.is_empty() { "JSON" } else { &self.format }
+            format,
+            entries.len()
         );
+        if entries.is_empty() {
+            report.push_str("No statistics were supplied for this report.\n");
+        } else {
+            for (key, value) in entries {
+                report.push_str(&format!("  {key}: {value}\n"));
+            }
+        }
         Ok(report)
     }
 }
@@ -575,18 +771,52 @@ impl ConsistencyChecker {
         Self::default()
     }
 
-    /// Check result consistency
+    /// Check the supplied metrics for values that cannot be a measurement.
+    ///
+    /// A metric is inconsistent when it is `NaN` or infinite: no profiler can
+    /// have measured either, so its presence means the value came from a
+    /// division by zero, an uninitialised field, or an arithmetic overflow
+    /// upstream. The score is the fraction of entries that survive that check,
+    /// and every failing key is named in `inconsistencies`.
+    ///
+    /// This used to report `is_consistent: true` and `consistency_score: 0.95`
+    /// unconditionally, without reading `results` — it declared data sound
+    /// before looking at it, and could never have flagged a problem.
+    /// `inconsistencies_found` now counts real findings rather than staying at
+    /// zero forever.
     pub async fn check_result_consistency(
         &mut self,
-        _results: &HashMap<String, f64>,
+        results: &HashMap<String, f64>,
     ) -> anyhow::Result<ConsistencyResults> {
-        // Placeholder implementation - would check actual result consistency
         self.checks_performed += 1;
+
+        let mut inconsistencies: Vec<String> = results
+            .iter()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(key, value)| {
+                let kind = if value.is_nan() { "NaN" } else { "infinite" };
+                format!("{key} is {kind}, which is not a measurable value")
+            })
+            .collect();
+        inconsistencies.sort();
+
+        self.inconsistencies_found = self
+            .inconsistencies_found
+            .saturating_add(u32::try_from(inconsistencies.len()).unwrap_or(u32::MAX));
+
+        // An empty input is vacuously consistent: there is nothing in it that
+        // could contradict anything else.
+        let score = if results.is_empty() {
+            1.0
+        } else {
+            (results.len() - inconsistencies.len()) as f64 / results.len() as f64
+        };
+
         Ok(ConsistencyResults {
-            is_consistent: true,
-            consistency_score: 0.95,
-            inconsistencies: Vec::new(),
-            overall_consistency_score: 0.95,
+            is_consistent: inconsistencies.is_empty(),
+            consistency_score: score,
+            inconsistencies,
+            overall_consistency_score: score,
         })
     }
 }
@@ -606,16 +836,59 @@ impl OutlierDetector {
         Self::default()
     }
 
-    /// Detect outliers in data
+    /// Detect outliers in `data` with a modified z-score test.
     pub async fn detect_outliers(&mut self, _data: &[f64]) -> anyhow::Result<OutlierResults> {
-        // Placeholder implementation - would detect actual outliers using statistical methods
-        self.outliers_detected += 1;
+        // Modified z-score against the median absolute deviation: robust to the
+        // outliers it is looking for, unlike a mean/stddev rule. A point is an
+        // outlier when its score exceeds `sensitivity` (default 3.5, the
+        // conventional Iglewicz-Hoaglin cutoff).
+        //
+        // This used to increment a counter and return "0 outliers" regardless of
+        // the data, so a run of wild samples reported a clean data set.
+        if _data.is_empty() {
+            return Ok(OutlierResults::default());
+        }
+
+        let threshold = if self.sensitivity > 0.0 { self.sensitivity } else { 3.5 };
+        let median = median_of(_data);
+        let deviations: Vec<f64> = _data.iter().map(|x| (x - median).abs()).collect();
+        let mad = median_of(&deviations);
+
+        // With a zero MAD every deviation is either exactly zero or an outlier
+        // by any robust measure; fall back to a strict equality test.
+        let scores: Vec<f64> = _data
+            .iter()
+            .map(|x| {
+                if mad > 0.0 {
+                    0.6745 * (x - median).abs() / mad
+                } else if (x - median).abs() > 0.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        let outlier_indices: Vec<usize> = scores
+            .iter()
+            .enumerate()
+            .filter(|(_, score)| **score > threshold)
+            .map(|(index, _)| index)
+            .collect();
+
+        self.outliers_detected = outlier_indices.len() as u32;
+
+        let mut outlier_metrics = HashMap::new();
+        outlier_metrics.insert("median".to_string(), median);
+        outlier_metrics.insert("median_absolute_deviation".to_string(), mad);
+        outlier_metrics.insert("threshold".to_string(), threshold);
+
         Ok(OutlierResults {
-            outliers_detected: 0,
-            outlier_indices: Vec::new(),
-            outlier_scores: Vec::new(),
-            outlier_percentage: 0.0,
-            outlier_metrics: HashMap::new(),
+            outliers_detected: outlier_indices.len() as u64,
+            outlier_percentage: outlier_indices.len() as f64 / _data.len() as f64 * 100.0,
+            outlier_indices,
+            outlier_scores: scores,
+            outlier_metrics,
         })
     }
 }
@@ -635,23 +908,77 @@ impl QualityAssuranceEngine {
         Self::default()
     }
 
-    /// Perform quality checks on data
+    /// Assess the supplied metrics against the checks this build can actually
+    /// run.
+    ///
+    /// Two properties are checkable without knowing what each metric means:
+    /// whether the set is empty (nothing was collected), and whether every
+    /// value is finite. `data_completeness` is `0.0` for an empty set and
+    /// `1.0` otherwise; `consistency_score` is the finite fraction; the
+    /// overall score is their product; and each non-finite metric becomes a
+    /// named issue.
+    ///
+    /// `reliability_score` / `data_reliability` are equal to the consistency
+    /// score rather than the `0.90` literal they used to carry: reliability
+    /// over repeated runs would need more than one run, and this method is
+    /// given one.
+    ///
+    /// Previously every field was a constant — `overall_quality: 0.95`,
+    /// `data_completeness: 1.0`, no issues — returned without reading `data`,
+    /// so a report over an empty metric set claimed complete, high-quality
+    /// data.
     pub async fn perform_quality_checks(
         &mut self,
-        _data: &HashMap<String, f64>,
+        data: &HashMap<String, f64>,
     ) -> anyhow::Result<QualityAssessmentReport> {
-        // Placeholder implementation - would perform comprehensive quality checks
         self.checks_performed += 1;
+
+        let mut issues: Vec<String> = data
+            .iter()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(key, value)| {
+                let kind = if value.is_nan() { "NaN" } else { "infinite" };
+                format!("{key} is {kind}")
+            })
+            .collect();
+        issues.sort();
+
+        let data_completeness = if data.is_empty() { 0.0 } else { 1.0 };
+        let consistency_score = if data.is_empty() {
+            0.0
+        } else {
+            (data.len() - issues.len()) as f64 / data.len() as f64
+        };
+        let overall = data_completeness * consistency_score;
+        self.quality_score = overall;
+
+        let recommendations = if issues.is_empty() && !data.is_empty() {
+            Vec::new()
+        } else {
+            vec![QualityRecommendation {
+                recommendation: if data.is_empty() {
+                    "No metrics were collected; check that profiling ran before assessing quality"
+                        .to_string()
+                } else {
+                    "Re-run profiling: some metrics are not finite values".to_string()
+                },
+                priority: "High".to_string(),
+                expected_improvement: 0.0,
+                action: "Re-run profiling".to_string(),
+                implementation_difficulty: "Low".to_string(),
+            }]
+        };
+
         Ok(QualityAssessmentReport {
-            overall_quality: 0.95,
-            data_completeness: 1.0,
-            consistency_score: 0.95,
-            reliability_score: 0.90,
-            issues: Vec::new(),
-            quality_score: 0.95,
-            quality_issues: Vec::new(),
-            data_reliability: 0.90,
-            recommendations: Vec::new(),
+            overall_quality: overall,
+            data_completeness,
+            consistency_score,
+            reliability_score: consistency_score,
+            issues: issues.clone(),
+            quality_score: overall,
+            quality_issues: issues,
+            data_reliability: consistency_score,
+            recommendations,
             assessment_timestamp: chrono::Utc::now(),
         })
     }
@@ -1320,5 +1647,223 @@ impl Default for RandomIoResult {
             write_iops: 0.0,
             mixed_workload_iops: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+
+    #[test]
+    fn sysfs_cache_sizes_parse_with_their_units() {
+        assert_eq!(parse_sysfs_cache_size("32K"), Some(32 * 1024));
+        assert_eq!(parse_sysfs_cache_size("8192K"), Some(8192 * 1024));
+        assert_eq!(parse_sysfs_cache_size("1M"), Some(1024 * 1024));
+        assert_eq!(parse_sysfs_cache_size("512"), Some(512));
+        assert_eq!(parse_sysfs_cache_size(""), None);
+        assert_eq!(parse_sysfs_cache_size("wat"), None);
+    }
+
+    #[test]
+    fn median_handles_both_parities_and_the_empty_case() {
+        assert_eq!(median_of(&[]), 0.0);
+        assert_eq!(median_of(&[5.0]), 5.0);
+        assert_eq!(median_of(&[1.0, 3.0, 2.0]), 2.0);
+        assert_eq!(median_of(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[tokio::test]
+    async fn outlier_detection_finds_the_outlier_it_is_given() {
+        let mut detector = OutlierDetector::default();
+        // Nine tightly clustered samples and one far away.
+        let data = [10.0, 10.2, 9.8, 10.1, 9.9, 10.3, 9.7, 10.0, 10.1, 250.0];
+
+        let results = detector.detect_outliers(&data).await.expect("detect");
+
+        assert_eq!(
+            results.outliers_detected, 1,
+            "the sample at 250.0 is an outlier among values near 10"
+        );
+        assert_eq!(results.outlier_indices, vec![9]);
+        assert!(results.outlier_percentage > 9.0 && results.outlier_percentage < 11.0);
+        assert_eq!(results.outlier_scores.len(), data.len());
+    }
+
+    #[tokio::test]
+    async fn outlier_detection_reports_none_for_clean_data() {
+        let mut detector = OutlierDetector::default();
+        let data = [10.0, 10.2, 9.8, 10.1, 9.9, 10.3, 9.7, 10.0];
+
+        let results = detector.detect_outliers(&data).await.expect("detect");
+
+        assert_eq!(results.outliers_detected, 0);
+        assert!(results.outlier_indices.is_empty());
+        assert_eq!(results.outlier_percentage, 0.0);
+    }
+
+    #[tokio::test]
+    async fn cache_latency_probes_report_their_absence() {
+        let mut tester = CachePerformanceTester::default();
+
+        let error = tester
+            .test_l1_cache_performance()
+            .await
+            .expect_err("no counter API is open, so no latency can be reported");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+
+        let error = tester
+            .test_all_cache_levels()
+            .expect_err("hit rate and miss penalty need performance counters");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_benchmarks_report_their_absence() {
+        let suite = SyntheticBenchmarkSuite::default();
+        let error = suite
+            .execute_suite(&HashMap::new())
+            .await
+            .expect_err("no benchmark harness is linked, so there are no scores");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cache_hierarchy_detection_is_read_from_the_host_or_refused() {
+        let mut engine = CacheDetectionEngine::default();
+        match engine.detect_cache_hierarchy() {
+            Ok((levels, total)) => {
+                assert!(levels >= 1, "a detected hierarchy has at least one level");
+                assert!(total > 0, "a detected hierarchy has a non-zero size");
+            },
+            Err(error) => assert!(
+                error.to_string().contains("cannot be measured"),
+                "a failure must say why, not fall back to a constant: {error}"
+            ),
+        }
+    }
+
+    /// Regression: `check_result_consistency` used to report
+    /// `is_consistent: true` with a score of `0.95` without reading its input,
+    /// so it could never flag anything.
+    #[tokio::test]
+    async fn consistency_check_flags_values_that_cannot_be_measurements() {
+        let mut checker = ConsistencyChecker::new();
+        let mut results = HashMap::new();
+        results.insert("throughput".to_string(), 120.0);
+        results.insert("latency".to_string(), f64::NAN);
+        results.insert("bandwidth".to_string(), f64::INFINITY);
+
+        let outcome = checker
+            .check_result_consistency(&results)
+            .await
+            .expect("the check itself must succeed");
+
+        assert!(!outcome.is_consistent);
+        assert_eq!(outcome.inconsistencies.len(), 2);
+        assert!((outcome.consistency_score - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(checker.inconsistencies_found, 2);
+        assert!(outcome.inconsistencies.iter().any(|i| i.contains("latency")));
+        assert!(outcome.inconsistencies.iter().any(|i| i.contains("bandwidth")));
+    }
+
+    /// Clean input is reported clean, and the score is exactly 1.0 rather than
+    /// the 0.95 the old constant returned.
+    #[tokio::test]
+    async fn consistency_check_passes_finite_metrics() {
+        let mut checker = ConsistencyChecker::new();
+        let mut results = HashMap::new();
+        results.insert("throughput".to_string(), 120.0);
+        results.insert("latency".to_string(), 3.5);
+
+        let outcome = checker
+            .check_result_consistency(&results)
+            .await
+            .expect("the check itself must succeed");
+
+        assert!(outcome.is_consistent);
+        assert!(outcome.inconsistencies.is_empty());
+        assert!((outcome.consistency_score - 1.0).abs() < 1e-9);
+    }
+
+    /// Regression: `perform_quality_checks` used to report
+    /// `data_completeness: 1.0` and `overall_quality: 0.95` for an empty
+    /// metric set — high-quality, complete data that did not exist.
+    #[tokio::test]
+    async fn quality_assessment_reports_an_empty_metric_set_as_incomplete() {
+        let mut engine = QualityAssuranceEngine::new();
+        let report = engine
+            .perform_quality_checks(&HashMap::new())
+            .await
+            .expect("the assessment itself must succeed");
+
+        assert!((report.data_completeness - 0.0).abs() < 1e-9);
+        assert!((report.overall_quality - 0.0).abs() < 1e-9);
+        assert_eq!(report.recommendations.len(), 1);
+    }
+
+    /// A complete, finite metric set scores 1.0 and raises no issues.
+    #[tokio::test]
+    async fn quality_assessment_scores_clean_metrics() {
+        let mut engine = QualityAssuranceEngine::new();
+        let mut data = HashMap::new();
+        data.insert("a".to_string(), 1.0);
+        data.insert("b".to_string(), 2.0);
+
+        let report = engine
+            .perform_quality_checks(&data)
+            .await
+            .expect("the assessment itself must succeed");
+
+        assert!((report.overall_quality - 1.0).abs() < 1e-9);
+        assert!(report.quality_issues.is_empty());
+        assert!(report.recommendations.is_empty());
+        assert!((engine.quality_score - 1.0).abs() < 1e-9);
+    }
+
+    /// Regression: `generate_detailed_report` ignored its input and emitted the
+    /// fixed line "Summary: System performance metrics analyzed".
+    #[tokio::test]
+    async fn detailed_report_contains_the_statistics_it_was_given() {
+        let mut generator = ReportGenerator::new();
+        let mut data = HashMap::new();
+        data.insert("total_profiles".to_string(), 3.0);
+        data.insert("cache_hits".to_string(), 17.0);
+
+        let report =
+            generator.generate_detailed_report(&data).await.expect("rendering must succeed");
+
+        assert!(report.contains("cache_hits: 17"), "{report}");
+        assert!(report.contains("total_profiles: 3"), "{report}");
+        assert!(report.contains("Metrics: 2"), "{report}");
+        assert!(
+            !report.contains("System performance metrics analyzed"),
+            "{report}"
+        );
+        // Keys render in sorted order, so the same statistics always render
+        // identically.
+        assert!(
+            report.find("cache_hits").unwrap_or(0) < report.find("total_profiles").unwrap_or(0)
+        );
+    }
+
+    /// Regression: `analyze_results` returned mean 100 / stddev 10 / median 98
+    /// for every input, including an empty one.
+    #[tokio::test]
+    async fn summary_statistics_report_that_they_have_no_sample() {
+        let mut engine = StatisticalAnalysisEngine::new();
+        let err = engine
+            .analyze_results(&HashMap::new())
+            .await
+            .expect_err("profile results are not a numeric sample");
+        assert!(err.to_string().contains("summary statistics"), "{err}");
     }
 }

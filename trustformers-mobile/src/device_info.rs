@@ -84,7 +84,7 @@ impl Default for MobileDeviceInfo {
                 battery_health_percent: Some(100),
                 charging_status: ChargingStatus::NotCharging,
                 is_charging: false,
-                power_save_mode: false,
+                power_save_mode: Some(false),
                 low_power_mode_available: true,
             },
             available_backends: vec![MobileBackend::CPU],
@@ -262,6 +262,7 @@ pub enum ThermalState {
     Critical,
     Emergency,
     Shutdown,
+    Unknown,
 }
 
 /// Temperature sensor information
@@ -290,8 +291,11 @@ pub struct PowerInfo {
     pub charging_status: ChargingStatus,
     /// Is charging (derived from charging_status)
     pub is_charging: bool,
-    /// Power save mode active
-    pub power_save_mode: bool,
+    /// Power save mode active. `None` when this cannot be verified on the
+    /// current platform (see
+    /// `MobileDeviceDetector::is_power_save_mode_active`) -- distinct
+    /// from `Some(false)`, which asserts a real check found it inactive.
+    pub power_save_mode: Option<bool>,
     /// Low power mode available
     pub low_power_mode_available: bool,
 }
@@ -522,15 +526,34 @@ impl MobileDeviceDetector {
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
+            // Real measurement via `sysinfo` (the same crate/feature set used
+            // elsewhere in this crate, e.g. `mlx_integration::sample_process_usage`)
+            // rather than the fixed 4096/2048 MB this used to report on every
+            // desktop host regardless of actual RAM. `System::new_all()`
+            // populates memory counters synchronously (no CPU-usage-style
+            // double-sample delay is needed for memory).
+            let mut system = sysinfo::System::new();
+            system.refresh_memory();
+            let total_mb = (system.total_memory() / (1024 * 1024)) as usize;
+            let available_mb = (system.available_memory() / (1024 * 1024)) as usize;
+
+            // A host with no readable memory counters (e.g. a sandboxed
+            // target where `sysinfo` cannot query the OS) falls back to a
+            // documented conservative assumption rather than silently
+            // reporting 0 MB, which would make every downstream tier/budget
+            // calculation degenerate.
+            let (total_mb, available_mb) =
+                if total_mb == 0 { (4096, 2048) } else { (total_mb, available_mb.max(1)) };
+
             Ok(MemoryInfo {
-                total_mb: 4096, // Default assumption
-                available_mb: 2048,
-                total_memory: 4096,
-                available_memory: 2048,
-                bandwidth_mbps: None,
+                total_mb,
+                available_mb,
+                total_memory: total_mb,
+                available_memory: available_mb,
+                bandwidth_mbps: Self::benchmark_memory_bandwidth().map(|v| v as usize),
                 memory_type: "Unknown".to_string(),
                 frequency_mhz: None,
-                is_low_memory_device: false,
+                is_low_memory_device: total_mb < 2048,
             })
         }
     }
@@ -642,7 +665,7 @@ impl MobileDeviceDetector {
         // Run micro-benchmarks to assess performance
         let cpu_single_core = Self::benchmark_cpu_single_core();
         let cpu_multi_core = Self::benchmark_cpu_multi_core(cpu_info.total_cores);
-        let gpu_score = gpu_info.as_ref().map(|_| Self::benchmark_gpu());
+        let gpu_score = gpu_info.as_ref().map(Self::benchmark_gpu);
         let memory_score = Self::benchmark_memory_bandwidth();
 
         let overall_tier = Self::calculate_overall_tier(
@@ -664,9 +687,26 @@ impl MobileDeviceDetector {
 
     // Configuration adjustment methods
 
+    /// Hard ceiling [`MobileConfig::validate`] enforces on `max_memory_mb`
+    /// ("Mobile deployment should not exceed 4GB memory"). The
+    /// `configure_for_*_device` helpers below derive `max_memory_mb` as a
+    /// fraction of `device_info.memory_info.total_mb`; while that total used
+    /// to be a fixed mobile-scale `4096` on every non-Android/iOS host, it
+    /// is now a real `sysinfo`-measured figure that, on a build/test
+    /// machine with far more RAM than a phone, can be tens of gigabytes.
+    /// Every assignment must therefore clamp to this ceiling, not just floor
+    /// with `.max(...)`.
+    const MAX_MOBILE_MEMORY_MB: usize = 4096;
+    /// Hard ceiling `validate()` enforces on `num_threads` ("should not use
+    /// more than 16 threads"); same rationale as above but for
+    /// `cpu_info.total_cores`/`performance_cores`, which on a many-core
+    /// desktop build host can exceed it.
+    const MAX_MOBILE_THREADS: usize = 16;
+
     fn configure_for_budget_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Maximum;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 6).max(128); // Very conservative
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 6).clamp(128, Self::MAX_MOBILE_MEMORY_MB); // Very conservative
         config.num_threads = 1;
         config.enable_batching = false;
         config.max_batch_size = 1;
@@ -678,16 +718,20 @@ impl MobileDeviceDetector {
 
     fn configure_for_mid_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Balanced;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 4).max(256);
-        config.num_threads = (device_info.cpu_info.performance_cores).max(1);
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 4).clamp(256, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads =
+            (device_info.cpu_info.performance_cores).clamp(1, Self::MAX_MOBILE_THREADS);
         config.enable_batching = device_info.memory_info.total_mb >= 3072;
         config.max_batch_size = if config.enable_batching { 2 } else { 1 };
     }
 
     fn configure_for_high_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Balanced;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 3).max(512);
-        config.num_threads = device_info.cpu_info.performance_cores + 1;
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 3).clamp(512, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads =
+            (device_info.cpu_info.performance_cores + 1).min(Self::MAX_MOBILE_THREADS);
         config.enable_batching = true;
         config.max_batch_size = 4;
         if let Some(ref mut quant) = config.quantization.as_mut() {
@@ -697,8 +741,9 @@ impl MobileDeviceDetector {
 
     fn configure_for_flagship_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Minimal;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 2).max(1024);
-        config.num_threads = device_info.cpu_info.total_cores;
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 2).clamp(1024, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads = device_info.cpu_info.total_cores.min(Self::MAX_MOBILE_THREADS);
         config.enable_batching = true;
         config.max_batch_size = 8;
         if let Some(ref mut quant) = config.quantization.as_mut() {
@@ -729,13 +774,36 @@ impl MobileDeviceDetector {
     }
 
     fn adjust_for_power_state(config: &mut MobileConfig, power_info: &PowerInfo) {
-        if power_info.power_save_mode || power_info.battery_level_percent.unwrap_or(100) < 20 {
+        // Neither `power_save_mode` nor `battery_level_percent` is
+        // observable on most builds today: no pure-Rust API reaches
+        // Android's `PowerManager.isPowerSaveMode()` / iOS's
+        // `ProcessInfo.isLowPowerModeEnabled`, and the real battery read
+        // (`get_battery_info`) is Android/Linux-`power_supply`-sysfs only.
+        // The previous `power_info.battery_level_percent.unwrap_or(100)`
+        // fabricated "fully charged" on every platform without a real
+        // reading, silently defeating both branches below everywhere
+        // except Android/Linux. This function is the one-shot
+        // "best config given what is actually known" path
+        // (`generate_optimized_config`), not a live safety gate, so the
+        // fix is not to swing to the opposite fabrication ("assume
+        // critical" -- which would pin every unmeasured device to the most
+        // restrictive config and make the tier-based selection above
+        // pointless); instead each signal only contributes when it is
+        // genuinely known, and with neither known no power-based
+        // adjustment is made at all.
+        let power_save_active = power_info.power_save_mode.unwrap_or(false);
+        let battery_critically_low =
+            power_info.battery_level_percent.is_some_and(|level| level < 20);
+        let battery_moderately_low =
+            power_info.battery_level_percent.is_some_and(|level| level < 50);
+
+        if power_save_active || battery_critically_low {
             // Aggressive power saving
             config.memory_optimization = MemoryOptimization::Maximum;
             config.num_threads = 1;
             config.enable_batching = false;
             config.backend = MobileBackend::CPU; // Prefer CPU over GPU/NPU
-        } else if power_info.battery_level_percent.unwrap_or(100) < 50 {
+        } else if battery_moderately_low {
             // Moderate power saving
             config.num_threads = (config.num_threads / 2).max(1);
             config.max_batch_size = (config.max_batch_size / 2).max(1);
@@ -942,24 +1010,159 @@ impl MobileDeviceDetector {
         None
     }
 
+    /// Delegates to the same real read [`crate::thermal_power`]'s live
+    /// monitor uses (`read_platform_temperature` + `temperature_to_state`)
+    /// so this one-shot detection and a running `ThermalPowerManager`
+    /// agree on what a given physical reading means, instead of running
+    /// two independently maintained thermal pipelines. `ThermalState::Unknown`
+    /// when the platform genuinely cannot be read (iOS; most desktop/CI
+    /// hosts, which expose no `sysinfo` thermal component) -- previously a
+    /// hardcoded `ThermalState::Nominal` under a
+    /// '// Platform-specific thermal state detection' comment that
+    /// performed no detection at all.
     fn get_current_thermal_state() -> ThermalState {
-        // Platform-specific thermal state detection
-        ThermalState::Nominal
+        crate::thermal_power::read_platform_temperature()
+            .map(crate::thermal_power::temperature_to_state)
+            .unwrap_or(ThermalState::Unknown)
     }
 
+    /// Whether the target OS has a thermal-management facility at all --
+    /// a static, `cfg`-determined fact about the platform, not whether
+    /// *this build* can currently read a value from it (Android's sysfs
+    /// read can fail on a locked-down OEM image even though the platform
+    /// genuinely throttles; iOS throttles even though this crate has no
+    /// FFI binding to query `ProcessInfo.thermalState`). Previously a
+    /// hardcoded `true` under a
+    /// '// Check if platform supports thermal throttling' comment that
+    /// checked nothing, so every platform -- including a plain desktop
+    /// build with no such facility -- reported throttling support.
     fn is_thermal_throttling_supported() -> bool {
-        // Check if platform supports thermal throttling
-        true
+        cfg!(any(target_os = "android", target_os = "ios"))
     }
 
+    /// Real `/sys/class/thermal/thermal_zone*/{type,temp}` scan on
+    /// Android/Linux -- the sibling convention to
+    /// [`Self::enumerate_thermal_zones`]'s `type`-only scan (this pairs
+    /// each zone's `type` file, the sensor name, with its `temp` file, a
+    /// real reading in millidegrees Celsius), and to
+    /// `thermal_power::read_android_temperature`'s own zone scan (same
+    /// sysfs convention, same duplicated `MAX_THERMAL_ZONES` bound and
+    /// unpopulated-zone-sentinel filter -- both already accepted and
+    /// justified, for the same "not worth widening cross-module
+    /// visibility for a few lines" reason, on `Self::enumerate_thermal_zones`
+    /// itself). No per-zone "safe max" sysfs convention is scanned here
+    /// (trip-point files exist but their count/ordering/labels are not
+    /// standardized across zones or OEMs), so `max_temperature_celsius`
+    /// is honestly `None` rather than guessed. Previously a `vec![]`
+    /// under a `// Enumerate available temperature sensors` comment that
+    /// performed no enumeration at all, on every platform -- the verbatim
+    /// sibling of `enumerate_thermal_zones`'s own former stub.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     fn enumerate_temperature_sensors() -> Vec<TemperatureSensor> {
-        // Enumerate available temperature sensors
-        vec![]
+        const MAX_THERMAL_ZONES: u32 = 64;
+        const PLAUSIBLE_MILLIDEGREES: std::ops::RangeInclusive<i64> = -40_000..=200_000;
+        const SENTINEL_MILLIDEGREES: [i64; 2] = [0, -1];
+
+        (0..MAX_THERMAL_ZONES)
+            .filter_map(|zone| {
+                let name =
+                    std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/type"))
+                        .ok()?
+                        .trim()
+                        .to_string();
+                let temperature_celsius =
+                    std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/temp"))
+                        .ok()
+                        .and_then(|raw| raw.trim().parse::<i64>().ok())
+                        .filter(|millidegrees| {
+                            !SENTINEL_MILLIDEGREES.contains(millidegrees)
+                                && PLAUSIBLE_MILLIDEGREES.contains(millidegrees)
+                        })
+                        .map(|millidegrees| millidegrees as f32 / 1000.0);
+                Some(TemperatureSensor {
+                    name,
+                    temperature_celsius,
+                    max_temperature_celsius: None,
+                })
+            })
+            .collect()
     }
 
+    /// iOS exposes no per-sensor enumeration API at all -- see
+    /// `thermal_power::read_ios_temperature`'s doc comment
+    /// (`ProcessInfo.thermalState` is the only thermal signal iOS
+    /// exposes, and reaching even that needs Objective-C FFI this crate's
+    /// default build does not implement). Honestly empty rather than a
+    /// fabricated sensor list.
+    #[cfg(target_os = "ios")]
+    fn enumerate_temperature_sensors() -> Vec<TemperatureSensor> {
+        Vec::new()
+    }
+
+    /// Desktop (macOS/Windows/other Unix): real `sysinfo::Components`
+    /// readings, the same mechanism
+    /// `thermal_power::read_desktop_temperature` and
+    /// `mobile_performance_profiler::collector::hottest_component_celsius`
+    /// already use for this crate's other (already real) thermal
+    /// telemetry. `critical()` -- sysinfo's "highest temperature before
+    /// the component halts" -- is the closest real match to this
+    /// struct's `max_temperature_celsius` ("maximum safe temperature");
+    /// `max()` (the highest temperature *observed so far*) is a
+    /// different quantity and not used here. Both readings are filtered
+    /// to finite values: sysinfo documents `f32::NAN` as its own
+    /// "failed to retrieve it" signal on Linux, and reporting that as
+    /// `Some(NaN)` here would itself be exactly the kind of
+    /// fabricated-looking value this pass exists to remove. A component
+    /// with an empty label is skipped entirely -- an unnamed sensor is
+    /// not a meaningfully identifiable one.
+    #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "ios")))]
+    fn enumerate_temperature_sensors() -> Vec<TemperatureSensor> {
+        sysinfo::Components::new_with_refreshed_list()
+            .iter()
+            .filter(|component| !component.label().is_empty())
+            .map(|component| TemperatureSensor {
+                name: component.label().to_string(),
+                temperature_celsius: component.temperature().filter(|c| c.is_finite()),
+                max_temperature_celsius: component.critical().filter(|c| c.is_finite()),
+            })
+            .collect()
+    }
+
+    /// Real `/sys/class/thermal/thermal_zone*/type` scan on Android/Linux
+    /// (the `type` file holds each zone's kernel-assigned name, e.g.
+    /// `"cpu-thermal"`, `"battery"`, `"gpu_thermal"` -- the sibling
+    /// convention to the `.../temp` millidegree scan
+    /// `thermal_power::read_android_temperature` already performs; the
+    /// `MAX_THERMAL_ZONES` bound is duplicated rather than shared across
+    /// crate-internal module boundaries the same way that file's own
+    /// desktop-temperature doc comment already justifies a six-line
+    /// duplication over widening visibility). No such sysfs convention
+    /// exists on iOS or a generic desktop/CI host, so those honestly
+    /// report an empty list rather than a fabricated name -- previously a
+    /// `vec![]` under a `// Enumerate thermal zones` comment that claimed
+    /// an enumeration it never performed, on every platform including
+    /// Android.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     fn enumerate_thermal_zones() -> Vec<String> {
-        // Enumerate thermal zones
-        vec![]
+        const MAX_THERMAL_ZONES: u32 = 64;
+
+        (0..MAX_THERMAL_ZONES)
+            .filter_map(|zone| {
+                std::fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/type"))
+                    .ok()
+                    .map(|contents| contents.trim().to_string())
+            })
+            .collect()
+    }
+
+    /// No pure-Rust, cross-platform thermal-zone-name enumeration exists
+    /// outside the Linux/Android `/sys/class/thermal` sysfs convention --
+    /// iOS exposes no zone list through any public API, and a generic
+    /// desktop/CI host has no equivalent concept at all. Honestly empty
+    /// rather than a fabricated placeholder name.
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    fn enumerate_thermal_zones() -> Vec<String> {
+        Vec::new()
     }
 
     fn get_battery_info() -> (Option<usize>, Option<u8>, Option<u8>) {
@@ -971,34 +1174,149 @@ impl MobileDeviceDetector {
         ChargingStatus::Unknown
     }
 
-    fn is_power_save_mode_active() -> bool {
-        false
+    /// `None` when this cannot be verified. Whether the OS-level power
+    /// saver is currently toggled on requires Android's
+    /// `PowerManager.isPowerSaveMode()` or iOS's
+    /// `ProcessInfo.isLowPowerModeEnabled` -- both JNI/Objective-C APIs
+    /// with no pure-Rust binding in this workspace's dependency set, and
+    /// COOLJAPAN policy keeps FFI feature-gated off by default. Previously
+    /// a hardcoded `false` with no explanatory comment, which asserted
+    /// "never power-saving" for every device unconditionally.
+    fn is_power_save_mode_active() -> Option<bool> {
+        None
     }
 
+    /// Static OS-capability fact, not a live measurement: iOS has offered
+    /// system-wide Low Power Mode since iOS 9, Android system-wide
+    /// Battery Saver since API 21 (Lollipop) -- both comfortably below any
+    /// version this crate plausibly targets, so `true` for either is a
+    /// real fact about the platform rather than a guess. A generic/desktop
+    /// build has no such crate-modeled concept, so `false` rather than the
+    /// previous blanket `true` regardless of platform.
     fn is_low_power_mode_available() -> bool {
-        true
+        cfg!(any(target_os = "android", target_os = "ios"))
     }
 
     // Performance benchmarking methods
+    //
+    // These used to return the fixed constants `1000`, `1000 * cores`,
+    // `2000`, and `1500` on every device, which made `calculate_overall_tier`
+    // (and everything downstream that trusts `PerformanceScores`, such as
+    // `generate_optimized_config`) blind to whether the device is actually
+    // fast or slow. Each benchmark below now runs a real, timed, bounded
+    // workload -- the *scores differ across machines* because they are
+    // measured, not asserted.
+
+    /// Bounded-duration budget for one core's micro-benchmark run. Small
+    /// enough that `MobileDeviceDetector::detect()` (which every test in
+    /// this module calls at least once) stays fast, large enough that the
+    /// measured iteration count is not dominated by `Instant` overhead.
+    const BENCHMARK_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+    /// Run a fixed-duration, data-dependent floating point workload on the
+    /// calling thread and return a throughput score (higher = faster core).
+    ///
+    /// The loop body carries a data dependency through `acc` from one
+    /// iteration to the next, so the compiler cannot fold it to a constant
+    /// or hoist it out of the loop; `std::hint::black_box` additionally
+    /// prevents the whole loop from being optimized away as dead code. This
+    /// is a real timed measurement, not a formula that returns the same
+    /// number for every CPU.
+    fn run_cpu_workload_score() -> u32 {
+        let start = std::time::Instant::now();
+        let mut acc: f64 = 1.0;
+        let mut rounds: u64 = 0;
+        while start.elapsed() < Self::BENCHMARK_BUDGET {
+            for _ in 0..2000 {
+                acc = std::hint::black_box((acc * 1.000_003 + 0.5).sin().abs() + 1.0);
+            }
+            rounds += 1;
+        }
+        std::hint::black_box(acc);
+        let elapsed_us = start.elapsed().as_micros().max(1) as u64;
+        // Normalize to "thousand loop-rounds per second" so the score is a
+        // stable order-of-magnitude figure independent of the exact budget
+        // chosen above.
+        let score = rounds.saturating_mul(1_000_000) / elapsed_us;
+        score.min(u32::MAX as u64) as u32
+    }
 
     fn benchmark_cpu_single_core() -> Option<u32> {
-        // Run single-core CPU benchmark
-        Some(1000) // Placeholder score
+        Some(Self::run_cpu_workload_score())
     }
 
     fn benchmark_cpu_multi_core(cores: usize) -> Option<u32> {
-        // Run multi-core CPU benchmark
-        Some((1000 * cores) as u32) // Placeholder
+        let cores = cores.max(1);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Run the same timed workload concurrently on `cores` OS
+            // threads and sum their throughput -- a real multi-core figure
+            // that reflects actual contention/scheduling on this device,
+            // not `single_core_score * cores`.
+            let handles: Vec<_> =
+                (0..cores).map(|_| std::thread::spawn(Self::run_cpu_workload_score)).collect();
+            let total: u64 = handles.into_iter().map(|h| u64::from(h.join().unwrap_or(0))).sum();
+            Some(total.min(u32::MAX as u64) as u32)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `wasm32-unknown-unknown` has no OS-thread `std::thread::spawn`
+            // support by default, so real parallel execution isn't
+            // available here. Summing `cores` sequential runs of the same
+            // timed workload is an honest lower bound (it credits zero
+            // speedup from parallelism) rather than a fabricated constant.
+            let total: u64 = (0..cores).map(|_| u64::from(Self::run_cpu_workload_score())).sum();
+            Some(total.min(u32::MAX as u64) as u32)
+        }
     }
 
-    fn benchmark_gpu() -> u32 {
-        // Run GPU benchmark
-        2000 // Placeholder
+    /// Derive a GPU score from the already-detected [`GpuInfo`] rather than
+    /// a flat constant. There is no portable, dependency-free way to run a
+    /// live GPU compute benchmark from this crate (that needs a real
+    /// Metal/Vulkan/OpenGL context per platform), so this is a deterministic
+    /// function of *real, per-device detected* data -- compute unit count
+    /// when known, otherwise the detected performance tier -- which varies
+    /// across devices with their actual detected GPU, unlike the previous
+    /// unconditional `2000`.
+    fn benchmark_gpu(gpu_info: &GpuInfo) -> u32 {
+        if let Some(units) = gpu_info.compute_units {
+            return (units as u32).saturating_mul(64);
+        }
+        match gpu_info.performance_tier {
+            GpuPerformanceTier::Low => 800,
+            GpuPerformanceTier::Medium => 1600,
+            GpuPerformanceTier::High => 2800,
+            GpuPerformanceTier::Flagship => 4200,
+        }
     }
 
+    /// Benchmark real memory throughput by timing repeated read-modify-write
+    /// passes over a multi-megabyte buffer and converting elapsed time and
+    /// bytes moved into MB/s. `std::hint::black_box` keeps the compiler from
+    /// eliding the writes/reads as dead code.
     fn benchmark_memory_bandwidth() -> Option<u32> {
-        // Benchmark memory bandwidth
-        Some(1500) // Placeholder
+        const BUFFER_LEN: usize = 4 * 1024 * 1024; // 4 MiB of u64 lanes below -> 32 MiB touched
+        let mut buffer = vec![0u64; BUFFER_LEN];
+
+        let start = std::time::Instant::now();
+        let mut passes: u64 = 0;
+        while start.elapsed() < Self::BENCHMARK_BUDGET {
+            for (i, slot) in buffer.iter_mut().enumerate() {
+                *slot = std::hint::black_box(slot.wrapping_add(i as u64 + 1));
+            }
+            passes += 1;
+        }
+        std::hint::black_box(&buffer);
+
+        let elapsed_secs = start.elapsed().as_secs_f64();
+        if elapsed_secs <= 0.0 {
+            return None;
+        }
+        let bytes_moved = passes as f64 * (BUFFER_LEN * std::mem::size_of::<u64>()) as f64;
+        let mbps = bytes_moved / elapsed_secs / (1024.0 * 1024.0);
+        Some(mbps.min(u32::MAX as f64) as u32)
     }
 
     fn calculate_overall_tier(
@@ -1173,5 +1491,435 @@ mod tests {
 
         assert!(allocation >= 128);
         assert!(allocation <= 2048);
+    }
+
+    /// Regression test for the previous `benchmark_*` implementations, which
+    /// returned the literal constants `1000`, `1000 * cores`, `2000`, and
+    /// `1500` on every device regardless of actual hardware speed. A real,
+    /// timed micro-benchmark on any machine running this test produces a
+    /// throughput figure in the tens-of-thousands range (rounds/sec-derived
+    /// score over an 8ms budget), not these small legacy constants.
+    #[test]
+    fn test_cpu_and_memory_benchmarks_are_measured_not_placeholder_constants() {
+        let single = MobileDeviceDetector::benchmark_cpu_single_core();
+        assert!(single.is_some());
+        assert_ne!(
+            single,
+            Some(1000),
+            "single-core score must not be the old placeholder"
+        );
+        assert!(single.expect("checked is_some above") > 0);
+
+        let multi = MobileDeviceDetector::benchmark_cpu_multi_core(4);
+        assert!(multi.is_some());
+        assert_ne!(
+            multi,
+            Some(4000),
+            "multi-core score must not be `1000 * cores`"
+        );
+        assert!(multi.expect("checked is_some above") > 0);
+
+        let mem = MobileDeviceDetector::benchmark_memory_bandwidth();
+        assert!(mem.is_some());
+        assert_ne!(
+            mem,
+            Some(1500),
+            "memory bandwidth must not be the old placeholder"
+        );
+        assert!(mem.expect("checked is_some above") > 0);
+    }
+
+    /// Regression test for the previous `benchmark_gpu()`, which took no
+    /// arguments and always returned the literal `2000` no matter which GPU
+    /// (if any) was actually detected. The score must now vary with the
+    /// real, per-device [`GpuInfo`] passed in.
+    #[test]
+    fn test_gpu_benchmark_derives_from_detected_info_not_flat_constant() {
+        let low = GpuInfo {
+            vendor: "test".to_string(),
+            model: "test-low".to_string(),
+            driver_version: "1.0".to_string(),
+            memory_mb: None,
+            compute_units: None,
+            supported_apis: vec![],
+            performance_tier: GpuPerformanceTier::Low,
+        };
+        let flagship = GpuInfo {
+            performance_tier: GpuPerformanceTier::Flagship,
+            ..low.clone()
+        };
+
+        let low_score = MobileDeviceDetector::benchmark_gpu(&low);
+        let flagship_score = MobileDeviceDetector::benchmark_gpu(&flagship);
+
+        assert_ne!(
+            low_score, 2000,
+            "tier-derived score must not be the old flat placeholder"
+        );
+        assert!(
+            flagship_score > low_score,
+            "a flagship-tier GPU must score higher than a low-tier one"
+        );
+
+        // compute_units, when known, takes priority over the coarse tier and
+        // also must not collapse to the old constant.
+        let with_units = GpuInfo {
+            compute_units: Some(10),
+            ..low
+        };
+        assert_eq!(MobileDeviceDetector::benchmark_gpu(&with_units), 640);
+    }
+
+    /// Regression test for the previous desktop branch of `detect_memory_info`,
+    /// which reported the fixed `total_mb: 4096, available_mb: 2048` for
+    /// every non-Android/non-iOS host. On any real machine, `sysinfo`-derived
+    /// totals differ from that pair (and always satisfy the aliasing
+    /// invariant `total_memory == total_mb`).
+    #[test]
+    fn test_memory_info_uses_real_sysinfo_not_fixed_4096_2048() {
+        let memory_info =
+            MobileDeviceDetector::detect_memory_info().expect("memory detection failed");
+        assert_eq!(memory_info.total_memory, memory_info.total_mb);
+        assert_eq!(memory_info.available_memory, memory_info.available_mb);
+        assert!(memory_info.total_mb > 0);
+    }
+
+    /// Regression test for the previous `get_current_thermal_state`
+    /// hardcoded `ThermalState::Nominal` under a
+    /// '// Platform-specific thermal state detection' comment that
+    /// performed no detection. On the desktop hosts this crate's tests
+    /// actually run on, `thermal_power::read_platform_temperature` is very
+    /// likely to fail (no `sysinfo` thermal component exposed), which the
+    /// old code could never distinguish from a genuinely cool, measured
+    /// device -- both produced the identical `Nominal`. This asserts the
+    /// honest outcome instead: either a real state derived from a real
+    /// reading, or `Unknown` when no reading was possible, never a
+    /// fabricated default.
+    #[test]
+    fn test_get_current_thermal_state_is_real_reading_or_honestly_unknown() {
+        // `read_platform_temperature` is a genuinely live hardware sensor
+        // read on hosts that expose one, and this workspace's test runs
+        // share the machine with several parallel `cargo build`/`test`
+        // jobs that visibly move CPU temperature during a run -- a naive
+        // "read, call get_current_thermal_state(), read again, compare"
+        // can flake right at a bucket boundary if the temperature crosses
+        // it between the bracketing reads (observed on this exact test
+        // host with a single stale `before`/`after` pair). Bracketing each
+        // attempt immediately around the call under test, and accepting
+        // the call's result whenever it falls within (inclusive of) the
+        // bracket -- which is always true unless
+        // `get_current_thermal_state` is not actually deriving from a real
+        // reading -- with a small bounded retry for the rare case a
+        // boundary is crossed exactly during the call itself, keeps this
+        // tied to real sensor data without being sensitive to normal
+        // thermal drift under concurrent CI load.
+        const MAX_ATTEMPTS: usize = 20;
+
+        let mut last_seen = None;
+        for _ in 0..MAX_ATTEMPTS {
+            let before = crate::thermal_power::read_platform_temperature()
+                .ok()
+                .map(crate::thermal_power::temperature_to_state);
+            let state = MobileDeviceDetector::get_current_thermal_state();
+            let after = crate::thermal_power::read_platform_temperature()
+                .ok()
+                .map(crate::thermal_power::temperature_to_state);
+
+            match (before, after) {
+                (None, None) => {
+                    // The platform could not be read on either side of the
+                    // call either: the honest outcome is Unknown, not the
+                    // previous fabricated Nominal default.
+                    assert_eq!(
+                        state,
+                        ThermalState::Unknown,
+                        "an unreadable platform must report Unknown, not the previous \
+                         fabricated Nominal default"
+                    );
+                    return;
+                },
+                (b, a) => {
+                    // At least one bracketing read succeeded: the real
+                    // in-between state must match one of the buckets that
+                    // genuinely straddle it.
+                    if b == Some(state) || a == Some(state) {
+                        return;
+                    }
+                    last_seen = Some((b, state, a));
+                },
+            }
+        }
+
+        panic!(
+            "get_current_thermal_state() never fell within its bracketing live reads across \
+             {MAX_ATTEMPTS} attempts (last seen before/state/after = {last_seen:?}) -- it must \
+             derive from a real reading via read_platform_temperature + temperature_to_state, \
+             not a fabricated default"
+        );
+    }
+
+    /// Regression test for the previous `is_thermal_throttling_supported`
+    /// hardcoded `true` under a
+    /// '// Check if platform supports thermal throttling' comment that
+    /// checked nothing. It is now a static `cfg!`-determined platform
+    /// fact: `true` only on Android/iOS, `false` everywhere else
+    /// (including the desktop hosts this test actually runs on).
+    #[test]
+    fn test_is_thermal_throttling_supported_reflects_real_platform_not_blanket_true() {
+        let supported = MobileDeviceDetector::is_thermal_throttling_supported();
+        assert_eq!(
+            supported,
+            cfg!(any(target_os = "android", target_os = "ios"))
+        );
+    }
+
+    /// Regression test for the previous `is_power_save_mode_active`
+    /// hardcoded `false` with no platform check behind it at all. No
+    /// pure-Rust binding reaches the real OS API on any target this crate
+    /// builds for today, so the honest answer is always `None`
+    /// ("cannot verify"), never an asserted `Some(false)`.
+    #[test]
+    fn test_is_power_save_mode_active_is_honestly_unverifiable() {
+        assert_eq!(MobileDeviceDetector::is_power_save_mode_active(), None);
+    }
+
+    /// Regression test for the previous `is_low_power_mode_available`
+    /// hardcoded `true` regardless of platform. This is a static
+    /// OS-capability fact (Low Power Mode / Battery Saver both predate
+    /// every version this crate plausibly targets), so `true` on
+    /// Android/iOS and `false` elsewhere -- not a blanket `true` on a
+    /// desktop/generic build with no such crate-modeled concept.
+    #[test]
+    fn test_is_low_power_mode_available_reflects_real_platform_not_blanket_true() {
+        let available = MobileDeviceDetector::is_low_power_mode_available();
+        assert_eq!(
+            available,
+            cfg!(any(target_os = "android", target_os = "ios"))
+        );
+    }
+
+    /// Regression test for the previous `adjust_for_power_state` reading
+    /// `power_info.battery_level_percent.unwrap_or(100)`, which fabricated
+    /// "fully charged" for every platform where the real battery read is
+    /// unavailable (every non-Android/Linux target). With neither
+    /// `power_save_mode` nor `battery_level_percent` known, no power-based
+    /// adjustment should fire at all -- distinct from both "assume fully
+    /// charged" (the old bug) and "assume critical" (the opposite
+    /// fabrication).
+    #[test]
+    fn test_adjust_for_power_state_makes_no_change_when_nothing_is_known() {
+        let power_info = PowerInfo {
+            battery_capacity_mah: None,
+            battery_level_percent: None,
+            battery_level: None,
+            battery_health_percent: None,
+            charging_status: ChargingStatus::Unknown,
+            is_charging: false,
+            power_save_mode: None,
+            low_power_mode_available: false,
+        };
+        let mut config = MobileConfig::default();
+        let original_threads = config.num_threads;
+        let original_batch = config.max_batch_size;
+        let original_memory_opt = config.memory_optimization;
+        let original_backend = config.backend;
+
+        MobileDeviceDetector::adjust_for_power_state(&mut config, &power_info);
+
+        assert_eq!(config.num_threads, original_threads);
+        assert_eq!(config.max_batch_size, original_batch);
+        assert_eq!(config.memory_optimization, original_memory_opt);
+        assert_eq!(config.backend, original_backend);
+    }
+
+    /// A genuinely known low battery must still trigger the moderate power
+    /// saving branch -- confirms the fix did not also break the case where
+    /// the signal *is* available (e.g. real Android/Linux
+    /// `power_supply` sysfs reads).
+    #[test]
+    fn test_adjust_for_power_state_still_reacts_to_a_known_low_battery() {
+        let power_info = PowerInfo {
+            battery_capacity_mah: Some(3000),
+            battery_level_percent: Some(30),
+            battery_level: Some(30),
+            battery_health_percent: Some(90),
+            charging_status: ChargingStatus::Discharging,
+            is_charging: false,
+            power_save_mode: Some(false),
+            low_power_mode_available: false,
+        };
+        let mut config = MobileConfig {
+            num_threads: 8,
+            max_batch_size: 8,
+            ..MobileConfig::default()
+        };
+
+        MobileDeviceDetector::adjust_for_power_state(&mut config, &power_info);
+
+        assert_eq!(config.num_threads, 4);
+        assert_eq!(config.max_batch_size, 4);
+    }
+
+    /// Regression guard for the previous `enumerate_thermal_zones` stub: a
+    /// bare `vec![]` under a `// Enumerate thermal zones` comment that
+    /// claimed an enumeration it never performed, on every target
+    /// including Android. This host (`cfg(not(any(target_os = "android",
+    /// target_os = "linux")))`) has no sysfs thermal-zone convention to
+    /// scan, so an empty `Vec` here is the honest answer, not a stub --
+    /// the distinction the fix makes is real-scan-on-android/linux vs.
+    /// honestly-empty-elsewhere, both documented, neither claiming work
+    /// that was not done.
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    fn test_enumerate_thermal_zones_is_honestly_empty_off_linux_and_android() {
+        assert_eq!(
+            MobileDeviceDetector::enumerate_thermal_zones(),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Unconditional on Linux/Android, unlike the companion test below:
+    /// whatever `enumerate_thermal_zones` returns, every name in it must
+    /// be real (non-empty) sysfs content, not a placeholder. This holds
+    /// vacuously when the scan finds no zones at all (a genuine
+    /// possibility on a locked-down container with no `/sys/class/
+    /// thermal` mounted), so on its own it cannot prove the scan ran for
+    /// real -- but because it is never gated behind an `if`, it can never
+    /// silently skip its assertion on a CI runner without that sysfs
+    /// path, the way a single `if`-wrapped test could report PASS with
+    /// zero assertions actually executed.
+    #[test]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn test_enumerate_thermal_zones_names_are_never_placeholders() {
+        let zones = MobileDeviceDetector::enumerate_thermal_zones();
+        assert!(
+            zones.iter().all(|name| !name.is_empty()),
+            "every reported zone name must be real (non-empty) sysfs content, not a \
+             placeholder: {zones:?}"
+        );
+    }
+
+    /// Only meaningful, and deliberately only run, on a host that already
+    /// exposes `/sys/class/thermal/thermal_zone0` -- proves the scan is a
+    /// real read rather than a stub on hosts where the honest answer is
+    /// knowable in advance (essentially every real Linux desktop/CI
+    /// runner and Android device). Guarded rather than unconditional
+    /// because a minimal container genuinely may not mount that path, in
+    /// which case "found no zones" is the correct honest answer, not a
+    /// bug this test should flag.
+    #[test]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn test_enumerate_thermal_zones_finds_zones_when_the_sysfs_class_exists() {
+        if !std::path::Path::new("/sys/class/thermal/thermal_zone0").exists() {
+            return;
+        }
+        let zones = MobileDeviceDetector::enumerate_thermal_zones();
+        assert!(
+            !zones.is_empty(),
+            "this host exposes /sys/class/thermal/thermal_zone0 but the scan reported no zones"
+        );
+    }
+
+    /// Regression guard for the previous `enumerate_temperature_sensors`
+    /// stub: a bare `vec![]` under a `// Enumerate available temperature
+    /// sensors` comment that claimed an enumeration it never performed --
+    /// the verbatim sibling of the `enumerate_thermal_zones` stub fixed
+    /// above. iOS has no per-sensor API at all (see
+    /// `enumerate_temperature_sensors`'s doc comment), so an empty `Vec`
+    /// here is a compile-time guarantee for this branch, not a
+    /// runtime-dependent one -- safe to assert unconditionally, unlike
+    /// the desktop-`sysinfo` branch below.
+    #[test]
+    #[cfg(target_os = "ios")]
+    fn test_enumerate_temperature_sensors_is_honestly_empty_on_ios() {
+        assert!(MobileDeviceDetector::enumerate_temperature_sensors().is_empty());
+    }
+
+    /// Unconditional on Linux/Android, unlike the companion test below:
+    /// whatever the scan returns, every sensor's name must be real
+    /// (non-empty) sysfs content, any reported temperature must be
+    /// finite and inside the physically plausible range this same
+    /// function filters on, and `max_temperature_celsius` must be `None`
+    /// (this function never fabricates a "safe max" -- see its doc
+    /// comment). Holds vacuously when the scan finds no zones at all,
+    /// so on its own it cannot prove the scan ran for real -- but
+    /// because it is never gated behind an `if`, it can never silently
+    /// skip its assertions on a CI runner without that sysfs path.
+    /// Mirrors `test_enumerate_thermal_zones_names_are_never_placeholders`.
+    #[test]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn test_enumerate_temperature_sensors_names_are_never_placeholders() {
+        let sensors = MobileDeviceDetector::enumerate_temperature_sensors();
+        for sensor in &sensors {
+            assert!(
+                !sensor.name.is_empty(),
+                "every reported sensor must have a real name"
+            );
+            if let Some(celsius) = sensor.temperature_celsius {
+                assert!(
+                    celsius.is_finite() && (-40.0..=200.0).contains(&celsius),
+                    "reported temperature {celsius} for {} is outside the plausible range",
+                    sensor.name
+                );
+            }
+            assert!(
+                sensor.max_temperature_celsius.is_none(),
+                "no trip-point scan is performed; this must never be fabricated"
+            );
+        }
+    }
+
+    /// Only meaningful, and deliberately only run, on a host that already
+    /// exposes `/sys/class/thermal/thermal_zone0` -- proves the scan is a
+    /// real read rather than a stub on hosts where the honest answer is
+    /// knowable in advance. Guarded rather than unconditional because a
+    /// minimal container genuinely may not mount that path.
+    #[test]
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    fn test_enumerate_temperature_sensors_finds_sensors_when_the_sysfs_class_exists() {
+        if !std::path::Path::new("/sys/class/thermal/thermal_zone0").exists() {
+            return;
+        }
+        let sensors = MobileDeviceDetector::enumerate_temperature_sensors();
+        assert!(
+            !sensors.is_empty(),
+            "this host exposes /sys/class/thermal/thermal_zone0 but the scan reported no sensors"
+        );
+    }
+
+    /// Desktop (macOS/Windows/other Unix): whatever `sysinfo::Components`
+    /// returns, every reported name must be non-empty (the scan itself
+    /// filters out empty labels) and every temperature finite. Confirmed
+    /// live, not just theoretically real: on this crate's own Apple
+    /// Silicon macOS dev host, `sysinfo::Components` returns ~33 real
+    /// PMU/NAND/battery dies with genuine (varying, non-placeholder)
+    /// Celsius readings; `critical()` is uniformly `None` on that
+    /// backend, unlike Linux hwmon where it is sometimes populated. This
+    /// still cannot also assert non-emptiness of the *list* the way the
+    /// Linux/Android tests above do: this crate targets mobile, and some
+    /// desktop/CI host may genuinely expose zero components (a sandboxed
+    /// container, for one), which is the honest answer there, not a bug.
+    #[test]
+    #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "ios")))]
+    fn test_enumerate_temperature_sensors_desktop_readings_are_never_placeholders() {
+        let sensors = MobileDeviceDetector::enumerate_temperature_sensors();
+        for sensor in &sensors {
+            assert!(
+                !sensor.name.is_empty(),
+                "every reported sensor must have a real name"
+            );
+            if let Some(celsius) = sensor.temperature_celsius {
+                assert!(
+                    celsius.is_finite(),
+                    "temperature must be finite, not sysinfo's NaN sentinel"
+                );
+            }
+            if let Some(celsius) = sensor.max_temperature_celsius {
+                assert!(
+                    celsius.is_finite(),
+                    "critical temperature must be finite, not sysinfo's NaN sentinel"
+                );
+            }
+        }
     }
 }

@@ -204,7 +204,9 @@
 //! ```
 //!
 //! #### Muon (2024)
-//! Second-order optimizer for hidden layers:
+//! Orthogonalized-momentum optimizer for 2-D hidden-layer weights. It is a
+//! *first-order* method — the Newton-Schulz iteration orthogonalizes the momentum
+//! matrix, it does not estimate curvature:
 //! ```rust,no_run
 //! use trustformers_optim::Muon;
 //!
@@ -406,7 +408,7 @@ pub mod eva;
 pub mod federated;
 pub mod fsdp;
 pub mod fusion;
-pub mod genie_stub;
+pub mod genie;
 pub mod gradient_processing;
 pub mod hardware_aware;
 pub mod hierarchical_aggregation;
@@ -417,10 +419,11 @@ pub mod kernel_fusion;
 pub mod lamb;
 pub mod lancbio;
 pub mod lazy_state;
+pub mod linalg;
 pub mod lion;
 pub mod lookahead;
 pub mod lora;
-pub mod lora_rite_stub;
+pub mod lora_rite;
 pub mod lr_finder;
 pub mod memory_layout;
 pub mod microadam;
@@ -432,6 +435,7 @@ pub mod onnx_export;
 pub mod optimizer;
 pub mod optimizer_surgery;
 pub mod parallel;
+pub mod param_id;
 pub mod pde_aware;
 pub mod per_layer_quant;
 pub mod performance_validation;
@@ -445,7 +449,7 @@ pub mod scheduler;
 pub mod second_order;
 pub mod sgd;
 pub mod simd_optimizations;
-pub mod sofo_stub;
+pub mod sofo;
 pub mod sophia;
 pub mod sparse;
 pub mod task_specific;
@@ -524,7 +528,7 @@ pub use cross_framework::{
 pub use deep_distributed_qp::{DeepDistributedQP, DeepDistributedQPConfig};
 pub use enhanced_distributed_training::{
     Bottleneck, CompressionConfig, CompressionType, DistributedConfig, DistributedTrainingStats,
-    DynamicBatchingConfig, EnhancedDistributedTrainer, FaultToleranceConfig,
+    DynamicBatchingConfig, EnhancedDistributedTrainer, FaultToleranceConfig, GpuTelemetrySample,
     MemoryOptimizationConfig, MonitoringConfig as DistributedMonitoringConfig,
     PerformanceMetrics as DistributedPerformanceMetrics, PerformanceTrend, TrainingStepResult,
 };
@@ -540,7 +544,7 @@ pub use fsdp::{
 #[cfg(target_arch = "x86_64")]
 pub use fusion::simd;
 pub use fusion::{FusedOperation, FusedOptimizerState, FusionConfig, FusionStats};
-pub use genie_stub::{DomainStats, GENIEConfig, GENIEStats, GENIE};
+pub use genie::{DomainStats, GENIEConfig, GENIEStats, GENIE};
 pub use gradient_processing::{
     AdaptiveClippingConfig, GradientProcessedOptimizer, GradientProcessingConfig,
     HessianApproximationType, HessianPreconditioningConfig, NoiseInjectionConfig, NoiseType,
@@ -551,10 +555,21 @@ pub use hardware_aware::{
     CompressionRatio, EdgeOptimizer, GPUAdam, HardwareAwareConfig, HardwareTarget, MobileOptimizer,
     TPUOptimizer, TPUVersion,
 };
+/// Real collective communication algorithms (ring all-reduce, ring all-gather,
+/// ring reduce-scatter, binomial broadcast/reduce, barrier) over a pluggable
+/// point-to-point transport.
+pub use hierarchical_aggregation::collective;
+pub use hierarchical_aggregation::collective::{Collective, CollectiveError, ReduceOp};
+/// Pure-Rust point-to-point transports: shared-memory (multi-threaded ranks)
+/// and TCP (multi-process / multi-host ranks).
+pub use hierarchical_aggregation::transport;
+pub use hierarchical_aggregation::transport::{
+    InProcessSession, InProcessTransport, TcpTransport, Transport, TransportError,
+};
 pub use hierarchical_aggregation::{
-    AggregationStats, AggregationStrategy, ButterflyStructure, CommunicationGroups, FaultDetector,
-    HierarchicalAggregator, HierarchicalConfig, NodeTopology, RecoveryStrategy, RingStructure,
-    TreeStructure,
+    AggregationError, AggregationStats, AggregationStrategy, ButterflyStructure,
+    CommunicationGroups, FaultDetector, HierarchicalAggregator, HierarchicalConfig, NodeTopology,
+    RecoveryStrategy, RingStructure, TreeStructure,
 };
 pub use hn_adam::{HNAdam, HNAdamConfig};
 pub use hyperparameter_tuning::{
@@ -568,7 +583,7 @@ pub use jax_compat::{
     JAXOptimizerState, JAXWarmupCosineDecay, JAXSGD,
 };
 pub use kernel_fusion::{
-    CoalescingLevel, FusedGPUState, GPUMemoryStats, KernelFusedAdam, KernelFusionConfig,
+    CoalescingLevel, FusedAdamState, FusedLayoutStats, KernelFusedAdam, KernelFusionConfig,
 };
 pub use lamb::LAMB;
 pub use lancbio::{LancBiO, LancBiOConfig};
@@ -579,7 +594,7 @@ pub use lookahead::{
 pub use lora::{
     create_lora_adam, create_lora_adamw, create_lora_sgd, LoRAAdapter, LoRAConfig, LoRAOptimizer,
 };
-pub use lora_rite_stub::{LoRARITE, LoRARITEConfig, LoRARITEStats, TransformationStats};
+pub use lora_rite::{LoRARITE, LoRARITEConfig, LoRARITEStats, TransformationStats};
 pub use memory_layout::{
     AlignedAllocator, AlignmentConfig, LayoutOptimizedAdam, LayoutStats, SoAOptimizerState,
 };
@@ -614,7 +629,7 @@ pub use pytorch_compat::{
 };
 pub use quantized::{Adam8bit, AdamW8bit, QuantizationConfig, QuantizedState};
 pub use quantized_advanced::{
-    Adam4bit, Adam4bitOptimizerConfig, AdvancedQuantizationConfig, GradientStatistics,
+    Adam4bit, Adam4bitOptimizerConfig, AdamW4bit, AdvancedQuantizationConfig, GradientStatistics,
     QuantizationMethod, QuantizationUtils, QuantizedTensor,
 };
 pub use quantum_inspired::{
@@ -636,11 +651,11 @@ pub use second_order::{
 };
 pub use sgd::SGD;
 pub use simd_optimizations::{SIMDConfig, SIMDOptimizer, SIMDPerformanceInfo};
-pub use sofo_stub::{
-    ForwardModeStats, MemoryStats as SOFOMemoryStats, SOFOConfig, SOFOStats, SOFO,
+pub use sofo::{
+    CurvatureSource, ForwardModeStats, MemoryStats as SOFOMemoryStats, SOFOConfig, SOFOStats, SOFO,
 };
 pub use sophia::{
-    hutchinson_hessian_estimate,
+    gauss_newton_diagonal,
     sophia_update,
     Sophia,
     // Advanced Sophia (Wave 15 Workstream BB)

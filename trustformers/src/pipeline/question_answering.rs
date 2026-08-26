@@ -200,9 +200,6 @@ impl QuestionAnsweringPipeline {
             ));
         }
 
-        let context_start = sep_positions[0] + 1;
-        let context_end = sep_positions[1];
-
         // Run model inference
         let output = model.forward(tokenized.clone())?;
 

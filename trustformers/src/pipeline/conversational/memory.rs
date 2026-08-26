@@ -200,10 +200,9 @@ impl MemoryManager {
             }
 
             // Merge similar memories if we found any
-            if similar_memories.len() > 1 {
-                compressed.push(self.merge_memories(similar_memories));
-            } else {
-                compressed.push(current.clone());
+            match self.merge_memories(&similar_memories) {
+                Some(merged) if similar_memories.len() > 1 => compressed.push(merged),
+                _ => compressed.push(current.clone()),
             }
         }
 
@@ -252,14 +251,16 @@ impl MemoryManager {
         tag_similarity > 0.6 || content_similarity > 0.5
     }
 
-    /// Merge similar memories into a single consolidated memory
-    fn merge_memories(&self, memories: Vec<ConversationMemory>) -> ConversationMemory {
-        if memories.is_empty() {
-            panic!("Cannot merge empty memory list");
-        }
+    /// Merge similar memories into a single consolidated memory.
+    ///
+    /// Returns `None` for an empty slice — emptiness is a normal outcome of
+    /// grouping, not a programmer error, so it is reported rather than
+    /// panicking inside long-lived conversation state.
+    fn merge_memories(&self, memories: &[ConversationMemory]) -> Option<ConversationMemory> {
+        let first = memories.first()?;
 
         if memories.len() == 1 {
-            return memories[0].clone();
+            return Some(first.clone());
         }
 
         // Find the most important memory as the base
@@ -268,11 +269,11 @@ impl MemoryManager {
             .max_by(|a, b| {
                 a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap_or(&memories[0]);
+            .unwrap_or(first);
 
         // Combine content
         let mut combined_content = base_memory.content.clone();
-        for memory in &memories {
+        for memory in memories {
             if memory.id != base_memory.id && !combined_content.contains(&memory.content) {
                 combined_content.push_str(" | ");
                 combined_content.push_str(&memory.content);
@@ -298,7 +299,7 @@ impl MemoryManager {
         // Sum access counts
         let total_access_count = memories.iter().map(|m| m.access_count).sum();
 
-        ConversationMemory {
+        Some(ConversationMemory {
             id: uuid::Uuid::new_v4().to_string(),
             content: combined_content,
             importance: combined_importance.min(1.0),
@@ -306,7 +307,7 @@ impl MemoryManager {
             access_count: total_access_count,
             memory_type: base_memory.memory_type.clone(),
             tags: all_tags,
-        }
+        })
     }
 
     /// Retrieve memories by type
@@ -840,7 +841,9 @@ impl LongTermMemoryManager {
             let group_memories: Vec<ConversationMemory> =
                 group.iter().map(|&idx| memories[idx].clone()).collect();
 
-            let merged = self.memory_manager.merge_memories(group_memories);
+            let Some(merged) = self.memory_manager.merge_memories(&group_memories) else {
+                continue;
+            };
 
             // Remove original memories (in reverse order to maintain indices)
             for &idx in group.iter().rev() {
@@ -1149,7 +1152,7 @@ mod tests {
             ),
         ];
 
-        let merged = manager.merge_memories(memories);
+        let merged = manager.merge_memories(&memories).expect("two memories merge into one");
 
         assert!(merged.content.contains("Python"));
         assert!(merged.importance >= 0.7);
@@ -1446,5 +1449,15 @@ mod tests {
         let turn = create_test_turn("Test content", ConversationRole::User);
         let memory = disabled_manager.create_memory(&turn);
         assert!(memory.is_none());
+    }
+
+    /// Regression: `merge_memories` used to `panic!("Cannot merge empty memory
+    /// list")`. Consolidation runs over long-lived conversation state, so an
+    /// empty group must be reported, not fatal.
+    #[test]
+    fn merging_an_empty_group_returns_none_instead_of_panicking() {
+        let config = create_test_memory_config();
+        let manager = MemoryManager::new(config);
+        assert!(manager.merge_memories(&[]).is_none());
     }
 }

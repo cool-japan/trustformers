@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -220,15 +219,25 @@ impl HubMirror {
     async fn download_model(&self, model_id: &str, version: &str) -> Result<PathBuf> {
         let cache_key = format!("{}:{}", model_id, version);
 
-        // Check if already downloading
-        {
+        // Check if already downloading. The read guard is dropped (via this
+        // block) before the possible call to `wait_for_download` below: that
+        // function takes `self.download_queue.read()` again, and
+        // `std::sync::RwLock` documents that same-thread reentrant locking
+        // "may deadlock ... depending on the platform" once a writer is
+        // queued in between. `return EXPR;` only drops locals *after*
+        // evaluating `EXPR`, so nesting the `.await` call directly inside
+        // this block (as the previous version did) would have kept `queue`
+        // held for the whole call.
+        let already_downloading = {
             let queue = self.download_queue.read().unwrap_or_else(|p| p.into_inner());
-            if let Some(progress) = queue.get(&cache_key) {
-                if progress.status == DownloadStatus::Downloading {
-                    // Wait for existing download to complete
-                    return self.wait_for_download(&cache_key).await;
-                }
-            }
+            queue
+                .get(&cache_key)
+                .map(|progress| progress.status == DownloadStatus::Downloading)
+                .unwrap_or(false)
+        };
+        if already_downloading {
+            // Wait for existing download to complete
+            return self.wait_for_download(&cache_key).await;
         }
 
         // Start new download
@@ -653,10 +662,14 @@ impl HubMirror {
                 {
                     if remote_model.latest_version != cached_model.version {
                         tracing::info!(
-                            "Update available for {}: {} -> {}",
-                            cached_model.model_id,
-                            cached_model.version,
-                            remote_model.latest_version
+                            "{}",
+                            format_update_available_message(
+                                &cached_model.model_id,
+                                &cached_model.version,
+                                &remote_model.latest_version,
+                                remote_model.size_mb,
+                                &remote_model.updated_at,
+                            )
                         );
                         updates_found += 1;
                     }
@@ -698,29 +711,36 @@ impl HubMirror {
         let max_size = self.config.max_storage_size_gb * 1024.0 * 1024.0 * 1024.0;
         let target_size = max_size * 0.7; // Clean up to 70% of max size
 
-        {
+        // Clone the entries out (rather than borrowing via `.values().collect()`)
+        // and drop the read guard immediately: the previous version instead
+        // called `calculate_total_size`, which takes `self.cache.read()` again,
+        // and `std::sync::RwLock` documents that same-thread reentrant locking
+        // "may deadlock ... depending on the platform" once a writer is queued
+        // in between. Summing `cache_items` directly below avoids that second
+        // lock acquisition entirely, rather than merely scoping it safely.
+        let mut cache_items: Vec<CachedModel> = {
             let cache = self.cache.read().unwrap_or_else(|p| p.into_inner());
-            let mut cache_items: Vec<_> = cache.values().collect();
+            cache.values().cloned().collect()
+        };
 
-            // Sort by priority (keep priority models) and last access time
-            cache_items.sort_by(|a, b| {
-                match (a.is_priority, b.is_priority) {
-                    (true, false) => std::cmp::Ordering::Greater,
-                    (false, true) => std::cmp::Ordering::Less,
-                    _ => a.last_accessed.cmp(&b.last_accessed), // LRU for same priority
-                }
-            });
-
-            let mut current_size = self.calculate_total_size().await?;
-
-            for model in cache_items {
-                if current_size <= target_size || model.is_priority {
-                    break;
-                }
-
-                models_to_remove.push((model.model_id.clone(), model.version.clone()));
-                current_size -= model.file_size as f64;
+        // Sort by priority (keep priority models) and last access time
+        cache_items.sort_by(|a, b| {
+            match (a.is_priority, b.is_priority) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.last_accessed.cmp(&b.last_accessed), // LRU for same priority
             }
+        });
+
+        let mut current_size: f64 = cache_items.iter().map(|m| m.file_size as f64).sum();
+
+        for model in cache_items {
+            if current_size <= target_size || model.is_priority {
+                break;
+            }
+
+            models_to_remove.push((model.model_id.clone(), model.version.clone()));
+            current_size -= model.file_size as f64;
         }
 
         // Remove selected models
@@ -897,6 +917,23 @@ impl HubMirror {
     }
 }
 
+/// Format the "update available" diagnostic surfaced during background sync.
+///
+/// Pulled out of `sync_with_remote` so the message content (including the
+/// remote's reported size and last-updated timestamp) is unit-testable
+/// without needing to capture `tracing` output.
+fn format_update_available_message(
+    model_id: &str,
+    cached_version: &str,
+    latest_version: &str,
+    size_mb: f64,
+    updated_at: &str,
+) -> String {
+    format!(
+        "Update available for {model_id}: {cached_version} -> {latest_version} ({size_mb:.2} MB, updated {updated_at})"
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteModelInfo {
     model_id: String,
@@ -944,6 +981,24 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn test_format_update_available_message_includes_remote_size_and_timestamp() {
+        // Regression test: `RemoteModelInfo::size_mb`/`updated_at` used to be
+        // deserialized from the sync response and then never read, so this
+        // diagnostic never mentioned them. Guard against that regressing.
+        let message = format_update_available_message(
+            "bert-base-uncased",
+            "1.0.0",
+            "1.1.0",
+            438.5,
+            "2026-01-15T00:00:00Z",
+        );
+        assert!(message.contains("bert-base-uncased"));
+        assert!(message.contains("1.0.0 -> 1.1.0"));
+        assert!(message.contains("438.50 MB"));
+        assert!(message.contains("2026-01-15T00:00:00Z"));
+    }
+
     #[tokio::test]
     async fn test_mirror_creation() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
@@ -972,6 +1027,199 @@ mod tests {
         // Test cache save/load
         mirror.save_cache().await.expect("async operation failed");
         mirror.load_cache().await.expect("async operation failed");
+    }
+
+    fn test_cached_model(
+        name: &str,
+        file_size: u64,
+        is_priority: bool,
+        access_secs: u64,
+    ) -> CachedModel {
+        CachedModel {
+            model_id: name.to_string(),
+            version: "1.0".to_string(),
+            local_path: std::env::temp_dir().join(format!("cleanup_cache_test_{name}")),
+            remote_url: format!("https://example.com/{name}"),
+            cached_at: SystemTime::UNIX_EPOCH + Duration::from_secs(access_secs),
+            last_accessed: SystemTime::UNIX_EPOCH + Duration::from_secs(access_secs),
+            access_count: 1,
+            file_size,
+            checksum: "deadbeef".to_string(),
+            metadata: ModelMetadata {
+                name: name.to_string(),
+                description: None,
+                architecture: "test".to_string(),
+                task: "test".to_string(),
+                language: None,
+                license: None,
+                tags: vec![],
+                performance_metrics: HashMap::new(),
+                size_mb: (file_size as f64) / (1024.0 * 1024.0),
+                dependencies: vec![],
+            },
+            is_priority,
+            download_complete: true,
+        }
+    }
+
+    /// Regression test for `cleanup_cache`'s refactor (extracting cache entries
+    /// via `.cloned()`, and summing their sizes directly, instead of borrowing
+    /// them across a now-removed `calculate_total_size().await` call -- see
+    /// that function's doc comment for why the borrow was a same-thread
+    /// `RwLock` reentrancy hazard). Exercises the exact eviction logic end to
+    /// end: the oldest non-priority entry over budget must be evicted; the
+    /// priority entry and the entry that alone fits under the target must
+    /// both survive.
+    #[tokio::test]
+    async fn test_cleanup_cache_evicts_oldest_non_priority_first() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        // target_size = 0.7 * max_size = 7_000_000 bytes.
+        let max_size_bytes = 10_000_000f64;
+        let config = MirrorConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            max_storage_size_gb: max_size_bytes / (1024.0 * 1024.0 * 1024.0),
+            ..Default::default()
+        };
+        let mirror = HubMirror::new(config).expect("operation failed in test");
+
+        {
+            let mut cache = mirror.cache.write().expect("lock should not be poisoned");
+            // Oldest, non-priority, 3_000_000 bytes -- must be evicted.
+            cache.insert(
+                "old_evict:1.0".to_string(),
+                test_cached_model("old_evict", 3_000_000, false, 1_000),
+            );
+            // Newer, non-priority, 1_000_000 bytes -- fits once old_evict is
+            // gone (9_000_000 - 3_000_000 = 6_000_000 <= 7_000_000 target).
+            cache.insert(
+                "new_keep:1.0".to_string(),
+                test_cached_model("new_keep", 1_000_000, false, 2_000),
+            );
+            // Priority, 5_000_000 bytes, oldest access of all -- must survive
+            // regardless of age or the total size still being over budget.
+            cache.insert(
+                "keep_priority:1.0".to_string(),
+                test_cached_model("keep_priority", 5_000_000, true, 500),
+            );
+        }
+
+        mirror.cleanup_cache().await.expect("cleanup_cache must not deadlock or error");
+
+        let cache = mirror.cache.read().expect("lock should not be poisoned");
+        assert!(
+            !cache.contains_key("old_evict:1.0"),
+            "the oldest non-priority, over-budget entry must have been evicted"
+        );
+        assert!(
+            cache.contains_key("new_keep:1.0"),
+            "the entry that fits under target once old_evict is gone must survive"
+        );
+        assert!(
+            cache.contains_key("keep_priority:1.0"),
+            "priority entries must never be evicted by cleanup_cache"
+        );
+    }
+
+    /// Regression test for `download_model`'s refactor: the "already
+    /// downloading" check now extracts a plain `bool` and drops its read
+    /// guard *before* the possible delegation to `wait_for_download` (see
+    /// that call site's doc comment for why the old code -- which called
+    /// `wait_for_download` from inside the same block that still held the
+    /// guard -- was a same-thread `RwLock` reentrancy hazard). This exercises
+    /// the exact delegation path end to end: seed the queue as
+    /// already-downloading, complete it concurrently from another task, and
+    /// confirm `download_model` observes the in-progress state, delegates to
+    /// `wait_for_download`, and resolves to the completed path -- all within
+    /// a bounded time instead of hanging.
+    #[tokio::test]
+    async fn test_download_model_delegates_to_wait_for_download_when_already_in_progress() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config = MirrorConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mirror = Arc::new(HubMirror::new(config).expect("operation failed in test"));
+
+        let model_id = "already-downloading-model";
+        let version = "1.0";
+        let cache_key = format!("{}:{}", model_id, version);
+        let final_path = temp_dir.path().join("already-downloading-model.bin");
+
+        // Seed the queue as if a download were already in progress.
+        {
+            let mut queue = mirror.download_queue.write().expect("lock should not be poisoned");
+            queue.insert(
+                cache_key.clone(),
+                DownloadProgress {
+                    model_id: model_id.to_string(),
+                    version: version.to_string(),
+                    bytes_downloaded: 0,
+                    total_bytes: 100,
+                    progress_percent: 0.0,
+                    download_speed_mbps: 0.0,
+                    eta_seconds: 0,
+                    status: DownloadStatus::Downloading,
+                },
+            );
+        }
+
+        // Complete the simulated download concurrently, from another task,
+        // while `download_model` is (or is about to be) delegating to
+        // `wait_for_download`.
+        let mirror_bg = Arc::clone(&mirror);
+        let cache_key_bg = cache_key.clone();
+        let final_path_bg = final_path.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            {
+                let mut queue =
+                    mirror_bg.download_queue.write().expect("lock should not be poisoned");
+                if let Some(progress) = queue.get_mut(&cache_key_bg) {
+                    progress.status = DownloadStatus::Completed;
+                }
+            }
+            {
+                let mut cache = mirror_bg.cache.write().expect("lock should not be poisoned");
+                cache.insert(
+                    cache_key_bg,
+                    CachedModel {
+                        model_id: model_id.to_string(),
+                        version: version.to_string(),
+                        local_path: final_path_bg,
+                        remote_url: "https://example.com".to_string(),
+                        cached_at: SystemTime::now(),
+                        last_accessed: SystemTime::now(),
+                        access_count: 1,
+                        file_size: 100,
+                        checksum: "abc".to_string(),
+                        metadata: ModelMetadata {
+                            name: model_id.to_string(),
+                            description: None,
+                            architecture: "test".to_string(),
+                            task: "test".to_string(),
+                            language: None,
+                            license: None,
+                            tags: vec![],
+                            performance_metrics: HashMap::new(),
+                            size_mb: 0.0001,
+                            dependencies: vec![],
+                        },
+                        is_priority: false,
+                        download_complete: true,
+                    },
+                );
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            mirror.download_model(model_id, version),
+        )
+        .await
+        .expect("download_model must not deadlock while another download is in progress")
+        .expect("download_model must resolve once the in-progress download completes");
+
+        assert_eq!(result, final_path);
     }
 
     #[test]

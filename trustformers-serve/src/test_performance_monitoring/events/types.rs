@@ -97,7 +97,17 @@ impl EventStore {
         true
     }
 }
-/// Event processing engine for complex event processing
+/// Event processing engine for complex event processing.
+///
+/// 0.2.1: every field of this type and of its four sub-components was built
+/// from the caller's `EventConfig` and then never read -- `EventManager`
+/// publishes straight through `event_store` and `event_dispatcher` and never
+/// asks the processor anything. The construction is real (rules, patterns,
+/// windows and indices are genuinely derived from the config), so rather than
+/// deleting configuration the operator supplied, each component now exposes
+/// what it holds. **No correlation, pattern matching, aggregation or enrichment
+/// is performed by this crate**: these are configured registries awaiting an
+/// engine, not an engine.
 #[derive(Debug)]
 pub struct EventProcessor {
     processing_rules: Arc<RwLock<Vec<ProcessingRule>>>,
@@ -107,6 +117,31 @@ pub struct EventProcessor {
     event_enricher: Arc<EventEnricher>,
 }
 impl EventProcessor {
+    /// Processing rules registered from the config.
+    pub async fn processing_rules(&self) -> Vec<ProcessingRule> {
+        self.processing_rules.read().await.clone()
+    }
+
+    /// The correlator built from `correlation_config`.
+    pub fn event_correlator(&self) -> &Arc<EventCorrelator> {
+        &self.event_correlator
+    }
+
+    /// The pattern matcher built from `pattern_config`.
+    pub fn pattern_matcher(&self) -> &Arc<PatternMatcher> {
+        &self.pattern_matcher
+    }
+
+    /// The aggregation engine built from `aggregation_config`.
+    pub fn aggregation_engine(&self) -> &Arc<AggregationEngine> {
+        &self.aggregation_engine
+    }
+
+    /// The enricher built from `enrichment_config`.
+    pub fn event_enricher(&self) -> &Arc<EventEnricher> {
+        &self.event_enricher
+    }
+
     fn new(config: &EventConfig) -> Self {
         Self {
             processing_rules: Arc::new(RwLock::new(Vec::new())),
@@ -135,6 +170,21 @@ pub struct PatternMatcher {
     matching_algorithms: Vec<MatchingAlgorithm>,
 }
 impl PatternMatcher {
+    /// Patterns derived from the configured pattern rules.
+    pub async fn patterns(&self) -> Vec<EventPattern> {
+        self.patterns.read().await.clone()
+    }
+
+    /// Names of the matching algorithms this matcher was configured with.
+    pub fn algorithm_names(&self) -> Vec<&str> {
+        self.matching_algorithms.iter().map(|a| a.algorithm_name.as_str()).collect()
+    }
+
+    /// Number of cached partial matches. Always 0: nothing matches yet.
+    pub async fn cached_match_count(&self) -> usize {
+        self.pattern_cache.lock().await.len()
+    }
+
     fn new(config: &PatternConfig) -> Self {
         let mut patterns_vec = Vec::new();
         if config.enabled {
@@ -184,6 +234,26 @@ pub struct AggregationEngine {
     aggregation_scheduler: Arc<AggregationScheduler>,
 }
 impl AggregationEngine {
+    /// Aggregation rules derived from the config.
+    pub async fn aggregation_rules(&self) -> Vec<AggregationRule> {
+        self.aggregation_rules.read().await.clone()
+    }
+
+    /// Open aggregation windows. Always empty: nothing aggregates yet.
+    pub async fn open_window_count(&self) -> usize {
+        self.aggregation_windows.read().await.len()
+    }
+
+    /// Cached aggregates. Always empty: nothing aggregates yet.
+    pub async fn cached_aggregate_count(&self) -> usize {
+        self.aggregation_cache.lock().await.len()
+    }
+
+    /// The scheduler this engine was configured with.
+    pub fn scheduler(&self) -> &Arc<AggregationScheduler> {
+        &self.aggregation_scheduler
+    }
+
     fn new(config: &AggregationConfig) -> Self {
         let default_rule = AggregationRule {
             rule_id: "default".to_string(),
@@ -417,6 +487,21 @@ pub struct EventIndexer {
     index_statistics: Arc<IndexStatistics>,
 }
 impl EventIndexer {
+    /// Indices declared by the configured indexed fields.
+    pub async fn indices(&self) -> HashMap<String, EventIndex> {
+        self.indices.read().await.clone()
+    }
+
+    /// The indexing configuration in force.
+    pub fn indexing_config(&self) -> &IndexingConfig {
+        &self.indexing_config
+    }
+
+    /// Index statistics. All zero: nothing writes an index entry yet.
+    pub fn index_statistics(&self) -> &Arc<IndexStatistics> {
+        &self.index_statistics
+    }
+
     fn new(config: &EventIndexingConfig) -> Self {
         let mut indices = HashMap::new();
         if config.enabled {
@@ -539,6 +624,26 @@ pub struct EventCorrelator {
     correlation_statistics: Arc<CorrelationStatistics>,
 }
 impl EventCorrelator {
+    /// Correlation rules derived from the configured correlation fields.
+    pub async fn correlation_rules(&self) -> Vec<CorrelationRule> {
+        self.correlation_rules.read().await.clone()
+    }
+
+    /// The correlation window from the config.
+    pub fn correlation_window(&self) -> Duration {
+        self.correlation_window
+    }
+
+    /// Live correlation contexts. Always empty: nothing correlates yet.
+    pub async fn open_context_count(&self) -> usize {
+        self.correlation_cache.lock().await.len()
+    }
+
+    /// Correlation statistics. All zero, for the same reason.
+    pub fn correlation_statistics(&self) -> &Arc<CorrelationStatistics> {
+        &self.correlation_statistics
+    }
+
     fn new(config: &CorrelationConfig) -> Self {
         let rules = if config.enabled {
             config
@@ -761,6 +866,23 @@ pub struct RetentionManager {
     retention_statistics: Arc<RetentionStatistics>,
 }
 impl RetentionManager {
+    /// Retention policies derived from the config.
+    pub async fn retention_policies(&self) -> Vec<RetentionPolicy> {
+        self.retention_policies.read().await.clone()
+    }
+
+    /// The cleanup schedule declared by the config.
+    ///
+    /// Declared, not run: nothing in this crate drives a cleanup loop.
+    pub fn cleanup_scheduler(&self) -> &Arc<CleanupScheduler> {
+        &self.cleanup_scheduler
+    }
+
+    /// Retention statistics. All zero: no cleanup has run.
+    pub fn retention_statistics(&self) -> &Arc<RetentionStatistics> {
+        &self.retention_statistics
+    }
+
     fn new(config: &EventRetentionConfig) -> Self {
         let cleanup_scheduler = CleanupScheduler {
             schedule_interval: config.cleanup_interval,
@@ -895,7 +1017,12 @@ pub struct EventFilter {
     pub time_window: Option<TimeWindow>,
     pub custom_predicates: Vec<CustomPredicate>,
 }
-/// Resource allocation information
+/// Resources granted to one test execution, as reported by whatever granted
+/// them.
+///
+/// Nothing in this crate allocates resources per test, so the event path
+/// carries [`ExecutionContext::resource_allocation`] as `None` rather than
+/// filling this in. See that field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceAllocation {
     pub cpu_cores: u32,
@@ -968,7 +1095,13 @@ pub struct ExecutionContext {
     pub execution_id: String,
     pub parent_execution_id: Option<String>,
     pub execution_environment: String,
-    pub resource_allocation: ResourceAllocation,
+    /// Resources an allocator granted this execution, when one did.
+    ///
+    /// 0.2.1: the live path filled this with `cpu_cores: 4, memory_mb: 1024,
+    /// disk_space_mb: 10240, network_bandwidth_mbps: 100.0` for every event on
+    /// every machine. Nothing in this crate allocates per-test resources, so
+    /// the honest value is `None`.
+    pub resource_allocation: Option<ResourceAllocation>,
     pub configuration_snapshot: HashMap<String, String>,
     pub dependency_versions: HashMap<String, String>,
 }
@@ -992,6 +1125,29 @@ pub struct EventDispatcher {
     dispatch_statistics: Arc<DispatchStatistics>,
 }
 impl EventDispatcher {
+    /// Capacity of the broadcast channel, from `EventConfig::channel_capacity`.
+    pub fn channel_capacity(&self) -> usize {
+        self.channel_capacity
+    }
+
+    /// Events queued for deferred dispatch.
+    ///
+    /// Always 0: `Self::dispatch_event` broadcasts synchronously and never
+    /// enqueues, and no dispatch worker is spawned.
+    pub async fn queued_event_count(&self) -> usize {
+        self.dispatch_queue.lock().await.len()
+    }
+
+    /// Number of dispatch workers. Always 0, for the same reason.
+    pub fn dispatch_worker_count(&self) -> usize {
+        self.dispatch_workers.len()
+    }
+
+    /// Dispatch statistics.
+    pub fn dispatch_statistics(&self) -> &Arc<DispatchStatistics> {
+        &self.dispatch_statistics
+    }
+
     fn new(broadcast_sender: broadcast::Sender<PerformanceEvent>, config: &EventConfig) -> Self {
         Self {
             broadcast_sender,
@@ -1031,12 +1187,88 @@ pub struct SourceFilter {
     pub source_id_pattern: Option<String>,
     pub host_pattern: Option<String>,
 }
-/// Host information for event source
+/// Host information for event source.
+///
+/// Build these with [`HostInfo::detect`] rather than by hand: everything here
+/// is a fact about the machine the process is running on, and every field has
+/// a real source.
+///
+/// 0.2.1: the live event path in `service.rs` used to fill this in by hand with
+/// `hostname: "localhost"`, `ip_address: "127.0.0.1"`, `operating_system:
+/// "Linux"` and `architecture: "x86_64"` -- constants that were wrong on every
+/// non-Linux host and told a consumer nothing about where the event came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostInfo {
+    /// Host name reported by the OS, or `"<unknown>"` when it will not say.
     pub hostname: String,
-    pub ip_address: String,
+    /// First non-loopback address found on a live interface. `None` when the
+    /// host has no such interface, or when no address could be enumerated:
+    /// there is no default address worth inventing.
+    pub ip_address: Option<String>,
+    /// Target OS this binary was built for (`std::env::consts::OS`).
     pub operating_system: String,
+    /// Target architecture this binary was built for (`std::env::consts::ARCH`).
     pub architecture: String,
+    /// This process's OS-assigned id.
     pub process_id: u32,
+}
+
+impl HostInfo {
+    /// Describe the host this process is running on.
+    ///
+    /// Every field is read from the OS (`sysinfo`) or from the compiled target
+    /// triple; nothing here is a constant standing in for a measurement. The
+    /// interface scan is the only part that can come up empty, and it reports
+    /// that as `ip_address: None`.
+    pub fn detect() -> Self {
+        let ip_address = sysinfo::Networks::new_with_refreshed_list()
+            .values()
+            .flat_map(|network| network.ip_networks())
+            .map(|ip_network| ip_network.addr)
+            .find(|addr| !addr.is_loopback() && !addr.is_unspecified())
+            .map(|addr| addr.to_string());
+
+        Self {
+            hostname: sysinfo::System::host_name().unwrap_or_else(|| "<unknown>".to_string()),
+            ip_address,
+            operating_system: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            process_id: std::process::id(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_info_tests {
+    use super::HostInfo;
+
+    /// `detect` must report the machine it is running on, not a constant.
+    #[test]
+    fn detect_reports_the_real_host() {
+        let host = HostInfo::detect();
+
+        assert_eq!(
+            host.operating_system,
+            std::env::consts::OS,
+            "operating_system must be this build's target OS"
+        );
+        assert_eq!(
+            host.architecture,
+            std::env::consts::ARCH,
+            "architecture must be this build's target arch"
+        );
+        assert_eq!(
+            host.process_id,
+            std::process::id(),
+            "process_id must be this process"
+        );
+        assert!(!host.hostname.is_empty(), "hostname must never be empty");
+        // The old hardcoded values: any of them appearing verbatim on a host
+        // that is not actually called `localhost` means the fabrication is back.
+        assert_ne!(
+            host.ip_address.as_deref(),
+            Some("127.0.0.1"),
+            "loopback is filtered out; it is never reported as the host address"
+        );
+    }
 }

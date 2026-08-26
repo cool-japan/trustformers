@@ -1,7 +1,7 @@
 //! Utility functions and data structures for ZeRO optimization
 
 use std::collections::HashMap;
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::parallel::ModelParallelContext;
 use trustformers_core::tensor::Tensor;
 
@@ -304,26 +304,8 @@ pub fn partition_parameters(
 
     for (name, param) in parameters {
         let shape = param.shape();
-        let total_elements = shape.iter().product::<usize>();
-
-        // Calculate partition size
-        let elements_per_rank = total_elements.div_ceil(world_size);
-        let start_idx = rank * elements_per_rank;
-        let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
-
-        // Create local shard using simplified slicing approach
-        // In a full implementation, this would use proper distributed tensor slicing
-        // For now, we create a scaled-down version to simulate partitioning
-        let local_shard = if world_size == 1 || total_elements <= elements_per_rank {
-            // If single device or small parameter, each rank gets a copy
-            param.clone()
-        } else {
-            // For demonstration, create a smaller tensor that represents the local shard
-            // This simulates the effect of partitioning without complex slicing logic
-            let scale_factor = 1.0 / (world_size as f32);
-
-            param.mul_scalar(scale_factor)?
-        };
+        let (start_idx, end_idx) = shard_range(shape.iter().product::<usize>(), world_size, rank)?;
+        let local_shard = slice_flat(param, start_idx, end_idx)?;
 
         let partition_info = PartitionInfo {
             rank,
@@ -339,6 +321,88 @@ pub fn partition_parameters(
     }
 
     Ok(partitions)
+}
+
+/// Computes the half-open element range `[start, end)` owned by `rank`.
+///
+/// Ranks are assigned contiguous, balanced slices of the *flattened* tensor:
+/// rank `r` owns `[r·⌈n/W⌉, min((r+1)·⌈n/W⌉, n))`. Trailing ranks may own an empty
+/// range when `n` is not divisible by `W`; the ranges are disjoint and their lengths
+/// sum to exactly `n`, which is what makes ZeRO's memory saving real.
+///
+/// # Errors
+///
+/// Returns an error for `world_size == 0` or `rank >= world_size`.
+pub fn shard_range(
+    total_elements: usize,
+    world_size: usize,
+    rank: usize,
+) -> Result<(usize, usize)> {
+    if world_size == 0 {
+        return Err(TrustformersError::invalid_input(
+            "ZeRO partitioning requires world_size > 0".to_string(),
+        ));
+    }
+    if rank >= world_size {
+        return Err(TrustformersError::invalid_input(format!(
+            "rank {rank} is out of range for world_size {world_size}"
+        )));
+    }
+
+    let elements_per_rank = total_elements.div_ceil(world_size);
+    let start_idx = (rank * elements_per_rank).min(total_elements);
+    let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
+    Ok((start_idx, end_idx))
+}
+
+/// Extracts `[start, end)` of a tensor's flattened data as a genuinely smaller 1-D
+/// tensor.
+///
+/// The whole point of ZeRO is that a rank only *retains* its own slice, so this really
+/// allocates `end - start` elements rather than rescaling the original. (The source
+/// tensor is read in full here because partitioning happens once, at setup, from a
+/// materialised parameter map.)
+///
+/// # Errors
+///
+/// Returns an error when the range is out of bounds or the tensor is not
+/// `f32`-readable.
+pub fn slice_flat(tensor: &Tensor, start: usize, end: usize) -> Result<Tensor> {
+    let data = tensor.data_f32()?;
+    if end > data.len() || start > end {
+        return Err(TrustformersError::invalid_input(format!(
+            "shard range {start}..{end} is out of bounds for a tensor of {} elements",
+            data.len()
+        )));
+    }
+    let shard = data[start..end].to_vec();
+    let len = shard.len();
+    Tensor::from_vec(shard, &[len])
+}
+
+/// Reassembles a full tensor from shards presented in rank order.
+///
+/// This is the inverse of [`partition_parameters`]/[`partition_gradients`]: the shards
+/// are concatenated and reshaped back to `global_shape`.
+///
+/// # Errors
+///
+/// Returns an error when the concatenated length does not match `global_shape`.
+pub fn gather_shards(shards: &[Tensor], global_shape: &[usize]) -> Result<Tensor> {
+    let mut values = Vec::new();
+    for shard in shards {
+        values.extend_from_slice(&shard.data_f32()?);
+    }
+
+    let expected: usize = global_shape.iter().product();
+    if values.len() != expected {
+        return Err(TrustformersError::invalid_input(format!(
+            "gathered {} elements but the global shape {global_shape:?} needs {expected}",
+            values.len()
+        )));
+    }
+
+    Tensor::from_vec(values, global_shape)
 }
 
 /// Gather parameters from all devices
@@ -368,24 +432,8 @@ pub fn partition_gradients(
 
     for (name, grad) in gradients {
         let shape = grad.shape();
-        let total_elements = shape.iter().product::<usize>();
-
-        // Calculate partition size
-        let elements_per_rank = total_elements.div_ceil(world_size);
-        let start_idx = rank * elements_per_rank;
-        let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
-
-        // Create local gradient shard using simplified approach
-        // In a full implementation, this would use proper distributed gradient slicing
-        let local_gradient = if world_size == 1 || total_elements <= elements_per_rank {
-            // If single device or small gradient, each rank gets a copy
-            grad.clone()
-        } else {
-            // For demonstration, create a scaled version to simulate partitioning
-            let scale_factor = 1.0 / (world_size as f32);
-
-            grad.mul_scalar(scale_factor)?
-        };
+        let (start_idx, end_idx) = shard_range(shape.iter().product::<usize>(), world_size, rank)?;
+        let local_gradient = slice_flat(grad, start_idx, end_idx)?;
 
         let partition_info = PartitionInfo {
             rank,
@@ -543,5 +591,106 @@ mod tests {
             let bucket_size: usize = bucket.iter().map(|&i| sizes[i]).sum();
             assert!(bucket_size <= 400 || bucket.len() == 1); // Single large item allowed
         }
+    }
+
+    /// Regression: partitioning used to scale the whole tensor by `1/world_size` on
+    /// every rank, so no rank ever held less than the full parameter.
+    #[test]
+    fn shards_are_disjoint_and_cover_every_element() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "w".to_string(),
+            Tensor::from_vec((0..10).map(|i| i as f32).collect(), &[10]).expect("tensor"),
+        );
+
+        let world_size = 4;
+        let mut total = 0_usize;
+        let mut seen = Vec::new();
+        for rank in 0..world_size {
+            let partitions =
+                partition_parameters(&parameters, world_size, rank).expect("partition");
+            let shard = &partitions.get("w").expect("shard").local_shard;
+            let values = shard.data_f32().expect("values");
+            total += values.len();
+            seen.extend(values);
+        }
+
+        assert_eq!(total, 10, "shard lengths must sum to the element count");
+        let expected: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        assert_eq!(seen, expected, "rank r must own slice r, in order");
+    }
+
+    /// Every rank's shard must be strictly smaller than the global tensor — that is
+    /// the entire memory saving ZeRO promises.
+    #[test]
+    fn each_shard_is_smaller_than_the_global_tensor() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "w".to_string(),
+            Tensor::from_vec(vec![1.0_f32; 16], &[4, 4]).expect("tensor"),
+        );
+
+        let partitions = partition_parameters(&parameters, 4, 1).expect("partition");
+        let partition = partitions.get("w").expect("partition");
+        assert_eq!(partition.local_shard.len(), 4);
+        assert_eq!(partition.partition_info.start_idx, 4);
+        assert_eq!(partition.partition_info.end_idx, 8);
+        assert_eq!(partition.partition_info.global_shape, vec![4, 4]);
+        assert_eq!(partition.partition_info.local_shape, vec![4]);
+    }
+
+    /// Gathering the shards in rank order must reproduce the original tensor exactly.
+    #[test]
+    fn gather_round_trips_the_original_tensor() {
+        let original =
+            Tensor::from_vec((0..12).map(|i| i as f32 * 0.5).collect(), &[3, 4]).expect("tensor");
+        let mut parameters = HashMap::new();
+        parameters.insert("w".to_string(), original.clone());
+
+        let world_size = 5;
+        let shards: Vec<Tensor> = (0..world_size)
+            .map(|rank| {
+                partition_parameters(&parameters, world_size, rank)
+                    .expect("partition")
+                    .get("w")
+                    .expect("shard")
+                    .local_shard
+                    .clone()
+            })
+            .collect();
+
+        let gathered = gather_shards(&shards, &[3, 4]).expect("gather");
+        assert_eq!(gathered.shape(), original.shape());
+        assert_eq!(
+            gathered.data_f32().expect("values"),
+            original.data_f32().expect("values")
+        );
+    }
+
+    /// Gradients shard exactly like parameters.
+    #[test]
+    fn gradients_are_sharded_not_rescaled() {
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "g".to_string(),
+            Tensor::from_vec(vec![2.0_f32; 8], &[8]).expect("tensor"),
+        );
+
+        let buffers = partition_gradients(&gradients, 2, 0).expect("partition");
+        let local = &buffers.get("g").expect("buffer").local_gradient;
+        assert_eq!(local.len(), 4, "the shard must be half the gradient");
+        assert!(
+            local.data_f32().expect("values").iter().all(|v| (*v - 2.0).abs() < 1e-6),
+            "values must be copied verbatim, not scaled by 1/world_size"
+        );
+    }
+
+    /// A trailing rank with nothing left to own gets an empty shard, not a copy.
+    #[test]
+    fn trailing_ranks_may_own_nothing() {
+        assert_eq!(shard_range(3, 4, 3).expect("range"), (3, 3));
+        assert_eq!(shard_range(3, 4, 0).expect("range"), (0, 1));
+        assert!(shard_range(3, 0, 0).is_err());
+        assert!(shard_range(3, 2, 2).is_err());
     }
 }

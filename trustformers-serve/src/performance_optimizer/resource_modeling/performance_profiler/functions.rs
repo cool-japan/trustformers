@@ -7,7 +7,16 @@ use std::time::Duration;
 
 use super::types::CpuVendor;
 
-macro_rules! define_placeholder_types {
+/// Declares a batch of plain data structs with `#[derive(Debug, Clone)]`.
+///
+/// ## Renamed in 0.2.1
+///
+/// This was called `define_placeholder_types!`. Nothing it generates is a
+/// placeholder: these are the ordinary configuration and result records the
+/// profiler passes around, and the macro only saves repeating the derive on
+/// each one. The name implied the *types* were stand-ins for something real,
+/// which sent readers looking for an implementation that was never missing.
+macro_rules! define_data_structs {
     (
         $($(#[$meta:meta])* $vis:vis struct $name:ident { $(pub $field:ident : $ty:ty,)*
         })*
@@ -16,7 +25,7 @@ macro_rules! define_placeholder_types {
         })*
     };
 }
-define_placeholder_types! {
+define_data_structs! {
     pub struct CpuProfilingConfig { pub enable_vendor_optimizations : bool, pub
     benchmark_iterations : usize, pub enable_thermal_monitoring : bool, pub cache_config
     : CacheProfilingConfig, } pub struct CacheProfilingConfig { pub analyze_all_levels :

@@ -249,7 +249,7 @@ impl GpuManager {
         let mut devices = vec![GpuDevice::cpu()];
 
         // Platform-specific device detection
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             // Detect Metal devices
             if let Ok(metal_devices) = Self::detect_metal_devices() {
@@ -284,83 +284,104 @@ impl GpuManager {
         devices
     }
 
-    #[cfg(target_os = "macos")]
+    /// Enumerate the system's Metal device.
+    ///
+    /// Queries the real device through the Metal backend. Without the `metal`
+    /// feature no Metal bindings are linked and no device is reported — an
+    /// empty list, never a placeholder "Apple GPU" with invented memory.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn detect_metal_devices() -> Result<Vec<GpuDevice>> {
-        // Stub implementation - would use Metal framework
+        let Some(device) = metal::Device::system_default() else {
+            return Ok(Vec::new());
+        };
+
+        // `recommended_max_working_set_size` is the amount of memory Metal will
+        // let this process hold resident — the closest real figure to a device
+        // memory budget that Metal exposes. Free memory is not exposed at all,
+        // so it is reported as unknown (0) rather than guessed.
+        let memory_total = device.recommended_max_working_set_size();
+
         Ok(vec![GpuDevice {
             id: 1,
-            name: "Apple GPU".to_string(),
+            name: device.name().to_string(),
             backend: GpuBackend::Metal,
-            memory_total: 8 * 1024 * 1024 * 1024, // 8GB placeholder
-            memory_free: 6 * 1024 * 1024 * 1024,  // 6GB placeholder
-            compute_capability: Some("Metal 3.0".to_string()),
+            memory_total,
+            memory_free: 0,
+            compute_capability: None,
             is_available: true,
         }])
     }
 
+    /// Enumerate CUDA devices.
+    ///
+    /// The CUDA feature links the oxicuda driver bindings but this crate has no
+    /// device-property query wired to them, so no device is reported rather
+    /// than a fabricated one.
     #[cfg(feature = "cuda")]
     fn detect_cuda_devices() -> Result<Vec<GpuDevice>> {
-        // Stub implementation - would use CUDA runtime API
-        Ok(vec![GpuDevice {
-            id: 2,
-            name: "NVIDIA GPU".to_string(),
-            backend: GpuBackend::Cuda,
-            memory_total: 12 * 1024 * 1024 * 1024, // 12GB placeholder
-            memory_free: 10 * 1024 * 1024 * 1024,  // 10GB placeholder
-            compute_capability: Some("8.6".to_string()),
-            is_available: true,
-        }])
+        tracing::debug!(
+            "CUDA device enumeration is not wired to the driver bindings; reporting no devices"
+        );
+        Ok(Vec::new())
     }
 
+    /// Enumerate ROCm devices.
+    ///
+    /// No HIP device-property query is linked, so no device is reported. This
+    /// previously invented two specific consumer cards.
     #[cfg(feature = "rocm")]
     fn detect_rocm_devices() -> Result<Vec<GpuDevice>> {
-        // ROCm device detection using ROCm Runtime API
-        // This would typically use hipGetDeviceCount() and hipGetDeviceProperties()
-
-        // Simulate ROCm device enumeration
-        // In a real implementation, this would call:
-        // - hipInit() to initialize ROCm
-        // - hipGetDeviceCount() to get number of devices
-        // - hipGetDeviceProperties() for each device
-
-        let devices = vec![
-            // Example for RX 6800 XT
-            GpuDevice {
-                id: 3,
-                name: "AMD Radeon RX 6800 XT".to_string(),
-                backend: GpuBackend::Rocm,
-                memory_total: 16 * 1024 * 1024 * 1024, // 16GB
-                memory_free: 14 * 1024 * 1024 * 1024,  // 14GB
-                compute_capability: Some("gfx1030".to_string()), // RDNA 2
-                is_available: true,
-            },
-            // Example for RX 7900 XTX
-            GpuDevice {
-                id: 4,
-                name: "AMD Radeon RX 7900 XTX".to_string(),
-                backend: GpuBackend::Rocm,
-                memory_total: 24 * 1024 * 1024 * 1024, // 24GB
-                memory_free: 22 * 1024 * 1024 * 1024,  // 22GB
-                compute_capability: Some("gfx1100".to_string()), // RDNA 3
-                is_available: true,
-            },
-        ];
-
-        Ok(devices)
+        tracing::debug!(
+            "ROCm device enumeration is not wired to hipGetDeviceProperties; reporting no devices"
+        );
+        Ok(Vec::new())
     }
 
+    /// Enumerate Vulkan devices through `vulkano`.
     #[cfg(feature = "vulkan")]
     fn detect_vulkan_devices() -> Result<Vec<GpuDevice>> {
-        // Stub implementation - would use Vulkan API
-        Ok(vec![GpuDevice {
-            id: 5,
-            name: "Vulkan GPU".to_string(),
-            backend: GpuBackend::Vulkan,
-            memory_total: 8 * 1024 * 1024 * 1024, // 8GB placeholder
-            memory_free: 6 * 1024 * 1024 * 1024,  // 6GB placeholder
-            compute_capability: Some("Vulkan 1.3".to_string()),
-            is_available: true,
-        }])
+        use vulkano::instance::{Instance, InstanceCreateInfo};
+        use vulkano::VulkanLibrary;
+
+        let Ok(library) = VulkanLibrary::new() else {
+            // No Vulkan loader on this system.
+            return Ok(Vec::new());
+        };
+        let Ok(instance) = Instance::new(library, InstanceCreateInfo::default()) else {
+            return Ok(Vec::new());
+        };
+        let Ok(physical_devices) = instance.enumerate_physical_devices() else {
+            return Ok(Vec::new());
+        };
+
+        let mut devices = Vec::new();
+        for (index, physical) in physical_devices.enumerate() {
+            let properties = physical.properties();
+            // Device-local heap size is the real VRAM figure Vulkan reports.
+            let memory_total = physical
+                .memory_properties()
+                .memory_heaps
+                .iter()
+                .filter(|heap| {
+                    heap.flags.intersects(vulkano::memory::MemoryHeapFlags::DEVICE_LOCAL)
+                })
+                .map(|heap| heap.size)
+                .max()
+                .unwrap_or(0);
+
+            devices.push(GpuDevice {
+                id: 100 + index,
+                name: properties.device_name.clone(),
+                backend: GpuBackend::Vulkan,
+                memory_total,
+                // Vulkan exposes no free-memory query without an extension.
+                memory_free: 0,
+                compute_capability: Some(format!("Vulkan {}", properties.api_version)),
+                is_available: true,
+            });
+        }
+
+        Ok(devices)
     }
 
     /// Get all available devices
@@ -474,6 +495,57 @@ pub trait ToGpu: Sized {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: the macOS path reported an 8 GiB "Apple GPU" without
+    /// asking Metal anything, and the CUDA/ROCm/Vulkan paths invented specific
+    /// cards. Without the corresponding feature, no GPU may be reported at all.
+    #[test]
+    fn test_no_gpu_is_invented_without_a_backend() {
+        let devices = GpuManager::detect_devices();
+
+        // The CPU fallback is always present and is honest about having no
+        // dedicated memory.
+        let cpu = devices
+            .iter()
+            .find(|device| device.backend == GpuBackend::Cpu)
+            .expect("CPU fallback is always present");
+        assert_eq!(cpu.memory_total, 0);
+
+        for device in &devices {
+            assert_ne!(
+                device.name, "Apple GPU",
+                "the placeholder Metal device must not reappear"
+            );
+            assert_ne!(device.name, "NVIDIA GPU");
+            assert_ne!(device.name, "Vulkan GPU");
+            assert_ne!(device.name, "AMD Radeon RX 6800 XT");
+            assert_ne!(device.name, "AMD Radeon RX 7900 XTX");
+        }
+
+        // Without any GPU feature the only device is the CPU fallback.
+        #[cfg(not(any(
+            all(target_os = "macos", feature = "metal"),
+            feature = "cuda",
+            feature = "rocm",
+            feature = "vulkan"
+        )))]
+        assert_eq!(
+            devices.len(),
+            1,
+            "no GPU backend is compiled in, so no GPU may be enumerated: {devices:?}"
+        );
+    }
+
+    /// `best_device` must never pick a device that was never enumerated.
+    #[test]
+    fn test_best_device_is_one_of_the_detected_devices() {
+        let manager = GpuManager::new();
+        let best = manager.best_device();
+        assert!(
+            manager.available_devices().iter().any(|device| device.name == best.name),
+            "best_device must come from the detected list"
+        );
+    }
 
     #[test]
     fn test_gpu_device_creation() {

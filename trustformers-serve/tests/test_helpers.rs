@@ -433,9 +433,21 @@ fn apply_isolation_settings(
     Ok(())
 }
 
+/// A real, if small, model for the serving path.
+///
+/// The architecture, the weights and the forward pass are genuine; the weights
+/// are the architecture's own initialization rather than trained parameters.
+/// Nothing here fakes inference.
+fn test_executor() -> std::sync::Arc<dyn trustformers_serve::batching::BatchExecutor> {
+    std::sync::Arc::new(
+        trustformers_serve::batching::untrained_byte_gpt2_executor(1, 16, 8)
+            .expect("the tiny GPT-2 used by the tests must build"),
+    )
+}
+
 /// Create test server instance
 async fn create_test_server_instance(config: ServerConfig) -> Result<TestServer> {
-    let server = TrustformerServer::new(config);
+    let server = TrustformerServer::with_executor(config, test_executor());
     let router = server.create_test_router().await;
     Ok(TestServer::new(router))
 }
@@ -445,7 +457,7 @@ async fn create_test_server_instance_with_auth(
     config: ServerConfig,
     enable_auth: bool,
 ) -> Result<TestServer> {
-    let mut server = TrustformerServer::new(config);
+    let mut server = TrustformerServer::with_executor(config, test_executor());
 
     if enable_auth {
         // Create a test authentication service with default configuration

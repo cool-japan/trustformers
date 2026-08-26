@@ -2,16 +2,31 @@ use std::collections::HashMap;
 use trustformers_core::errors::Result;
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 
-/// CANINE (Character Architecture with No tokenization In Neural Encoders) tokenizer
-/// Uses character-level encoding without requiring a fixed vocabulary
+/// The size of the Unicode code point space CANINE's token IDs range over
+/// (`0..=0x10FFFF`, i.e. `char::MAX as u32 + 1`), matching HuggingFace's
+/// `CanineTokenizer.UNICODE_VOCAB_SIZE`.
+pub const UNICODE_VOCAB_SIZE: usize = 0x110000;
+
+/// CANINE (Character Architecture with No tokenization In Neural Encoders) tokenizer.
+///
+/// Uses character-level encoding without requiring a fixed vocabulary: a
+/// token ID is simply the Unicode code point (`char as u32`) of the
+/// character it represents, exactly as HuggingFace's `CanineTokenizer`
+/// does. This keeps IDs directly compatible with a real CANINE checkpoint's
+/// embedding table (indexed by [`UNICODE_VOCAB_SIZE`]) and makes decoding
+/// exact for every character, not just ASCII.
+///
+/// Downsampling is deliberately *not* performed here: real CANINE
+/// downsamples inside the model via a strided convolution over the full
+/// per-character hidden states, which is lossy-but-informed (every
+/// character still contributes to the representation before pooling).
+/// Dropping characters out of the raw input sequence before the model ever
+/// sees them, as an earlier version of this tokenizer did, discards input
+/// data outright rather than downsampling a representation of it.
 #[derive(Debug, Clone)]
 pub struct CanineTokenizer {
     /// Maximum sequence length
     max_length: Option<usize>,
-    /// Downsampling rate for sequence length reduction
-    downsample_rate: usize,
-    /// Hash table size for character hashing
-    hash_size: usize,
     /// Special token IDs
     cls_token_id: u32,
     sep_token_id: u32,
@@ -22,16 +37,19 @@ pub struct CanineTokenizer {
 }
 
 impl CanineTokenizer {
-    /// Create a new CANINE tokenizer
+    /// Create a new CANINE tokenizer.
+    ///
+    /// Special token IDs default to HuggingFace `CanineTokenizer`'s own
+    /// values, placed in the Unicode Private Use Area (`U+E000..U+F8FF`)
+    /// so they never collide with a real character's code point: `PAD` =
+    /// 0, `CLS` = `0xE000`, `SEP` = `0xE001`, `MASK` = `0xE003`.
     pub fn new() -> Self {
         Self {
             max_length: None,
-            downsample_rate: 1, // Default to no downsampling for compatibility
-            hash_size: 16384,   // 2^14
-            cls_token_id: 0,
-            sep_token_id: 1,
-            pad_token_id: 2,
-            mask_token_id: 3,
+            cls_token_id: 0xE000,
+            sep_token_id: 0xE001,
+            pad_token_id: 0,
+            mask_token_id: 0xE003,
             add_special_tokens: true,
         }
     }
@@ -39,18 +57,6 @@ impl CanineTokenizer {
     /// Set maximum sequence length
     pub fn with_max_length(mut self, max_length: usize) -> Self {
         self.max_length = Some(max_length);
-        self
-    }
-
-    /// Set downsampling rate
-    pub fn with_downsample_rate(mut self, downsample_rate: usize) -> Self {
-        self.downsample_rate = downsample_rate;
-        self
-    }
-
-    /// Set hash table size
-    pub fn with_hash_size(mut self, hash_size: usize) -> Self {
-        self.hash_size = hash_size;
         self
     }
 
@@ -75,57 +81,14 @@ impl CanineTokenizer {
         self
     }
 
-    /// Hash a character to a token ID using FNV hash
-    fn hash_char(&self, ch: char) -> u32 {
-        let code_point = ch as u32;
-
-        // Special handling for ASCII characters (0-127)
-        if code_point <= 127 {
-            // Reserve first 4 slots for special tokens, then ASCII chars
-            return 4 + code_point;
-        }
-
-        // Use FNV-1a hash for non-ASCII characters
-        let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
-        let fnv_prime: u64 = 0x100000001b3; // FNV prime
-
-        // Hash the Unicode code point
-        let bytes = code_point.to_le_bytes();
-        for byte in bytes {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(fnv_prime);
-        }
-
-        // Map to hash table size, avoiding special token IDs (0-131)
-        let hashed = (hash % (self.hash_size as u64 - 132)) + 132;
-        hashed as u32
-    }
-
-    /// Convert character sequence to token IDs
+    /// Convert a character sequence to token IDs: each character's own
+    /// Unicode code point, exactly as HuggingFace's `CanineTokenizer` does.
+    /// Unlike a hash, this mapping is injective (no two distinct
+    /// characters ever collide on the same ID) and trivially reversible by
+    /// [`char::from_u32`], which is what makes [`Tokenizer::decode`] exact
+    /// for every character rather than only ASCII.
     fn chars_to_ids(&self, text: &str) -> Vec<u32> {
-        text.chars().map(|ch| self.hash_char(ch)).collect()
-    }
-
-    /// Apply downsampling to reduce sequence length
-    fn downsample_sequence(&self, token_ids: Vec<u32>) -> Vec<u32> {
-        if self.downsample_rate <= 1 {
-            return token_ids;
-        }
-
-        // Simple strided downsampling - take every nth token
-        token_ids
-            .into_iter()
-            .enumerate()
-            .filter_map(
-                |(i, id)| {
-                    if i % self.downsample_rate == 0 {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                },
-            )
-            .collect()
+        text.chars().map(|ch| ch as u32).collect()
     }
 
     /// Prepare input with special tokens
@@ -182,14 +145,11 @@ impl Default for CanineTokenizer {
 
 impl Tokenizer for CanineTokenizer {
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
-        // Convert characters to token IDs using hashing
+        // Convert characters to token IDs (each character's own code point).
         let char_ids = self.chars_to_ids(text);
 
-        // Apply downsampling to reduce sequence length
-        let downsampled_ids = self.downsample_sequence(char_ids);
-
         // Add special tokens
-        let token_ids = self.add_special_tokens_to_sequence(downsampled_ids);
+        let token_ids = self.add_special_tokens_to_sequence(char_ids);
 
         // Create attention mask
         let attention_mask = self.create_attention_mask(token_ids.len());
@@ -209,28 +169,29 @@ impl Tokenizer for CanineTokenizer {
     }
 
     fn decode(&self, token_ids: &[u32]) -> Result<String> {
-        // CANINE decoding is not straightforward since it uses hashing
-        // This is a simplified version that handles special tokens
+        // Each ID is a Unicode code point, so decoding is the exact
+        // inverse of `chars_to_ids`: `char::from_u32` for every ID that
+        // isn't one of this tokenizer's special tokens.
         let mut result = String::new();
 
         for &token_id in token_ids {
             if token_id == self.cls_token_id
                 || token_id == self.sep_token_id
                 || token_id == self.pad_token_id
+                || token_id == self.mask_token_id
             {
                 continue; // Skip special tokens
             }
 
-            // For ASCII characters (IDs 4-131), we can reverse the mapping
-            if (4..=131).contains(&token_id) {
-                let ascii_code = token_id - 4;
-                if let Some(ch) = char::from_u32(ascii_code) {
-                    result.push(ch);
-                }
-            } else {
-                // For hashed non-ASCII characters, we can't easily reverse
-                // In practice, CANINE models learn embeddings that don't require exact decoding
-                result.push('�'); // Use replacement character
+            match char::from_u32(token_id) {
+                Some(ch) => result.push(ch),
+                // Not every u32 is a valid Unicode scalar value (surrogate
+                // code points, or values above U+10FFFF): `encode` never
+                // produces such an ID, but `decode` is a public API that
+                // can be called on arbitrary/adversarial input, so an
+                // invalid ID still needs a defined (if lossy) fallback
+                // rather than panicking.
+                None => result.push('\u{fffd}'),
             }
         }
 
@@ -238,7 +199,7 @@ impl Tokenizer for CanineTokenizer {
     }
 
     fn vocab_size(&self) -> usize {
-        self.hash_size
+        UNICODE_VOCAB_SIZE
     }
 
     fn encode_pair(&self, text: &str, text2: &str) -> Result<TokenizedInput> {
@@ -246,24 +207,20 @@ impl Tokenizer for CanineTokenizer {
         let char_ids1 = self.chars_to_ids(text);
         let char_ids2 = self.chars_to_ids(text2);
 
-        // Apply downsampling
-        let downsampled_ids1 = self.downsample_sequence(char_ids1);
-        let downsampled_ids2 = self.downsample_sequence(char_ids2);
-
-        // Calculate first sequence length before moving downsampled_ids1
+        // Calculate first sequence length before moving char_ids1
         let sep_count = if self.add_special_tokens { 1 } else { 0 };
-        let first_seq_len = 1 + downsampled_ids1.len() + sep_count; // CLS + text1 + SEP
+        let first_seq_len = 1 + char_ids1.len() + sep_count; // CLS + text1 + SEP
 
         // Combine with special tokens: [CLS] text1 [SEP] text2 [SEP]
         let mut token_ids = Vec::new();
         if self.add_special_tokens {
             token_ids.push(self.cls_token_id);
         }
-        token_ids.extend(downsampled_ids1);
+        token_ids.extend(char_ids1);
         if self.add_special_tokens {
             token_ids.push(self.sep_token_id);
         }
-        token_ids.extend(downsampled_ids2);
+        token_ids.extend(char_ids2);
         if self.add_special_tokens {
             token_ids.push(self.sep_token_id);
         }
@@ -297,28 +254,35 @@ impl Tokenizer for CanineTokenizer {
     }
 
     fn get_vocab(&self) -> HashMap<String, u32> {
-        // CANINE doesn't have a fixed vocabulary, so return empty HashMap
+        // CANINE's "vocabulary" is the entire Unicode code point space
+        // (see `vocab_size`/`UNICODE_VOCAB_SIZE`), not a finite enumerable
+        // piece list the way a BPE/WordPiece vocabulary is, so there is no
+        // meaningful finite map to return here.
         HashMap::new()
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        // CANINE uses hashing, so we can't directly convert tokens to IDs
-        // For single characters, we can use the char_to_id method
-        if token.len() == 1 {
-            token.chars().next().map(|c| self.hash_char(c))
-        } else {
-            None
+        // Every token is exactly one character; `chars().count()` (not
+        // `len()`, which counts UTF-8 *bytes* and would wrongly reject
+        // any single non-ASCII character, e.g. "世".len() == 3) is the
+        // correct one-character check.
+        let mut chars = token.chars();
+        let first = chars.next()?;
+        if chars.next().is_some() {
+            return None; // more than one character
         }
+        Some(first as u32)
     }
 
     fn id_to_token(&self, id: u32) -> Option<String> {
-        // CANINE uses hashing, so we can't directly convert IDs to tokens
-        // For ASCII characters (IDs 4-131), we can reverse the mapping
-        if (4..=131).contains(&id) {
-            Some(((id - 4) as u8 as char).to_string())
-        } else {
-            None
+        if id == self.cls_token_id
+            || id == self.sep_token_id
+            || id == self.pad_token_id
+            || id == self.mask_token_id
+        {
+            return None;
         }
+        char::from_u32(id).map(|c| c.to_string())
     }
 }
 
@@ -346,24 +310,25 @@ mod tests {
 
         let encoded = tokenizer.encode(text).expect("Encoding failed");
 
-        // 'A' is ASCII 65, so token ID should be 4 + 65 = 69
-        assert_eq!(encoded.input_ids[1], 69); // CLS(0) + A(69)
+        // The token ID is simply the character's own code point: 'A' is
+        // U+0041 == 65, not a hashed/offset value.
+        assert_eq!(encoded.input_ids[1], 65); // CLS + A(65)
+        assert_eq!(encoded.input_ids[1], 'A' as u32);
     }
 
+    /// Regression test: an earlier version of this tokenizer applied
+    /// strided "downsampling" *inside the tokenizer* by dropping every
+    /// other raw character before the model ever saw it -- genuine input
+    /// data loss, not the strided-convolution downsampling a real CANINE
+    /// model performs internally over full per-character representations.
+    /// The tokenizer must now preserve every character.
     #[test]
-    fn test_canine_downsampling() {
-        let tokenizer = CanineTokenizer::new().with_downsample_rate(2);
-        let text = "Hello World";
-
+    fn test_canine_preserves_every_character() {
+        let tokenizer = CanineTokenizer::new();
+        let text = "Hello World"; // 11 characters
         let encoded = tokenizer.encode(text).expect("Encoding failed");
 
-        // With downsampling rate 2, should take every 2nd character (indices 0, 2, 4, ...)
-        // Original: "Hello World" (11 chars: H e l l o   W o r l d)
-        // Downsampled: H l o W r d (6 chars)
-        let expected_downsampled_chars = text.len().div_ceil(2); // 6 chars
-        let expected_total = expected_downsampled_chars + 2; // + CLS + SEP = 8
-
-        assert_eq!(encoded.input_ids.len(), expected_total);
+        assert_eq!(encoded.input_ids.len(), text.chars().count() + 2); // + CLS + SEP
     }
 
     #[test]
@@ -415,9 +380,11 @@ mod tests {
         // Should handle both ASCII and Unicode characters
         assert!(encoded.input_ids.len() > 2); // At least CLS + some chars + SEP
 
-        // ASCII characters should have predictable IDs
+        // Every character's ID is exactly its own code point.
         let h_id = encoded.input_ids[1]; // 'H' after CLS
-        assert_eq!(h_id, 4 + 72); // 'H' is ASCII 72
+        assert_eq!(h_id, 'H' as u32);
+        let shi_id = encoded.input_ids[7]; // '世' (index: CLS,H,e,l,l,o,' ',世)
+        assert_eq!(shi_id, '世' as u32);
     }
 
     #[test]
@@ -430,6 +397,63 @@ mod tests {
 
         // Should decode ASCII characters correctly
         assert!(decoded.contains("Hello"));
+    }
+
+    /// Regression test: the old FNV-hash mapping for non-ASCII characters
+    /// was many-to-one and irreversible, so `decode` conceded defeat and
+    /// emitted the U+FFFD replacement character for every non-ASCII
+    /// input. Token IDs are now Unicode code points, so decoding is exact.
+    #[test]
+    fn test_canine_decode_round_trips_non_ascii() {
+        let tokenizer = CanineTokenizer::new();
+        let text = "Hello 世界 café";
+
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
+        assert!(
+            !encoded.input_ids.contains(&0xFFFD),
+            "non-ASCII characters must not collapse onto the replacement-character ID"
+        );
+
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
+        assert_eq!(
+            decoded, text,
+            "encode -> decode must be the identity for any Unicode text"
+        );
+        assert!(!decoded.contains('\u{fffd}'));
+    }
+
+    /// Regression test: token IDs must be unique per character (an earlier
+    /// hash-based mapping folded distinct non-ASCII characters onto the
+    /// same ID whenever they collided in the hash table).
+    #[test]
+    fn test_canine_distinct_characters_get_distinct_ids() {
+        let tokenizer = CanineTokenizer::new();
+        let text = "アイウエオ日本語한국어";
+        let ids = tokenizer.encode(text).expect("Encoding failed").input_ids;
+        // Strip CLS/SEP; every remaining ID should equal that character's
+        // own code point, so distinct characters are trivially distinct
+        // IDs (this also directly checks compatibility with a real CANINE
+        // checkpoint's embedding table, which is indexed by code point).
+        let content = &ids[1..ids.len() - 1];
+        for (id, ch) in content.iter().zip(text.chars()) {
+            assert_eq!(*id, ch as u32);
+        }
+    }
+
+    #[test]
+    fn test_canine_vocab_size_is_full_unicode_range() {
+        let tokenizer = CanineTokenizer::new();
+        assert_eq!(tokenizer.vocab_size(), UNICODE_VOCAB_SIZE);
+        assert_eq!(tokenizer.vocab_size(), 0x110000);
+    }
+
+    #[test]
+    fn test_canine_token_to_id_handles_multibyte_char() {
+        let tokenizer = CanineTokenizer::new();
+        // "世" is 3 UTF-8 bytes but exactly one character; the old
+        // `token.len() == 1` (byte-length) check wrongly rejected it.
+        assert_eq!(tokenizer.token_to_id("世"), Some('世' as u32));
+        assert_eq!(tokenizer.id_to_token('世' as u32), Some("世".to_string()));
     }
 
     #[test]

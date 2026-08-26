@@ -4,7 +4,6 @@
 //! forecast models, and scaling decision types.
 
 use super::super::types::*;
-use super::functions::{AnomalyDetectionAlgorithm, BaselineAdaptationAlgorithm};
 use super::types::*;
 // Explicit imports to disambiguate from super::super::types::*
 use super::types::{PerformanceBaseline, VariabilityBounds};
@@ -32,16 +31,6 @@ use log::info;
 pub struct BaselineManager {
     /// Current performance baseline
     current_baseline: Arc<RwLock<PerformanceBaseline>>,
-    /// Baseline update configuration
-    config: Arc<RwLock<BaselineConfig>>,
-    /// Baseline validation engine
-    validation_engine: Arc<BaselineValidationEngine>,
-    /// Baseline history for comparison
-    baseline_history: Arc<RwLock<VecDeque<PerformanceBaseline>>>,
-    /// Adaptation algorithm
-    adaptation_algorithm: Arc<dyn BaselineAdaptationAlgorithm + Send + Sync>,
-    /// Baseline statistics
-    baseline_stats: Arc<BaselineStatistics>,
     /// Active status
     active: Arc<AtomicBool>,
 }
@@ -49,11 +38,6 @@ impl BaselineManager {
     pub async fn new(_config: BaselineConfig) -> Result<Self> {
         Ok(Self {
             current_baseline: Arc::new(RwLock::new(PerformanceBaseline::default())),
-            config: Arc::new(RwLock::new(_config)),
-            validation_engine: Arc::new(BaselineValidationEngine::new()),
-            baseline_history: Arc::new(RwLock::new(VecDeque::new())),
-            adaptation_algorithm: Arc::new(DefaultAdaptationAlgorithm::new()),
-            baseline_stats: Arc::new(BaselineStatistics::default()),
             active: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -143,21 +127,25 @@ impl BaselineManager {
                 error_rate_lower: 0.0,
                 error_rate_upper: 0.0,
             },
+            // `force_refresh` clears the baseline; nothing has been measured
+            // yet, which is what `sample_count: 0` and the `Pending` validation
+            // status above say. The intervals that can be absent are absent
+            // rather than zero-width.
             confidence_intervals: ConfidenceIntervals {
-                confidence_level: 0.95,
+                confidence_level: 95.0,
                 throughput_interval: (0.0, 0.0),
-                latency_interval: (Duration::from_secs(0), Duration::from_secs(0)),
-                cpu_interval: (0.0, 0.0),
-                memory_interval: (0.0, 0.0),
-                network_interval: (0.0, 0.0),
-                io_interval: (0.0, 0.0),
-                response_time_interval: (Duration::from_secs(0), Duration::from_secs(0)),
-                error_rate_interval: (0.0, 0.0),
+                latency_interval: None,
+                cpu_interval: None,
+                memory_interval: None,
+                network_interval: None,
+                io_interval: None,
+                response_time_interval: None,
+                error_rate_interval: None,
                 method: ConfidenceMethod::StandardError,
                 mean_lower: 0.0,
                 mean_upper: 0.0,
-                variance_lower: 0.0,
-                variance_upper: 0.0,
+                variance_lower: None,
+                variance_upper: None,
             },
         };
         info!("Baseline forcefully refreshed");
@@ -189,8 +177,6 @@ pub struct ExponentialSmoothingAdaptation {
     pub(super) alpha: f64,
     /// Trend smoothing factor
     pub(super) beta: f64,
-    /// Minimum adaptation threshold
-    min_threshold: f64,
 }
 impl ExponentialSmoothingAdaptation {
     /// Create new exponential smoothing adaptation algorithm
@@ -198,14 +184,7 @@ impl ExponentialSmoothingAdaptation {
         Self {
             alpha: alpha.clamp(0.0, 1.0),
             beta: beta.clamp(0.0, 1.0),
-            min_threshold: 0.01,
         }
-    }
-    /// Apply exponential smoothing to a value
-    fn smooth_value(&self, current: f64, new_value: f64, trend: f64) -> (f64, f64) {
-        let smoothed = self.alpha * new_value + (1.0 - self.alpha) * (current + trend);
-        let new_trend = self.beta * (smoothed - current) + (1.0 - self.beta) * trend;
-        (smoothed, new_trend)
     }
 }
 #[derive(Debug, Default)]
@@ -301,31 +280,6 @@ impl LinearRegressionTrendDetector {
             .sum();
         let r_squared = if ss_tot.abs() < f64::EPSILON { 0.0 } else { 1.0 - (ss_res / ss_tot) };
         Some((slope, intercept, r_squared))
-    }
-    /// Determine trend direction and strength
-    fn analyze_trend(&self) -> Option<TrendInfo> {
-        let (slope, _intercept, r_squared) = self.calculate_regression()?;
-        let direction = if slope > 0.0 {
-            TrendDirection::Increasing
-        } else if slope < 0.0 {
-            TrendDirection::Decreasing
-        } else {
-            TrendDirection::Stable
-        };
-        let strength = match r_squared {
-            r if r >= 0.8 => TrendStrength::Strong,
-            r if r >= 0.5 => TrendStrength::Moderate,
-            r if r >= 0.3 => TrendStrength::Weak,
-            _ => TrendStrength::None,
-        };
-        Some(TrendInfo {
-            direction,
-            strength,
-            slope,
-            r_squared,
-            confidence: r_squared,
-            significance: r_squared > 0.5,
-        })
     }
 }
 impl LinearRegressionTrendDetector {
@@ -678,30 +632,15 @@ impl StatisticalProcessor {
 /// machine learning approaches, and threshold-based detection for comprehensive
 /// anomaly identification across different performance characteristics.
 pub struct AnomalyDetector {
-    /// Collection of detection algorithms
-    algorithms: Vec<Box<dyn AnomalyDetectionAlgorithm + Send + Sync>>,
     /// Anomaly detection configuration
     config: Arc<RwLock<AnomalyDetectionConfig>>,
-    /// Detection statistics and performance tracking
-    detection_stats: Arc<DetectionStatistics>,
-    /// Historical anomaly data for pattern recognition
-    anomaly_history: Arc<RwLock<VecDeque<AnomalyEvent>>>,
-    /// Machine learning model for advanced detection
-    ml_model: Arc<RwLock<Option<AnomalyMLModel>>>,
-    /// Pattern recognition engine
-    pattern_engine: Arc<PatternRecognitionEngine>,
     /// Active status
     active: Arc<AtomicBool>,
 }
 impl AnomalyDetector {
     pub async fn new(_config: AnomalyDetectionConfig) -> Result<Self> {
         Ok(Self {
-            algorithms: Vec::new(),
             config: Arc::new(RwLock::new(_config)),
-            detection_stats: Arc::new(DetectionStatistics::default()),
-            anomaly_history: Arc::new(RwLock::new(VecDeque::new())),
-            ml_model: Arc::new(RwLock::new(None)),
-            pattern_engine: Arc::new(PatternRecognitionEngine::new()),
             active: Arc::new(AtomicBool::new(false)),
         })
     }

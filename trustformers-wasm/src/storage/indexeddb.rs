@@ -75,11 +75,28 @@ fn open_request_to_promise(request: &IdbOpenDbRequest) -> js_sys::Promise {
     })
 }
 
-/// Compression type for model storage
+/// Compression type recorded against a stored model's bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CompressionType {
+    /// Bytes stored exactly as given, uncompressed.
     None,
+    /// **Legacy marker only** — no code in this crate ever writes this
+    /// variant. Records tagged `Gzip` were written by an older version of
+    /// [`ModelStorage::store_model`] that claimed gzip compression for any
+    /// payload over 1MiB while actually storing the raw bytes unchanged
+    /// (a bug, not a lossless-but-differently-named format). Reading a
+    /// `Gzip` record must therefore return its bytes as-is rather than
+    /// attempting to decompress them — see the legacy-honest-read branch
+    /// in [`ModelStorage::get_model`]. New writes always use [`Self::Deflate`]
+    /// instead.
     Gzip,
+    /// Real DEFLATE (RFC 1951) compression via `oxiarc_deflate`, applied
+    /// by [`ModelStorage::store_model`] to payloads over 1MiB. Every
+    /// record tagged `Deflate` genuinely holds deflate-compressed bytes.
+    Deflate,
+    /// Declared for API completeness but not implemented: no code path in
+    /// this crate ever writes a `Brotli` record, and reading one returns a
+    /// structured error rather than silently returning undecoded bytes.
     Brotli,
 }
 
@@ -98,7 +115,7 @@ impl Default for StorageConfig {
             db_name: "trustformers_models".to_string(),
             max_storage_mb: 1024.0,
             enable_compression: true,
-            compression_type: CompressionType::Gzip,
+            compression_type: CompressionType::Deflate,
         }
     }
 }
@@ -283,17 +300,33 @@ impl ModelStorage {
         // Check storage space before storing
         self.ensure_storage_space(data.len()).await?;
 
-        // Compress data if it's large enough
-        let (compressed_data, compression_type) = if data.len() > 1024 * 1024 {
-            // For models > 1MB, apply compression
-            // In a real implementation, you'd use actual compression
-            (data.to_vec(), CompressionType::Gzip)
-        } else {
-            (data.to_vec(), CompressionType::None)
+        // Compress data if it's large enough. Real DEFLATE via
+        // `oxiarc_deflate` (already used the same way in
+        // `runtime::edge_caching` and `storage::model_splitting`) — a
+        // previous version stored the raw bytes here while labeling the
+        // record `Gzip`, which is why that tag is now legacy-only (see
+        // `CompressionType::Gzip`'s doc comment).
+        let (compressed_data, compression_type) = match Self::compress_for_storage(data) {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Compression genuinely failing on arbitrary bytes is not
+                // expected, but store the model uncompressed (labeled
+                // honestly) rather than losing it.
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(
+                    &format!(
+                        "compression failed for model '{model_name}', storing uncompressed: {e}"
+                    )
+                    .into(),
+                );
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = &e;
+                (data.to_vec(), CompressionType::None)
+            },
         };
 
         let now = Date::now();
-        let checksum = self.calculate_checksum(&compressed_data);
+        let checksum = Self::calculate_checksum(&compressed_data);
 
         let metadata = ModelMetadata {
             id: model_id.to_string(),
@@ -361,24 +394,23 @@ impl ModelStorage {
         // Update last accessed time
         self.update_last_accessed(model_id).await?;
 
-        // Verify checksum
-        let calculated_checksum = self.calculate_checksum(&stored_model.data);
-        if calculated_checksum != stored_model.metadata.checksum {
-            return Err("Model data corruption detected".into());
+        // Verify checksum against the stored (possibly compressed) bytes,
+        // before any decompression — see `Self::verify_checksum` for why
+        // the algorithm depends on the checksum's own format.
+        if !Self::verify_checksum(&stored_model.data, &stored_model.metadata.checksum) {
+            return Err(format!(
+                "Model data corruption detected for '{model_id}': checksum mismatch"
+            )
+            .into());
         }
 
-        // Decompress data if needed
-        let data = match stored_model.metadata.compression_type {
-            CompressionType::None => stored_model.data,
-            CompressionType::Gzip => {
-                // In a real implementation, you'd decompress here
-                stored_model.data
-            },
-            CompressionType::Brotli => {
-                // In a real implementation, you'd decompress here
-                stored_model.data
-            },
-        };
+        // Decompress data if needed (real core in `Self::decompress_stored_data`).
+        let data = Self::decompress_stored_data(
+            stored_model.data,
+            &stored_model.metadata.compression_type,
+            model_id,
+        )
+        .map_err(|e| JsValue::from_str(&e))?;
 
         web_sys::console::log_1(
             &format!(
@@ -484,6 +516,54 @@ impl ModelStorage {
     }
 
     // Private helper methods
+    //
+    // `compress_for_storage`, `decompress_stored_data`, `calculate_checksum`,
+    // `calculate_legacy_checksum` and `verify_checksum` are deliberately
+    // plain functions over owned/borrowed bytes (no `js_sys`/`JsValue`,
+    // no `&self`) so they can be exercised directly by native unit tests —
+    // `store_model`/`get_model` themselves need a real `IdbDatabase` and so
+    // cannot run outside a browser.
+
+    /// Choose real compression for a payload about to be stored: DEFLATE
+    /// (via `oxiarc_deflate`) for anything over 1MiB, stored raw otherwise.
+    /// `Err` only if `oxiarc_deflate` itself fails (not expected for
+    /// arbitrary bytes, but its API is fallible) — `store_model` treats
+    /// that as "fall back to storing uncompressed", never as data loss.
+    fn compress_for_storage(data: &[u8]) -> Result<(Vec<u8>, CompressionType), String> {
+        if data.len() > 1024 * 1024 {
+            let compressed = oxiarc_deflate::deflate(data, 6).map_err(|e| e.to_string())?;
+            Ok((compressed, CompressionType::Deflate))
+        } else {
+            Ok((data.to_vec(), CompressionType::None))
+        }
+    }
+
+    /// Inverse of [`Self::compress_for_storage`], dispatching on the
+    /// record's stored `compression_type`. `model_id` is only used to
+    /// build a readable error message.
+    fn decompress_stored_data(
+        data: Vec<u8>,
+        compression_type: &CompressionType,
+        model_id: &str,
+    ) -> Result<Vec<u8>, String> {
+        match compression_type {
+            CompressionType::None => Ok(data),
+            CompressionType::Deflate => oxiarc_deflate::inflate(&data)
+                .map_err(|e| format!("failed to decompress model '{model_id}': {e}")),
+            CompressionType::Gzip => {
+                // Legacy marker only: records written before real
+                // compression existed used this tag while the payload was
+                // stored completely raw. Return the bytes as-is — do NOT
+                // attempt to decompress them, see the doc comment on
+                // `CompressionType::Gzip`.
+                Ok(data)
+            },
+            CompressionType::Brotli => Err(format!(
+                "model '{model_id}' is stored as Brotli, which this build cannot decode \
+                 (no Brotli decompressor is implemented)"
+            )),
+        }
+    }
 
     async fn ensure_storage_space(&self, required_bytes: usize) -> Result<(), JsValue> {
         let current_usage = self.get_storage_usage().await?;
@@ -555,11 +635,41 @@ impl ModelStorage {
         Ok(())
     }
 
-    fn calculate_checksum(&self, data: &[u8]) -> String {
-        // Simple checksum calculation
-        // In a real implementation, you'd use a proper hash function like SHA-256
+    /// Real SHA-256 checksum (same approach as
+    /// `plugin_framework::calculate_plugin_checksum`) — 64 lowercase hex
+    /// characters. Every checksum this method writes going forward uses
+    /// this format; see [`Self::verify_checksum`] for reading records
+    /// written by the older 8-hex-character byte-sum checksum.
+    fn calculate_checksum(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Legacy checksum: a plain sum of byte values, formatted as 8 hex
+    /// characters — what every record wrote before this file used SHA-256.
+    /// Weak (order-insensitive, no cryptographic guarantee) but genuinely
+    /// computed; kept only so records written before this change can still
+    /// be read and their integrity checked, not to produce new checksums.
+    fn calculate_legacy_checksum(data: &[u8]) -> String {
         let sum: u32 = data.iter().map(|&b| b as u32).sum();
-        format!("{:08x}", sum)
+        format!("{sum:08x}")
+    }
+
+    /// Verify `data` against a stored checksum, dispatching on the
+    /// checksum's own format: 64 hex characters means real SHA-256 (every
+    /// record this file writes today); anything shorter (8 hex characters
+    /// in every record actually produced by the legacy code) is checked
+    /// against the legacy byte-sum instead, so pre-existing IndexedDB
+    /// records remain readable rather than being rejected as "corrupt"
+    /// purely because the checksum algorithm changed.
+    fn verify_checksum(data: &[u8], stored_checksum: &str) -> bool {
+        if stored_checksum.len() == 64 {
+            Self::calculate_checksum(data) == stored_checksum
+        } else {
+            Self::calculate_legacy_checksum(data) == stored_checksum
+        }
     }
 }
 
@@ -583,5 +693,135 @@ mod tests {
 
         assert_eq!(metadata.id, "test-model");
         assert_eq!(metadata.size_bytes, 1024);
+    }
+
+    // -----------------------------------------------------------------
+    // Real compression (replacing the old "store raw, label it Gzip" bug).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_compress_for_storage_stores_small_payloads_raw_as_none() {
+        let data = std::vec![1u8, 2, 3, 4];
+        let (stored, kind) = ModelStorage::compress_for_storage(&data).unwrap();
+        assert_eq!(stored, data);
+        assert!(matches!(kind, CompressionType::None));
+    }
+
+    #[test]
+    fn test_compress_for_storage_deflates_large_payloads_for_real() {
+        // Highly repetitive so DEFLATE engages hard — a regression guard
+        // against the old bug where "compression" was a no-op that
+        // returned the input unchanged while still labeling it `Gzip`.
+        let data = std::vec![0x11u8; 2 * 1024 * 1024];
+        let (stored, kind) = ModelStorage::compress_for_storage(&data).unwrap();
+        assert!(matches!(kind, CompressionType::Deflate));
+        assert!(
+            stored.len() < data.len() / 10,
+            "highly repetitive >1MiB data must compress substantially: {} of {} bytes",
+            stored.len(),
+            data.len()
+        );
+        assert_ne!(
+            stored, data,
+            "a real compressor must not just return the input unchanged"
+        );
+    }
+
+    #[test]
+    fn test_compress_then_decompress_round_trips_exactly() {
+        let mut state = 321u32;
+        let data: Vec<u8> = (0..1_500_000)
+            .map(|_| {
+                state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                (state >> 16) as u8
+            })
+            .collect();
+        let (stored, kind) = ModelStorage::compress_for_storage(&data).unwrap();
+        assert!(matches!(kind, CompressionType::Deflate));
+        let recovered = ModelStorage::decompress_stored_data(stored, &kind, "m1")
+            .expect("a real Deflate record must decompress cleanly");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_decompress_none_returns_bytes_unchanged() {
+        let data = std::vec![9u8, 8, 7];
+        let out = ModelStorage::decompress_stored_data(data.clone(), &CompressionType::None, "m1")
+            .unwrap();
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn test_decompress_legacy_gzip_tag_returns_raw_bytes_not_a_decode_attempt() {
+        // The whole point of keeping `Gzip` as a legacy marker: a record
+        // tagged `Gzip` never actually held gzip- or deflate-compressed
+        // bytes (that was the bug), so decoding it must be a no-op, not an
+        // attempt to run a decompressor over data that was never
+        // compressed (which would corrupt or error on real payloads).
+        let raw_uncompressed_payload = std::vec![0xABu8; 4096];
+        let out = ModelStorage::decompress_stored_data(
+            raw_uncompressed_payload.clone(),
+            &CompressionType::Gzip,
+            "legacy-model",
+        )
+        .expect("legacy Gzip-tagged records must read back cleanly, not error");
+        assert_eq!(out, raw_uncompressed_payload);
+    }
+
+    #[test]
+    fn test_decompress_brotli_is_a_structured_error_not_silent_passthrough() {
+        let data = std::vec![1u8, 2, 3];
+        let err = ModelStorage::decompress_stored_data(data, &CompressionType::Brotli, "m1")
+            .expect_err("Brotli must error, not silently return undecoded bytes");
+        assert!(err.contains("Brotli"));
+        assert!(err.contains("m1"));
+    }
+
+    // -----------------------------------------------------------------
+    // Real SHA-256 checksums, with legacy-format compatibility.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_calculate_checksum_is_64_hex_chars() {
+        let checksum = ModelStorage::calculate_checksum(b"hello model bytes");
+        assert_eq!(checksum.len(), 64);
+        assert!(checksum.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_calculate_checksum_matches_known_sha256_vector() {
+        // SHA-256("abc") is a well-known test vector; confirms this is
+        // real SHA-256, not the old byte-sum reformatted to look similar.
+        assert_eq!(
+            ModelStorage::calculate_checksum(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_verify_checksum_accepts_real_sha256_and_rejects_corruption() {
+        let data = std::vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let checksum = ModelStorage::calculate_checksum(&data);
+        assert!(ModelStorage::verify_checksum(&data, &checksum));
+
+        let mut corrupted = data.clone();
+        corrupted[0] ^= 0xFF;
+        assert!(!ModelStorage::verify_checksum(&corrupted, &checksum));
+    }
+
+    #[test]
+    fn test_verify_checksum_accepts_legacy_byte_sum_format() {
+        // Simulates a record written by the pre-SHA-256 code: an 8-hex-char
+        // checksum. It must still verify against the legacy algorithm so
+        // old IndexedDB records are not rejected as "corrupt" just because
+        // the checksum algorithm changed going forward.
+        let data = std::vec![10u8, 20, 30];
+        let legacy_checksum = ModelStorage::calculate_legacy_checksum(&data);
+        assert_eq!(legacy_checksum.len(), 8);
+        assert!(ModelStorage::verify_checksum(&data, &legacy_checksum));
+
+        let mut corrupted = data.clone();
+        corrupted[0] ^= 0xFF;
+        assert!(!ModelStorage::verify_checksum(&corrupted, &legacy_checksum));
     }
 }

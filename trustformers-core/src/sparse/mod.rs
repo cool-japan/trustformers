@@ -227,8 +227,7 @@ impl SparseCoo {
         // Accumulate into a sorted list of (row, col, value) triples
         let mut map: HashMap<(usize, usize), f64> = HashMap::new();
         for i in 0..self.nnz {
-            *map.entry((self.row_indices[i], self.col_indices[i]))
-                .or_insert(0.0) += self.values[i];
+            *map.entry((self.row_indices[i], self.col_indices[i])).or_insert(0.0) += self.values[i];
         }
         let mut triples: Vec<(usize, usize, f64)> =
             map.into_iter().map(|((r, c), v)| (r, c, v)).collect();
@@ -499,7 +498,7 @@ impl BlockSparse {
     /// Returns [`SparseError::ShapeMismatch`] if `rows` or `cols` is not
     /// divisible by `block_size`.
     pub fn new(rows: usize, cols: usize, block_size: usize) -> Result<Self, SparseError> {
-        if block_size == 0 || rows % block_size != 0 || cols % block_size != 0 {
+        if block_size == 0 || !rows.is_multiple_of(block_size) || !cols.is_multiple_of(block_size) {
             return Err(SparseError::ShapeMismatch(format!(
                 "rows ({}) and cols ({}) must both be divisible by block_size ({})",
                 rows, cols, block_size
@@ -701,11 +700,8 @@ pub fn top_k_sparsify(values: &[f64], k: usize) -> Vec<f64> {
         return vec![0.0; values.len()];
     }
     // Collect (abs_value, original_index) and partial-sort
-    let mut indexed: Vec<(f64, usize)> = values
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v.abs(), i))
-        .collect();
+    let mut indexed: Vec<(f64, usize)> =
+        values.iter().enumerate().map(|(i, &v)| (v.abs(), i)).collect();
     // Find the k-th largest threshold via a simple O(n log n) sort
     indexed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let threshold = indexed[k - 1].0;
@@ -745,15 +741,9 @@ pub fn top_k_mask(scores: &[f64], k: usize) -> Vec<bool> {
         return vec![false; scores.len()];
     }
     // Sort indices by descending score, stable by index for ties
-    let mut indexed: Vec<(usize, f64)> = scores
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i, s))
-        .collect();
+    let mut indexed: Vec<(usize, f64)> = scores.iter().enumerate().map(|(i, &s)| (i, s)).collect();
     indexed.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.cmp(&b.0))
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
     });
     let mut mask = vec![false; scores.len()];
     for &(idx, _) in indexed.iter().take(effective_k) {
@@ -829,7 +819,7 @@ impl BigBirdAttentionMask {
     /// Random blocks are generated using a Lehmer-style LCG seeded from `config.seed`.
     pub fn new(seq_len: usize, config: &BigBirdConfig) -> Self {
         let block_size = config.block_size.max(1);
-        let num_blocks = (seq_len + block_size - 1) / block_size;
+        let num_blocks = seq_len.div_ceil(block_size);
 
         // Global tokens: first block
         let global_count = block_size.min(seq_len);
@@ -883,11 +873,7 @@ impl BigBirdAttentionMask {
             return true;
         }
         // 3. Sliding window
-        let diff = if q_pos >= k_pos {
-            q_pos - k_pos
-        } else {
-            k_pos - q_pos
-        };
+        let diff = q_pos.abs_diff(k_pos);
         if diff <= self.window_size {
             return true;
         }
@@ -903,10 +889,10 @@ impl BigBirdAttentionMask {
     pub fn to_dense_mask(&self) -> Vec<Vec<f32>> {
         let n = self.seq_len;
         let mut mask = vec![vec![-1e9_f32; n]; n];
-        for q in 0..n {
-            for k in 0..n {
+        for (q, row) in mask.iter_mut().enumerate() {
+            for (k, cell) in row.iter_mut().enumerate() {
                 if self.should_attend(q, k) {
-                    mask[q][k] = 0.0;
+                    *cell = 0.0;
                 }
             }
         }
@@ -952,14 +938,14 @@ pub struct LongformerConfig {
 /// - `k` is in `global_token_indices`.
 pub fn longformer_attention_mask(seq_len: usize, config: &LongformerConfig) -> Vec<Vec<f32>> {
     let mut mask = vec![vec![-1e9_f32; seq_len]; seq_len];
-    for q in 0..seq_len {
-        for k in 0..seq_len {
-            let diff = if q >= k { q - k } else { k - q };
+    for (q, row) in mask.iter_mut().enumerate() {
+        for (k, cell) in row.iter_mut().enumerate() {
+            let diff = q.abs_diff(k);
             let within_window = diff <= config.window_size;
             let q_global = config.global_token_indices.contains(&q);
             let k_global = config.global_token_indices.contains(&k);
             if within_window || q_global || k_global {
-                mask[q][k] = 0.0;
+                *cell = 0.0;
             }
         }
     }
@@ -1016,7 +1002,7 @@ pub struct BlockSparseAttnConfig {
 /// `[0, 1)` drawn from a LCG is `>= config.sparsity`.
 pub fn block_sparse_attn_mask(seq_len: usize, config: &BlockSparseAttnConfig) -> Vec<bool> {
     let block_size = config.block_size.max(1);
-    let n_blocks = (seq_len + block_size - 1) / block_size;
+    let n_blocks = seq_len.div_ceil(block_size);
     let total = n_blocks * n_blocks;
     if total == 0 {
         return Vec::new();
@@ -1093,10 +1079,7 @@ mod tests {
 
     #[test]
     fn coo_from_dense_with_threshold() {
-        let dense = vec![
-            vec![0.001, 2.0, 0.0],
-            vec![-1.5, 0.0, 0.0005],
-        ];
+        let dense = vec![vec![0.001, 2.0, 0.0], vec![-1.5, 0.0, 0.0005]];
         let coo = SparseCoo::from_dense(&dense, 0.01);
         // Only |x| > 0.01 should be kept: 2.0 and -1.5
         assert_eq!(coo.nnz, 2);
@@ -1273,13 +1256,12 @@ mod tests {
         let mask = BlockSparse::causal_mask(4, 2).unwrap();
         // Lower triangular: position (r,c) should be 1 iff c <= r
         let dense = mask.to_dense();
-        for r in 0..4 {
-            for c in 0..4 {
+        for (r, row) in dense.iter().enumerate().take(4) {
+            for (c, value) in row.iter().enumerate().take(4) {
                 let expected = if c <= r { 1.0 } else { 0.0 };
                 assert_eq!(
-                    dense[r][c], expected,
-                    "causal_mask({r},{c}) expected {expected} got {}",
-                    dense[r][c]
+                    *value, expected,
+                    "causal_mask({r},{c}) expected {expected} got {value}"
                 );
             }
         }
@@ -1290,13 +1272,12 @@ mod tests {
         let mask = BlockSparse::sliding_window_mask(6, 2, 1).unwrap();
         let dense = mask.to_dense();
         // Each row r attends to positions max(0, r-1)..=r
-        for r in 0..6_usize {
-            for c in 0..6_usize {
+        for (r, row) in dense.iter().enumerate().take(6) {
+            for (c, value) in row.iter().enumerate().take(6) {
                 let expected = if c <= r && r - c <= 1 { 1.0 } else { 0.0 };
                 assert_eq!(
-                    dense[r][c], expected,
-                    "sliding_window({r},{c}) expected {expected} got {}",
-                    dense[r][c]
+                    *value, expected,
+                    "sliding_window({r},{c}) expected {expected} got {value}"
                 );
             }
         }
@@ -1450,7 +1431,10 @@ mod tests {
         let dense = mask.to_dense_mask();
         // Row 0 = global token → all entries should be 0.0 (attends to everything)
         for &v in &dense[0] {
-            assert!((v - 0.0).abs() < 1e-6, "global token row 0 should all be 0.0");
+            assert!(
+                (v - 0.0).abs() < 1e-6,
+                "global token row 0 should all be 0.0"
+            );
         }
     }
 
@@ -1465,10 +1449,13 @@ mod tests {
         let mask = BigBirdAttentionMask::new(16, &config);
         let ratio = mask.sparsity_ratio();
         assert!(
-            ratio >= 0.0 && ratio <= 1.0,
+            (0.0..=1.0).contains(&ratio),
             "sparsity ratio must be in [0,1]: got {ratio}"
         );
-        assert!(ratio > 0.0, "with global tokens + window there must be some attention");
+        assert!(
+            ratio > 0.0,
+            "with global tokens + window there must be some attention"
+        );
     }
 
     // ── Longformer tests ──────────────────────────────────────────────────────
@@ -1514,19 +1501,18 @@ mod tests {
         };
         let mask = longformer_attention_mask(8, &config);
         // Global token 0 attends to all positions
-        for k in 0..8 {
+        for (k, value) in mask[0].iter().enumerate().take(8) {
             assert!(
-                (mask[0][k] - 0.0).abs() < 1e-6,
-                "global token 0 should attend to position {k}: got {}",
-                mask[0][k]
+                value.abs() < 1e-6,
+                "global token 0 should attend to position {k}: got {value}"
             );
         }
         // All positions attend to global token 0
-        for q in 0..8 {
+        for (q, row) in mask.iter().enumerate().take(8) {
             assert!(
-                (mask[q][0] - 0.0).abs() < 1e-6,
+                row[0].abs() < 1e-6,
                 "position {q} should attend to global token 0: got {}",
-                mask[q][0]
+                row[0]
             );
         }
     }
@@ -1572,7 +1558,10 @@ mod tests {
         };
         let mask = block_sparse_attn_mask(8, &config);
         for (i, &v) in mask.iter().enumerate() {
-            assert!(v, "with sparsity=0 all blocks should attend, but block {i} does not");
+            assert!(
+                v,
+                "with sparsity=0 all blocks should attend, but block {i} does not"
+            );
         }
     }
 
@@ -1586,7 +1575,10 @@ mod tests {
         };
         let mask = block_sparse_attn_mask(8, &config);
         for (i, &v) in mask.iter().enumerate() {
-            assert!(!v, "with sparsity=1 no blocks should attend, but block {i} does");
+            assert!(
+                !v,
+                "with sparsity=1 no blocks should attend, but block {i} does"
+            );
         }
     }
 

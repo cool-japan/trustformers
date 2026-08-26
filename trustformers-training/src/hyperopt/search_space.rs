@@ -156,14 +156,27 @@ pub struct ContinuousParameter {
 }
 
 impl ContinuousParameter {
-    /// Create a new continuous parameter
-    pub fn new(name: impl Into<String>, low: f64, high: f64) -> Self {
-        assert!(low <= high, "Low bound must be <= high bound");
-        Self {
-            name: name.into(),
-            low,
-            high,
+    /// Create a new continuous parameter.
+    ///
+    /// Bounds usually arrive from a YAML/JSON tuning config, so an inverted range is a
+    /// configuration error to report — not a reason to abort the whole HPO run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `low > high` or either bound is not finite.
+    pub fn new(name: impl Into<String>, low: f64, high: f64) -> Result<Self> {
+        let name = name.into();
+        if !low.is_finite() || !high.is_finite() {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': bounds must be finite (low={low}, high={high})"
+            ));
         }
+        if low > high {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': low bound {low} must be <= high bound {high}"
+            ));
+        }
+        Ok(Self { name, low, high })
     }
 
     /// Sample a random value
@@ -196,16 +209,29 @@ pub struct DiscreteParameter {
 }
 
 impl DiscreteParameter {
-    /// Create a new discrete parameter
-    pub fn new(name: impl Into<String>, low: i64, high: i64, step: i64) -> Self {
-        assert!(low <= high, "Low bound must be <= high bound");
-        assert!(step > 0, "Step must be positive");
-        Self {
-            name: name.into(),
+    /// Create a new discrete parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `low > high` or `step <= 0`.
+    pub fn new(name: impl Into<String>, low: i64, high: i64, step: i64) -> Result<Self> {
+        let name = name.into();
+        if low > high {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': low bound {low} must be <= high bound {high}"
+            ));
+        }
+        if step <= 0 {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': step must be positive, got {step}"
+            ));
+        }
+        Ok(Self {
+            name,
             low,
             high,
             step,
-        }
+        })
     }
 
     /// Sample a random value
@@ -251,31 +277,44 @@ pub struct LogParameter {
 }
 
 impl LogParameter {
-    /// Create a new log-scale parameter
-    pub fn new(name: impl Into<String>, low: f64, high: f64) -> Self {
-        assert!(low > 0.0, "Low bound must be positive for log scale");
-        assert!(high > 0.0, "High bound must be positive for log scale");
-        assert!(low <= high, "Low bound must be <= high bound");
-        Self {
-            name: name.into(),
-            low,
-            high,
-            base: 10.0,
-        }
+    /// Create a new log-scale parameter with base 10.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either bound is non-positive or `low > high`.
+    pub fn new(name: impl Into<String>, low: f64, high: f64) -> Result<Self> {
+        Self::with_base(name, low, high, 10.0)
     }
 
-    /// Create a new log-scale parameter with custom base
-    pub fn with_base(name: impl Into<String>, low: f64, high: f64, base: f64) -> Self {
-        assert!(low > 0.0, "Low bound must be positive for log scale");
-        assert!(high > 0.0, "High bound must be positive for log scale");
-        assert!(low <= high, "Low bound must be <= high bound");
-        assert!(base > 0.0 && base != 1.0, "Base must be positive and != 1");
-        Self {
-            name: name.into(),
+    /// Create a new log-scale parameter with a custom base.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either bound is non-positive, `low > high`, or the base is
+    /// non-positive or exactly 1 (for which the logarithm is undefined).
+    pub fn with_base(name: impl Into<String>, low: f64, high: f64, base: f64) -> Result<Self> {
+        let name = name.into();
+        if low <= 0.0 || high <= 0.0 {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': log-scale bounds must be positive (low={low}, high={high})"
+            ));
+        }
+        if low > high {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': low bound {low} must be <= high bound {high}"
+            ));
+        }
+        if base <= 0.0 || (base - 1.0).abs() < f64::EPSILON {
+            return Err(anyhow::anyhow!(
+                "Parameter '{name}': base must be positive and != 1, got {base}"
+            ));
+        }
+        Ok(Self {
+            name,
             low,
             high,
             base,
-        }
+        })
     }
 
     /// Sample a random value from log space
@@ -420,9 +459,14 @@ impl SearchSpace {
     }
 }
 
-/// Builder for creating search spaces
+/// Builder for creating search spaces.
+///
+/// The chaining methods stay infallible so a space can be described in one expression;
+/// invalid bounds are collected and reported by [`SearchSpaceBuilder::build`], which is the
+/// single fallible step. Nothing is silently dropped or clamped.
 pub struct SearchSpaceBuilder {
     parameters: Vec<HyperParameter>,
+    errors: Vec<String>,
 }
 
 impl SearchSpaceBuilder {
@@ -430,6 +474,7 @@ impl SearchSpaceBuilder {
     pub fn new() -> Self {
         Self {
             parameters: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -443,29 +488,45 @@ impl SearchSpaceBuilder {
 
     /// Add a continuous parameter
     pub fn continuous(mut self, name: impl Into<String>, low: f64, high: f64) -> Self {
-        self.parameters.push(HyperParameter::Continuous(ContinuousParameter::new(
-            name, low, high,
-        )));
+        match ContinuousParameter::new(name, low, high) {
+            Ok(p) => self.parameters.push(HyperParameter::Continuous(p)),
+            Err(e) => self.errors.push(e.to_string()),
+        }
         self
     }
 
     /// Add a discrete parameter
     pub fn discrete(mut self, name: impl Into<String>, low: i64, high: i64, step: i64) -> Self {
-        self.parameters.push(HyperParameter::Discrete(DiscreteParameter::new(
-            name, low, high, step,
-        )));
+        match DiscreteParameter::new(name, low, high, step) {
+            Ok(p) => self.parameters.push(HyperParameter::Discrete(p)),
+            Err(e) => self.errors.push(e.to_string()),
+        }
         self
     }
 
     /// Add a log-scale parameter
     pub fn log_uniform(mut self, name: impl Into<String>, low: f64, high: f64) -> Self {
-        self.parameters.push(HyperParameter::Log(LogParameter::new(name, low, high)));
+        match LogParameter::new(name, low, high) {
+            Ok(p) => self.parameters.push(HyperParameter::Log(p)),
+            Err(e) => self.errors.push(e.to_string()),
+        }
         self
     }
 
-    /// Build the search space
-    pub fn build(self) -> SearchSpace {
-        SearchSpace::new(self.parameters)
+    /// Build the search space.
+    ///
+    /// # Errors
+    ///
+    /// Returns every rejected parameter definition collected during building, so a bad tuning
+    /// config surfaces all of its problems at once instead of aborting the process.
+    pub fn build(self) -> Result<SearchSpace> {
+        if !self.errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "invalid search space: {}",
+                self.errors.join("; ")
+            ));
+        }
+        Ok(SearchSpace::new(self.parameters))
     }
 }
 
@@ -516,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_continuous_parameter() {
-        let param = ContinuousParameter::new("learning_rate", 1e-5, 1e-1);
+        let param = ContinuousParameter::new("learning_rate", 1e-5, 1e-1).expect("valid bounds");
         let mut rng = StdRng::seed_from_u64(42);
         let value = param.sample(&mut rng).expect("Sampling should succeed");
 
@@ -530,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_discrete_parameter() {
-        let param = DiscreteParameter::new("batch_size", 8, 128, 8);
+        let param = DiscreteParameter::new("batch_size", 8, 128, 8).expect("valid bounds");
         let mut rng = StdRng::seed_from_u64(42);
         let value = param.sample(&mut rng).expect("Failed to sample discrete parameter");
 
@@ -545,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_log_parameter() {
-        let param = LogParameter::new("weight_decay", 1e-6, 1e-2);
+        let param = LogParameter::new("weight_decay", 1e-6, 1e-2).expect("valid bounds");
         let mut rng = StdRng::seed_from_u64(42);
         let value = param.sample(&mut rng).expect("Failed to sample log parameter");
 
@@ -563,7 +624,8 @@ mod tests {
             .categorical("optimizer", vec!["adam", "sgd"])
             .continuous("learning_rate", 1e-5, 1e-1)
             .discrete("batch_size", 8, 32, 8)
-            .build();
+            .build()
+            .expect("search space definition must be valid");
 
         assert_eq!(space.parameters.len(), 3);
         assert_eq!(space.parameter_names().len(), 3);
@@ -583,7 +645,8 @@ mod tests {
         let space = SearchSpaceBuilder::new()
             .categorical("optimizer", vec!["adam", "sgd"])
             .continuous("learning_rate", 1e-5, 1e-1)
-            .build();
+            .build()
+            .expect("search space definition must be valid");
 
         let mut valid_config = HashMap::new();
         valid_config.insert(
@@ -670,25 +733,32 @@ mod tests {
 
     #[test]
     fn test_hyper_parameter_name_log() {
-        let hp = HyperParameter::Log(LogParameter::new("weight_decay", 1e-6, 1e-2));
+        let hp = HyperParameter::Log(
+            LogParameter::new("weight_decay", 1e-6, 1e-2).expect("valid bounds"),
+        );
         assert_eq!(hp.name(), "weight_decay");
     }
 
     #[test]
     fn test_hyper_parameter_is_valid_continuous_in_range() {
-        let hp = HyperParameter::Continuous(ContinuousParameter::new("lr", 0.0001, 0.1));
+        let hp = HyperParameter::Continuous(
+            ContinuousParameter::new("lr", 0.0001, 0.1).expect("valid bounds"),
+        );
         assert!(hp.is_valid(&ParameterValue::Float(0.01)));
     }
 
     #[test]
     fn test_hyper_parameter_is_valid_continuous_out_of_range() {
-        let hp = HyperParameter::Continuous(ContinuousParameter::new("lr", 0.0001, 0.1));
+        let hp = HyperParameter::Continuous(
+            ContinuousParameter::new("lr", 0.0001, 0.1).expect("valid bounds"),
+        );
         assert!(!hp.is_valid(&ParameterValue::Float(0.5)));
     }
 
     #[test]
     fn test_hyper_parameter_is_valid_discrete_step_boundary() {
-        let hp = HyperParameter::Discrete(DiscreteParameter::new("bs", 8, 64, 8));
+        let hp =
+            HyperParameter::Discrete(DiscreteParameter::new("bs", 8, 64, 8).expect("valid bounds"));
         assert!(hp.is_valid(&ParameterValue::Int(16)));
         assert!(!hp.is_valid(&ParameterValue::Int(10))); // not divisible by step
     }
@@ -699,7 +769,9 @@ mod tests {
 
     #[test]
     fn test_search_space_empty_has_no_params() {
-        let space = SearchSpaceBuilder::new().build();
+        let space = SearchSpaceBuilder::new()
+            .build()
+            .expect("search space definition must be valid");
         assert_eq!(space.parameters.len(), 0);
         assert_eq!(space.parameter_names().len(), 0);
     }
@@ -709,7 +781,8 @@ mod tests {
         let space = SearchSpaceBuilder::new()
             .categorical("z_param", vec!["a", "b"])
             .continuous("a_param", 0.0, 1.0)
-            .build();
+            .build()
+            .expect("search space definition must be valid");
         let names = space.parameter_names();
         assert!(names.iter().any(|n| n == &"z_param".to_string()));
         assert!(names.iter().any(|n| n == &"a_param".to_string()));
@@ -717,7 +790,10 @@ mod tests {
 
     #[test]
     fn test_search_space_log_parameter_in_range() {
-        let space = SearchSpaceBuilder::new().log_uniform("wd", 1e-6, 1e-2).build();
+        let space = SearchSpaceBuilder::new()
+            .log_uniform("wd", 1e-6, 1e-2)
+            .build()
+            .expect("search space definition must be valid");
         let mut rng = StdRng::seed_from_u64(42);
         let config = space.sample(&mut rng).expect("log uniform sampling should succeed");
         if let Some(ParameterValue::Float(v)) = config.get("wd") {

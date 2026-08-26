@@ -1,6 +1,6 @@
 # TrustformeRS Debug
 
-**Version:** 0.2.0 | **Status:** Alpha | **Tests:** ~899 | **SLoC:** ~101,000 | **Updated:** 2026-07-02
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** ~899 as of 2026-07-09, not independently re-run this pass | **SLoC:** 88,454 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from ~101,000 likely reflects measurement scope rather than code change; not investigated) | **Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
 
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
 
@@ -9,8 +9,8 @@ Advanced debugging and analysis tools for TrustformeRS machine learning models.
 | Feature | Description |
 |---------|-------------|
 | `visual` | Enable graphical plot output via Plotters (opt-in — see note below) |
-| `video` | Enable video frame export for training animations |
-| `gif` | Enable animated GIF export for visualization sequences |
+| `image` | Enable PNG raster output (large-model layer heatmaps) |
+| `gif` | Enable animated GIF export for visualization sequences (implies `image`) |
 | `wasm` | Enable WebAssembly-compatible debugging (no filesystem I/O) |
 | `atomics` | Enable atomic counters for lock-free profiling in multi-threaded contexts |
 | `headless` | Enable terminal/ASCII visualization for server environments (Ratatui) |
@@ -60,7 +60,20 @@ Multiple backends depending on enabled features:
 - **Ratatui** (`headless` feature): Terminal-based TUI dashboards and ASCII plots for headless server environments
 - **TensorBoard**: Event file export compatible with TensorBoard scalar/histogram/graph viewers
 - **GIF export** (`gif` feature): Animated training progress visualizations
-- **Video export** (`video` feature): MP4-compatible frame sequences for training recordings
+- **PNG export** (`image` feature): Layer heatmaps from `LargeModelVisualizer`
+
+There is no video/MP4 export. A `video` feature used to be advertised here; it
+enabled an `ffmpeg-next` dependency that no code in the crate ever called, so it
+was removed rather than left as a promise nothing could keep.
+
+### Large-Model Visualization
+
+Memory-bounded visualization for models too large to render layer-by-layer (`LargeModelVisualizer`, `large_model_viz` module, re-exported at the crate root):
+
+- **Smart Layer Sampling**: Uniform, Adaptive, Representative, and Importance-based (parameter-count/compute-cost weighted) sampling strategies pick a representative subset of layers instead of rendering every layer
+- **Hierarchical Rendering**: Layers are grouped into clusters with per-group summary statistics for very deep architectures
+- **Memory-Bounded Caching**: Configurable memory budget (`max_memory_mb`) that warns when accumulated layer metadata exceeds it
+- **Output Formats**: Text summary, JSON metadata, static PNG/SVG, and interactive SVG/HTML
 
 ### Memory Profiling
 
@@ -77,6 +90,16 @@ Deadlock-safe memory profiling using scoped mutex guards:
 - **Bottleneck Detection**: Identify performance bottlenecks automatically
 - **Optimization Suggestions**: Get recommendations for performance improvements
 - **Flame Graphs**: Generate Inferno-compatible flamegraph data for call stack visualization
+
+### Distributed Profiling
+
+Multi-node, multi-rank profiling for distributed training (`DistributedProfiler`, `distributed_profiling` module, re-exported at the crate root):
+
+- **Per-Rank Node Registration**: Track each node by rank and role, recording communication and synchronization events as training progresses
+- **Communication & Synchronization Analysis**: Aggregated summaries of cross-node communication patterns and synchronization overhead
+- **Load Balance Analysis**: Detect work imbalance across ranks
+- **Bottleneck Detection**: Automatic identification of distributed-training bottlenecks with actionable recommendations
+- **Real-time Stats & Export**: Live statistics snapshots (`get_realtime_stats`) plus full JSON report export (`export_json`)
 
 ### AI Code Analysis
 

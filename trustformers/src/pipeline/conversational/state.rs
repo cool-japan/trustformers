@@ -257,7 +257,6 @@ impl ConversationState {
         let mut user_response_times = Vec::new();
         let mut assistant_response_times = Vec::new();
         let mut topic_transitions = 0;
-        let last_topics: Vec<String> = Vec::new();
 
         for i in 1..self.turns.len() {
             let current = &self.turns[i];

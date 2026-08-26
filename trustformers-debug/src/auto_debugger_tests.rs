@@ -6,11 +6,10 @@ mod tests {
     use std::time::Duration;
 
     use crate::auto_debugger::{
-        ArchitectureSuggestion, AutoDebugReport, AutoDebugger, CodeExample, DataStrategy,
-        DebugContext, DetectedIssue, EstimatedEffort, Evidence, ExpectedImpact, FixPriority,
-        FixSuggestion, FixType, HyperparameterRecommendation, IssuePattern, IssueType,
-        IssueSeverity, KnowledgeBase, ModelInfo, OptimizationAttempt, TrainingRecipeOptimization,
-        TrainingSchedule,
+        ArchitectureSuggestion, AutoDebugger, CodeExample, DataStrategy, DebugContext,
+        DetectedIssue, EstimatedEffort, Evidence, ExpectedImpact, FixPriority, FixSuggestion,
+        FixType, HyperparameterRecommendation, IssuePattern, IssueSeverity, IssueType,
+        KnowledgeBase, ModelInfo, OptimizationAttempt, TrainingSchedule,
     };
     use crate::core::session::DebugConfig;
     use crate::dashboard::DashboardMetrics;
@@ -68,7 +67,10 @@ mod tests {
         let metrics: Vec<DashboardMetrics> = vec![];
         let context = empty_context(&metrics);
         let report = debugger.analyze_issues(&context);
-        assert!(report.is_ok(), "analyze_issues should succeed with empty context");
+        assert!(
+            report.is_ok(),
+            "analyze_issues should succeed with empty context"
+        );
         let report = report.expect("report should be Ok");
         assert!(report.detected_issues.is_empty());
     }
@@ -274,7 +276,10 @@ mod tests {
             .detected_issues
             .iter()
             .any(|i| matches!(i.issue_type, IssueType::ModelTooLarge));
-        assert!(has_model_too_large, "Should detect ModelTooLarge for 2B params");
+        assert!(
+            has_model_too_large,
+            "Should detect ModelTooLarge for 2B params"
+        );
     }
 
     #[test]
@@ -301,7 +306,10 @@ mod tests {
             .detected_issues
             .iter()
             .any(|i| matches!(i.issue_type, IssueType::InappropriateArchitecture));
-        assert!(has_arch_issue, "Should detect InappropriateArchitecture for 150 layers");
+        assert!(
+            has_arch_issue,
+            "Should detect InappropriateArchitecture for 150 layers"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -319,7 +327,10 @@ mod tests {
             .detected_issues
             .iter()
             .any(|i| matches!(i.issue_type, IssueType::LowGpuUtilization));
-        assert!(has_low_gpu, "Should detect LowGpuUtilization when GPU at 30%");
+        assert!(
+            has_low_gpu,
+            "Should detect LowGpuUtilization when GPU at 30%"
+        );
     }
 
     #[test]
@@ -333,7 +344,10 @@ mod tests {
             .detected_issues
             .iter()
             .any(|i| matches!(i.issue_type, IssueType::LowGpuUtilization));
-        assert!(!has_low_gpu, "Should not detect LowGpuUtilization when GPU at 90%");
+        assert!(
+            !has_low_gpu,
+            "Should not detect LowGpuUtilization when GPU at 90%"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -345,16 +359,18 @@ mod tests {
         let config = make_debug_config();
         let debugger = AutoDebugger::new(&config);
         // Create 10 metrics with nearly identical loss to simulate stalled training
-        let metrics: Vec<DashboardMetrics> = (0..10)
-            .map(|_| make_dashboard_metrics(Some(1.0), None))
-            .collect();
+        let metrics: Vec<DashboardMetrics> =
+            (0..10).map(|_| make_dashboard_metrics(Some(1.0), None)).collect();
         let context = empty_context(&metrics);
         let report = debugger.analyze_issues(&context).expect("analyze should succeed");
         let has_stalled = report
             .detected_issues
             .iter()
             .any(|i| matches!(i.issue_type, IssueType::TrainingStalled));
-        assert!(has_stalled, "Should detect stalled training with constant loss");
+        assert!(
+            has_stalled,
+            "Should detect stalled training with constant loss"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -372,7 +388,10 @@ mod tests {
             .hyperparameter_recommendations
             .iter()
             .any(|r| r.parameter == "learning_rate");
-        assert!(has_lr_recommendation, "Should recommend learning rate when loss > 1.0");
+        assert!(
+            has_lr_recommendation,
+            "Should recommend learning rate when loss > 1.0"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -556,9 +575,7 @@ mod tests {
         };
         let report = debugger.analyze_issues(&context).expect("report ok");
         // Should have optimizations recommended for long training
-        assert!(
-            !report.training_recipe.training_schedule.learning_rate_schedule.is_empty()
-        );
+        assert!(!report.training_recipe.training_schedule.learning_rate_schedule.is_empty());
     }
 
     #[test]
@@ -664,7 +681,8 @@ mod tests {
             "Should have no detected issues for empty context"
         );
         assert!(
-            report.analysis_summary.contains("No significant") || !report.analysis_summary.is_empty()
+            report.analysis_summary.contains("No significant")
+                || !report.analysis_summary.is_empty()
         );
     }
 }

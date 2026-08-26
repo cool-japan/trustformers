@@ -6,7 +6,7 @@
 use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 pub struct ConcurrencyRiskAssessment {
@@ -15,20 +15,11 @@ pub struct ConcurrencyRiskAssessment {
 
     /// Risk mitigation strategies
     mitigation_strategies: Arc<Mutex<Vec<Box<dyn RiskMitigationStrategy + Send + Sync>>>>,
-
-    /// Historical risk data
-    risk_history: Arc<Mutex<RiskAssessmentHistory>>,
-
-    /// Risk monitoring data
-    monitoring_data: Arc<RwLock<RiskMonitoringData>>,
-
-    /// Configuration
-    config: RiskAssessmentConfig,
 }
 
 impl ConcurrencyRiskAssessment {
     /// Creates a new concurrency risk assessment system
-    pub async fn new(config: RiskAssessmentConfig) -> Result<Self> {
+    pub async fn new(_config: RiskAssessmentConfig) -> Result<Self> {
         let mut assessment_algorithms: Vec<Box<dyn RiskAssessmentAlgorithm + Send + Sync>> =
             Vec::new();
         let mut mitigation_strategies: Vec<Box<dyn RiskMitigationStrategy + Send + Sync>> =
@@ -48,9 +39,6 @@ impl ConcurrencyRiskAssessment {
         Ok(Self {
             assessment_algorithms: Arc::new(Mutex::new(assessment_algorithms)),
             mitigation_strategies: Arc::new(Mutex::new(mitigation_strategies)),
-            risk_history: Arc::new(Mutex::new(RiskAssessmentHistory::new())),
-            monitoring_data: Arc::new(RwLock::new(RiskMonitoringData::new())),
-            config,
         })
     }
 

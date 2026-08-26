@@ -5,12 +5,59 @@
 //!
 //! WebNN is a W3C standard that provides a unified API for accessing hardware acceleration
 //! across different platforms (CPU, GPU, NPU, DSP, etc.)
+//!
+//! ## Honesty policy: detection-only, no fabricated capabilities
+//!
+//! `web-sys` 0.3.103/0.3.104 (this workspace's pinned range) ships **no**
+//! typed bindings for `Ml`, `MLContext`, or `MLGraphBuilder` - grep its
+//! `Cargo.toml` feature list and they are simply absent, because WebNN is
+//! still a W3C Working Draft. That means this module cannot call
+//! `navigator.ml.createContext()` (which is async besides) and therefore
+//! cannot ask the browser which precisions (FP16/INT8), device types
+//! (NPU/DSP), or operators it actually supports.
+//!
+//! What *is* honestly detectable without typed bindings is **presence**:
+//! whether `navigator.ml` exists at all, checked via `js_sys::Reflect` on
+//! wasm32 (see `detect_navigator_ml_available`). Everything downstream of
+//! that - [`WebNNContext::capabilities`] in particular - reports only that
+//! single real signal plus conservative `false`/empty defaults for anything
+//! that would require an actual `createContext()` round trip. Reporting
+//! `true` for FP16/INT8/NPU/DSP support without ever having queried the
+//! browser (the previous behavior: hardcoded `true`, and `has_npu`/`has_dsp`
+//! literally echoing back the caller's *requested* device type as if it
+//! were detected hardware) is exactly the fabrication this module now
+//! forbids.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
+
+/// Real, synchronous detection of whether the browser exposes a WebNN
+/// `navigator.ml` entry point.
+///
+/// This only checks *presence* of the `ml` property via `js_sys::Reflect`;
+/// it does not (cannot, with only `web-sys`'s typed bindings) create an
+/// `MLContext` or query per-operator/precision hardware support. Compiles
+/// and is logically correct; full runtime behavior is verified in browser
+/// CI, not by native `cargo test`.
+#[cfg(target_arch = "wasm32")]
+fn detect_navigator_ml_available() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let navigator = window.navigator();
+    js_sys::Reflect::has(&navigator, &JsValue::from_str("ml")).unwrap_or(false)
+}
+
+/// Native builds have no `navigator` object at all: WebNN is structurally
+/// unavailable rather than merely "not yet detected", so this always
+/// returns `false` - never a fabricated positive.
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_navigator_ml_available() -> bool {
+    false
+}
 
 /// WebNN device types for hardware acceleration
 #[wasm_bindgen]
@@ -188,63 +235,87 @@ pub struct WebNNContext {
     power_preference: WebNNPowerPreference,
     supported_operators: Vec<String>,
     max_tensor_size: usize,
-    supports_fp16: bool,
-    supports_int8: bool,
-    supports_dynamic_shapes: bool,
+    /// Real, detected presence of `navigator.ml` (see
+    /// [`detect_navigator_ml_available`]) - the only WebNN "capability"
+    /// this context can honestly report without typed `createContext()`
+    /// bindings.
+    ml_api_available: bool,
 }
 
 #[wasm_bindgen]
 impl WebNNContext {
-    /// Create a new WebNN context
+    /// Create a new WebNN context.
+    ///
+    /// `device_type` records what the *caller requested*; it is not a
+    /// detected hardware fact (see [`Self::capabilities`], which used to
+    /// conflate the two).
     #[wasm_bindgen(constructor)]
     pub fn new(device_type: WebNNDeviceType, power_preference: WebNNPowerPreference) -> Self {
-        // In a real implementation, this would query the browser's WebNN API
-        // for actual device capabilities
         Self {
             device_type,
             power_preference,
             supported_operators: Vec::new(),
-            max_tensor_size: 1024 * 1024 * 1024, // 1GB default
-            supports_fp16: true,
-            supports_int8: true,
-            supports_dynamic_shapes: true,
+            max_tensor_size: 1024 * 1024 * 1024, // Conservative internal cap, not a hardware measurement.
+            ml_api_available: detect_navigator_ml_available(),
         }
     }
 
-    /// Check if the WebNN API is available
+    /// Check if the WebNN API is available.
+    ///
+    /// Real detection: on wasm32, whether `navigator.ml` exists (see
+    /// `detect_navigator_ml_available`); on native, structurally `false`,
+    /// since there is no `navigator` to query.
     pub fn is_available() -> bool {
-        // In a real implementation, this would check:
-        // - Browser support for WebNN
-        // - Hardware availability (NPU, etc.)
-        // - Driver compatibility
-        // For now, return false (conservative)
-        false
+        detect_navigator_ml_available()
     }
 
-    /// Get device capabilities
+    /// Get device capabilities.
+    ///
+    /// Reports only what was actually checked: whether `navigator.ml` is
+    /// present. Precision support (FP16/INT8), dynamic-shape support, and
+    /// real NPU/DSP hardware presence would require calling
+    /// `navigator.ml.createContext()`, which `web-sys` has no typed
+    /// bindings for (see the module-level doc comment) and which this
+    /// context never calls - so those fields are conservatively `false`
+    /// rather than fabricated. In particular, `has_npu`/`has_dsp` no longer
+    /// echo back the caller's *requested* `device_type` as if it were
+    /// detected hardware, which is what this method used to do.
     pub fn capabilities(&self) -> WebNNCapabilities {
         WebNNCapabilities {
             device_type: self.device_type,
-            supports_fp16: self.supports_fp16,
-            supports_int8: self.supports_int8,
-            supports_dynamic_shapes: self.supports_dynamic_shapes,
+            ml_api_available: self.ml_api_available,
+            supports_fp16: false,
+            supports_int8: false,
+            supports_dynamic_shapes: false,
             max_tensor_size: self.max_tensor_size,
-            has_npu: self.device_type == WebNNDeviceType::NPU,
-            has_dsp: self.device_type == WebNNDeviceType::DSP,
+            has_npu: false,
+            has_dsp: false,
         }
     }
 
-    /// Check if a specific operator is supported
+    /// Check if a specific operator is supported.
+    ///
+    /// `supported_operators` is never populated (doing so honestly would
+    /// require the same unavailable `createContext()` + graph-builder
+    /// round trip described above), so this always returns `false` -
+    /// which is itself the honest answer, not a stub left unfinished.
     pub fn supports_operator(&self, operator: &str) -> bool {
         self.supported_operators.iter().any(|op| op == operator)
     }
 }
 
-/// WebNN device capabilities
+/// WebNN device capabilities.
+///
+/// Every field here is a real, checked value or an honest conservative
+/// default - never a fabricated positive. See the module-level doc comment
+/// and [`WebNNContext::capabilities`] for exactly what is and is not
+/// detectable without typed `createContext()` bindings.
 #[wasm_bindgen]
 #[derive(Debug, Clone)]
 pub struct WebNNCapabilities {
     device_type: WebNNDeviceType,
+    /// The one real, checked signal: whether `navigator.ml` is present.
+    ml_api_available: bool,
     supports_fp16: bool,
     supports_int8: bool,
     supports_dynamic_shapes: bool,
@@ -260,32 +331,55 @@ impl WebNNCapabilities {
         self.device_type
     }
 
-    /// Check if FP16 is supported
+    /// Whether `navigator.ml` was detected as present. This is the only
+    /// field on this type backed by a real runtime check (see
+    /// `detect_navigator_ml_available`).
+    pub fn ml_api_available(&self) -> bool {
+        self.ml_api_available
+    }
+
+    /// Check if FP16 is supported.
+    ///
+    /// Always `false`: verifying this would require a real
+    /// `navigator.ml.createContext()` call, which this crate cannot make
+    /// (no typed `web-sys` bindings exist - see the module doc comment).
+    /// Reporting anything else without checking would be fabrication.
     pub fn supports_fp16(&self) -> bool {
         self.supports_fp16
     }
 
-    /// Check if INT8 quantization is supported
+    /// Check if INT8 quantization is supported. Always `false` - see
+    /// [`Self::supports_fp16`]: unverifiable without a real
+    /// `createContext()` call this crate cannot make.
     pub fn supports_int8(&self) -> bool {
         self.supports_int8
     }
 
-    /// Check if dynamic shapes are supported
+    /// Check if dynamic shapes are supported. Always `false` - see
+    /// [`Self::supports_fp16`].
     pub fn supports_dynamic_shapes(&self) -> bool {
         self.supports_dynamic_shapes
     }
 
-    /// Get maximum tensor size in bytes
+    /// Get maximum tensor size in bytes (a conservative internal cap
+    /// configured by this crate, not a queried hardware limit).
     pub fn max_tensor_size(&self) -> usize {
         self.max_tensor_size
     }
 
-    /// Check if NPU is available
+    /// Check if NPU hardware is available.
+    ///
+    /// Always `false`: this used to echo back the caller's *requested*
+    /// `WebNNDeviceType` as though it were detected hardware, which is
+    /// exactly backwards - requesting NPU execution proves nothing about
+    /// whether an NPU actually exists. Real NPU presence is not detectable
+    /// through `js_sys::Reflect` alone.
     pub fn has_npu(&self) -> bool {
         self.has_npu
     }
 
-    /// Check if DSP is available
+    /// Check if DSP hardware is available. Always `false` - see
+    /// [`Self::has_npu`].
     pub fn has_dsp(&self) -> bool {
         self.has_dsp
     }
@@ -469,8 +563,53 @@ mod tests {
             WebNNContext::new(WebNNDeviceType::NPU, WebNNPowerPreference::HighPerformance);
 
         let caps = context.capabilities();
+        // `device_type` echoes what was requested - that part is honest
+        // bookkeeping, not a hardware claim.
         assert_eq!(caps.device_type(), WebNNDeviceType::NPU);
-        assert!(caps.has_npu());
+        // Regression guard: `has_npu` used to just return
+        // `device_type == WebNNDeviceType::NPU`, i.e. it reported "NPU
+        // detected" purely because NPU execution was *requested* - not
+        // because any hardware was ever checked. It must not echo the
+        // request; on this native test target there is no `navigator` to
+        // query at all, so it must be `false`.
+        assert!(!caps.has_npu());
+        assert!(!caps.has_dsp());
+    }
+
+    #[test]
+    fn test_webnn_is_available_native_is_honestly_false() {
+        // Regression guard for `detect_navigator_ml_available`'s native
+        // branch: there is no `navigator` object on native targets, so
+        // WebNN must be reported unavailable rather than fabricated as
+        // present.
+        assert!(!WebNNContext::is_available());
+    }
+
+    #[test]
+    fn test_webnn_capabilities_do_not_fabricate_precision_support() {
+        // Regression guard: `capabilities()` used to hardcode
+        // `supports_fp16`/`supports_int8`/`supports_dynamic_shapes` to
+        // `true` unconditionally, regardless of whether WebNN was ever
+        // queried (or even present). None of these are verifiable without a
+        // real `navigator.ml.createContext()` call this crate cannot make,
+        // so they must all be `false`.
+        let context = WebNNContext::new(WebNNDeviceType::Auto, WebNNPowerPreference::Default);
+        let caps = context.capabilities();
+        assert!(!caps.supports_fp16());
+        assert!(!caps.supports_int8());
+        assert!(!caps.supports_dynamic_shapes());
+    }
+
+    #[test]
+    fn test_webnn_ml_api_available_reflects_real_detection() {
+        // On native, `ml_api_available` must match the real (structural
+        // `false`) detection result, not an independent fabricated value.
+        let context = WebNNContext::new(WebNNDeviceType::CPU, WebNNPowerPreference::LowPower);
+        assert_eq!(
+            context.capabilities().ml_api_available(),
+            detect_navigator_ml_available()
+        );
+        assert!(!context.capabilities().ml_api_available());
     }
 
     #[test]
@@ -526,10 +665,14 @@ mod tests {
 
     #[test]
     fn test_capabilities_fp16_int8() {
+        // Regression guard: this test used to assert the fabrication
+        // (`supports_fp16()`/`supports_int8()` hardcoded `true`). Neither
+        // is verifiable without a real `createContext()` call, so both must
+        // now be `false`.
         let context = WebNNContext::new(WebNNDeviceType::NPU, WebNNPowerPreference::Default);
         let caps = context.capabilities();
-        assert!(caps.supports_fp16());
-        assert!(caps.supports_int8());
+        assert!(!caps.supports_fp16());
+        assert!(!caps.supports_int8());
     }
 
     #[test]

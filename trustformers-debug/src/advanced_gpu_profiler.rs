@@ -24,6 +24,14 @@ pub struct AdvancedGpuMemoryProfiler {
     bandwidth_monitors: HashMap<i32, GpuBandwidthMonitor>,
     memory_pressure_monitor: MemoryPressureMonitor,
     cross_device_transfers: Vec<CrossDeviceTransfer>,
+    /// Real host-OS telemetry handle (`sysinfo`), used ONLY to compute
+    /// [`MemoryPressureSnapshot::swap_activity`] -- see that field's doc
+    /// comment for why this is host-wide rather than per-GPU.
+    system_info: sysinfo::System,
+    /// Previous real `used_swap()` reading, so `swap_activity` can report
+    /// a genuine delta instead of a single instantaneous level. `None`
+    /// until the first [`Self::update_memory_pressure`] call.
+    last_used_swap_bytes: Option<u64>,
 }
 
 /// GPU memory allocation with detailed tracking
@@ -98,13 +106,35 @@ pub struct MemoryUsageStats {
 pub struct MemoryFragmentationSnapshot {
     pub timestamp: DateTime<Utc>,
     pub device_id: i32,
+    /// Capacity this pool was configured with -- see `GpuMemoryPool`'s
+    /// own doc comment for how that number is obtained (this crate has no
+    /// pure-Rust GPU memory query API).
     pub total_memory: usize,
+    /// Real remaining capacity: `total_memory` minus the real sum of
+    /// currently-outstanding allocations tracked via
+    /// [`AdvancedGpuMemoryProfiler::track_allocation`] /
+    /// [`AdvancedGpuMemoryProfiler::track_deallocation`] -- genuine
+    /// bookkeeping from real call arguments, not fabricated.
     pub free_memory: usize,
-    pub largest_free_block: usize,
-    pub fragmentation_ratio: f64,
-    pub free_block_distribution: Vec<usize>,
-    pub external_fragmentation: f64,
-    pub internal_fragmentation: f64,
+    /// Size of the largest contiguous free block, when measurable. This
+    /// pool tracks only a running free-BYTE COUNT, never the placement of
+    /// individual allocations in address space, so it has no way to know
+    /// whether that free capacity is one block or many small ones --
+    /// `None`, never a claim that all free memory forms one contiguous
+    /// block (the previous behavior).
+    pub largest_free_block: Option<usize>,
+    /// `None` for the same reason as [`Self::largest_free_block`]: real
+    /// fragmentation is a function of block placement and allocator
+    /// policy, neither of which this crate tracks or simulates.
+    pub fragmentation_ratio: Option<f64>,
+    /// Per-block free-space sizes, when known. `None` -- not an empty
+    /// `Vec`, which would misleadingly read as "zero free blocks exist"
+    /// -- see [`Self::largest_free_block`].
+    pub free_block_distribution: Option<Vec<usize>>,
+    /// `None` for the same reason as [`Self::fragmentation_ratio`].
+    pub external_fragmentation: Option<f64>,
+    /// `None` for the same reason as [`Self::fragmentation_ratio`].
+    pub internal_fragmentation: Option<f64>,
 }
 
 /// GPU bandwidth monitoring
@@ -162,8 +192,22 @@ pub struct MemoryPressureSnapshot {
     pub available_memory_ratio: f64,
     pub allocation_rate: f64, // allocations per second
     pub deallocation_rate: f64,
-    pub gc_pressure: f64,
-    pub swap_activity: f64,
+    /// `None`: Rust has no garbage collector, and this crate has no hook
+    /// into any framework-level GC, so there is no real signal to report
+    /// here. Never a fabricated `0.0`.
+    pub gc_pressure: Option<f64>,
+    /// Real change in HOST OS swap usage (bytes, signed -- positive means
+    /// swap grew) since the previous snapshot, read via `sysinfo`
+    /// (already a workspace dependency; see
+    /// `AdvancedGpuMemoryProfiler::last_used_swap_bytes`). `None` only
+    /// for the very first snapshot, when there is no previous reading to
+    /// diff against. This is deliberately HOST-wide, not
+    /// `device_id`-scoped: no GPU vendor exposes a per-device "swap"
+    /// concept to userspace, so a genuinely per-GPU number does not
+    /// exist to measure. A single instantaneous reading would be a
+    /// LEVEL, not "activity" -- this is a real delta, not a level
+    /// wearing that name.
+    pub swap_activity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +235,11 @@ pub struct CrossDeviceTransfer {
     pub transfer_type: CrossDeviceTransferType,
     pub duration: Duration,
     pub bandwidth_achieved: f64,
-    pub p2p_enabled: bool,
+    /// Whether this transfer used peer-to-peer DMA. `None` when unknown:
+    /// this crate has no pure-Rust API to query real GPU P2P capability
+    /// (see `AdvancedGpuMemoryProfiler::detect_p2p_capability`) -- never
+    /// a guessed `true`.
+    pub p2p_enabled: Option<bool>,
     pub timestamp: SystemTime,
 }
 
@@ -629,6 +677,8 @@ impl AdvancedGpuMemoryProfiler {
             bandwidth_monitors,
             memory_pressure_monitor: MemoryPressureMonitor::new(),
             cross_device_transfers: Vec::new(),
+            system_info: sysinfo::System::new(),
+            last_used_swap_bytes: None,
         })
     }
 
@@ -787,25 +837,59 @@ impl AdvancedGpuMemoryProfiler {
     }
 
     fn update_memory_pressure(&mut self, device_id: i32) {
-        if let Some(pool) = self.memory_pools.get(&device_id) {
-            let pressure_snapshot = MemoryPressureSnapshot {
-                timestamp: Utc::now(),
-                device_id,
-                pressure_level: pool.calculate_pressure_level(),
-                available_memory_ratio: pool.get_available_memory_ratio(),
-                allocation_rate: self.calculate_allocation_rate(device_id),
-                deallocation_rate: self.calculate_deallocation_rate(device_id),
-                gc_pressure: 0.0,   // Simplified
-                swap_activity: 0.0, // Simplified
-            };
+        let Some((pressure_level, available_memory_ratio)) =
+            self.memory_pools.get(&device_id).map(|pool| {
+                (
+                    pool.calculate_pressure_level(),
+                    pool.get_available_memory_ratio(),
+                )
+            })
+        else {
+            return;
+        };
+        let allocation_rate = self.calculate_allocation_rate(device_id);
+        let deallocation_rate = self.calculate_deallocation_rate(device_id);
+        let swap_activity = self.compute_swap_activity_delta();
 
-            self.memory_pressure_monitor.add_snapshot(pressure_snapshot);
-        }
+        let pressure_snapshot = MemoryPressureSnapshot {
+            timestamp: Utc::now(),
+            device_id,
+            pressure_level,
+            available_memory_ratio,
+            allocation_rate,
+            deallocation_rate,
+            // Rust has no garbage collector and this crate has no hook
+            // into any framework-level GC -- see the field's own doc
+            // comment.
+            gc_pressure: None,
+            swap_activity,
+        };
+
+        self.memory_pressure_monitor.add_snapshot(pressure_snapshot);
     }
 
-    fn detect_p2p_capability(&self, _source: i32, _target: i32) -> bool {
-        // Simplified P2P detection - would use actual GPU capabilities
-        true
+    /// Real change in HOST OS swap usage in bytes since the previous call
+    /// (positive = swap grew), via `sysinfo` (already a workspace
+    /// dependency -- same pattern as `realtime_dashboard.rs`). `None` only
+    /// on the very first call, when there is no previous reading yet. See
+    /// [`MemoryPressureSnapshot::swap_activity`] for the host-wide-not-
+    /// per-GPU caveat.
+    fn compute_swap_activity_delta(&mut self) -> Option<f64> {
+        self.system_info.refresh_memory();
+        let used = self.system_info.used_swap();
+        let delta = self.last_used_swap_bytes.map(|prev| used as f64 - prev as f64);
+        self.last_used_swap_bytes = Some(used);
+        delta
+    }
+
+    /// Whether `source`/`target` support peer-to-peer DMA, when knowable.
+    /// This crate has no pure-Rust GPU capability query API (a real one
+    /// would need vendor FFI -- CUDA/ROCm/NVML -- which the COOLJAPAN
+    /// pure-Rust policy keeps out of the default build), so there is
+    /// nothing to honestly detect here today: always `None`, never a
+    /// guessed `true`.
+    fn detect_p2p_capability(&self, _source: i32, _target: i32) -> Option<bool> {
+        None
     }
 
     fn calculate_allocation_rate(&self, device_id: i32) -> f64 {
@@ -864,16 +948,25 @@ impl AdvancedGpuMemoryProfiler {
     ) -> Vec<MemoryOptimizationRecommendation> {
         let mut recommendations = Vec::new();
 
-        // Analyze fragmentation and suggest optimizations
+        // Analyze fragmentation and suggest optimizations, when this
+        // pool's fragmentation was actually measurable for that snapshot
+        // -- see `MemoryFragmentationSnapshot::fragmentation_ratio`'s doc
+        // comment. No allocator/placement model exists in this crate
+        // today, so this loop is currently a no-op in practice; it is
+        // still real code, ready the moment a real ratio is ever
+        // populated, rather than fabricating one to keep it "working".
         for snapshot in self.fragmentation_history.iter().take(10) {
-            if snapshot.fragmentation_ratio > 0.3 {
+            let Some(ratio) = snapshot.fragmentation_ratio else {
+                continue;
+            };
+            if ratio > 0.3 {
                 recommendations.push(MemoryOptimizationRecommendation {
                     recommendation_type: MemoryOptimizationType::DefragmentationStrategy,
                     priority: OptimizationPriority::High,
                     description: format!(
                         "High fragmentation detected on device {}: {:.1}%",
                         snapshot.device_id,
-                        snapshot.fragmentation_ratio * 100.0
+                        ratio * 100.0
                     ),
                     expected_benefit: ExpectedBenefit {
                         performance_improvement: 15.0,
@@ -907,10 +1000,15 @@ pub struct MemoryAnalysisReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FragmentationSummary {
-    pub avg_fragmentation_ratio: f64,
-    pub peak_fragmentation_ratio: f64,
+    /// Mean of the real (`Some`) fragmentation ratios recorded across the
+    /// summarised history. `None` when none of that history carries a
+    /// measured ratio -- see
+    /// [`MemoryFragmentationSnapshot::fragmentation_ratio`]. Never a
+    /// fabricated `0.1`.
+    pub avg_fragmentation_ratio: Option<f64>,
+    pub peak_fragmentation_ratio: Option<f64>,
     pub fragmentation_trend: FragmentationTrend,
-    pub most_fragmented_device: i32,
+    pub most_fragmented_device: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -922,7 +1020,15 @@ pub enum FragmentationTrend {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BandwidthSummary {
-    pub avg_bandwidth_utilization: f64,
+    /// A "utilization" ratio needs a real theoretical peak bandwidth to
+    /// divide by; this crate has no pure-Rust GPU capability query for
+    /// one (see [`GpuBandwidthMonitor`]'s `theoretical_bandwidth`, itself
+    /// a documented assumption, not a measurement), so honestly `None`
+    /// rather than a ratio against an invented denominator.
+    pub avg_bandwidth_utilization: Option<f64>,
+    /// Real maximum `achieved_bandwidth_gb_s` across all recorded
+    /// samples on every device. `0.0`, not `None`, when no sample has
+    /// ever been recorded -- a genuine "nothing observed yet".
     pub peak_bandwidth_achieved: f64,
     pub bandwidth_efficiency_by_operation: HashMap<String, f64>,
     pub underutilized_devices: Vec<i32>,
@@ -966,7 +1072,10 @@ pub struct CrossDeviceTransferSummary {
     pub total_transfers: usize,
     pub total_bytes_transferred: usize,
     pub avg_transfer_bandwidth: f64,
-    pub p2p_efficiency: f64,
+    /// `None`: computing this needs to know which transfers were really
+    /// peer-to-peer, which this crate cannot determine -- see
+    /// [`CrossDeviceTransfer::p2p_enabled`] / `detect_p2p_capability`.
+    pub p2p_efficiency: Option<f64>,
     pub transfer_bottlenecks: Vec<TransferBottleneck>,
 }
 
@@ -1034,16 +1143,24 @@ impl Default for MemoryAccessPattern {
     }
 }
 
-// Implementation stubs for remaining structures
+// Constructors and helpers for the remaining structures.
+
+/// This crate has no pure-Rust API to query a real GPU's memory capacity
+/// (a real query needs vendor FFI -- CUDA/ROCm/Metal -- kept out of the
+/// default build by the COOLJAPAN pure-Rust policy). [`GpuMemoryPool::new`]
+/// therefore uses this ASSUMED capacity as a documented fallback rather
+/// than silently pretending to have queried real hardware. It is real
+/// bookkeeping arithmetic from here on (`allocate`/`deallocate` track
+/// genuine caller-supplied sizes against it), just seeded from an
+/// assumption instead of a measurement.
+const ASSUMED_DEVICE_MEMORY_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
 
 impl GpuMemoryPool {
     fn new(device_id: i32) -> Result<Self> {
-        // Simplified implementation - would query actual GPU memory
         Ok(Self {
             device_id,
-            total_memory: 8 * 1024 * 1024 * 1024, // 8GB
-            free_memory: 8 * 1024 * 1024 * 1024,
-            fragmentation_score: 0.0,
+            total_memory: ASSUMED_DEVICE_MEMORY_BYTES,
+            free_memory: ASSUMED_DEVICE_MEMORY_BYTES,
         })
     }
 
@@ -1061,17 +1178,22 @@ impl GpuMemoryPool {
         Ok(())
     }
 
+    /// `total_memory`/`free_memory` are real (see their own doc comments
+    /// on [`MemoryFragmentationSnapshot`]); the block-placement fields are
+    /// honestly `None` -- this pool tracks a free-byte COUNT only, never
+    /// individual allocation placement, so it cannot know the true shape
+    /// of its free space.
     fn get_fragmentation_snapshot(&self) -> Result<MemoryFragmentationSnapshot> {
         Ok(MemoryFragmentationSnapshot {
             timestamp: Utc::now(),
             device_id: self.device_id,
             total_memory: self.total_memory,
             free_memory: self.free_memory,
-            largest_free_block: self.free_memory, // Simplified
-            fragmentation_ratio: self.fragmentation_score,
-            free_block_distribution: vec![self.free_memory],
-            external_fragmentation: self.fragmentation_score * 0.7,
-            internal_fragmentation: self.fragmentation_score * 0.3,
+            largest_free_block: None,
+            fragmentation_ratio: None,
+            free_block_distribution: None,
+            external_fragmentation: None,
+            internal_fragmentation: None,
         })
     }
 
@@ -1139,62 +1261,365 @@ impl MemoryPressureMonitor {
         }
     }
 
+    /// Real per-device most-recent level, real pressure trend, real
+    /// devices-under-pressure list and a real (attributed-by-gap)
+    /// time-in-high-pressure -- all from `self.pressure_history`, which
+    /// this crate already collects on every real `track_allocation`/
+    /// `track_deallocation` call. Previously discarded its own real
+    /// history entirely (`_history` was never read).
     fn get_summary(&self) -> MemoryPressureSummary {
-        // Simplified implementation
+        // `pressure_history` is a `VecDeque` filled via `push_back`, so
+        // iterating oldest->newest and letting each insert overwrite the
+        // last correctly leaves the MOST RECENT snapshot per device.
+        let mut current_pressure_levels: HashMap<i32, MemoryPressureLevel> = HashMap::new();
+        for snapshot in &self.pressure_history {
+            current_pressure_levels.insert(snapshot.device_id, snapshot.pressure_level.clone());
+        }
+
+        let devices_under_pressure: Vec<i32> = current_pressure_levels
+            .iter()
+            .filter(|(_, level)| {
+                matches!(
+                    level,
+                    MemoryPressureLevel::High | MemoryPressureLevel::Critical
+                )
+            })
+            .map(|(&device_id, _)| device_id)
+            .collect();
+
+        // Real trend: mean pressure ordinal of the recent half of history
+        // vs. the older half -- the same "insufficient data -> Stable"
+        // convention used by `GradientAnomalyDetector::analyze_recent_trend`
+        // elsewhere in this crate.
+        let pressure_trend = if self.pressure_history.len() < 4 {
+            PressureTrend::Stable
+        } else {
+            let ordinals: Vec<f64> = self
+                .pressure_history
+                .iter()
+                .map(|s| pressure_ordinal(&s.pressure_level))
+                .collect();
+            let mid = ordinals.len() / 2;
+            let older_avg = ordinals[..mid].iter().sum::<f64>() / mid as f64;
+            let recent_avg = ordinals[mid..].iter().sum::<f64>() / (ordinals.len() - mid) as f64;
+            let trend_threshold = 0.25;
+            if recent_avg > older_avg + trend_threshold {
+                PressureTrend::Increasing
+            } else if recent_avg < older_avg - trend_threshold {
+                PressureTrend::Decreasing
+            } else {
+                PressureTrend::Stable
+            }
+        };
+
+        // Real time spent at High/Critical: attribute each real
+        // inter-snapshot gap (real timestamps) to the level held at the
+        // START of that gap, per device, and sum the gaps that started
+        // High or Critical.
+        let mut by_device: HashMap<i32, Vec<&MemoryPressureSnapshot>> = HashMap::new();
+        for snapshot in &self.pressure_history {
+            by_device.entry(snapshot.device_id).or_default().push(snapshot);
+        }
+        let mut time_in_high_pressure = Duration::from_secs(0);
+        for snapshots in by_device.values_mut() {
+            snapshots.sort_by_key(|s| s.timestamp);
+            for pair in snapshots.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if matches!(
+                    a.pressure_level,
+                    MemoryPressureLevel::High | MemoryPressureLevel::Critical
+                ) {
+                    if let Ok(gap) = (b.timestamp - a.timestamp).to_std() {
+                        time_in_high_pressure += gap;
+                    }
+                }
+            }
+        }
+
         MemoryPressureSummary {
-            current_pressure_levels: HashMap::new(),
-            pressure_trend: PressureTrend::Stable,
-            devices_under_pressure: Vec::new(),
-            time_in_high_pressure: Duration::from_secs(0),
+            current_pressure_levels,
+            pressure_trend,
+            devices_under_pressure,
+            time_in_high_pressure,
         }
     }
 }
 
-// Additional implementation stubs for summary structures
+/// Ordinal encoding of [`MemoryPressureLevel`] for trend averaging (higher
+/// = more pressure). An internal convenience, not a claim of any inherent
+/// numeric scale in the real telemetry.
+fn pressure_ordinal(level: &MemoryPressureLevel) -> f64 {
+    match level {
+        MemoryPressureLevel::Low => 0.0,
+        MemoryPressureLevel::Medium => 1.0,
+        MemoryPressureLevel::High => 2.0,
+        MemoryPressureLevel::Critical => 3.0,
+    }
+}
+
+// Real summary aggregation from the real data each analyzer already
+// collects (previously discarded via an unused `_history`/`_monitors`/
+// `_allocations`/`_transfers` parameter in every one of the four `new`s
+// below).
 
 impl FragmentationSummary {
-    fn new(_history: &VecDeque<MemoryFragmentationSnapshot>) -> Self {
+    fn new(history: &VecDeque<MemoryFragmentationSnapshot>) -> Self {
+        let measured: Vec<(i32, f64)> = history
+            .iter()
+            .filter_map(|s| s.fragmentation_ratio.map(|r| (s.device_id, r)))
+            .collect();
+
+        let Some(&(first_device, _)) = measured.first() else {
+            // No snapshot in this history has ever carried a real
+            // fragmentation ratio -- see that field's own doc comment.
+            // Honestly absent, never the old `0.1`/`0.2` constants.
+            return Self {
+                avg_fragmentation_ratio: None,
+                peak_fragmentation_ratio: None,
+                fragmentation_trend: FragmentationTrend::Stable,
+                most_fragmented_device: None,
+            };
+        };
+
+        let avg = measured.iter().map(|(_, r)| r).sum::<f64>() / measured.len() as f64;
+        let (peak_device, peak_ratio) =
+            measured.iter().fold((first_device, f64::MIN), |(bd, br), &(d, r)| {
+                if r > br {
+                    (d, r)
+                } else {
+                    (bd, br)
+                }
+            });
+
+        let fragmentation_trend = if measured.len() < 4 {
+            FragmentationTrend::Stable
+        } else {
+            let mid = measured.len() / 2;
+            let older_avg = measured[..mid].iter().map(|(_, r)| r).sum::<f64>() / mid as f64;
+            let recent_avg =
+                measured[mid..].iter().map(|(_, r)| r).sum::<f64>() / (measured.len() - mid) as f64;
+            let trend_threshold = 0.05;
+            if recent_avg > older_avg + trend_threshold {
+                FragmentationTrend::Worsening
+            } else if recent_avg < older_avg - trend_threshold {
+                FragmentationTrend::Improving
+            } else {
+                FragmentationTrend::Stable
+            }
+        };
+
         Self {
-            avg_fragmentation_ratio: 0.1,
-            peak_fragmentation_ratio: 0.2,
-            fragmentation_trend: FragmentationTrend::Stable,
-            most_fragmented_device: 0,
+            avg_fragmentation_ratio: Some(avg),
+            peak_fragmentation_ratio: Some(peak_ratio),
+            fragmentation_trend,
+            most_fragmented_device: Some(peak_device),
         }
     }
 }
 
 impl BandwidthSummary {
-    fn new(_monitors: &HashMap<i32, GpuBandwidthMonitor>) -> Self {
+    fn new(monitors: &HashMap<i32, GpuBandwidthMonitor>) -> Self {
+        let peak_bandwidth_achieved =
+            monitors.values().map(|m| m.peak_observed_bandwidth).fold(0.0_f64, f64::max);
+
+        // Real average `efficiency_percentage` per real operation type --
+        // each sample's value comes from whatever called
+        // `record_bandwidth_sample`, not fabricated by this crate.
+        let mut efficiency_sum: HashMap<String, (f64, usize)> = HashMap::new();
+        for monitor in monitors.values() {
+            for sample in &monitor.bandwidth_samples {
+                let entry = efficiency_sum
+                    .entry(format!("{:?}", sample.operation_type))
+                    .or_insert((0.0, 0));
+                entry.0 += sample.efficiency_percentage;
+                entry.1 += 1;
+            }
+        }
+        let bandwidth_efficiency_by_operation: HashMap<String, f64> = efficiency_sum
+            .into_iter()
+            .map(|(op, (sum, count))| (op, sum / count as f64))
+            .collect();
+
+        // Real, RELATIVE under-utilization: a device whose peak observed
+        // bandwidth sits well below the best peak observed anywhere,
+        // among devices with at least one real sample -- never compared
+        // against `theoretical_bandwidth` (a documented assumption, not a
+        // measurement). Zero samples is "unproven", not "underutilized".
+        let underutilized_devices: Vec<i32> = if peak_bandwidth_achieved > 0.0 {
+            monitors
+                .iter()
+                .filter(|(_, m)| !m.bandwidth_samples.is_empty())
+                .filter(|(_, m)| m.peak_observed_bandwidth < peak_bandwidth_achieved * 0.5)
+                .map(|(&device_id, _)| device_id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Self {
-            avg_bandwidth_utilization: 0.75,
-            peak_bandwidth_achieved: 800.0,
-            bandwidth_efficiency_by_operation: HashMap::new(),
-            underutilized_devices: Vec::new(),
+            avg_bandwidth_utilization: None,
+            peak_bandwidth_achieved,
+            bandwidth_efficiency_by_operation,
+            underutilized_devices,
         }
     }
 }
 
 impl AllocationPatternSummary {
-    fn new(_allocations: &HashMap<Uuid, GpuMemoryAllocation>) -> Self {
+    fn new(allocations: &HashMap<Uuid, GpuMemoryAllocation>) -> Self {
+        let total_allocations = allocations.len();
+        let total_bytes: u128 = allocations.values().map(|a| a.size_bytes as u128).sum();
+        let avg_allocation_size = if total_allocations > 0 {
+            (total_bytes / total_allocations as u128) as usize
+        } else {
+            0
+        };
+        let largest_allocation = allocations.values().map(|a| a.size_bytes).max().unwrap_or(0);
+
+        let mut allocation_size_distribution: HashMap<String, usize> = HashMap::new();
+        for allocation in allocations.values() {
+            *allocation_size_distribution
+                .entry(format!("{:?}", allocation.memory_type))
+                .or_insert(0) += 1;
+        }
+
+        // Heuristic, documented as such (not a certainty): an allocation
+        // still outstanding after this long is flagged as a possible
+        // leak. Real elapsed time from the real allocation timestamp;
+        // never a fabricated count -- the old code reported `0` always,
+        // even with real un-freed allocations on record.
+        const LEAK_SUSPECT_THRESHOLD: Duration = Duration::from_secs(300);
+        let memory_leaks_detected = allocations
+            .values()
+            .filter(|a| {
+                !a.freed && a.timestamp.elapsed().unwrap_or_default() > LEAK_SUSPECT_THRESHOLD
+            })
+            .count();
+
+        // Real hot spots: group by the most specific real context label
+        // available, summing real bytes. `allocation_frequency` is a real
+        // rate (count / the real observed timestamp span across ALL
+        // tracked allocations), falling back to the raw real count only
+        // when that span is degenerate (e.g. a single allocation).
+        // `avg_allocation_lifetime` averages real `free_timestamp -
+        // timestamp` deltas over allocations that HAVE been freed at that
+        // location -- one still outstanding has no real lifetime yet.
+        let observation_span_secs = {
+            let timestamps: Vec<SystemTime> = allocations.values().map(|a| a.timestamp).collect();
+            match (timestamps.iter().min(), timestamps.iter().max()) {
+                (Some(&min_t), Some(&max_t)) => {
+                    max_t.duration_since(min_t).unwrap_or_default().as_secs_f64()
+                },
+                _ => 0.0,
+            }
+        };
+
+        let mut by_location: HashMap<String, (usize, u64, Duration, usize)> = HashMap::new();
+        for allocation in allocations.values() {
+            let location = allocation
+                .allocation_context
+                .tensor_name
+                .clone()
+                .or_else(|| allocation.allocation_context.layer_name.clone())
+                .or_else(|| allocation.allocation_context.kernel_name.clone())
+                .unwrap_or_else(|| {
+                    format!("{:?}", allocation.allocation_context.allocation_source)
+                });
+            let entry = by_location.entry(location).or_insert((0, 0, Duration::ZERO, 0));
+            entry.0 += 1;
+            entry.1 += allocation.size_bytes as u64;
+            if let Some(free_time) = allocation.free_timestamp {
+                if let Ok(lifetime) = free_time.duration_since(allocation.timestamp) {
+                    entry.2 += lifetime;
+                    entry.3 += 1;
+                }
+            }
+        }
+        let mut allocation_hot_spots: Vec<AllocationHotSpot> = by_location
+            .into_iter()
+            .map(
+                |(location, (count, bytes, total_lifetime, freed_count))| AllocationHotSpot {
+                    location,
+                    allocation_frequency: if observation_span_secs > 0.0 {
+                        count as f64 / observation_span_secs
+                    } else {
+                        count as f64
+                    },
+                    total_memory_allocated: bytes as usize,
+                    avg_allocation_lifetime: if freed_count > 0 {
+                        total_lifetime / freed_count as u32
+                    } else {
+                        Duration::ZERO
+                    },
+                },
+            )
+            .collect();
+        allocation_hot_spots.sort_by_key(|h| std::cmp::Reverse(h.total_memory_allocated));
+        allocation_hot_spots.truncate(10);
+
         Self {
-            total_allocations: 0,
-            avg_allocation_size: 0,
-            largest_allocation: 0,
-            allocation_size_distribution: HashMap::new(),
-            memory_leaks_detected: 0,
-            allocation_hot_spots: Vec::new(),
+            total_allocations,
+            avg_allocation_size,
+            largest_allocation,
+            allocation_size_distribution,
+            memory_leaks_detected,
+            allocation_hot_spots,
         }
     }
 }
 
 impl CrossDeviceTransferSummary {
-    fn new(_transfers: &[CrossDeviceTransfer]) -> Self {
+    fn new(transfers: &[CrossDeviceTransfer]) -> Self {
+        let total_transfers = transfers.len();
+        let total_bytes_transferred: usize = transfers.iter().map(|t| t.bytes_transferred).sum();
+        let avg_transfer_bandwidth = if total_transfers > 0 {
+            transfers.iter().map(|t| t.bandwidth_achieved).sum::<f64>() / total_transfers as f64
+        } else {
+            0.0
+        };
+
+        // Real, RELATIVE bottleneck detection: a (source, target) device
+        // pair whose average achieved bandwidth sits well below the
+        // overall average across every pair -- a genuine comparison
+        // against other real measurements, never an absolute claim this
+        // crate cannot verify (e.g. "P2P not available", which needs a
+        // real capability query -- see `detect_p2p_capability`).
+        let mut by_pair: HashMap<(i32, i32), Vec<f64>> = HashMap::new();
+        for t in transfers {
+            by_pair
+                .entry((t.source_device, t.target_device))
+                .or_default()
+                .push(t.bandwidth_achieved);
+        }
+        let transfer_bottlenecks: Vec<TransferBottleneck> = if avg_transfer_bandwidth > 0.0 {
+            by_pair
+                .into_iter()
+                .filter_map(|(pair, bandwidths)| {
+                    let pair_avg = bandwidths.iter().sum::<f64>() / bandwidths.len() as f64;
+                    if pair_avg < avg_transfer_bandwidth * 0.5 {
+                        Some(TransferBottleneck {
+                            device_pair: pair,
+                            bottleneck_type: TransferBottleneckType::BandwidthLimited,
+                            impact_severity: (1.0 - pair_avg / avg_transfer_bandwidth)
+                                .clamp(0.0, 1.0),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Self {
-            total_transfers: 0,
-            total_bytes_transferred: 0,
-            avg_transfer_bandwidth: 0.0,
-            p2p_efficiency: 0.9,
-            transfer_bottlenecks: Vec::new(),
+            total_transfers,
+            total_bytes_transferred,
+            avg_transfer_bandwidth,
+            // Needs to know which transfers were really P2P, which this
+            // crate cannot determine -- see `CrossDeviceTransfer::p2p_enabled`.
+            p2p_efficiency: None,
+            transfer_bottlenecks,
         }
     }
 }
@@ -1204,7 +1629,6 @@ struct GpuMemoryPool {
     device_id: i32,
     total_memory: usize,
     free_memory: usize,
-    fragmentation_score: f64,
 }
 
 /// Configuration for advanced GPU profiling
@@ -1251,7 +1675,9 @@ pub struct KernelOptimizationSummaryReport {
     pub high_impact_optimizations: Vec<HighImpactOptimization>,
     pub fusion_opportunities: usize,
     pub regression_alerts: usize,
-    pub overall_optimization_score: f64,
+    /// Composite score in `[0, 100]`, or `None` when no kernel has been
+    /// analysed yet and there is therefore nothing to score.
+    pub overall_optimization_score: Option<f64>,
     pub top_recommendations: Vec<String>,
 }
 
@@ -1263,3 +1689,7 @@ pub struct HighImpactOptimization {
     pub implementation_difficulty: String,
     pub description: String,
 }
+
+#[cfg(test)]
+#[path = "advanced_gpu_profiler_tests.rs"]
+mod advanced_gpu_profiler_tests;

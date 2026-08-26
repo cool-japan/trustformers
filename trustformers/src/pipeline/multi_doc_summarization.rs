@@ -324,7 +324,6 @@ impl MultiDocSummarizationPipeline {
                 kept_indices.iter().map(|&i| documents[i].clone()).collect();
             (retained, skipped)
         } else {
-            let n = documents.len();
             (documents, 0_usize)
         };
 

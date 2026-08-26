@@ -152,6 +152,7 @@ impl SIMDSoftmax {
         }
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     fn forward_avx2(&self, input: &Tensor, dim: usize) -> Result<Tensor> {
         let shape = input.shape();
         let input_shape = shape.clone();
@@ -172,20 +173,26 @@ impl SIMDSoftmax {
             let input_slice = &data[start_idx..start_idx + last_dim_size];
             let output_slice = &mut output_data[start_idx..start_idx + last_dim_size];
 
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             unsafe {
                 self.forward_avx2_inner(input_slice, output_slice, last_dim_size);
-            }
-            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-            {
-                // Simple fallback
-                for (i, &val) in input_slice.iter().enumerate() {
-                    output_slice[i] = val;
-                }
             }
         }
 
         Ok(Tensor::from_vec(output_data, &input_shape)?)
+    }
+
+    /// `forward` only ever dispatches here when
+    /// `best_instruction_set() == "avx2"`/`"avx2_fma"`, which
+    /// `cpu_features.rs` can only report on x86/x86_64 - so on every other
+    /// architecture this is unreachable in practice. It used to be defined
+    /// unconditionally with a body that copied the un-normalized input
+    /// straight to `output` and called it "softmax" for that unreachable
+    /// case; arch-gating the real (SIMD) implementation above and delegating
+    /// here instead removes that latent wrong-output trap entirely, rather
+    /// than leaving it one `cfg`/dispatch-table edit away from firing.
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    fn forward_avx2(&self, input: &Tensor, dim: usize) -> Result<Tensor> {
+        self.forward_standard(input, dim)
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -336,6 +343,45 @@ mod tests {
     #[test]
     fn test_simd_softmax_creation() {
         let _ = SIMDSoftmax::new();
+    }
+
+    /// Regression test: on any non-x86/x86_64 target, `forward_avx2` used
+    /// to fall through to a branch that copied the un-normalized input
+    /// straight to `output` and called it "softmax" (a real bug, latent
+    /// only because nothing currently dispatches into `forward_avx2` off
+    /// x86). Called directly here (bypassing `forward`'s
+    /// `best_instruction_set()` dispatch) so this exercises whichever
+    /// implementation is actually compiled in on the host running this
+    /// test - the real AVX2 kernel on x86/x86_64, or the delegation to
+    /// `forward_standard` everywhere else - and both must produce a real,
+    /// normalized softmax, not an identity copy.
+    #[test]
+    fn test_forward_avx2_is_not_an_identity_copy() {
+        let softmax = SIMDSoftmax::new();
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let input = Tensor::from_vec(data.clone(), &[8]).expect("tensor failed");
+
+        let output = softmax.forward_avx2(&input, 0).expect("forward_avx2 failed");
+        let out_data = output.data().expect("data failed");
+
+        assert_ne!(
+            out_data, data,
+            "forward_avx2 must not return the un-normalized input unchanged"
+        );
+        let sum: f32 = out_data.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "forward_avx2 output must sum to 1.0 like a real softmax, got {sum}"
+        );
+        // Reference check against the independently-implemented scalar path.
+        let expected = softmax.forward_standard(&input, 0).expect("forward_standard failed");
+        let expected_data = expected.data().expect("data failed");
+        for (a, b) in out_data.iter().zip(expected_data.iter()) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "forward_avx2 {a} != forward_standard {b}"
+            );
+        }
     }
 
     // ── 2. SIMDSoftmax::default works ─────────────────────────────────────────

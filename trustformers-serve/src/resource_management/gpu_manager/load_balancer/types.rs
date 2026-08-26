@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -195,8 +195,6 @@ pub struct GpuLoadBalancer {
     round_robin_counter: Arc<AtomicU64>,
     /// Load balancing analytics
     analytics: Arc<RwLock<LoadBalancingAnalytics>>,
-    /// Strategy performance metrics for adaptive strategy selection
-    strategy_performance: Arc<RwLock<HashMap<LoadBalancingStrategy, f32>>>,
     /// Load balancing configuration
     config: Arc<RwLock<LoadBalancerConfig>>,
     /// Device weights for weighted load balancing
@@ -207,7 +205,12 @@ pub struct GpuLoadBalancer {
     rebalancing_suggestions: Arc<RwLock<VecDeque<RebalancingSuggestion>>>,
     /// Event channel for load balancing events
     event_sender: mpsc::UnboundedSender<LoadBalancingEvent>,
-    event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<LoadBalancingEvent>>>>,
+    /// Set once an unmonitored-candidates fallback (see `select_least_loaded`
+    /// and `select_hybrid`) has logged at `warn!`; later occurrences log at
+    /// `debug!` instead. Nothing in this crate feeds live telemetry into
+    /// `device_loads` today, so without this the fallback would `warn!` on
+    /// effectively every allocation.
+    logged_unmonitored_fallback: Arc<AtomicBool>,
 }
 impl GpuLoadBalancer {
     /// Create a new GPU load balancer with default configuration
@@ -230,19 +233,18 @@ impl GpuLoadBalancer {
     /// A new load balancer instance with the specified configuration
     #[instrument(skip(config))]
     pub fn with_config(config: LoadBalancerConfig) -> Self {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (event_sender, _event_receiver) = mpsc::unbounded_channel();
         Self {
             strategy: Arc::new(RwLock::new(LoadBalancingStrategy::LeastLoaded)),
             device_loads: Arc::new(RwLock::new(HashMap::new())),
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             analytics: Arc::new(RwLock::new(LoadBalancingAnalytics::default())),
-            strategy_performance: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
             device_weights: Arc::new(RwLock::new(HashMap::new())),
             load_history: Arc::new(RwLock::new(VecDeque::new())),
             rebalancing_suggestions: Arc::new(RwLock::new(VecDeque::new())),
             event_sender,
-            event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
+            logged_unmonitored_fallback: Arc::new(AtomicBool::new(false)),
         }
     }
     /// Set the load balancing strategy
@@ -442,35 +444,122 @@ impl GpuLoadBalancer {
                     / device.total_memory_mb as f64;
                 memory_usage_ratio <= constraint.value
             },
-            GpuConstraintType::MaxUtilization => {
-                device.utilization_percent as f64 <= constraint.value
-            },
+            // 0.2.1: this compared `GpuDeviceInfo::utilization_percent`, a
+            // discovery-time 0.0 that nothing updates, so the constraint was
+            // satisfied by every device unconditionally. This selector has no
+            // live reading available at this point, so it cannot evaluate the
+            // limit at all -- and reporting an unverifiable limit as *met* is
+            // what made it useless. `GpuResourceManager::verify_device_requirements`
+            // does check it, against real telemetry.
+            GpuConstraintType::MaxUtilization => false,
+            // Likewise not checked here. `true` means "this selector does not
+            // evaluate this constraint", not "the device satisfies it".
             GpuConstraintType::MinPerformance => true,
             GpuConstraintType::PowerLimit => true,
             GpuConstraintType::TemperatureLimit => true,
             GpuConstraintType::Custom(_) => true,
         }
     }
+    /// Log (once loudly, then quietly) that a selector fell back to a
+    /// disclosed deterministic tie-break because no candidate device carried
+    /// live load data. Shared by `select_least_loaded` and `select_hybrid` so
+    /// the two selectors stay consistent, and so the warning fires once per
+    /// process rather than once per allocation.
+    ///
+    /// `outcome` names what the caller actually does about it (e.g.
+    /// "falling back to the lowest device id" or "returning no selection --
+    /// there is no signal left to break the tie by"); the two selectors that
+    /// use this disagree on that, and the log must not claim a fallback that
+    /// did not happen.
+    fn log_unmonitored_fallback(&self, context: &str, candidate_count: usize, outcome: &str) {
+        if !self.logged_unmonitored_fallback.swap(true, Ordering::Relaxed) {
+            warn!(
+                "{context}: no live load data for any of {candidate_count} candidate \
+                 device(s); {outcome} until telemetry is wired into `device_loads` \
+                 (further occurrences logged at debug level)",
+            );
+        } else {
+            debug!(
+                "{context}: no live load data for any of {candidate_count} candidate \
+                 device(s); {outcome}",
+            );
+        }
+    }
     /// Select device using least loaded strategy
+    ///
+    /// A device with no live load reading is *unknown*, not idle. 0.2.1: this
+    /// fell back to `GpuDeviceInfo::utilization_percent`, which discovery
+    /// fixes at 0.0 and never updates, so an unmonitored device always
+    /// looked like the least loaded one and won every least-loaded
+    /// selection. Comparing against `f32::INFINITY` for a missing reading
+    /// fixes that: a monitored device (finite utilization) always outranks
+    /// an unmonitored one whenever the two are compared directly.
+    ///
+    /// When *every* candidate is unmonitored, though, every score is
+    /// `INFINITY` and a plain `min_by` resolves the tie by `HashMap`
+    /// iteration order -- an undisclosed, run-to-run-unstable pick dressed
+    /// up as a load-based decision, which is exactly the failure class this
+    /// function exists to remove. Nothing in this crate feeds live telemetry
+    /// into `device_loads` today: `update_device_load` /
+    /// `update_comprehensive_load` have no production caller (see
+    /// `GpuResourceManager::allocate_devices`, which measures
+    /// `device_telemetry` per call but does not forward it here), so this is
+    /// the ordinary case in the current tree, not a rare corner. Two
+    /// consequences follow from that:
+    ///
+    /// - Returning a structured error here would make the default
+    ///   `LeastLoaded` strategy refuse *every* allocation today.
+    /// - Returning `Ok(None)` would not actually be more honest: the only
+    ///   production caller (`GpuResourceManager::allocate_devices`, via the
+    ///   legacy `select_device` wrapper) maps both `Err` and `None` to the
+    ///   identical `DeviceNotFound` outcome, so it would have the same
+    ///   effect as an error while looking like "no suitable device" instead
+    ///   of "no load data".
+    ///
+    /// So until real telemetry is wired in, fall back to the lowest device
+    /// id -- a disclosed, deterministic tie-break, never presented as a
+    /// measurement -- and say so (see [`Self::log_unmonitored_fallback`]).
+    ///
+    /// The same lowest-id tie-break also settles an *exact* score tie among
+    /// otherwise-monitored candidates (e.g. two devices both reading 40%
+    /// utilization): candidates are walked in sorted device-id order rather
+    /// than `HashMap::values` order, which is unspecified and not sorted by
+    /// id, matching the convention [`Self::select_hybrid`] uses for its
+    /// combined scores.
     async fn select_least_loaded(
         &self,
         devices: &HashMap<usize, GpuDeviceInfo>,
     ) -> Result<Option<usize>> {
         let device_loads = self.device_loads.read();
-        let selected = devices
-            .values()
-            .min_by(|a, b| {
-                let load_a = device_loads
-                    .get(&a.device_id)
-                    .map(|load| load.utilization)
-                    .unwrap_or(a.utilization_percent / 100.0);
-                let load_b = device_loads
-                    .get(&b.device_id)
-                    .map(|load| load.utilization)
-                    .unwrap_or(b.utilization_percent / 100.0);
-                load_a.partial_cmp(&load_b).unwrap_or(std::cmp::Ordering::Equal)
+        if !devices.is_empty() && devices.keys().all(|id| !device_loads.contains_key(id)) {
+            self.log_unmonitored_fallback(
+                "select_least_loaded",
+                devices.len(),
+                "falling back to the lowest device id (a disclosed, deterministic \
+                 tie-break, not a measurement)",
+            );
+            return Ok(devices.keys().min().copied());
+        }
+        // Walk candidates in sorted device-id order and keep the first
+        // (lowest-id) device on an exact utilization tie, rather than
+        // `HashMap::values` iteration order (unspecified, and not sorted by
+        // id): the same disclosed, deterministic tie-break `select_hybrid`
+        // uses below for its combined scores. `best_load <= load` keeps the
+        // already-chosen (lower-id) candidate unless `load` is strictly
+        // lower, so only a genuine improvement replaces it.
+        let mut device_ids: Vec<usize> = devices.keys().copied().collect();
+        device_ids.sort_unstable();
+        let selected = device_ids
+            .into_iter()
+            .fold(None::<(usize, f32)>, |best, id| {
+                let load =
+                    device_loads.get(&id).map(|load| load.utilization).unwrap_or(f32::INFINITY);
+                match best {
+                    Some((_, best_load)) if best_load <= load => best,
+                    _ => Some((id, load)),
+                }
             })
-            .map(|device| device.device_id);
+            .map(|(device_id, _)| device_id);
         Ok(selected)
     }
     /// Select device using round-robin strategy
@@ -521,17 +610,42 @@ impl GpuLoadBalancer {
         let device_loads = self.device_loads.read();
         let mut best_device = None;
         let mut best_score = f32::NEG_INFINITY;
+        let mut any_monitored = false;
         for device in devices.values() {
             let weight = device_weights.get(&device.device_id).copied().unwrap_or(1.0);
-            let load = device_loads
-                .get(&device.device_id)
-                .map(|load| load.utilization)
-                .unwrap_or(device.utilization_percent / 100.0);
+            // No live load reading means this device cannot be scored; skip it
+            // rather than scoring it as idle. See `GpuDeviceInfo::utilization_percent`.
+            let Some(load) = device_loads.get(&device.device_id).map(|load| load.utilization)
+            else {
+                continue;
+            };
+            any_monitored = true;
             let score = weight * (1.0 - load);
             if score > best_score {
                 best_score = score;
                 best_device = Some(device.device_id);
             }
+        }
+        // Unlike `select_least_loaded`/`select_hybrid`, `Weighted` already
+        // shared the right final semantics before Wave 6d: skipping an
+        // unmonitored device rather than scoring it as idle means one can
+        // never outrank a measured device, and an all-unmonitored candidate
+        // set already resolves to a deterministic `None` (nothing was ever
+        // written to `best_device`) rather than a `HashMap`-order pick. It
+        // still shares the same operator-visible logging so an operator
+        // sees *why* weighted selection is declining every allocation,
+        // instead of a silent `DeviceNotFound` with no telemetry to explain
+        // it. There is no device-id fallback here (unlike the other two):
+        // without a per-device weight/load pair there is no signal at all to
+        // break a tie by, so the strategy honestly reports nothing rather
+        // than inventing an order.
+        if !any_monitored && !devices.is_empty() {
+            self.log_unmonitored_fallback(
+                "select_weighted",
+                devices.len(),
+                "returning no selection -- there is no per-device weight/load signal \
+                 left to break the tie by",
+            );
         }
         Ok(best_device)
     }
@@ -558,10 +672,13 @@ impl GpuLoadBalancer {
         device_loads: &HashMap<usize, DeviceLoadInfo>,
     ) -> f32 {
         let base_score = device.total_memory_mb as f32 / 1000.0;
-        let load_penalty = device_loads
-            .get(&device.device_id)
-            .map(|load| load.utilization)
-            .unwrap_or(device.utilization_percent / 100.0);
+        // Without a live load reading the penalty is unknown. Charging the full
+        // penalty is the conservative choice: an unmonitored device must not
+        // out-score a measured, lightly-loaded one. See
+        // `GpuDeviceInfo::utilization_percent` for why the record's own figure
+        // is not a usable fallback.
+        let load_penalty =
+            device_loads.get(&device.device_id).map(|load| load.utilization).unwrap_or(1.0);
         base_score * (1.0 - load_penalty)
     }
     /// Select device using memory-optimized strategy
@@ -654,14 +771,48 @@ impl GpuLoadBalancer {
             let candidates = match strategy {
                 LoadBalancingStrategy::LeastLoaded => {
                     let device_loads = self.device_loads.read();
+                    // Whether *any* candidate carries a load reading, checked
+                    // once per component rather than per device: it decides
+                    // whether a missing reading means "known to lose to a
+                    // measured rival" or "nothing here has an opinion".
+                    let any_monitored = devices.keys().any(|id| device_loads.contains_key(id));
+                    if !any_monitored && !devices.is_empty() {
+                        self.log_unmonitored_fallback(
+                            "select_hybrid(LeastLoaded)",
+                            devices.len(),
+                            "contributing a neutral score to every candidate so the \
+                             other strategies in this hybrid decide instead",
+                        );
+                    }
                     devices
-                        .iter()
-                        .map(|(id, device)| {
-                            let load = device_loads
-                                .get(id)
-                                .map(|load| load.utilization)
-                                .unwrap_or(device.utilization_percent / 100.0);
-                            (*id, 1.0 - load)
+                        .keys()
+                        .map(|id| {
+                            // 0.2.1: this fell back to `GpuDeviceInfo::utilization_percent`,
+                            // the same discovery-time 0.0 the dedicated `select_least_loaded`
+                            // was fixed to stop trusting -- an unmonitored device scored
+                            // `1.0 - 0.0 = 1.0` and beat every genuinely measured device in
+                            // the sum-then-max combination below. A missing reading now
+                            // contributes `-INFINITY` *when at least one other candidate is
+                            // monitored*: added into any finite total from the other
+                            // strategies in this hybrid it still leaves the device
+                            // unelectable, so the invariant holds regardless of how many
+                            // other (possibly uniform) strategies are mixed in, unlike
+                            // simply omitting the device for this round would.
+                            //
+                            // Wave 6d: when *no* candidate is monitored, `-INFINITY` for
+                            // every device would poison the combined total for all of them
+                            // equally (`-infinity + finite == -infinity`), silently
+                            // discarding whatever real signal `PerformanceBased` /
+                            // `MemoryOptimized` contributed elsewhere in this hybrid and
+                            // handing the decision back to `HashMap` iteration order. A
+                            // neutral `0.0` leaves this component out of the running
+                            // instead of overruling the others.
+                            let score = match device_loads.get(id).map(|load| load.utilization) {
+                                Some(load) => 1.0 - load,
+                                None if any_monitored => f32::NEG_INFINITY,
+                                None => 0.0,
+                            };
+                            (*id, score)
                         })
                         .collect::<HashMap<_, _>>()
                 },
@@ -691,9 +842,27 @@ impl GpuLoadBalancer {
                 *candidate_scores.entry(device_id).or_insert(0.0) += score;
             }
         }
-        let selected = candidate_scores
+        // Break ties on the lowest device id, walked in sorted order, rather
+        // than on `HashMap` iteration order: a single-strategy hybrid whose
+        // only component reports a genuine tie (e.g. `Hybrid([LeastLoaded])`
+        // with nothing monitored, scored `0.0` for every candidate above) can
+        // leave every candidate at the exact same total, and resolving that
+        // via hash order is the same undisclosed-arbitrary-pick failure this
+        // reconciliation removes from the dedicated selectors. Keeping the
+        // first (lowest-id) candidate on a tie -- rather than the last, as
+        // `Iterator::max_by` would -- matches the fallback in
+        // `select_least_loaded`.
+        let mut ordered_ids: Vec<usize> = candidate_scores.keys().copied().collect();
+        ordered_ids.sort_unstable();
+        let selected = ordered_ids
             .into_iter()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .fold(None::<(usize, f32)>, |best, id| {
+                let score = candidate_scores[&id];
+                match best {
+                    Some((_, best_score)) if best_score >= score => best,
+                    _ => Some((id, score)),
+                }
+            })
             .map(|(device_id, _)| device_id);
         Ok(selected)
     }
@@ -1117,4 +1286,77 @@ pub enum PowerPriority {
     Balanced,
     /// Maximize performance regardless of power
     High,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_device(device_id: usize) -> GpuDeviceInfo {
+        GpuDeviceInfo {
+            device_id,
+            device_name: format!("Test GPU {device_id}"),
+            total_memory_mb: 8192,
+            available_memory_mb: 4096,
+            utilization_percent: 0.0,
+            capabilities: vec![],
+            status: GpuDeviceStatus::Available,
+            last_updated: Utc::now(),
+        }
+    }
+
+    /// Regression: monitored devices reporting the *exact same* utilization
+    /// must resolve to the lowest device id, not to whichever one `HashMap`
+    /// iteration happens to visit first (unspecified, and not sorted by
+    /// id) -- the same disclosed, deterministic tie-break `select_hybrid`
+    /// already uses for its combined scores. Devices are inserted out of id
+    /// order so an implementation that (incorrectly) depended on iteration
+    /// order would not accidentally look correct.
+    #[tokio::test]
+    async fn select_least_loaded_breaks_exact_ties_on_lowest_device_id() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer.update_device_load(9, 0.42).await.expect("update load");
+        load_balancer.update_device_load(2, 0.42).await.expect("update load");
+        load_balancer.update_device_load(5, 0.42).await.expect("update load");
+
+        let mut devices = HashMap::new();
+        devices.insert(9, test_device(9));
+        devices.insert(2, test_device(2));
+        devices.insert(5, test_device(5));
+
+        let selected = load_balancer
+            .select_least_loaded(&devices)
+            .await
+            .expect("selection must succeed");
+        assert_eq!(
+            selected,
+            Some(2),
+            "an exact utilization tie among monitored devices must resolve to the lowest device id"
+        );
+    }
+
+    /// Companion to the tie-break test above: proves the tie-break applies
+    /// only on genuine ties, not that the lowest id always wins outright. A
+    /// higher-id device with a strictly lower (better) load must still be
+    /// selected over a lower-id device with a strictly higher load.
+    #[tokio::test]
+    async fn select_least_loaded_prefers_lower_load_over_lower_id() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer.update_device_load(3, 0.9).await.expect("update load");
+        load_balancer.update_device_load(7, 0.1).await.expect("update load");
+
+        let mut devices = HashMap::new();
+        devices.insert(3, test_device(3));
+        devices.insert(7, test_device(7));
+
+        let selected = load_balancer
+            .select_least_loaded(&devices)
+            .await
+            .expect("selection must succeed");
+        assert_eq!(
+            selected,
+            Some(7),
+            "the genuinely less-loaded device must win even though its id is higher"
+        );
+    }
 }

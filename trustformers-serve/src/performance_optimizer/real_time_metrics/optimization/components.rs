@@ -35,7 +35,6 @@ pub struct ImpactAssessor {
 #[derive(Debug, Clone)]
 struct ImpactAssessmentRecord {
     recommendation_id: String,
-    timestamp: DateTime<Utc>,
     predicted_impact: ImpactAssessment,
     actual_impact: Option<ImpactAssessment>,
     accuracy_score: Option<f32>,
@@ -44,8 +43,6 @@ struct ImpactAssessmentRecord {
 /// Impact prediction model using machine learning
 pub struct ImpactPredictionModel {
     feature_weights: HashMap<String, f32>,
-    historical_accuracy: f32,
-    model_version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +92,6 @@ impl ImpactAssessor {
         // Store assessment record
         let record = ImpactAssessmentRecord {
             recommendation_id: recommendation.id.clone(),
-            timestamp: Utc::now(),
             predicted_impact: predicted_impact.clone(),
             actual_impact: None,
             accuracy_score: None,
@@ -218,11 +214,7 @@ impl ImpactPredictionModel {
         feature_weights.insert("risk_level".to_string(), -0.2);
         feature_weights.insert("action_count".to_string(), 0.1);
 
-        Ok(Self {
-            feature_weights,
-            historical_accuracy: 0.75,
-            model_version: "v1.0".to_string(),
-        })
+        Ok(Self { feature_weights })
     }
 
     pub async fn predict_impact(
@@ -267,6 +259,9 @@ impl ImpactPredictionModel {
     }
 }
 
+/// Retained selection records before the oldest is dropped.
+const MAX_SELECTION_HISTORY: usize = 256;
+
 /// Strategy selector for choosing optimal optimization algorithms
 ///
 /// Intelligently selects the most appropriate optimization algorithms
@@ -278,22 +273,38 @@ pub struct StrategySelector {
     shutdown: Arc<AtomicBool>,
 }
 
+/// What this selector has actually observed about one optimization algorithm.
+///
+/// Every field except the name starts unknown. Before 0.2.1 the selector seeded
+/// each algorithm with `success_rate: 0.75`, `average_impact: 0.5`,
+/// `effectiveness_score: 0.75` and a `last_used` of "yesterday" while
+/// `usage_count` stayed at zero, so the ranking `select_algorithms` produced was
+/// driven by numbers no run had ever generated.
 #[derive(Debug, Clone)]
 struct StrategyPerformance {
     algorithm_name: String,
-    success_rate: f32,
-    average_impact: f32,
+    /// Share of runs that produced at least one recommendation; `None` until the
+    /// algorithm has run once.
+    success_rate: Option<f32>,
+    /// Mean impact of the recommendations this algorithm produced.
+    ///
+    /// Always `None`: nothing measures what a recommendation achieved once
+    /// applied, so no impact figure can be attributed to the algorithm.
+    average_impact: Option<f32>,
+    /// Number of times this algorithm has been run by the engine.
     usage_count: u64,
-    last_used: DateTime<Utc>,
-    effectiveness_score: f32,
+    /// When the algorithm last ran; `None` while `usage_count` is zero.
+    last_used: Option<DateTime<Utc>>,
+    /// Derived from `success_rate` and `usage_count`; `None` until it has run.
+    effectiveness_score: Option<f32>,
 }
 
+/// One recorded selection: which algorithms were chosen, and what they scored.
 #[derive(Debug, Clone)]
 struct SelectionRecord {
     timestamp: DateTime<Utc>,
-    context_hash: String,
-    selected_algorithms: Vec<String>,
-    outcome_success: Option<bool>,
+    selected: Vec<String>,
+    scores: Vec<(String, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -335,7 +346,6 @@ impl StrategySelector {
 
     /// Select optimal algorithms for given optimization context
     pub async fn select_algorithms(&self, context: &OptimizationContext) -> Result<Vec<String>> {
-        let context_hash = self.calculate_context_hash(context);
         let performance_map = self.algorithm_performance.lock();
         let config = self.config.read();
 
@@ -352,22 +362,24 @@ impl StrategySelector {
 
         // Select top algorithms
         let selected: Vec<String> = algorithm_scores
-            .into_iter()
+            .iter()
             .filter(|(_, score)| *score >= config.min_success_rate_threshold)
             .take(config.max_algorithms_per_selection)
-            .map(|(name, _)| name)
+            .map(|(name, _)| name.clone())
             .collect();
 
-        // Record selection
+        // Record what was actually selected and on what scores.
         let record = SelectionRecord {
             timestamp: Utc::now(),
-            context_hash,
-            selected_algorithms: selected.clone(),
-            outcome_success: None,
+            selected: selected.clone(),
+            scores: algorithm_scores,
         };
 
         let mut history = self.selection_history.lock();
         history.push_back(record);
+        while history.len() > MAX_SELECTION_HISTORY {
+            history.pop_front();
+        }
 
         info!("Selected {} algorithms for optimization", selected.len());
         Ok(selected)
@@ -378,11 +390,49 @@ impl StrategySelector {
         let mut performance_map = self.algorithm_performance.lock();
 
         for (_, performance) in performance_map.iter_mut() {
-            // Update effectiveness score based on recent performance
+            // Recompute only where the algorithm has actually run; an unrun
+            // algorithm keeps no effectiveness score at all.
             performance.effectiveness_score = self.calculate_effectiveness_score(performance);
         }
 
         Ok(())
+    }
+
+    /// Record that `algorithm` ran and whether it produced any recommendation.
+    ///
+    /// This is the only path by which `success_rate`, `usage_count` and
+    /// `last_used` ever become non-`None`.
+    pub fn record_algorithm_run(&self, algorithm: &str, produced_recommendation: bool) {
+        let mut performance_map = self.algorithm_performance.lock();
+        let Some(performance) = performance_map.get_mut(algorithm) else {
+            return;
+        };
+        let previous_successes = performance
+            .success_rate
+            .map(|rate| rate * performance.usage_count as f32)
+            .unwrap_or(0.0);
+        performance.usage_count += 1;
+        let successes = previous_successes + if produced_recommendation { 1.0 } else { 0.0 };
+        performance.success_rate = Some(successes / performance.usage_count as f32);
+        performance.last_used = Some(Utc::now());
+    }
+
+    /// Number of selections recorded so far.
+    pub fn recorded_selection_count(&self) -> usize {
+        self.selection_history.lock().len()
+    }
+
+    /// The most recent selection: when it happened, what was chosen, and the
+    /// score every candidate received.
+    pub fn last_selection(&self) -> Option<(DateTime<Utc>, Vec<String>, Vec<(String, f32)>)> {
+        let history = self.selection_history.lock();
+        history.back().map(|record| {
+            (
+                record.timestamp,
+                record.selected.clone(),
+                record.scores.clone(),
+            )
+        })
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -410,26 +460,17 @@ impl StrategySelector {
                 algorithm.to_string(),
                 StrategyPerformance {
                     algorithm_name: algorithm.to_string(),
-                    success_rate: 0.75,  // Default success rate
-                    average_impact: 0.5, // Default impact
+                    // Nothing has run yet, so nothing is known yet.
+                    success_rate: None,
+                    average_impact: None,
                     usage_count: 0,
-                    last_used: Utc::now() - chrono::Duration::days(1),
-                    effectiveness_score: 0.75,
+                    last_used: None,
+                    effectiveness_score: None,
                 },
             );
         }
 
         Ok(())
-    }
-
-    fn calculate_context_hash(&self, context: &OptimizationContext) -> String {
-        // Simple hash based on context characteristics
-        format!(
-            "cores_{}_objectives_{}_constraints_{}",
-            context.system_state.available_cores,
-            context.objectives.len(),
-            context.constraints.len()
-        )
     }
 
     fn calculate_algorithm_score(
@@ -439,15 +480,26 @@ impl StrategySelector {
     ) -> f32 {
         let config = self.config.read();
 
-        // Base score from success rate and impact
-        let performance_score = performance.success_rate * config.performance_weight
-            + performance.average_impact * (1.0 - config.performance_weight);
+        // Only observed history contributes: an algorithm that has never run
+        // scores on its context fit alone rather than on a seeded prior.
+        let performance_score = match (performance.success_rate, performance.average_impact) {
+            (Some(rate), Some(impact)) => {
+                rate * config.performance_weight + impact * (1.0 - config.performance_weight)
+            },
+            (Some(rate), None) => rate * config.performance_weight,
+            (None, Some(impact)) => impact * (1.0 - config.performance_weight),
+            (None, None) => 0.0,
+        };
 
         // Recency bonus (more recent usage gets higher score)
-        let now_timestamp = Utc::now().timestamp();
-        let last_used_timestamp = performance.last_used.timestamp();
-        let hours_since_last_use = (now_timestamp - last_used_timestamp) as f32 / 3600.0;
-        let recency_score = (1.0 / (1.0 + hours_since_last_use / 24.0)) * config.recency_weight;
+        let recency_score = match performance.last_used {
+            Some(last_used) => {
+                let hours_since_last_use =
+                    (Utc::now().timestamp() - last_used.timestamp()) as f32 / 3600.0;
+                (1.0 / (1.0 + hours_since_last_use / 24.0)) * config.recency_weight
+            },
+            None => 0.0,
+        };
 
         // Context-specific bonuses
         let context_bonus = self.calculate_context_bonus(&performance.algorithm_name, context);
@@ -465,11 +517,22 @@ impl StrategySelector {
         }
     }
 
-    fn calculate_effectiveness_score(&self, performance: &StrategyPerformance) -> f32 {
-        // Combine success rate, impact, and usage frequency
-        let usage_factor = (performance.usage_count as f32 / 100.0).min(1.0); // Normalize to 0-1
-
-        performance.success_rate * 0.5 + performance.average_impact * 0.3 + usage_factor * 0.2
+    /// Effectiveness of an algorithm that has actually run.
+    ///
+    /// `None` while `usage_count` is zero: there is no observation to score.
+    fn calculate_effectiveness_score(&self, performance: &StrategyPerformance) -> Option<f32> {
+        if performance.usage_count == 0 {
+            return None;
+        }
+        let success_rate = performance.success_rate?;
+        // Usage frequency, normalised at a hundred runs.
+        let usage_factor = (performance.usage_count as f32 / 100.0).min(1.0);
+        // `average_impact` is never measured, so its weight is redistributed
+        // onto the two terms that are, rather than multiplied by a stand-in.
+        Some(match performance.average_impact {
+            Some(impact) => success_rate * 0.5 + impact * 0.3 + usage_factor * 0.2,
+            None => success_rate * 0.8 + usage_factor * 0.2,
+        })
     }
 }
 
@@ -497,9 +560,6 @@ struct LearningModel {
 #[derive(Debug, Clone)]
 struct ModelPerformanceMetrics {
     accuracy: f32,
-    precision: f32,
-    recall: f32,
-    f1_score: f32,
     last_updated: DateTime<Utc>,
 }
 
@@ -536,9 +596,6 @@ impl AdaptiveLearner {
 
         let performance_metrics = ModelPerformanceMetrics {
             accuracy: 0.5,
-            precision: 0.5,
-            recall: 0.5,
-            f1_score: 0.5,
             last_updated: Utc::now(),
         };
 

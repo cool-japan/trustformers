@@ -229,6 +229,25 @@ impl Variable {
         self.unary_op(OperationType::Softmax)
     }
 
+    /// Round with a straight-through gradient estimator.
+    ///
+    /// Forward evaluates `round(x)`; the backward pass passes the incoming
+    /// gradient through unchanged. This is the operation trainable quantizers
+    /// need: plain rounding has a zero derivative almost everywhere, so a
+    /// detached `round` (what this used to be) severs the graph entirely.
+    pub fn round_straight_through(&self) -> Result<Variable> {
+        self.unary_op(OperationType::RoundStraightThrough)
+    }
+
+    /// Clamp with a clipped straight-through gradient estimator.
+    ///
+    /// Forward evaluates `clamp(x, min_value, max_value)`; the backward pass
+    /// passes the gradient through for entries inside the range and blocks it
+    /// for saturated entries.
+    pub fn clamp_straight_through(&self, min_value: f32, max_value: f32) -> Result<Variable> {
+        self.unary_op(OperationType::ClampStraightThrough(min_value, max_value))
+    }
+
     // Tensor operations
 
     /// Reshape the tensor
@@ -384,12 +403,17 @@ impl Variable {
             OperationType::Softmax => self_tensor.softmax(-1),
             OperationType::Reshape(shape) => self_tensor.reshape(shape),
             OperationType::Transpose(permutation) => {
-                // For now, handle simple 2D transpose case
-                if permutation.len() >= 2 {
-                    self_tensor.transpose(permutation[0], permutation[1])
+                if permutation.is_empty() {
+                    // Empty permutation means "reverse all axes" (numpy `.T`).
+                    let ndim = self_tensor.shape().len();
+                    let reversed: Vec<usize> = (0..ndim).rev().collect();
+                    self_tensor.permute(&reversed)
                 } else {
-                    // Default transpose for 2D case
-                    self_tensor.transpose(0, 1)
+                    // General N-dimensional permutation. The previous code applied
+                    // only `permutation[0]`/`permutation[1]` as a single axis swap,
+                    // which silently produced the wrong layout for any rank > 2
+                    // permutation that was not a plain 2-axis swap.
+                    self_tensor.permute(permutation)
                 }
             },
             OperationType::Sum(axes) => {
@@ -403,9 +427,17 @@ impl Variable {
                     },
                 }
             },
-            OperationType::Mean(_axes) => {
-                // For now, just compute global mean
-                self_tensor.mean()
+            OperationType::RoundStraightThrough => self_tensor.round(),
+            OperationType::ClampStraightThrough(min_value, max_value) => {
+                self_tensor.clamp(*min_value, *max_value)
+            },
+            OperationType::Mean(axes) => {
+                // Mirror the `Sum` arm: honour the requested axes instead of
+                // collapsing every `mean(dim)` to a global scalar.
+                match axes {
+                    Some(axes_vec) if !axes_vec.is_empty() => self_tensor.mean_axes(axes_vec),
+                    _ => self_tensor.mean(),
+                }
             },
             _ => Err(TrustformersError::tensor_op_error(
                 &format!("Unsupported unary operation: {:?}", op),

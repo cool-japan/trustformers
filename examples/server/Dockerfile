@@ -1,79 +1,62 @@
-# Build stage
-FROM rust:1.78-slim as builder
+# Build stage.
+#
+# `examples/server` is excluded from the repository's cargo workspace and
+# carries its own `[workspace]` table, so it is built from inside its own
+# directory and its artifacts land in `examples/server/target`.
+#
+# The whole repository is copied in one step on purpose, mirroring
+# `examples/grpc-server/Dockerfile`. An earlier version of this file tried to
+# pre-warm the dependency cache by copying a hand-maintained subset of member
+# manifests plus dummy `src/lib.rs` files; that kind of list goes stale
+# silently (`trustformers`'s own path/workspace dependencies on
+# `trustformers-models` / `trustformers-tokenizers` / `trustformers-optim`
+# aren't even literal `path = ".."` entries in `trustformers/Cargo.toml` —
+# they resolve through the root `[workspace.dependencies]` table — so a
+# manually maintained copy list cannot be verified against the manifest by
+# inspection alone) and was not verified against a real build in this
+# environment (no Docker daemon is available here — see `README.md`).
+FROM rust:1.89-bookworm AS builder
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory
-WORKDIR /app
-
-# Copy workspace files
-COPY Cargo.toml ./
-COPY trustformers/Cargo.toml ./trustformers/
-COPY trustformers-core/Cargo.toml ./trustformers-core/
-COPY trustformers-models/Cargo.toml ./trustformers-models/
-COPY trustformers-tokenizers/Cargo.toml ./trustformers-tokenizers/
-COPY trustformers-optim/Cargo.toml ./trustformers-optim/
-COPY trustformers-training/Cargo.toml ./trustformers-training/
-COPY examples/server/Cargo.toml ./examples/server/
-
-# Create dummy source files to cache dependencies
-RUN mkdir -p trustformers/src trustformers-core/src trustformers-models/src \
-    trustformers-tokenizers/src trustformers-optim/src trustformers-training/src \
-    examples/server/src && \
-    echo "fn main() {}" > examples/server/src/main.rs && \
-    touch trustformers/src/lib.rs trustformers-core/src/lib.rs \
-    trustformers-models/src/lib.rs trustformers-tokenizers/src/lib.rs \
-    trustformers-optim/src/lib.rs trustformers-training/src/lib.rs
-
-# Build dependencies
-WORKDIR /app/examples/server
-RUN cargo build --release
-
-# Copy actual source code
 WORKDIR /app
 COPY . .
 
-# Build the server
 WORKDIR /app/examples/server
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release
 
-# Runtime stage
-FROM ubuntu:22.04
+# Runtime stage.
+FROM debian:bookworm-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# `ca-certificates` for outbound TLS: `AutoConfig::from_pretrained` falls back
+# to a real model-hub network request when `config.json` isn't found locally
+# (see README.md). `curl` for the HEALTHCHECK below. No `libssl3`: the
+# TrustformeRS stack is pure Rust and the binary links no OpenSSL.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN useradd -m -u 1000 trustformers
 
-# Copy binary from builder
-COPY --from=builder /app/examples/server/target/release/trustformers-server /usr/local/bin/
+COPY --from=builder \
+    /app/examples/server/target/release/trustformers-server \
+    /usr/local/bin/trustformers-server
 
-# Create directories for models and cache
-RUN mkdir -p /var/cache/trustformers && \
-    chown -R trustformers:trustformers /var/cache/trustformers
+# Matches the default `MODEL_CACHE_DIR` below and `kubernetes/pvc.yaml`'s
+# mount path: a relative `model_name` in `POST /models` resolves under here.
+RUN mkdir -p /var/cache/trustformers && chown trustformers:trustformers /var/cache/trustformers
 
-# Switch to non-root user
 USER trustformers
 
-# Environment variables
 ENV RUST_LOG=info
-ENV MODEL_CACHE_DIR=/var/cache/trustformers
 ENV PORT=8080
+ENV MODEL_CACHE_DIR=/var/cache/trustformers
 
-# Expose port
 EXPOSE 8080
 
-# Health check
+# `/health` is a real route (see `src/main.rs`) that returns 200 with the
+# running binary's version as soon as the router is serving — it does not
+# depend on any model being loaded.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
-# Run the server
 CMD ["trustformers-server"]

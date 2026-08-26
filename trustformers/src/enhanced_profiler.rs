@@ -114,7 +114,11 @@ pub struct PerformanceSample {
     pub throughput_ops_per_sec: f32,
     pub memory_usage_mb: f32,
     pub cpu_usage_percent: f32,
-    pub gpu_usage_percent: f32,
+    /// GPU utilisation, when a GPU telemetry source is available.
+    ///
+    /// `None` means "not measurable on this build/platform" — this crate has no
+    /// pure-Rust vendor telemetry, so it never guesses a figure.
+    pub gpu_usage_percent: Option<f32>,
     pub custom_metrics: HashMap<String, f64>,
 }
 
@@ -148,7 +152,7 @@ pub enum Platform {
 }
 
 /// Specialized hardware detection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecializedHardware {
     CUDA,
     ROCm,
@@ -309,7 +313,8 @@ pub enum BottleneckType {
 pub struct HardwareUtilization {
     pub cpu_utilization_percent: f32,
     pub memory_utilization_percent: f32,
-    pub gpu_utilization_percent: f32,
+    /// `None` when no GPU telemetry was available for this session.
+    pub gpu_utilization_percent: Option<f32>,
     pub efficiency_score: f32,
     pub underutilized_resources: Vec<String>,
 }
@@ -317,11 +322,20 @@ pub struct HardwareUtilization {
 /// Memory analysis results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryAnalysis {
+    /// Share of the peak that is unreturned growth, in 0..=1.
     pub leak_probability: f32,
-    pub fragmentation_level: f32,
+    /// Heap fragmentation, when an instrumented allocator can report it.
+    ///
+    /// `None` on a stock Rust process: nothing measures it.
+    pub fragmentation_level: Option<f32>,
+    /// Shape of the recorded memory series.
     pub allocation_pattern: AllocationPattern,
-    pub gc_impact: f32,
-    pub optimization_potential: f32,
+    /// Garbage-collection impact. Always `None` in a non-GC runtime.
+    pub gc_impact: Option<f32>,
+    /// Estimated headroom for memory optimisation.
+    ///
+    /// `None` until a source exists that can measure it.
+    pub optimization_potential: Option<f32>,
 }
 
 /// Memory allocation patterns
@@ -452,19 +466,39 @@ impl EnhancedProfiler {
         }
     }
 
-    /// Detect hardware configuration
+    /// Detect hardware configuration from the operating system.
+    ///
+    /// CPU model, core count and installed memory are real `sysinfo` readings.
+    /// GPU enumeration has no pure-Rust source in this build, so the GPU list
+    /// stays empty rather than carrying a placeholder device, and the
+    /// specialized-hardware list reflects the features this binary was actually
+    /// compiled with.
     async fn detect_hardware(&self) -> HardwareInfo {
-        // Mock hardware detection - in real implementation, use system APIs
+        let mut system = sysinfo::System::new();
+        system.refresh_cpu_all();
+        system.refresh_memory();
+
+        let cpu_cores = sysinfo::System::physical_core_count().unwrap_or_else(num_cpus::get);
+        let cpu_model = system
+            .cpus()
+            .first()
+            .map(|cpu| cpu.brand().trim().to_string())
+            .filter(|brand| !brand.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        let total_memory_gb = system.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+
+        let mut specialized_hardware = Vec::new();
+        if cfg!(feature = "cuda") {
+            specialized_hardware.push(SpecializedHardware::CUDA);
+        }
+
         HardwareInfo {
-            cpu_cores: num_cpus::get(),
-            cpu_model: "Mock CPU Model".to_string(),
-            total_memory_gb: 16.0, // Mock value
-            gpu_info: vec![GPUInfo {
-                name: "Mock GPU".to_string(),
-                memory_gb: 8.0,
-                compute_capability: "8.6".to_string(),
-                utilization_percent: 0.0,
-            }],
+            cpu_cores,
+            cpu_model,
+            total_memory_gb,
+            // No pure-Rust GPU enumeration is linked in; an empty list is the
+            // honest answer, an invented "Mock GPU" is not.
+            gpu_info: Vec::new(),
             platform: if cfg!(target_os = "linux") {
                 Platform::Linux
             } else if cfg!(target_os = "windows") {
@@ -474,30 +508,31 @@ impl EnhancedProfiler {
             } else {
                 Platform::Unknown
             },
-            specialized_hardware: vec![
-                SpecializedHardware::CUDA,
-                SpecializedHardware::Metal,
-                SpecializedHardware::ONNX,
-            ],
+            specialized_hardware,
         }
     }
 
-    /// Get current memory usage (mock implementation)
+    /// Resident memory of this process, in megabytes.
+    ///
+    /// Returns `0.0` only when the operating system refuses to report the
+    /// process — never a synthetic figure.
     fn get_current_memory_usage(&self) -> f32 {
-        // Mock memory usage - in real implementation, use system APIs
-        100.0 + (std::ptr::addr_of!(self) as usize % 100) as f32 / 2.0
+        crate::profiler::read_process_memory()
+            .map(|m| m.resident_bytes as f32 / (1024.0 * 1024.0))
+            .unwrap_or(0.0)
     }
 
-    /// Get CPU usage (mock implementation)
+    /// Live system-wide CPU utilisation, in percent.
     async fn get_cpu_usage(&self) -> f32 {
-        // Mock CPU usage - in real implementation, use system APIs
-        20.0 + (std::ptr::addr_of!(self) as usize % 60) as f32
+        read_cpu_usage().await
     }
 
-    /// Get GPU usage (mock implementation)
-    async fn get_gpu_usage(&self) -> f32 {
-        // Mock GPU usage - in real implementation, use GPU APIs
-        10.0 + (std::ptr::addr_of!(self) as usize % 80) as f32
+    /// GPU utilisation, if any source can supply it.
+    ///
+    /// This build links no GPU telemetry, so the answer is `None`. Callers must
+    /// render that as "not available" rather than as zero.
+    async fn get_gpu_usage(&self) -> Option<f32> {
+        None
     }
 
     /// Calculate throughput for a session
@@ -517,7 +552,7 @@ impl EnhancedProfiler {
 
             if latest_sample.latency_ms > self.config.thresholds.max_latency_ms {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High latency detected: {:.2}ms",
                     latest_sample.latency_ms
                 );
@@ -525,7 +560,7 @@ impl EnhancedProfiler {
 
             if latest_sample.memory_usage_mb > self.config.thresholds.max_memory_usage_mb {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High memory usage: {:.2}MB",
                     latest_sample.memory_usage_mb
                 );
@@ -533,7 +568,7 @@ impl EnhancedProfiler {
 
             if latest_sample.cpu_usage_percent > self.config.thresholds.max_cpu_usage_percent {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High CPU usage: {:.2}%",
                     latest_sample.cpu_usage_percent
                 );
@@ -591,38 +626,142 @@ impl EnhancedProfiler {
         sorted_data.get(index).copied().unwrap_or(0.0)
     }
 
-    /// Analyze performance trends
+    /// Analyze performance trends from the recorded samples.
+    ///
+    /// Each series is split in half and the two means compared; the confidence
+    /// is the fraction of the series that actually carried data, so a session
+    /// with too few samples reports a low confidence instead of a fixed 0.8.
     fn analyze_trends(&self, session: &ProfilingSession) -> PerformanceTrends {
-        // Simple trend analysis - in real implementation, use statistical methods
+        let latencies: Vec<f32> = session.samples.iter().map(|s| s.latency_ms).collect();
+        let throughputs: Vec<f32> =
+            session.samples.iter().map(|s| s.throughput_ops_per_sec).collect();
+        let memories: Vec<f32> = session.samples.iter().map(|s| s.memory_usage_mb).collect();
+
         PerformanceTrends {
-            latency_trend: TrendDirection::Stable,
-            throughput_trend: TrendDirection::Improving,
-            memory_trend: TrendDirection::Stable,
-            trend_confidence: 0.8,
+            // Rising latency is a regression, rising throughput is an improvement.
+            latency_trend: Self::trend_of(&latencies, false),
+            throughput_trend: Self::trend_of(&throughputs, true),
+            memory_trend: Self::trend_of(&memories, false),
+            trend_confidence: Self::trend_confidence(session.samples.len()),
         }
     }
 
-    /// Analyze bottlenecks
-    fn analyze_bottlenecks(&self, session: &ProfilingSession) -> BottleneckAnalysis {
-        // Simple bottleneck analysis - in real implementation, use advanced analytics
-        let avg_cpu = session.samples.iter().map(|s| s.cpu_usage_percent).sum::<f32>()
-            / session.samples.len() as f32;
-        let avg_memory = session.samples.iter().map(|s| s.memory_usage_mb).sum::<f32>()
-            / session.samples.len() as f32;
+    /// Direction of a measured series.
+    ///
+    /// `higher_is_better` flips the mapping so the same comparison serves both
+    /// latency (lower is better) and throughput (higher is better). A series
+    /// whose halves differ by less than one standard deviation is `Stable`;
+    /// a series whose standard deviation exceeds half its mean is `Volatile`.
+    fn trend_of(series: &[f32], higher_is_better: bool) -> TrendDirection {
+        if series.len() < 4 {
+            return TrendDirection::Stable;
+        }
+        let mean = series.iter().sum::<f32>() / series.len() as f32;
+        let variance = series.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / series.len() as f32;
+        let std_dev = variance.sqrt();
 
-        let primary_bottleneck = if avg_cpu > 80.0 {
-            BottleneckType::CPU
-        } else if avg_memory > 1000.0 {
-            BottleneckType::Memory
+        let midpoint = series.len() / 2;
+        let first_mean = series[..midpoint].iter().sum::<f32>() / midpoint as f32;
+        let second_mean = series[midpoint..].iter().sum::<f32>() / (series.len() - midpoint) as f32;
+        let delta = second_mean - first_mean;
+
+        if std_dev > mean.abs() * 0.5 && mean.abs() > f32::EPSILON {
+            return TrendDirection::Volatile;
+        }
+        if delta.abs() <= std_dev {
+            return TrendDirection::Stable;
+        }
+        let rising = delta > 0.0;
+        if rising == higher_is_better {
+            TrendDirection::Improving
         } else {
-            BottleneckType::Unknown
+            TrendDirection::Degrading
+        }
+    }
+
+    /// How much a trend verdict can be trusted, from the sample count alone.
+    ///
+    /// Reaches 1.0 at 32 samples; below 4 samples no direction is inferred at
+    /// all and the confidence is 0.
+    fn trend_confidence(sample_count: usize) -> f32 {
+        if sample_count < 4 {
+            return 0.0;
+        }
+        (sample_count as f32 / 32.0).min(1.0)
+    }
+
+    /// Identify the resource closest to its configured threshold.
+    ///
+    /// Every number below is an average over the session's real samples; the
+    /// contributing factors quote those measurements rather than describing
+    /// generic causes.
+    fn analyze_bottlenecks(&self, session: &ProfilingSession) -> BottleneckAnalysis {
+        if session.samples.is_empty() {
+            return BottleneckAnalysis {
+                primary_bottleneck: BottleneckType::Unknown,
+                bottleneck_severity: 0.0,
+                contributing_factors: Vec::new(),
+                impact_analysis: "No samples were recorded for this session".to_string(),
+            };
+        }
+        let count = session.samples.len() as f32;
+        let avg_cpu = session.samples.iter().map(|s| s.cpu_usage_percent).sum::<f32>() / count;
+        let avg_memory = session.samples.iter().map(|s| s.memory_usage_mb).sum::<f32>() / count;
+        let avg_latency = session.samples.iter().map(|s| s.latency_ms).sum::<f32>() / count;
+
+        let thresholds = &self.config.thresholds;
+        let cpu_load = ratio(avg_cpu, thresholds.max_cpu_usage_percent);
+        let memory_load = ratio(avg_memory, thresholds.max_memory_usage_mb);
+        let latency_load = ratio(avg_latency, thresholds.max_latency_ms);
+
+        let (primary_bottleneck, severity) = [
+            (BottleneckType::CPU, cpu_load),
+            (BottleneckType::Memory, memory_load),
+            (BottleneckType::ModelComplexity, latency_load),
+        ]
+        .into_iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or((BottleneckType::Unknown, 0.0));
+
+        let mut contributing_factors = Vec::new();
+        if cpu_load > 0.5 {
+            contributing_factors.push(format!(
+                "mean CPU utilisation {avg_cpu:.1}% is {:.0}% of the configured limit",
+                cpu_load * 100.0
+            ));
+        }
+        if memory_load > 0.5 {
+            contributing_factors.push(format!(
+                "mean resident memory {avg_memory:.1}MB is {:.0}% of the configured limit",
+                memory_load * 100.0
+            ));
+        }
+        if latency_load > 0.5 {
+            contributing_factors.push(format!(
+                "mean latency {avg_latency:.1}ms is {:.0}% of the configured limit",
+                latency_load * 100.0
+            ));
+        }
+
+        let impact_analysis = if contributing_factors.is_empty() {
+            "All measured resources stayed below half of their configured limits".to_string()
+        } else {
+            format!(
+                "{:?} is closest to its limit at {:.0}% of the threshold",
+                primary_bottleneck,
+                severity * 100.0
+            )
         };
 
         BottleneckAnalysis {
-            primary_bottleneck,
-            bottleneck_severity: 0.5,
-            contributing_factors: vec!["Mock factor 1".to_string(), "Mock factor 2".to_string()],
-            impact_analysis: "Moderate impact on overall performance".to_string(),
+            primary_bottleneck: if severity > 0.0 {
+                primary_bottleneck
+            } else {
+                BottleneckType::Unknown
+            },
+            bottleneck_severity: severity.min(1.0),
+            contributing_factors,
+            impact_analysis,
         }
     }
 
@@ -666,31 +805,104 @@ impl EnhancedProfiler {
     fn analyze_hardware_utilization(&self, session: &ProfilingSession) -> HardwareUtilization {
         let avg_cpu = session.samples.iter().map(|s| s.cpu_usage_percent).sum::<f32>()
             / session.samples.len() as f32;
-        let avg_gpu = session.samples.iter().map(|s| s.gpu_usage_percent).sum::<f32>()
-            / session.samples.len() as f32;
+        // Average only over samples that carried a GPU reading; if none did,
+        // the figure stays unknown.
+        let gpu_readings: Vec<f32> =
+            session.samples.iter().filter_map(|s| s.gpu_usage_percent).collect();
+        let avg_gpu = if gpu_readings.is_empty() {
+            None
+        } else {
+            Some(gpu_readings.iter().sum::<f32>() / gpu_readings.len() as f32)
+        };
         let avg_memory = session.samples.iter().map(|s| s.memory_usage_mb).sum::<f32>()
             / session.samples.len() as f32;
 
+        let total_memory_mb = session.hardware_info.total_memory_gb * 1024.0;
+        let memory_utilization_percent =
+            if total_memory_mb > 0.0 { avg_memory / total_memory_mb * 100.0 } else { 0.0 };
+
+        // Only resources that were actually measured can be called
+        // under-utilised. GPU utilisation is unknown on this build, so it is
+        // never listed.
+        let mut underutilized_resources = Vec::new();
+        if avg_cpu < 25.0 {
+            underutilized_resources.push("CPU".to_string());
+        }
+        if memory_utilization_percent < 25.0 {
+            underutilized_resources.push("Memory".to_string());
+        }
+
         HardwareUtilization {
             cpu_utilization_percent: avg_cpu,
-            memory_utilization_percent: avg_memory / session.hardware_info.total_memory_gb / 10.24, // Convert to percentage
+            memory_utilization_percent,
             gpu_utilization_percent: avg_gpu,
-            efficiency_score: (avg_cpu + avg_gpu) / 2.0 / 100.0,
-            underutilized_resources: vec!["GPU".to_string()], // Mock
+            // Mean of the utilisation figures that were actually measured.
+            efficiency_score: match avg_gpu {
+                Some(gpu) => (avg_cpu + gpu) / 2.0 / 100.0,
+                None => avg_cpu / 100.0,
+            },
+            underutilized_resources,
         }
     }
 
-    /// Analyze memory usage patterns
+    /// Analyse the recorded memory series.
+    ///
+    /// Growth and shape come from the real samples. Fragmentation and
+    /// garbage-collection impact have no source in a Rust process without an
+    /// instrumented allocator, so they are reported as unknown rather than
+    /// filled with a constant.
     fn analyze_memory_usage(&self, session: &ProfilingSession) -> MemoryAnalysis {
-        let memory_growth =
-            session.memory_tracker.peak_memory_mb - session.memory_tracker.initial_memory_mb;
+        let series: Vec<f32> =
+            session.memory_tracker.memory_samples.iter().map(|s| s.memory_mb).collect();
+        let initial = session.memory_tracker.initial_memory_mb;
+        let peak = session.memory_tracker.peak_memory_mb;
+        let growth = peak - initial;
+
+        // Leak likelihood: how much of the peak is growth that never came back.
+        let leak_probability = if peak > 0.0 {
+            let final_level = series.last().copied().unwrap_or(initial);
+            ((final_level - initial) / peak).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         MemoryAnalysis {
-            leak_probability: if memory_growth > 50.0 { 0.7 } else { 0.2 },
-            fragmentation_level: 0.3,                      // Mock
-            allocation_pattern: AllocationPattern::Steady, // Mock
-            gc_impact: 0.1,                                // Mock
-            optimization_potential: 0.6,                   // Mock
+            leak_probability,
+            fragmentation_level: None,
+            allocation_pattern: Self::classify_allocation_pattern(&series, growth),
+            gc_impact: None,
+            optimization_potential: None,
+        }
+    }
+
+    /// Classify the shape of a memory series.
+    fn classify_allocation_pattern(series: &[f32], growth: f32) -> AllocationPattern {
+        if series.len() < 4 {
+            return AllocationPattern::Steady;
+        }
+        let mean = series.iter().sum::<f32>() / series.len() as f32;
+        if mean <= f32::EPSILON {
+            return AllocationPattern::Steady;
+        }
+        let variance = series.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / series.len() as f32;
+        let coefficient_of_variation = variance.sqrt() / mean;
+
+        let direction_changes = series
+            .windows(3)
+            .filter(|w| (w[1] - w[0]).signum() != (w[2] - w[1]).signum())
+            .count();
+        let change_rate = direction_changes as f32 / (series.len() - 2).max(1) as f32;
+
+        if coefficient_of_variation > 0.5 && change_rate > 0.5 {
+            AllocationPattern::Chaotic
+        } else if change_rate > 0.5 {
+            AllocationPattern::Cyclical
+        } else if growth > mean * 0.25 {
+            AllocationPattern::Growing
+        } else if coefficient_of_variation > 0.25 {
+            AllocationPattern::Spiky
+        } else {
+            AllocationPattern::Steady
         }
     }
 
@@ -718,7 +930,10 @@ impl EnhancedProfiler {
                             sample.throughput_ops_per_sec,
                             sample.memory_usage_mb,
                             sample.cpu_usage_percent,
-                            sample.gpu_usage_percent
+                            sample
+                                .gpu_usage_percent
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "NA".to_string())
                         ));
                     }
                     Ok(csv)
@@ -827,6 +1042,92 @@ impl EnhancedProfiler {
     }
 }
 
+/// Live system-wide CPU utilisation, in percent.
+///
+/// `sysinfo` derives utilisation from the delta between two refreshes, so a
+/// single shared `System` is kept and only re-sampled once the minimum update
+/// interval has elapsed. That keeps repeated sampling from adding a fixed sleep
+/// to every measurement — a profiler must not dominate what it measures.
+pub async fn read_cpu_usage() -> f32 {
+    /// Shared sampler state: the `sysinfo` handle, when it was last refreshed,
+    /// and the utilisation that refresh produced.
+    struct CpuSampler {
+        system: sysinfo::System,
+        refreshed_at: std::time::Instant,
+        last_value: Option<f32>,
+    }
+
+    static CPU: std::sync::OnceLock<std::sync::Mutex<CpuSampler>> = std::sync::OnceLock::new();
+
+    let cell = CPU.get_or_init(|| {
+        let mut system = sysinfo::System::new();
+        system.refresh_cpu_usage();
+        std::sync::Mutex::new(CpuSampler {
+            system,
+            refreshed_at: std::time::Instant::now(),
+            last_value: None,
+        })
+    });
+
+    // Decide whether this call has to wait for a fresh delta window. The guard
+    // is released before the await so the returned future stays `Send`.
+    let wait = match cell.lock() {
+        Ok(guard) => {
+            match sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.checked_sub(guard.refreshed_at.elapsed()) {
+                // The window has not elapsed. Re-reading now would measure a
+                // near-zero interval and report a false 0%, so reuse the value
+                // the last refresh actually measured when there is one.
+                Some(remaining) => match guard.last_value {
+                    Some(value) => return value,
+                    None => Some(remaining),
+                },
+                None => None,
+            }
+        },
+        Err(_) => return 0.0,
+    };
+    if let Some(wait) = wait {
+        tokio::time::sleep(wait).await;
+    }
+
+    match cell.lock() {
+        Ok(mut guard) => {
+            // Another caller may have refreshed while this one slept.
+            if guard.refreshed_at.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+                if let Some(value) = guard.last_value {
+                    return value;
+                }
+            }
+            guard.system.refresh_cpu_usage();
+            guard.refreshed_at = std::time::Instant::now();
+            let value = guard.system.global_cpu_usage();
+            guard.last_value = Some(value);
+            value
+        },
+        Err(_) => 0.0,
+    }
+}
+
+/// `value / limit`, clamped to a non-negative number; `0.0` when the limit is
+/// not positive.
+fn ratio(value: f32, limit: f32) -> f32 {
+    if limit <= 0.0 {
+        0.0
+    } else {
+        (value / limit).max(0.0)
+    }
+}
+
+/// Log a profiling failure without pulling `tracing` into the caller's crate.
+///
+/// `enhanced_profile_operation!` calls this instead of expanding a
+/// `tracing::warn!` in the caller's crate graph, which would only compile for
+/// callers that happen to depend on `tracing` themselves.
+#[doc(hidden)]
+pub fn log_profiler_warning(context: &str, error: &dyn std::fmt::Display) {
+    tracing::warn!(%error, "{context}");
+}
+
 /// Global profiler instance for easy access
 static GLOBAL_PROFILER: std::sync::OnceLock<Arc<EnhancedProfiler>> = std::sync::OnceLock::new();
 
@@ -840,41 +1141,175 @@ pub fn global_profiler() -> Option<Arc<EnhancedProfiler>> {
     GLOBAL_PROFILER.get().cloned()
 }
 
-/// Convenience macro for enhanced profiling operations
+/// Convenience macro for enhanced profiling operations.
+///
+/// Wraps an `async` block in a profiling session. Every path is
+/// `$crate`-qualified so the macro works from any crate, and profiling failures
+/// never abort the work being profiled: if the global profiler was never
+/// initialised the block simply runs un-profiled, and session errors are logged
+/// rather than panicking.
+///
+/// This doctest exercises the macro from *outside* the defining crate, which is
+/// what catches the unhygienic-path bug the qualification above fixes, and
+/// shows that a missing global profiler degrades gracefully instead of
+/// panicking:
+///
+/// ```
+/// use trustformers::enhanced_profile_operation;
+///
+/// let runtime = tokio::runtime::Runtime::new().expect("runtime");
+/// let answer = runtime.block_on(async { enhanced_profile_operation!("decode", { 21 * 2 }) });
+/// assert_eq!(answer, 42);
+/// ```
 #[macro_export]
 macro_rules! enhanced_profile_operation {
     ($operation_name:expr, $block:block) => {{
-        let profiler = global_profiler().expect("Profiler not initialized");
-        let session_id = format!(
-            "{}_{}",
-            $operation_name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("System time is before UNIX_EPOCH")
-                .as_nanos()
-        );
+        match $crate::enhanced_profiler::global_profiler() {
+            // No profiler installed: run the work un-profiled rather than
+            // aborting the program that asked to be profiled.
+            None => $block,
+            Some(profiler) => {
+                let session_id = format!(
+                    "{}_{}",
+                    $operation_name,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
 
-        profiler
-            .start_session(session_id.clone(), $operation_name.to_string())
-            .await
-            .expect("Failed to start profiler session");
+                if let Err(error) =
+                    profiler.start_session(session_id.clone(), $operation_name.to_string()).await
+                {
+                    $crate::enhanced_profiler::log_profiler_warning(
+                        "failed to start profiling session",
+                        &error,
+                    );
+                }
 
-        let result = $block;
+                let result = $block;
 
-        profiler
-            .record_sample(&session_id, std::collections::HashMap::new())
-            .await
-            .expect("Failed to record profiler sample");
-        let _analysis =
-            profiler.end_session(&session_id).await.expect("Failed to end profiler session");
+                if let Err(error) =
+                    profiler.record_sample(&session_id, std::collections::HashMap::new()).await
+                {
+                    $crate::enhanced_profiler::log_profiler_warning(
+                        "failed to record profiling sample",
+                        &error,
+                    );
+                }
+                if let Err(error) = profiler.end_session(&session_id).await {
+                    $crate::enhanced_profiler::log_profiler_warning(
+                        "failed to end profiling session",
+                        &error,
+                    );
+                }
 
-        result
+                result
+            },
+        }
     }};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Regression: hardware detection returned "Mock CPU Model"/"Mock GPU"/16GB
+    // and an unconditional CUDA+Metal+ONNX list, usage was derived from
+    // `std::ptr::addr_of!(self)`, and bottleneck analysis reported
+    // "Mock factor 1"/"Mock factor 2". Every assertion below fails against that
+    // implementation.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hardware_detection_reports_real_values() {
+        let profiler = EnhancedProfiler::new(ProfilerConfig::default());
+        let hardware = profiler.detect_hardware().await;
+
+        assert_ne!(hardware.cpu_model, "Mock CPU Model");
+        assert!(hardware.cpu_cores > 0, "a running process has CPU cores");
+        assert!(
+            hardware.total_memory_gb > 0.0,
+            "installed memory must be a real reading"
+        );
+        assert!(
+            hardware.gpu_info.is_empty(),
+            "no GPU enumeration is linked in, so no device may be listed"
+        );
+        assert!(
+            !hardware.specialized_hardware.contains(&SpecializedHardware::Metal)
+                && !hardware.specialized_hardware.contains(&SpecializedHardware::ONNX),
+            "specialized hardware must reflect compiled features, not a fixed list"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_and_gpu_readings_are_measured_or_absent() {
+        let profiler = EnhancedProfiler::new(ProfilerConfig::default());
+        let memory_mb = profiler.get_current_memory_usage();
+        assert!(
+            memory_mb > 0.0,
+            "resident memory must be a real reading, got {memory_mb}"
+        );
+        assert!(
+            profiler.get_gpu_usage().await.is_none(),
+            "with no GPU telemetry the answer must be `None`, never a number"
+        );
+    }
+
+    #[tokio::test]
+    async fn bottleneck_factors_quote_real_measurements() {
+        let profiler = EnhancedProfiler::new(ProfilerConfig::default());
+        profiler
+            .start_session("bottlenecks".to_string(), "test".to_string())
+            .await
+            .expect("session should start");
+        profiler
+            .record_sample("bottlenecks", HashMap::new())
+            .await
+            .expect("sample should record");
+
+        let sessions = profiler.sessions.read().await;
+        let session = sessions.get("bottlenecks").expect("session exists");
+        let analysis = profiler.analyze_bottlenecks(session);
+
+        for factor in &analysis.contributing_factors {
+            assert!(
+                !factor.contains("Mock factor"),
+                "contributing factors must describe measurements: {factor}"
+            );
+        }
+        assert!((0.0..=1.0).contains(&analysis.bottleneck_severity));
+    }
+
+    #[tokio::test]
+    async fn memory_analysis_reports_unknowns_as_none() {
+        let profiler = EnhancedProfiler::new(ProfilerConfig::default());
+        profiler
+            .start_session("memory".to_string(), "test".to_string())
+            .await
+            .expect("session should start");
+        profiler
+            .record_sample("memory", HashMap::new())
+            .await
+            .expect("sample should record");
+
+        let sessions = profiler.sessions.read().await;
+        let session = sessions.get("memory").expect("session exists");
+        let analysis = profiler.analyze_memory_usage(session);
+
+        assert!(
+            analysis.fragmentation_level.is_none(),
+            "0.3 was the old placeholder fragmentation level"
+        );
+        assert!(
+            analysis.gc_impact.is_none(),
+            "a Rust process has no garbage collector to measure"
+        );
+        assert!(analysis.optimization_potential.is_none());
+        assert!((0.0..=1.0).contains(&analysis.leak_probability));
+    }
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]

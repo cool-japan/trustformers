@@ -4,11 +4,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
 
+/// Half-precision storage dtype used by [`AMPManager::to_half_precision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HalfPrecisionDType {
+    /// IEEE 754 binary16 — 10 mantissa bits, max magnitude 65504.
+    #[default]
+    F16,
+    /// bfloat16 — 7 mantissa bits, `f32`'s exponent range (no overflow at `f32` scale).
+    BF16,
+}
+
 /// Configuration for mixed precision training
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixedPrecisionConfig {
     /// Enable automatic mixed precision
     pub enabled: bool,
+    /// Narrow dtype that [`AMPManager::to_half_precision`] casts to.
+    #[serde(default)]
+    pub half_dtype: HalfPrecisionDType,
     /// Initial loss scale value
     pub init_scale: f32,
     /// Factor to scale loss by when no overflow is detected
@@ -29,6 +42,7 @@ impl Default for MixedPrecisionConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            half_dtype: HalfPrecisionDType::F16,
             init_scale: 2f32.powf(16.0), // 65536
             scale_factor: 2.0,
             backoff_factor: 0.5,
@@ -77,26 +91,43 @@ impl LossScaler {
         loss.scalar_mul(self.current_scale).map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// Unscale gradients after backward pass
+    /// Unscale gradients after the backward pass, reporting whether the batch overflowed.
+    ///
+    /// The scan is performed in two phases so that the gradient map is never left in a
+    /// half-unscaled state:
+    ///
+    /// 1. Every tensor is checked for `inf`/`NaN`.
+    /// 2. Only if the whole map is finite is any tensor divided by the current loss scale.
+    ///
+    /// When `true` is returned **no tensor has been modified** — the caller must skip the
+    /// optimizer step for this batch and feed the result to [`LossScaler::update_scale`]
+    /// so the scale backs off. (Previously the loop unscaled an arbitrary,
+    /// `HashMap`-iteration-order-dependent prefix before bailing out, which silently mixed
+    /// scaled and unscaled gradients in the next step.)
     pub fn unscale_gradients(&self, gradients: &mut HashMap<String, Tensor>) -> Result<bool> {
         if !self.config.enabled {
             return Ok(false);
         }
 
-        let scale = self.current_scale;
+        // Phase 1: full scan, no mutation.
         let mut overflow_detected = false;
-
-        for (_, gradient) in gradients.iter_mut() {
-            // Check for inf/nan values
+        for gradient in gradients.values() {
             if self.has_inf_nan(gradient)? {
                 overflow_detected = true;
-                if self.config.skip_inf_nan {
-                    break;
-                }
+                break;
             }
+        }
 
-            // Unscale gradient
-            *gradient = gradient.scalar_mul(1.0 / scale).map_err(|e| anyhow::anyhow!(e))?;
+        // A dirty batch is reported without touching any tensor, so the caller can discard
+        // the whole map (or retry) with a well-defined, fully-scaled state.
+        if overflow_detected && self.config.skip_inf_nan {
+            return Ok(true);
+        }
+
+        // Phase 2: the map is clean (or the caller opted out of skipping) — unscale all of it.
+        let inv_scale = 1.0 / self.current_scale;
+        for gradient in gradients.values_mut() {
+            *gradient = gradient.scalar_mul(inv_scale).map_err(|e| anyhow::anyhow!(e))?;
         }
 
         Ok(overflow_detected)
@@ -223,90 +254,129 @@ impl AMPManager {
         }
     }
 
-    /// Convert tensor to half precision (fp16 simulation using f32)
-    /// In a real implementation, this would convert to actual fp16
+    /// Cast a tensor down to the configured half-precision dtype.
+    ///
+    /// This performs a **real** narrowing cast to `half::f16` / `half::bf16` (producing a
+    /// [`Tensor::F16`] / [`Tensor::BF16`]), so the result carries genuine IEEE half-precision
+    /// semantics — relative mantissa precision, subnormals and `inf` on overflow — and half
+    /// the memory footprint. Integer tensors are returned unchanged (they have no
+    /// half-precision counterpart in [`Tensor`]).
+    ///
+    /// Returns the input unchanged when AMP is disabled.
     pub fn to_half_precision(&self, tensor: &Tensor) -> Result<Tensor> {
         if !self.config.enabled {
             return Ok(tensor.clone());
         }
 
-        // Simulate fp16 precision by quantizing to fp16 range
-        match tensor {
-            Tensor::F32(arr) => {
-                let quantized = arr.mapv(|x| {
-                    // Simulate fp16 precision limitations
-                    let clamped = x.clamp(-65504.0, 65504.0); // fp16 range
-
-                    // Simulate fp16 precision by reducing mantissa bits
-                    // This is a simplified simulation
-
-                    (clamped * 1024.0).round() / 1024.0
-                });
-                Ok(Tensor::F32(quantized))
+        match (tensor, self.config.half_dtype) {
+            (Tensor::F32(arr), HalfPrecisionDType::F16) => {
+                Ok(Tensor::F16(arr.mapv(half::f16::from_f32)))
             },
-            Tensor::F64(_) => Ok(tensor.clone()),
-            Tensor::F16(_) => Ok(tensor.clone()), // Already fp16 precision
-            Tensor::BF16(_) => Ok(tensor.clone()), // Already reduced precision
-            Tensor::I64(_) => Ok(tensor.clone()),
-            Tensor::C32(arr) => {
-                let quantized = arr.mapv(|x| {
-                    let re_clamped = x.re.clamp(-65504.0, 65504.0);
-                    let im_clamped = x.im.clamp(-65504.0, 65504.0);
-                    let re_scaled = (re_clamped * 1024.0).round() / 1024.0;
-                    let im_scaled = (im_clamped * 1024.0).round() / 1024.0;
-                    Complex::new(re_scaled, im_scaled)
-                });
-                Ok(Tensor::C32(quantized))
+            (Tensor::F32(arr), HalfPrecisionDType::BF16) => {
+                Ok(Tensor::BF16(arr.mapv(half::bf16::from_f32)))
             },
-            Tensor::C64(_) => Ok(tensor.clone()),
-            Tensor::CF16(_) => Ok(tensor.clone()), // Already fp16 precision
-            Tensor::CBF16(_) => Ok(tensor.clone()), // Already reduced precision
-            _ => Ok(tensor.clone()),               // Sparse and other tensor types unchanged
+            (Tensor::F64(arr), HalfPrecisionDType::F16) => {
+                Ok(Tensor::F16(arr.mapv(half::f16::from_f64)))
+            },
+            (Tensor::F64(arr), HalfPrecisionDType::BF16) => {
+                Ok(Tensor::BF16(arr.mapv(half::bf16::from_f64)))
+            },
+            (Tensor::C32(arr), HalfPrecisionDType::F16) => {
+                Ok(Tensor::CF16(arr.mapv(|x| {
+                    Complex::new(half::f16::from_f32(x.re), half::f16::from_f32(x.im))
+                })))
+            },
+            (Tensor::C32(arr), HalfPrecisionDType::BF16) => {
+                Ok(Tensor::CBF16(arr.mapv(|x| {
+                    Complex::new(half::bf16::from_f32(x.re), half::bf16::from_f32(x.im))
+                })))
+            },
+            (Tensor::C64(arr), HalfPrecisionDType::F16) => {
+                Ok(Tensor::CF16(arr.mapv(|x| {
+                    Complex::new(half::f16::from_f64(x.re), half::f16::from_f64(x.im))
+                })))
+            },
+            (Tensor::C64(arr), HalfPrecisionDType::BF16) => {
+                Ok(Tensor::CBF16(arr.mapv(|x| {
+                    Complex::new(half::bf16::from_f64(x.re), half::bf16::from_f64(x.im))
+                })))
+            },
+            // Already at (or below) half precision, or an integer / device tensor with no
+            // meaningful narrowing: hand it back untouched.
+            _ => Ok(tensor.clone()),
         }
     }
 
-    /// Convert tensor back to full precision
+    /// Widen a half-precision tensor back to `f32` (or `Complex<f32>`).
+    ///
+    /// This is the exact inverse of [`AMPManager::to_half_precision`] for the dtypes that
+    /// method produces; anything already at full precision is returned unchanged.
     pub fn to_full_precision(&self, tensor: &Tensor) -> Result<Tensor> {
-        // In fp16 simulation, this is a no-op since we're still using f32
-        Ok(tensor.clone())
+        match tensor {
+            Tensor::F16(arr) => Ok(Tensor::F32(arr.mapv(|x| x.to_f32()))),
+            Tensor::BF16(arr) => Ok(Tensor::F32(arr.mapv(|x| x.to_f32()))),
+            Tensor::CF16(arr) => Ok(Tensor::C32(
+                arr.mapv(|x| Complex::new(x.re.to_f32(), x.im.to_f32())),
+            )),
+            Tensor::CBF16(arr) => Ok(Tensor::C32(
+                arr.mapv(|x| Complex::new(x.re.to_f32(), x.im.to_f32())),
+            )),
+            _ => Ok(tensor.clone()),
+        }
     }
 
-    /// Perform forward pass with automatic mixed precision
-    pub fn forward_with_amp<F>(&self, forward_fn: F) -> Result<Tensor>
+    /// Run a forward pass under automatic mixed precision.
+    ///
+    /// The input is cast down to the configured half dtype, `forward_fn` runs on the
+    /// narrowed tensor, and the result is widened back to full precision so the loss is
+    /// always computed in `f32`. With AMP disabled the closure sees the untouched input.
+    pub fn forward_with_amp<F>(&self, input: &Tensor, forward_fn: F) -> Result<Tensor>
     where
-        F: FnOnce() -> Result<Tensor>,
+        F: FnOnce(Tensor) -> Result<Tensor>,
     {
         if !self.config.enabled {
-            return forward_fn();
+            return forward_fn(input.clone());
         }
 
-        // In a real implementation, this would:
-        // 1. Cast model weights to fp16
-        // 2. Perform forward pass in fp16
-        // 3. Cast output back to fp32 for loss computation
-
-        let output = forward_fn()?;
+        let half_input = self.to_half_precision(input)?;
+        let output = forward_fn(half_input)?;
         self.to_full_precision(&output)
     }
 
-    /// Perform backward pass with loss scaling
-    pub fn backward_with_amp(
+    /// Run a backward pass under loss scaling.
+    ///
+    /// The loss is multiplied by the current scale, `backward_fn` is invoked with the
+    /// **scaled** loss to produce the raw (scaled) gradients, those gradients are unscaled
+    /// in one atomic pass, and the loss scale is updated from the overflow verdict.
+    ///
+    /// Returns `(gradients, overflow)`. When `overflow` is `true` the gradients are still
+    /// scaled (see [`LossScaler::unscale_gradients`]) and the caller **must** skip the
+    /// optimizer step for this batch.
+    pub fn backward_with_amp<F>(
         &mut self,
         loss: &Tensor,
-        gradients: &mut HashMap<String, Tensor>,
-    ) -> Result<bool> {
-        // Scale loss
-        let _scaled_loss = self.loss_scaler.scale_loss(loss)?;
+        backward_fn: F,
+    ) -> Result<(HashMap<String, Tensor>, bool)>
+    where
+        F: FnOnce(&Tensor) -> Result<HashMap<String, Tensor>>,
+    {
+        let scaled_loss = self.loss_scaler.scale_loss(loss)?;
+        let mut gradients = backward_fn(&scaled_loss)?;
 
-        // Simulate backward pass (in real implementation, this would compute gradients)
-        // For simulation, we assume gradients are already computed and scaled
-
-        // Unscale gradients and check for overflow
-        let overflow = self.loss_scaler.unscale_gradients(gradients)?;
-
-        // Update loss scale
+        let overflow = self.loss_scaler.unscale_gradients(&mut gradients)?;
         self.loss_scaler.update_scale(overflow)?;
 
+        Ok((gradients, overflow))
+    }
+
+    /// Unscale a set of already-computed gradients and update the loss scale.
+    ///
+    /// Use this when the backward pass is driven elsewhere and only the loss-scaling
+    /// bookkeeping is needed. Returns `true` when the batch overflowed, in which case the
+    /// gradients were left untouched and the optimizer step must be skipped.
+    pub fn unscale_and_update(&mut self, gradients: &mut HashMap<String, Tensor>) -> Result<bool> {
+        let overflow = self.loss_scaler.unscale_gradients(gradients)?;
+        self.loss_scaler.update_scale(overflow)?;
         Ok(overflow)
     }
 
@@ -329,6 +399,7 @@ pub mod utils {
     pub fn default_fp16_config() -> MixedPrecisionConfig {
         MixedPrecisionConfig {
             enabled: true,
+            half_dtype: HalfPrecisionDType::F16,
             init_scale: 2f32.powf(16.0),
             scale_factor: 2.0,
             backoff_factor: 0.5,
@@ -343,6 +414,7 @@ pub mod utils {
     pub fn default_bf16_config() -> MixedPrecisionConfig {
         MixedPrecisionConfig {
             enabled: true,
+            half_dtype: HalfPrecisionDType::BF16,
             init_scale: 1.0, // bfloat16 doesn't typically need loss scaling
             scale_factor: 1.0,
             backoff_factor: 1.0,
@@ -1491,6 +1563,170 @@ mod tests {
             utils::calculate_dynamic_range(&tensor).expect("tensor operation failed");
         assert_eq!(min_val, -2.0);
         assert_eq!(max_val, 5.0);
+    }
+
+    // ── Regression tests for the two-pass unscale and the real half-precision cast ──
+
+    #[test]
+    fn test_unscale_leaves_every_gradient_untouched_on_overflow() {
+        // Regression: the old loop unscaled a HashMap-iteration-order-dependent prefix
+        // before breaking out on the first inf/nan, so a caller that kept the map ended up
+        // mixing scaled and unscaled gradients. With many clean entries around one dirty
+        // one, the old code left at least one entry divided by 65536 with high probability;
+        // the fixed code must leave *all* of them exactly as they were.
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            skip_inf_nan: true,
+            ..MixedPrecisionConfig::default()
+        };
+        let scaler = LossScaler::new(config);
+
+        let mut gradients = HashMap::new();
+        for i in 0..16 {
+            gradients.insert(
+                format!("clean_{i}"),
+                Tensor::ones(&[2, 2]).expect("tensor creation failed"),
+            );
+        }
+        gradients.insert(
+            "dirty".to_string(),
+            Tensor::from_vec(vec![f32::INFINITY, 1.0, 1.0, 1.0], &[2, 2])
+                .expect("tensor creation failed"),
+        );
+
+        let overflow = scaler.unscale_gradients(&mut gradients).expect("unscale failed");
+        assert!(overflow, "an inf gradient must be reported as an overflow");
+
+        for i in 0..16 {
+            let g = gradients.get(&format!("clean_{i}")).expect("gradient missing");
+            let v = g.get_scalar(&[0, 0]).expect("get_scalar failed");
+            assert!(
+                (v - 1.0).abs() < 1e-9,
+                "gradient clean_{i} must be left fully scaled on overflow, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unscale_divides_every_gradient_when_clean() {
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            ..MixedPrecisionConfig::default()
+        };
+        let scaler = LossScaler::new(config);
+
+        let mut gradients = HashMap::new();
+        for i in 0..4 {
+            gradients.insert(
+                format!("p{i}"),
+                Tensor::ones(&[2]).expect("tensor creation failed"),
+            );
+        }
+
+        let overflow = scaler.unscale_gradients(&mut gradients).expect("unscale failed");
+        assert!(!overflow);
+        for i in 0..4 {
+            let g = gradients.get(&format!("p{i}")).expect("gradient missing");
+            let v = g.get_scalar(&[0]).expect("get_scalar failed");
+            assert!((v - 1.0 / 65536.0).abs() < 1e-12, "p{i} not unscaled: {v}");
+        }
+    }
+
+    #[test]
+    fn test_to_half_precision_yields_an_actual_f16_tensor() {
+        // Regression: the old implementation returned Tensor::F32 rounded to a 1/1024 grid,
+        // which is neither an fp16 dtype nor fp16 semantics.
+        let manager = AMPManager::new(utils::default_fp16_config());
+        let tensor =
+            Tensor::from_vec(vec![1.0, -2.5, 3.25, 0.5], &[4]).expect("tensor creation failed");
+        let half = manager.to_half_precision(&tensor).expect("cast failed");
+        assert!(
+            matches!(half, Tensor::F16(_)),
+            "to_half_precision must produce Tensor::F16, got {half:?}"
+        );
+        assert_eq!(half.shape(), &[4]);
+
+        let back = manager.to_full_precision(&half).expect("widen failed");
+        assert!(matches!(back, Tensor::F32(_)));
+        // 1.0, -2.5, 3.25 and 0.5 are all exactly representable in binary16.
+        let round_tripped = back.data().expect("data failed");
+        for (o, r) in [1.0f32, -2.5, 3.25, 0.5].iter().zip(round_tripped.iter()) {
+            assert!((o - r).abs() < 1e-6, "expected {o}, got {r}");
+        }
+    }
+
+    #[test]
+    fn test_to_half_precision_keeps_small_magnitudes() {
+        // fp16 has *relative* precision: 1e-4 survives a round trip to ~4 significant
+        // digits. The old absolute 1/1024 grid flushed it straight to 0.
+        let manager = AMPManager::new(utils::default_fp16_config());
+        let tensor = Tensor::from_vec(vec![1e-4], &[1]).expect("tensor creation failed");
+        let back = manager
+            .to_full_precision(&manager.to_half_precision(&tensor).expect("cast failed"))
+            .expect("widen failed");
+        let v = back.get_scalar(&[0]).expect("get_scalar failed");
+        assert!(v > 0.0, "1e-4 must survive an fp16 round trip, got {v}");
+        assert!(
+            (v - 1e-4).abs() / 1e-4 < 1e-2,
+            "fp16 round trip should be within 1% relative, got {v}"
+        );
+    }
+
+    #[test]
+    fn test_bf16_config_selects_bf16_dtype() {
+        let manager = AMPManager::new(utils::default_bf16_config());
+        let tensor = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor creation failed");
+        let half = manager.to_half_precision(&tensor).expect("cast failed");
+        assert!(
+            matches!(half, Tensor::BF16(_)),
+            "expected BF16, got {half:?}"
+        );
+    }
+
+    #[test]
+    fn test_forward_with_amp_casts_down_and_back_up() {
+        let manager = AMPManager::new(utils::default_fp16_config());
+        let input = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor creation failed");
+        let mut seen_half = false;
+        let out = manager
+            .forward_with_amp(&input, |t| {
+                seen_half = matches!(t, Tensor::F16(_));
+                Ok(t)
+            })
+            .expect("forward failed");
+        assert!(seen_half, "the closure must observe a half-precision input");
+        assert!(
+            matches!(out, Tensor::F32(_)),
+            "the output must be widened back to f32"
+        );
+    }
+
+    #[test]
+    fn test_backward_with_amp_invokes_the_gradient_hook_with_a_scaled_loss() {
+        let mut manager = AMPManager::new(utils::default_fp16_config());
+        let loss = Tensor::from_vec(vec![2.0], &[1]).expect("tensor creation failed");
+
+        let (grads, overflow) = manager
+            .backward_with_amp(&loss, |scaled| {
+                // The hook sees loss * 65536 and returns d(loss)/dp = scaled loss here.
+                let v = scaled.get_scalar(&[0]).expect("get_scalar failed");
+                assert!(
+                    (v - 2.0 * 65536.0).abs() < 1e-3,
+                    "hook must receive the scaled loss, got {v}"
+                );
+                let mut m = HashMap::new();
+                m.insert("w".to_string(), scaled.clone());
+                Ok(m)
+            })
+            .expect("backward failed");
+
+        assert!(!overflow);
+        let g = grads.get("w").expect("gradient missing");
+        let v = g.get_scalar(&[0]).expect("get_scalar failed");
+        assert!(
+            (v - 2.0).abs() < 1e-4,
+            "gradient must come back unscaled, got {v}"
+        );
     }
 
     #[test]

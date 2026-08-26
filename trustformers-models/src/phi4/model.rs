@@ -1,3 +1,7 @@
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 
 use crate::phi4::config::{Phi4Config, Phi4RopeScaling};
@@ -30,6 +34,30 @@ impl Phi4RmsNorm {
             weight,
             eps: eps as f32,
         })
+    }
+}
+
+impl Phi4RmsNorm {
+    /// Install the normalisation gain from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `weight` does not have the shape this norm was built for.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        if weight.shape() != self.weight.shape() {
+            return Err(TrustformersError::shape_error(format!(
+                "Phi4RmsNorm expects a {:?} gain, got {:?}",
+                self.weight.shape(),
+                weight.shape()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// The current normalisation gain.
+    pub fn weight(&self) -> &Tensor {
+        &self.weight
     }
 }
 
@@ -130,9 +158,9 @@ impl Phi4RotaryEmbedding {
 
 /// Feed-forward network using SwiGLU (gate_proj · SiLU + up_proj → down_proj).
 pub struct Phi4MLP {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    pub(crate) gate_proj: Linear,
+    pub(crate) up_proj: Linear,
+    pub(crate) down_proj: Linear,
 }
 
 impl Phi4MLP {
@@ -172,10 +200,10 @@ impl Layer for Phi4MLP {
 ///
 /// There is no sliding-window attention in Phi-4 (unlike Phi-3 small).
 pub struct Phi4Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    pub(crate) q_proj: Linear,
+    pub(crate) k_proj: Linear,
+    pub(crate) v_proj: Linear,
+    pub(crate) o_proj: Linear,
     rotary_emb: Phi4RotaryEmbedding,
     num_heads: usize,
     num_kv_heads: usize,
@@ -318,10 +346,10 @@ impl Layer for Phi4Attention {
 /// A single Phi-4 transformer decoder layer:
 /// pre-LN → attention → residual → pre-LN → MLP → residual.
 pub struct Phi4DecoderLayer {
-    self_attn: Phi4Attention,
-    mlp: Phi4MLP,
-    input_layernorm: Phi4RmsNorm,
-    post_attention_layernorm: Phi4RmsNorm,
+    pub(crate) self_attn: Phi4Attention,
+    pub(crate) mlp: Phi4MLP,
+    pub(crate) input_layernorm: Phi4RmsNorm,
+    pub(crate) post_attention_layernorm: Phi4RmsNorm,
 }
 
 impl Phi4DecoderLayer {
@@ -411,7 +439,12 @@ impl Model for Phi4Model {
         self.norm.forward(hidden)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+    /// Load a HuggingFace Phi-4 checkpoint (safetensors or `torch.save`).
+    ///
+    /// See [`Phi4Model::load_checkpoint`] for the name map and the failure modes.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, &["lm_head."])?;
         Ok(())
     }
 
@@ -461,6 +494,134 @@ fn _assert_trustformers_error() -> TrustformersError {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+impl Phi4Model {
+    /// Bind a parsed checkpoint into this model.
+    ///
+    /// The HuggingFace export nests the backbone under `model.`; the bare
+    /// layout is accepted too. `allowed_unused_prefixes` names namespaces this
+    /// base model legitimately ignores (the LM head lives on the causal-LM
+    /// wrapper, not here).
+    ///
+    /// A parameter the checkpoint does not carry is *recorded* and reported by
+    /// [`WeightBinder::finish`](crate::weight_loading::checkpoint::WeightBinder::finish),
+    /// never substituted, so a mismatched checkpoint cannot leave
+    /// randomly-initialised tensors in place while the load returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like a Phi-4 checkpoint,
+    /// when any tensor has the wrong shape, when a parameter is missing, or when
+    /// the checkpoint carries weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim;
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_key_value_heads * head_dim;
+        let intermediate = self.config.intermediate_size;
+        let attention_bias = false;
+        let mlp_bias = false;
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.q_proj"),
+                q_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.q_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.k_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.k_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.v_proj"),
+                kv_width,
+                hidden,
+                attention_bias,
+                &mut layer.self_attn.v_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.o_proj"),
+                hidden,
+                q_width,
+                attention_bias,
+                &mut layer.self_attn.o_proj,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.gate_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.gate_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.up_proj"),
+                intermediate,
+                hidden,
+                mlp_bias,
+                &mut layer.mlp.up_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.down_proj"),
+                hidden,
+                intermediate,
+                mlp_bias,
+                &mut layer.mlp.down_proj,
+            )?;
+
+            if let Some(w) =
+                take_norm_weight(&mut binder, &format!("layers.{i}.input_layernorm"), hidden)?
+            {
+                layer.input_layernorm.set_weight(w)?;
+            }
+            if let Some(w) = take_norm_weight(
+                &mut binder,
+                &format!("layers.{i}.post_attention_layernorm"),
+                hidden,
+            )? {
+                layer.post_attention_layernorm.set_weight(w)?;
+            }
+        }
+
+        if let Some(w) = take_norm_weight(&mut binder, "norm", hidden)? {
+            self.norm.set_weight(w)?;
+        }
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -708,5 +869,172 @@ mod tests {
     fn test_phi4_decoder_layer_construction() {
         let cfg = tiny_phi4_config();
         let _layer = Phi4DecoderLayer::new(&cfg).expect("Phi4DecoderLayer must build");
+    }
+
+    // ── Real checkpoint loading ─────────────────────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    fn loading_config() -> Phi4Config {
+        Phi4Config {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            head_dim: 2,
+            max_position_embeddings: 16,
+            original_max_position_embeddings: 16,
+            rms_norm_eps: 1e-5,
+            rope_theta: 250000.0,
+            hidden_act: "silu".to_string(),
+            tie_word_embeddings: true,
+            attention_dropout: 0.0,
+            embd_dropout: 0.0,
+            rope_scaling: None,
+        }
+    }
+
+    fn loading_fixture(config: &Phi4Config) -> DecoderFixtureSpec {
+        let head_dim = config.head_dim;
+        let mut spec = DecoderFixtureSpec::llama_style(
+            "model.",
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.num_attention_heads * head_dim,
+            config.num_key_value_heads * head_dim,
+        );
+        spec.attention_bias = false;
+        spec.mlp_bias = false;
+        spec
+    }
+
+    /// Regression: `load_pretrained` silently returned `Ok(())` without reading a byte, so no Phi-4 checkpoint
+    /// could ever reach the model's parameters. It now binds every one of them,
+    /// and the proof is that the checkpoint's exact values arrive in the layers.
+    #[test]
+    fn load_pretrained_binds_every_parameter_from_the_checkpoint() {
+        let config = loading_config();
+        let tensors = loading_fixture(&config).tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi4Model::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        for name in [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+            "model.norm.weight",
+        ] {
+            let expected = tensors
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("fixture must carry {name}"))
+                .values
+                .clone();
+            let actual = match name {
+                "model.layers.0.self_attn.q_proj.weight" => {
+                    model.layers[0].self_attn.q_proj.weight().data().expect("readable")
+                },
+                "model.layers.1.mlp.down_proj.weight" => {
+                    model.layers[1].mlp.down_proj.weight().data().expect("readable")
+                },
+                _ => model.norm.weight().data().expect("readable"),
+            };
+            assert_eq!(actual, expected, "{name} must hold the checkpoint's values");
+        }
+    }
+
+    /// Grouped-query attention: `k_proj`/`v_proj` are narrower than `q_proj`.
+    /// A loader that assumed a square projection would reject this fixture.
+    #[test]
+    fn load_pretrained_respects_grouped_query_attention_widths() {
+        let config = loading_config();
+        let head_dim = config.head_dim;
+        let bytes = loading_fixture(&config).safetensors();
+        let mut model = Phi4Model::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            model.layers[0].self_attn.k_proj.weight().shape(),
+            vec![config.num_key_value_heads * head_dim, config.hidden_size]
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().shape(),
+            vec![config.num_attention_heads * head_dim, config.hidden_size]
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.retain(|t| t.name != "model.layers.1.mlp.up_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi4Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.up_proj.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.push(F32Tensor::ramp(
+            "model.layers.9.mystery.weight",
+            &[4, 4],
+            99.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi4Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = Phi4Model::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = Phi4Config {
+            hidden_size: config.hidden_size * 2,
+            intermediate_size: config.intermediate_size * 2,
+            ..config.clone()
+        };
+        let bytes = loading_fixture(&wider).safetensors();
+
+        let mut model = Phi4Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(err.to_string().contains("expects"), "unexpected: {err}");
     }
 }

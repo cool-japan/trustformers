@@ -1,4 +1,13 @@
-// TensorBoard logging integration for training metrics and visualizations
+//! TensorBoard logging integration for training metrics and visualizations.
+//!
+//! Event files are written in the real TFRecord container (masked CRC-32C
+//! framing) with `tensorflow.Event` protobuf payloads, so the output of
+//! [`TensorBoardLogger`] can be opened directly by `tensorboard --logdir`.
+//! The wire format lives in [`crate::monitoring::tfrecord`].
+
+use crate::monitoring::tfrecord::{
+    self, encode_file_version_event, encode_summary_event, HistogramProto, SummaryValue,
+};
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -34,16 +43,23 @@ impl TensorBoardLogger {
         })
     }
 
-    /// Initialize the event file for writing
+    /// Initialize the event file for writing.
+    ///
+    /// The first record of every TensorBoard run is a `file_version` event; it
+    /// is written here so a freshly created file is immediately loadable.
     fn init_event_file(&mut self) -> Result<()> {
         if self.event_file.is_none() {
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let filename = format!("events.out.tfevents.{}.{}", timestamp, self.session_id);
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
+            let filename = format!("events.out.tfevents.{}.{}", now.as_secs(), self.session_id);
             let filepath = self.log_dir.join(filename);
 
             let file = OpenOptions::new().create(true).append(true).open(filepath)?;
+            let mut writer = BufWriter::new(file);
 
-            self.event_file = Some(BufWriter::new(file));
+            tfrecord::write_record(&mut writer, &encode_file_version_event(now.as_secs_f64()))?;
+            writer.flush()?;
+
+            self.event_file = Some(writer);
         }
         Ok(())
     }
@@ -153,38 +169,14 @@ impl TensorBoardLogger {
         Ok(())
     }
 
-    /// Write an event to the log file
+    /// Write an event to the log file as a TFRecord-framed `tensorflow.Event`.
     fn write_event(&mut self, event: &TensorBoardEvent) -> Result<()> {
         if let Some(ref mut writer) = self.event_file {
-            // Write length-prefixed record
-            let serialized = event.serialize()?;
-            let length = serialized.len() as u64;
-
-            // TensorBoard format: [length][crc][data][crc]
-            writer.write_all(&length.to_le_bytes())?;
-            writer.write_all(&Self::crc32(&length.to_le_bytes()).to_le_bytes())?;
-            writer.write_all(&serialized)?;
-            writer.write_all(&Self::crc32(&serialized).to_le_bytes())?;
+            let payload = event.encode();
+            tfrecord::write_record(writer, &payload)?;
             writer.flush()?;
         }
         Ok(())
-    }
-
-    /// Simple CRC32 implementation for TensorBoard format
-    fn crc32(data: &[u8]) -> u32 {
-        // Simplified CRC32 - in production should use proper CRC32 implementation
-        let mut crc = 0xffffffffu32;
-        for &byte in data {
-            crc ^= byte as u32;
-            for _ in 0..8 {
-                if crc & 1 != 0 {
-                    crc = (crc >> 1) ^ 0xedb88320;
-                } else {
-                    crc >>= 1;
-                }
-            }
-        }
-        !crc
     }
 
     /// Flush and close the logger
@@ -300,27 +292,10 @@ impl TensorBoardEvent {
         })
     }
 
-    fn serialize(&self) -> Result<Vec<u8>> {
-        // Simplified serialization - in production should use proper Protocol Buffers
-        let mut data = Vec::new();
-
-        // Write timestamp
-        data.extend_from_slice(&self.timestamp.to_le_bytes());
-
-        // Write step
-        data.extend_from_slice(&self.step.to_le_bytes());
-
-        // Write tag length and tag
-        let tag_bytes = self.tag.as_bytes();
-        data.extend_from_slice(&(tag_bytes.len() as u32).to_le_bytes());
-        data.extend_from_slice(tag_bytes);
-
-        // Write value based on type
-        match &self.value {
-            EventValue::Scalar(value) => {
-                data.push(0); // Scalar type marker
-                data.extend_from_slice(&value.to_le_bytes());
-            },
+    /// Serialise as a `tensorflow.Event` protobuf message.
+    fn encode(&self) -> Vec<u8> {
+        let value = match &self.value {
+            EventValue::Scalar(scalar) => SummaryValue::Simple(*scalar),
             EventValue::Histogram {
                 min,
                 max,
@@ -328,24 +303,19 @@ impl TensorBoardEvent {
                 sum,
                 sum_squares,
                 buckets,
-            } => {
-                data.push(1); // Histogram type marker
-                data.extend_from_slice(&min.to_le_bytes());
-                data.extend_from_slice(&max.to_le_bytes());
-                data.extend_from_slice(&num.to_le_bytes());
-                data.extend_from_slice(&sum.to_le_bytes());
-                data.extend_from_slice(&sum_squares.to_le_bytes());
+            } => SummaryValue::Histogram(HistogramProto {
+                min: *min as f64,
+                max: *max as f64,
+                // `HistogramProto.num` is a `double` in the TensorFlow schema.
+                num: *num as f64,
+                sum: *sum,
+                sum_squares: *sum_squares,
+                bucket_limit: buckets.iter().map(|bucket| bucket.edge).collect(),
+                bucket: buckets.iter().map(|bucket| bucket.count as f64).collect(),
+            }),
+        };
 
-                // Write buckets
-                data.extend_from_slice(&(buckets.len() as u32).to_le_bytes());
-                for bucket in buckets {
-                    data.extend_from_slice(&bucket.edge.to_le_bytes());
-                    data.extend_from_slice(&bucket.count.to_le_bytes());
-                }
-            },
-        }
-
-        Ok(data)
+        encode_summary_event(self.timestamp, self.step as i64, &self.tag, &value)
     }
 }
 
@@ -444,6 +414,108 @@ mod tests {
 
         logger.log_attention_heatmap("attention/layer_0", &attention_tensor, Some(0))?;
 
+        Ok(())
+    }
+
+    /// Regression test: the logger used to emit raw little-endian f64/u64 plus a
+    /// type-marker byte, framed with CRC-32/IEEE. TensorBoard could not read a
+    /// single byte of it. The file must now parse as TFRecord-framed
+    /// `tensorflow.Event` protobuf messages.
+    #[test]
+    fn test_event_file_is_readable_tfrecord_protobuf() -> Result<()> {
+        use crate::monitoring::tfrecord::{decode_message, read_record};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "trustformers_tb_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir)?;
+
+        {
+            let mut logger = TensorBoardLogger::new(&temp_dir)?;
+            logger.log_scalar("loss/train", 0.5, Some(3))?;
+            logger.log_histogram("weights/layer0", &[1.0, 2.0, 3.0, 4.0], Some(4))?;
+            logger.close()?;
+        }
+
+        let event_file = std::fs::read_dir(&temp_dir)?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("events.out.tfevents."))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| anyhow!("no events.out.tfevents.* file was produced"))?;
+
+        let bytes = std::fs::read(&event_file)?;
+        let mut cursor = std::io::Cursor::new(bytes);
+
+        // Record 0: file_version.
+        let first = read_record(&mut cursor)?.ok_or_else(|| anyhow!("missing file_version"))?;
+        let first_fields = decode_message(&first)?;
+        let version = first_fields
+            .iter()
+            .find(|(number, _)| *number == 3)
+            .and_then(|(_, field)| field.as_bytes())
+            .ok_or_else(|| anyhow!("first record is not a file_version event"))?;
+        assert_eq!(std::str::from_utf8(version)?, "brain.Event:2");
+
+        // Record 1: the scalar summary.
+        let second = read_record(&mut cursor)?.ok_or_else(|| anyhow!("missing scalar event"))?;
+        let second_fields = decode_message(&second)?;
+        let step = second_fields
+            .iter()
+            .find(|(number, _)| *number == 2)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing step"))?;
+        assert_eq!(step.1, crate::monitoring::tfrecord::WireField::Varint(3));
+
+        let summary = second_fields
+            .iter()
+            .find(|(number, _)| *number == 5)
+            .and_then(|(_, field)| field.as_bytes())
+            .ok_or_else(|| anyhow!("missing summary"))?
+            .to_vec();
+        let value_bytes = decode_message(&summary)?
+            .into_iter()
+            .find(|(number, _)| *number == 1)
+            .and_then(|(_, field)| field.as_bytes().map(|b| b.to_vec()))
+            .ok_or_else(|| anyhow!("missing summary value"))?;
+        let value_fields = decode_message(&value_bytes)?;
+        let tag = value_fields
+            .iter()
+            .find(|(number, _)| *number == 1)
+            .and_then(|(_, field)| field.as_bytes())
+            .ok_or_else(|| anyhow!("missing tag"))?;
+        assert_eq!(std::str::from_utf8(tag)?, "loss/train");
+        let scalar = value_fields
+            .iter()
+            .find(|(number, _)| *number == 2)
+            .and_then(|(_, field)| field.as_float())
+            .ok_or_else(|| anyhow!("missing simple_value"))?;
+        assert!((scalar - 0.5).abs() < 1e-6);
+
+        // Record 2: the histogram summary carries a HistogramProto, not a scalar.
+        let third = read_record(&mut cursor)?.ok_or_else(|| anyhow!("missing histogram event"))?;
+        let third_summary = decode_message(&third)?
+            .into_iter()
+            .find(|(number, _)| *number == 5)
+            .and_then(|(_, field)| field.as_bytes().map(|b| b.to_vec()))
+            .ok_or_else(|| anyhow!("missing summary"))?;
+        let third_value = decode_message(&third_summary)?
+            .into_iter()
+            .find(|(number, _)| *number == 1)
+            .and_then(|(_, field)| field.as_bytes().map(|b| b.to_vec()))
+            .ok_or_else(|| anyhow!("missing summary value"))?;
+        let third_fields = decode_message(&third_value)?;
+        assert!(
+            third_fields.iter().any(|(number, _)| *number == 5),
+            "histogram events must populate Summary.Value.histo (field 5)"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
         Ok(())
     }
 

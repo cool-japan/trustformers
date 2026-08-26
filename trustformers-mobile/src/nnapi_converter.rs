@@ -509,7 +509,7 @@ impl NNAPIModelConverter {
         let output_indices = self.identify_output_operands(&operations);
 
         Ok(NNAPIModel {
-            metadata: self.create_metadata(),
+            metadata: self.create_metadata(&operands, &operations),
             operands,
             operations,
             inputs: input_indices,
@@ -647,13 +647,17 @@ impl NNAPIModelConverter {
     }
 
     /// Create metadata
-    fn create_metadata(&self) -> NNAPIModelMetadata {
+    fn create_metadata(
+        &self,
+        operands: &[NNAPIOperand],
+        operations: &[NNAPIOperation],
+    ) -> NNAPIModelMetadata {
         NNAPIModelMetadata {
             name: "TrustformersModel".to_string(),
             version: "1.0.0".to_string(),
             min_api_level: self.config.target_api_level,
             supported_devices: self.config.target_devices.clone(),
-            model_hash: self.compute_model_hash(),
+            model_hash: Self::compute_model_hash(operands, operations),
             performance_hints: PerformanceHints {
                 expected_latency_ms: None,
                 expected_power_mw: None,
@@ -663,10 +667,57 @@ impl NNAPIModelConverter {
         }
     }
 
-    /// Compute model hash for caching
-    fn compute_model_hash(&self) -> String {
-        // Simplified hash computation
-        "model_hash_placeholder".to_string()
+    /// Compute a real, content-derived model hash for the compiled-model
+    /// cache described on [`NNAPIModelMetadata::model_hash`].
+    ///
+    /// Hashes a stable serialization (`serde_json`, chosen because
+    /// `NNAPIOperand`/`NNAPIOperation` already derive `Serialize` and JSON's
+    /// field-name/value encoding is unambiguous field-by-field -- unlike a
+    /// hand-rolled byte concatenation, there is no risk of two different
+    /// operand lists serializing to the same byte stream by accident) of
+    /// the full operand and operation graph with `sha2::Sha256`, hex-encoded.
+    /// Two conversions of the same graph produce the same hash (the JSON
+    /// serialization of a `Vec` is order-sensitive, and `operands`/
+    /// `operations` are already built in a deterministic order by
+    /// `convert_to_nnapi`); two different graphs collide only with
+    /// cryptographic-hash-collision probability, unlike the previous
+    /// constant string (which "collided" -- identically -- for every model
+    /// ever converted, silently defeating any cache keyed on it).
+    ///
+    /// # Errors
+    ///
+    /// Never fails in practice (`NNAPIOperand`/`NNAPIOperation` contain only
+    /// directly-serializable fields), but a serialization failure -- which
+    /// would indicate a real bug in those types -- is surfaced as a
+    /// deterministic placeholder hash tag rather than a panic, since this
+    /// function has no `Result` in its signature (metadata construction is
+    /// infallible elsewhere in this module).
+    fn compute_model_hash(operands: &[NNAPIOperand], operations: &[NNAPIOperation]) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        match serde_json::to_vec(operands) {
+            Ok(bytes) => hasher.update(&bytes),
+            Err(e) => {
+                tracing::warn!("failed to serialize NNAPI operands for hashing: {e}");
+                return "unhashable-operands".to_string();
+            },
+        }
+        // A length-prefixing separator between the two serialized arrays
+        // prevents an operands-tail / operations-head collision (two
+        // different (operands, operations) splits that happen to
+        // concatenate to the same byte stream); `\0` cannot appear inside
+        // either JSON array's own bytes.
+        hasher.update(b"\0");
+        match serde_json::to_vec(operations) {
+            Ok(bytes) => hasher.update(&bytes),
+            Err(e) => {
+                tracing::warn!("failed to serialize NNAPI operations for hashing: {e}");
+                return "unhashable-operations".to_string();
+            },
+        }
+
+        hex::encode(hasher.finalize())
     }
 
     /// Select execution preference
@@ -1343,5 +1394,107 @@ mod tests {
     fn test_nnapi_format_equality() {
         assert_eq!(NNAPIFormat::Binary, NNAPIFormat::Binary);
         assert_ne!(NNAPIFormat::Binary, NNAPIFormat::TFLite);
+    }
+
+    fn sample_operand(index: u32, dimensions: Vec<u32>) -> NNAPIOperand {
+        NNAPIOperand {
+            index,
+            dtype: NNAPIDataType::TensorFloat32,
+            dimensions,
+            scale: None,
+            zero_point: None,
+            lifetime: OperandLifetime::ModelInput,
+            location: None,
+        }
+    }
+
+    fn sample_operation(
+        op_type: NNAPIOperationType,
+        inputs: Vec<u32>,
+        outputs: Vec<u32>,
+    ) -> NNAPIOperation {
+        NNAPIOperation {
+            operation_type: op_type,
+            inputs,
+            outputs,
+            params: OperationParams {
+                params: HashMap::new(),
+            },
+        }
+    }
+
+    /// Regression test for the P1 finding: `compute_model_hash` must derive
+    /// its output from the actual operand/operation graph, not return the
+    /// same constant string ("model_hash_placeholder") for every model.
+    /// Two structurally different graphs must hash differently.
+    #[test]
+    fn test_compute_model_hash_differs_for_different_graphs() {
+        let operands_a = vec![sample_operand(0, vec![1, 3, 224, 224])];
+        let operations_a = vec![sample_operation(NNAPIOperationType::Relu, vec![0], vec![1])];
+
+        let operands_b = vec![sample_operand(0, vec![1, 3, 32, 32])];
+        let operations_b = vec![sample_operation(
+            NNAPIOperationType::Conv2D,
+            vec![0],
+            vec![1],
+        )];
+
+        let hash_a = NNAPIModelConverter::compute_model_hash(&operands_a, &operations_a);
+        let hash_b = NNAPIModelConverter::compute_model_hash(&operands_b, &operations_b);
+
+        assert_ne!(
+            hash_a, hash_b,
+            "structurally different operand/operation graphs must hash differently, not both \
+             collapse to the same constant"
+        );
+        assert_ne!(hash_a, "model_hash_placeholder");
+        assert_ne!(hash_b, "model_hash_placeholder");
+    }
+
+    /// The same graph, hashed twice, must produce the same hash -- a real
+    /// hash is deterministic, and a caching layer keyed on it depends on
+    /// that.
+    #[test]
+    fn test_compute_model_hash_is_deterministic_for_the_same_graph() {
+        let operands = vec![
+            sample_operand(0, vec![1, 8, 8, 8]),
+            sample_operand(1, vec![1, 4, 4, 4]),
+        ];
+        let operations = vec![sample_operation(
+            NNAPIOperationType::MaxPool2D,
+            vec![0],
+            vec![1],
+        )];
+
+        let hash_1 = NNAPIModelConverter::compute_model_hash(&operands, &operations);
+        let hash_2 = NNAPIModelConverter::compute_model_hash(&operands, &operations);
+
+        assert_eq!(hash_1, hash_2);
+        // A real SHA-256 hex digest is 64 hex characters; the previous
+        // constant ("model_hash_placeholder", 22 characters) is not.
+        assert_eq!(
+            hash_1.len(),
+            64,
+            "expected a 64-character SHA-256 hex digest, got {hash_1:?}"
+        );
+        assert!(hash_1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A single-operand graph and a two-operand graph built from adding one
+    /// more operand to it must still hash differently -- catches an
+    /// implementation that hashed only, say, `operands.len()` or only the
+    /// first element instead of the full content.
+    #[test]
+    fn test_compute_model_hash_sensitive_to_operand_count() {
+        let one_operand = vec![sample_operand(0, vec![1, 3, 224, 224])];
+        let two_operands = vec![
+            sample_operand(0, vec![1, 3, 224, 224]),
+            sample_operand(1, vec![1, 3, 224, 224]),
+        ];
+        let operations: Vec<NNAPIOperation> = Vec::new();
+
+        let hash_one = NNAPIModelConverter::compute_model_hash(&one_operand, &operations);
+        let hash_two = NNAPIModelConverter::compute_model_hash(&two_operands, &operations);
+        assert_ne!(hash_one, hash_two);
     }
 }

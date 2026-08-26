@@ -159,11 +159,11 @@ impl GptNeoBlock {
 }
 
 impl GptNeoAttention {
-    fn new(config: &GptNeoConfig, attention_type: &str) -> Result<Self> {
+    pub fn new(config: &GptNeoConfig, attention_type: &str) -> Result<Self> {
         Self::new_with_device(config, attention_type, Device::CPU)
     }
 
-    fn new_with_device(
+    pub fn new_with_device(
         config: &GptNeoConfig,
         attention_type: &str,
         device: Device,
@@ -185,19 +185,29 @@ impl GptNeoAttention {
         self.device
     }
 
-    fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        // For now, implement as global attention regardless of type
-        // In a full implementation, local attention would use sliding window
-        self.attention.forward(hidden_states, attention_mask)
+    /// `Some(window)` for "local" layers, `None` for "global" layers.
+    pub fn window_size(&self) -> Option<usize> {
+        self.window_size
+    }
+
+    pub fn forward(
+        &self,
+        hidden_states: Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        // `window_size` is `Some(w)` for "local" layers and `None` for
+        // "global" layers (set in `new_with_device` from `attention_type`),
+        // so this naturally alternates per GPT-Neo's configured pattern.
+        self.attention.forward(hidden_states, attention_mask, self.window_size)
     }
 }
 
 impl MultiHeadAttention {
-    fn new(config: &GptNeoConfig) -> Result<Self> {
+    pub fn new(config: &GptNeoConfig) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
 
-    fn new_with_device(config: &GptNeoConfig, device: Device) -> Result<Self> {
+    pub fn new_with_device(config: &GptNeoConfig, device: Device) -> Result<Self> {
         let head_dim = config.hidden_size / config.num_heads;
         Ok(Self {
             q_proj: Linear::new(config.hidden_size, config.hidden_size, false),
@@ -215,23 +225,105 @@ impl MultiHeadAttention {
         self.device
     }
 
-    fn forward(&self, hidden_states: Tensor, _attention_mask: Option<&Tensor>) -> Result<Tensor> {
-        let _batch_size = hidden_states.shape()[0];
-        let _seq_len = hidden_states.shape()[1];
-
+    /// Real multi-head scaled dot-product attention with causal masking and
+    /// an optional local sliding window (`window = Some(w)`: query position
+    /// `i` attends only to keys with `i - j < w`; `window = None`: full
+    /// causal attention).
+    pub fn forward(
+        &self,
+        hidden_states: Tensor,
+        _attention_mask: Option<&Tensor>,
+        window: Option<usize>,
+    ) -> Result<Tensor> {
         // Compute Q, K, V
-        let _q = self.q_proj.forward(hidden_states.clone())?;
-        let _k = self.k_proj.forward(hidden_states.clone())?;
+        let q = self.q_proj.forward(hidden_states.clone())?;
+        let k = self.k_proj.forward(hidden_states.clone())?;
         let v = self.v_proj.forward(hidden_states)?;
 
-        // Reshape to [batch_size, num_heads, seq_len, head_dim]
-        // For now, we'll use a simplified attention computation
-        // In a full implementation, we'd properly reshape and compute attention scores
+        if self.num_heads == 0 {
+            return Err(tensor_op_error("gptneo_attn", "num_heads must be > 0"));
+        }
+        let width = self.num_heads * self.head_dim;
+        let total_q: usize = q.shape().iter().product();
+        if width == 0 || !total_q.is_multiple_of(width) {
+            return Err(tensor_op_error(
+                "gptneo_attn",
+                "q size inconsistent with num_heads * head_dim",
+            ));
+        }
+        let seq_len = total_q / width;
+        if let Some(w) = window {
+            if w == 0 {
+                return Err(tensor_op_error("gptneo_attn", "window size must be > 0"));
+            }
+        }
 
-        // Simplified attention: just use V values for now
-        let output = self.out_proj.forward(v)?;
+        match (&q, &k, &v) {
+            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
+                let q_data = q_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptneo_attn", "q tensor not contiguous"))?;
+                let k_data = k_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptneo_attn", "k tensor not contiguous"))?;
+                let v_data = v_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptneo_attn", "v tensor not contiguous"))?;
+                if q_data.len() != seq_len * width
+                    || k_data.len() != seq_len * width
+                    || v_data.len() != seq_len * width
+                {
+                    return Err(tensor_op_error(
+                        "gptneo_attn",
+                        "q/k/v tensor size inconsistent with num_heads * head_dim",
+                    ));
+                }
 
-        Ok(output)
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
+                let mut out = vec![0f32; seq_len * width];
+                for h in 0..self.num_heads {
+                    for i in 0..seq_len {
+                        let q_off = i * width + h * self.head_dim;
+                        let mut scores = Vec::with_capacity(i + 1);
+                        let mut key_positions = Vec::with_capacity(i + 1);
+                        for j in 0..=i {
+                            if let Some(w) = window {
+                                if i - j >= w {
+                                    continue;
+                                }
+                            }
+                            let k_off = j * width + h * self.head_dim;
+                            let dot: f32 = (0..self.head_dim)
+                                .map(|d| q_data[q_off + d] * k_data[k_off + d])
+                                .sum();
+                            scores.push(dot * scale);
+                            key_positions.push(j);
+                        }
+                        let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let mut weights = vec![0f32; scores.len()];
+                        let mut sum = 0f32;
+                        for (idx, &s) in scores.iter().enumerate() {
+                            let e = (s - max_val).exp();
+                            weights[idx] = e;
+                            sum += e;
+                        }
+                        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                        let out_off = i * width + h * self.head_dim;
+                        for (idx, &j) in key_positions.iter().enumerate() {
+                            let wn = weights[idx] * inv_sum;
+                            let v_off = j * width + h * self.head_dim;
+                            for d in 0..self.head_dim {
+                                out[out_off + d] += wn * v_data[v_off + d];
+                            }
+                        }
+                    }
+                }
+
+                let attended = Tensor::from_vec(out, &[seq_len, width])?;
+                self.out_proj.forward(attended)
+            },
+            _ => Err(tensor_op_error("gptneo_attn", "q, k, v must be F32")),
+        }
     }
 }
 
@@ -514,9 +606,10 @@ impl GptNeoLMHeadModel {
     ) -> Result<()> {
         use std::process::Command;
 
-        println!(
+        tracing::info!(
             "Downloading model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
+            model_name,
+            model_path
         );
 
         // Create the model directory
@@ -540,7 +633,7 @@ impl GptNeoLMHeadModel {
             let file_url = format!("{}/{}", base_url, file_name);
             let file_path = model_path.join(file_name);
 
-            println!("Attempting to download {}", file_url);
+            tracing::info!("Attempting to download {}", file_url);
 
             // Try using curl first
             let file_path_str = file_path.to_str().ok_or_else(|| {
@@ -558,18 +651,18 @@ impl GptNeoLMHeadModel {
 
             match curl_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {}", file_name);
+                    tracing::info!("Successfully downloaded {}", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with curl: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("curl not available: {}", e);
+                    tracing::info!("curl not available: {}", e);
                 },
             }
 
@@ -578,18 +671,18 @@ impl GptNeoLMHeadModel {
 
             match wget_result {
                 Ok(output) if output.status.success() => {
-                    println!("Successfully downloaded {} with wget", file_name);
+                    tracing::info!("Successfully downloaded {} with wget", file_name);
                     continue;
                 },
                 Ok(output) => {
-                    eprintln!(
+                    tracing::warn!(
                         "Failed to download {} with wget: {}",
                         file_name,
                         String::from_utf8_lossy(&output.stderr)
                     );
                 },
                 Err(e) => {
-                    println!("wget not available: {}", e);
+                    tracing::info!("wget not available: {}", e);
                 },
             }
 
@@ -602,7 +695,7 @@ impl GptNeoLMHeadModel {
             }
         }
 
-        println!(
+        tracing::info!(
             "Successfully downloaded model {} from HuggingFace Hub",
             model_name
         );

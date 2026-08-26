@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -110,90 +110,14 @@ impl Default for TimestampedMetrics {
     }
 }
 
-/// Circular buffer for efficient metrics storage
-///
-/// High-performance circular buffer optimized for real-time metrics storage
-/// with constant-time insertion and efficient memory management.
-#[derive(Debug)]
-pub struct CircularBuffer<T> {
-    /// Buffer data
-    buffer: Vec<Option<T>>,
-
-    /// Current write position
-    write_pos: AtomicUsize,
-
-    /// Current size
-    size: AtomicUsize,
-
-    /// Maximum capacity
-    capacity: usize,
-
-    /// Buffer statistics
-    stats: BufferStatistics,
-}
-
-impl<T> CircularBuffer<T> {
-    /// Create new circular buffer
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            buffer: (0..capacity).map(|_| None).collect(),
-            write_pos: AtomicUsize::new(0),
-            size: AtomicUsize::new(0),
-            capacity,
-            stats: BufferStatistics::default(),
-        }
-    }
-
-    /// Insert item into buffer
-    pub fn insert(&self, item: T) {
-        let start_time = Instant::now();
-
-        let pos = self.write_pos.fetch_add(1, Ordering::AcqRel) % self.capacity;
-
-        // This is unsafe but necessary for performance - we need proper synchronization
-        // In a real implementation, we'd use proper atomic operations or locks
-        unsafe {
-            let buffer_ptr = self.buffer.as_ptr() as *mut Option<T>;
-            let slot = buffer_ptr.add(pos);
-            std::ptr::write(slot, Some(item));
-        }
-
-        let current_size = self.size.load(Ordering::Acquire);
-        if current_size < self.capacity {
-            self.size.fetch_add(1, Ordering::AcqRel);
-        } else {
-            self.stats.overwrites.fetch_add(1, Ordering::AcqRel);
-        }
-
-        self.stats.total_insertions.fetch_add(1, Ordering::AcqRel);
-
-        let insertion_time = start_time.elapsed().as_nanos() as f32;
-        // Update running average (simplified)
-        let current_avg = self.stats.avg_insertion_time.load(Ordering::Acquire);
-        let new_avg = (current_avg * 0.9) + (insertion_time * 0.1);
-        self.stats.avg_insertion_time.store(new_avg, Ordering::Release);
-    }
-
-    /// Get current buffer size
-    pub fn size(&self) -> usize {
-        self.size.load(Ordering::Acquire)
-    }
-
-    /// Get buffer capacity
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    /// Check if buffer is full
-    pub fn is_full(&self) -> bool {
-        self.size.load(Ordering::Acquire) >= self.capacity
-    }
-
-    /// Get buffer statistics
-    pub fn stats(&self) -> &BufferStatistics {
-        &self.stats
-    }
-}
+// `CircularBuffer` was deleted from this module in 0.2.1. It was a shadow copy
+// of `collector::types::CircularBuffer` -- the one that is actually used, held
+// behind a `Mutex` by `RealTimeMetricsCollector` -- and nothing in the crate
+// ever constructed this one. It was also unsound: `insert(&self, item: T)` cast
+// the buffer's `*const` to `*mut` and wrote through it from a shared reference,
+// with a comment conceding that "in a real implementation, we'd use proper
+// atomic operations or locks". `real_time_metrics::CircularBuffer` now names
+// the collector's implementation.
 
 /// Buffer performance statistics
 ///
@@ -237,182 +161,15 @@ impl BufferStatistics {
     }
 }
 
-/// Aggregation window for time-based analysis
-///
-/// Time-based aggregation window with statistical analysis and trend detection
-/// capabilities for real-time performance insights.
-#[derive(Debug)]
-pub struct AggregationWindow {
-    /// Window duration
-    pub duration: Duration,
-
-    /// Data points in window
-    pub data_points: VecDeque<TimestampedMetrics>,
-
-    /// Window statistics
-    pub statistics: WindowStatistics,
-
-    /// Last update timestamp
-    pub last_update: DateTime<Utc>,
-
-    /// Window full indicator
-    pub is_full: bool,
-}
-
-impl AggregationWindow {
-    /// Create new aggregation window
-    pub fn new(duration: Duration) -> Self {
-        Self {
-            duration,
-            data_points: VecDeque::new(),
-            statistics: WindowStatistics::default(),
-            last_update: Utc::now(),
-            is_full: false,
-        }
-    }
-
-    /// Add data point to window
-    pub fn add_data_point(&mut self, point: TimestampedMetrics) {
-        let now = Utc::now();
-        let cutoff = now
-            - chrono::Duration::from_std(self.duration)
-                .unwrap_or_else(|_| chrono::Duration::seconds(60));
-
-        // Remove old data points
-        while let Some(front) = self.data_points.front() {
-            if front.timestamp < cutoff {
-                self.data_points.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Add new data point
-        self.data_points.push_back(point);
-        self.last_update = now;
-
-        // Update statistics
-        self.update_statistics();
-
-        // Check if window is full (has data across the entire duration)
-        if let (Some(front), Some(back)) = (self.data_points.front(), self.data_points.back()) {
-            let window_span = back.timestamp - front.timestamp;
-            let duration_chrono = chrono::Duration::from_std(self.duration)
-                .unwrap_or_else(|_| chrono::Duration::seconds(60));
-            self.is_full = window_span >= duration_chrono * 8 / 10; // 80% coverage
-        }
-    }
-
-    /// Update window statistics
-    fn update_statistics(&mut self) {
-        if self.data_points.is_empty() {
-            return;
-        }
-
-        // Calculate basic statistics
-        let count = self.data_points.len();
-        let throughputs: Vec<f64> = self.data_points.iter().map(|p| p.metrics.throughput).collect();
-
-        let mean_throughput = throughputs.iter().sum::<f64>() / count as f64;
-        let throughput_variance: f64 =
-            throughputs.iter().map(|t| (t - mean_throughput).powi(2)).sum::<f64>() / count as f64;
-        let throughput_std_dev = throughput_variance.sqrt();
-
-        // Calculate latency statistics
-        let latencies: Vec<Duration> = self.data_points.iter().map(|p| p.metrics.latency).collect();
-
-        let mean_latency_nanos: f64 =
-            latencies.iter().map(|l| l.as_nanos() as f64).sum::<f64>() / count as f64;
-        let mean_latency = Duration::from_nanos(mean_latency_nanos as u64);
-
-        // Calculate CPU and memory utilization
-        let mean_cpu: f32 =
-            self.data_points.iter().map(|p| p.metrics.cpu_utilization).sum::<f32>() / count as f32;
-
-        let mean_memory: f32 =
-            self.data_points.iter().map(|p| p.metrics.memory_utilization).sum::<f32>()
-                / count as f32;
-
-        // Calculate percentiles (simplified)
-        let mut sorted_latencies = latencies;
-        sorted_latencies.sort();
-        let mut percentiles = HashMap::new();
-        if !sorted_latencies.is_empty() {
-            percentiles.insert(50, sorted_latencies[count * 50 / 100]);
-            percentiles.insert(90, sorted_latencies[count * 90 / 100]);
-            percentiles.insert(95, sorted_latencies[count * 95 / 100]);
-            percentiles.insert(99, sorted_latencies[count * 99 / 100]);
-        }
-
-        // Update statistics
-        self.statistics = WindowStatistics {
-            count,
-            calculated_at: Utc::now(),
-            mean: mean_throughput,
-            std_dev: throughput_std_dev,
-            min: 0.0, // Would need to track actual min
-            max: 0.0, // Would need to track actual max
-            outlier_count: 0,
-            mean_throughput,
-            throughput_std_dev,
-            mean_latency,
-            latency_percentiles: percentiles,
-            mean_cpu_utilization: mean_cpu,
-            mean_memory_utilization: mean_memory,
-            quality_metrics: self.calculate_quality_metrics(),
-            trend_analysis: TrendAnalysis::default(),
-            distribution_analysis: DistributionAnalysis::default(),
-            efficiency_trend: TrendDirection::Stable, // Simplified
-            variability_coefficient: if mean_throughput > 0.0 {
-                (throughput_std_dev / mean_throughput) as f32
-            } else {
-                0.0
-            },
-        };
-    }
-
-    /// Calculate quality metrics for the window
-    fn calculate_quality_metrics(&self) -> QualityMetrics {
-        if self.data_points.is_empty() {
-            return QualityMetrics::default();
-        }
-
-        let count = self.data_points.len() as f32;
-        let expected_points = (self.duration.as_secs() * 10) as f32; // Assuming 10Hz base rate
-        let completeness_score = (count / expected_points).min(1.0);
-
-        // Calculate accuracy based on quality scores
-        let accuracy_score: f32 =
-            self.data_points.iter().map(|p| p.quality_score).sum::<f32>() / count;
-
-        // Simplified quality metrics
-        QualityMetrics {
-            overall_score: (completeness_score + accuracy_score) / 2.0,
-            completeness_score,
-            accuracy_score,
-            consistency_score: 0.9,   // Simplified
-            timeliness_score: 0.95,   // Simplified
-            outlier_percentage: 0.05, // Simplified
-            missing_data_percentage: (1.0 - completeness_score) * 100.0,
-            quality_trend: TrendDirection::Stable,
-        }
-    }
-
-    /// Get window span
-    pub fn get_span(&self) -> Option<Duration> {
-        if let (Some(front), Some(back)) = (self.data_points.front(), self.data_points.back()) {
-            let span = back.timestamp - front.timestamp;
-            span.to_std().ok()
-        } else {
-            None
-        }
-    }
-
-    /// Check if window has enough data
-    pub fn has_sufficient_data(&self) -> bool {
-        self.data_points.len() >= 10 && self.is_full
-    }
-}
+// `AggregationWindow` was deleted from this module in 0.2.1. Like
+// `CircularBuffer` above it was a shadow copy -- `aggregator::types::AggregationWindow`
+// is the one the aggregator actually builds -- and nothing constructed this one.
+// Its `update_statistics` also published invented numbers: `min: 0.0`/`max: 0.0`
+// under "would need to track actual min", `outlier_count: 0`,
+// `efficiency_trend: Stable`, and a `QualityMetrics` whose consistency (0.9),
+// timeliness (0.95) and outlier percentage (0.05) were constants labelled
+// "Simplified". `real_time_metrics::AggregationWindow` now names the
+// aggregator's implementation.
 
 /// Comprehensive statistical calculations for windows
 ///

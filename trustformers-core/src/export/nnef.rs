@@ -1,17 +1,31 @@
-//! NNEF (Neural Network Exchange Format) export functionality
+//! NNEF (Neural Network Exchange Format) export surface.
 //!
-//! This module provides NNEF export capabilities for TrustformeRS models.
+//! NNEF is a Khronos standard for representing neural networks. An NNEF package is
+//! an *operation graph* (`graph.nnef`) plus the binary tensors it references.
+//!
+//! # Why no NNEF package is written
+//!
+//! [`Model`] exposes parameters (via [`Model::named_tensors`]) but not topology:
+//! there is no way to learn which operations connect which tensors. Earlier
+//! revisions of this exporter papered over that by emitting a fixed 768-wide,
+//! 12-block transformer graph plus weight files filled with `(i % 256) as u8`,
+//! regardless of the model handed to it. That artifact described a model that did
+//! not exist, so it is no longer produced: [`NNEFExporter::export`] now returns a
+//! structured [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation).
+//!
+//! Use the GGUF or GGML exporters to write the model's real parameters; they are
+//! tensor containers and need no topology.
 
-#![allow(unused_variables)] // Export implementation with reserved parameters
-//! NNEF is a Khronos standard for representing neural networks.
-
+use crate::errors::unsupported_operation;
 use crate::export::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
-use serde_json::{json, Value as JsonValue};
-use std::fs::{create_dir_all, File};
-use std::io::Write;
-use std::path::Path;
+
+/// Explanation attached to every refusal to write an NNEF package.
+pub const NNEF_UNSUPPORTED_REASON: &str =
+    "an NNEF package requires the model's operation graph, which the `Model` trait \
+     does not expose (`named_tensors` yields parameters only). TrustformeRS will not \
+     emit a synthesized graph under a real model's name.";
 
 /// NNEF exporter for TrustformeRS models
 #[derive(Clone)]
@@ -37,189 +51,21 @@ impl NNEFExporter {
         }
     }
 
-    /// Export model to NNEF format
-    fn export_to_nnef<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
-        let output_path = Path::new(&config.output_path);
-
-        // Create output directory if it doesn't exist
-        if let Some(parent) = output_path.parent() {
-            create_dir_all(parent)?;
-        }
-
-        // Generate NNEF graph structure
-        let graph = self.build_nnef_graph(model, config)?;
-
-        // Create NNEF package directory
-        let package_dir = output_path.with_extension("nnef");
-        create_dir_all(&package_dir)?;
-
-        // Write graph.nnef file
-        let graph_file = package_dir.join("graph.nnef");
-        let mut file = File::create(graph_file)?;
-        file.write_all(graph.as_bytes())?;
-
-        // Write graph.json metadata
-        let metadata = self.build_metadata(model, config)?;
-        let metadata_file = package_dir.join("graph.json");
-        let mut file = File::create(metadata_file)?;
-        file.write_all(serde_json::to_string_pretty(&metadata)?.as_bytes())?;
-
-        // Export weights as binary tensors
-        self.export_weights(model, &package_dir, config)?;
-
-        println!("✅ NNEF export completed: {}", package_dir.display());
-        Ok(())
+    /// The NNEF version this exporter would declare.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
-    /// Build NNEF graph representation
-    fn build_nnef_graph<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<String> {
-        let mut graph = String::new();
-
-        // NNEF header
-        graph.push_str(&format!("version {};\n", self.version));
-
-        // Extensions
-        for ext in &self.extensions {
-            graph.push_str("extension KHR_enable_fragment_definitions;\n");
-        }
-
-        graph.push('\n');
-
-        // Model info - intelligent shape inference based on config and model type
-        let input_shape = self.get_input_shape(config);
-        let output_shape = self.get_output_shape(config);
-
-        // Graph definition
-        graph.push_str("graph network(\n");
-        graph.push_str(&format!(
-            "    input: tensor<scalar=real, shape=[{}]>\n",
-            input_shape.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
-        ));
-        graph.push_str(") -> (\n");
-        graph.push_str(&format!(
-            "    output: tensor<scalar=real, shape=[{}]>\n",
-            output_shape.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", ")
-        ));
-        graph.push_str(")\n{\n");
-
-        // Layer definitions (simplified transformer structure)
-        self.add_transformer_layers(&mut graph, config)?;
-
-        graph.push_str("}\n");
-
-        Ok(graph)
+    /// The NNEF extensions this exporter would declare.
+    pub fn extensions(&self) -> &[String] {
+        &self.extensions
     }
 
-    /// Add transformer layer definitions to NNEF graph
-    fn add_transformer_layers(&self, graph: &mut String, config: &ExportConfig) -> Result<()> {
-        // Input embedding
-        graph.push_str("    # Input embedding\n");
-        graph.push_str("    embedded = linear(input, weight=variable<scalar=real, shape=[512, 768]>, bias=variable<scalar=real, shape=[768]>);\n");
-
-        // Multi-head attention
-        graph.push_str("\n    # Multi-head attention\n");
-        graph.push_str(
-            "    query = linear(embedded, weight=variable<scalar=real, shape=[768, 768]>);\n",
-        );
-        graph.push_str(
-            "    key = linear(embedded, weight=variable<scalar=real, shape=[768, 768]>);\n",
-        );
-        graph.push_str(
-            "    value = linear(embedded, weight=variable<scalar=real, shape=[768, 768]>);\n",
-        );
-
-        // Reshape for multi-head
-        graph.push_str("    query_heads = reshape(query, shape=[?, 12, 64]);\n");
-        graph.push_str("    key_heads = reshape(key, shape=[?, 12, 64]);\n");
-        graph.push_str("    value_heads = reshape(value, shape=[?, 12, 64]);\n");
-
-        // Attention computation
-        graph.push_str(
-            "    scores = matmul(query_heads, transpose(key_heads, axes=[0, 1, 3, 2]));\n",
-        );
-        graph.push_str("    scaled_scores = mul(scores, scalar=0.125);  # 1/sqrt(64)\n");
-        graph.push_str("    attention_weights = softmax(scaled_scores, axes=[3]);\n");
-        graph.push_str("    attention_output = matmul(attention_weights, value_heads);\n");
-
-        // Reshape back
-        graph.push_str("    attention_reshaped = reshape(attention_output, shape=[?, 768]);\n");
-
-        // Feed forward
-        graph.push_str("\n    # Feed forward network\n");
-        graph.push_str("    ff_intermediate = linear(attention_reshaped, weight=variable<scalar=real, shape=[768, 3072]>, bias=variable<scalar=real, shape=[3072]>);\n");
-        graph.push_str("    ff_activated = gelu(ff_intermediate);\n");
-        graph.push_str("    ff_output = linear(ff_activated, weight=variable<scalar=real, shape=[3072, 768]>, bias=variable<scalar=real, shape=[768]>);\n");
-
-        // Layer normalization and residual
-        graph.push_str("\n    # Layer normalization and residual connection\n");
-        graph.push_str("    residual = add(embedded, ff_output);\n");
-        graph.push_str("    output = layer_normalization(residual, epsilon=1e-12);\n");
-
-        Ok(())
-    }
-
-    /// Build metadata for NNEF package
-    fn build_metadata<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<JsonValue> {
-        Ok(json!({
-            "format": "NNEF",
-            "version": self.version,
-            "producer": "TrustformeRS",
-            "producer_version": "0.1.0",
-            "extensions": self.extensions,
-            "properties": {
-                "precision": format!("{:?}", config.precision),
-                "optimized": config.optimize,
-                "quantized": config.quantization.is_some()
-            },
-            "inputs": [{
-                "name": "input",
-                "dtype": self.precision_to_dtype(config.precision),
-                "shape": self.get_input_shape(config)
-            }],
-            "outputs": [{
-                "name": "output",
-                "dtype": self.precision_to_dtype(config.precision),
-                "shape": self.get_output_shape(config)
-            }]
-        }))
-    }
-
-    /// Export model weights as binary tensors
-    fn export_weights<M: Model>(
-        &self,
-        model: &M,
-        package_dir: &Path,
-        config: &ExportConfig,
-    ) -> Result<()> {
-        // Create weights directory
-        let weights_dir = package_dir.join("weights");
-        create_dir_all(&weights_dir)?;
-
-        // Export placeholder weights (in a real implementation, extract from model)
-        let weight_files = vec![
-            ("embedding_weight.dat", vec![768 * 512 * 4]), // embedding weights
-            ("attention_query_weight.dat", vec![768 * 768 * 4]), // query weights
-            ("attention_key_weight.dat", vec![768 * 768 * 4]), // key weights
-            ("attention_value_weight.dat", vec![768 * 768 * 4]), // value weights
-            ("ff_intermediate_weight.dat", vec![768 * 3072 * 4]), // FF intermediate weights
-            ("ff_output_weight.dat", vec![3072 * 768 * 4]), // FF output weights
-        ];
-
-        for (filename, data) in weight_files {
-            let weight_path = weights_dir.join(filename);
-            let mut file = File::create(weight_path)?;
-
-            // Write dummy data (in practice, extract actual weights)
-            let dummy_data: Vec<u8> =
-                data.into_iter().enumerate().map(|(i, _)| (i % 256) as u8).collect();
-            file.write_all(&dummy_data)?;
-        }
-
-        Ok(())
-    }
-
-    /// Get input shape based on configuration and model type inference
-    fn get_input_shape(&self, config: &ExportConfig) -> Vec<i64> {
+    /// Derive the declared input shape from the export configuration.
+    ///
+    /// This is purely a function of [`ExportConfig`]; it makes no claim about the
+    /// model's actual layout.
+    pub fn get_input_shape(&self, config: &ExportConfig) -> Vec<i64> {
         // Infer model type from context and configuration
         let batch_size = config.batch_size.unwrap_or(1) as i64;
 
@@ -262,8 +108,11 @@ impl NNEFExporter {
         vec![batch_size, sequence_length]
     }
 
-    /// Get output shape based on configuration and inferred model type
-    fn get_output_shape(&self, config: &ExportConfig) -> Vec<i64> {
+    /// Derive the declared output shape from the export configuration.
+    ///
+    /// This is purely a function of [`ExportConfig`]; it makes no claim about the
+    /// model's actual layout.
+    pub fn get_output_shape(&self, config: &ExportConfig) -> Vec<i64> {
         let batch_size = config.batch_size.unwrap_or(1) as i64;
         let sequence_length = config.sequence_length.unwrap_or(512) as i64;
 
@@ -342,8 +191,8 @@ impl NNEFExporter {
         }
     }
 
-    /// Convert export precision to NNEF data type
-    fn precision_to_dtype(&self, precision: ExportPrecision) -> &'static str {
+    /// Convert export precision to the corresponding NNEF scalar data type name.
+    pub fn precision_to_dtype(&self, precision: ExportPrecision) -> &'static str {
         match precision {
             ExportPrecision::FP32 => "real32",
             ExportPrecision::FP16 => "real16",
@@ -352,8 +201,8 @@ impl NNEFExporter {
         }
     }
 
-    /// Validate NNEF export configuration
-    fn validate_config(&self, config: &ExportConfig) -> Result<()> {
+    /// Validate an NNEF export configuration.
+    pub fn validate_config(&self, config: &ExportConfig) -> Result<()> {
         if config.format != ExportFormat::NNEF {
             return Err(anyhow!(
                 "Invalid format for NNEF exporter: {:?}",
@@ -378,9 +227,15 @@ impl NNEFExporter {
 }
 
 impl ModelExporter for NNEFExporter {
+    /// Always fails with a structured `UnsupportedOperation` error.
+    ///
+    /// See the [module documentation](self) for why no NNEF package is written.
     fn export<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
         self.validate_config(config)?;
-        self.export_to_nnef(model, config)
+        // Surface the "no weights at all" problem first: it is the caller's bug,
+        // whereas the missing topology is a limitation of the `Model` trait.
+        let _tensors = crate::export::collect_model_tensors(model)?;
+        Err(unsupported_operation("NNEF graph export", NNEF_UNSUPPORTED_REASON).into())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
@@ -405,47 +260,7 @@ impl Default for NNEFExporter {
 mod tests {
     use super::*;
 
-    #[derive(Clone)]
-    struct MockModel {
-        config: MockConfig,
-    }
-
-    #[derive(Clone, serde::Serialize, serde::Deserialize)]
-    struct MockConfig {
-        hidden_size: usize,
-    }
-
-    impl crate::traits::Config for MockConfig {
-        fn architecture(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    impl Model for MockModel {
-        type Config = MockConfig;
-        type Input = crate::tensor::Tensor;
-        type Output = crate::tensor::Tensor;
-
-        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
-            Ok(input)
-        }
-
-        fn load_pretrained(
-            &mut self,
-            _reader: &mut dyn std::io::Read,
-        ) -> crate::errors::Result<()> {
-            Ok(())
-        }
-
-        fn get_config(&self) -> &Self::Config {
-            &self.config
-        }
-
-        fn num_parameters(&self) -> usize {
-            // Mock model with a reasonable parameter count for testing
-            600_000
-        }
-    }
+    use crate::export::test_support::TestModel;
 
     #[test]
     fn test_nnef_exporter_creation() {
@@ -496,46 +311,49 @@ mod tests {
         assert_eq!(output_shape, vec![2, 128, 768]);
     }
 
+    /// Regression test for the exporter that used to write a fixed 12-block
+    /// transformer graph plus `(i % 256) as u8` weight files for any model.
     #[test]
-    fn test_nnef_graph_generation() {
+    fn export_refuses_to_write_a_synthesized_package() {
+        let dir = std::env::temp_dir().join("trustformers_nnef_export_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("model");
+
         let exporter = NNEFExporter::new();
-        let model = MockModel {
-            config: MockConfig { hidden_size: 768 },
-        };
+        let model = TestModel::with_seed(3.0);
         let config = ExportConfig {
             format: ExportFormat::NNEF,
+            output_path: output.to_string_lossy().to_string(),
             ..Default::default()
         };
 
-        let graph = exporter.build_nnef_graph(&model, &config).expect("operation failed in test");
+        let err = exporter.export(&model, &config).expect_err("must not fabricate a graph");
+        assert!(
+            err.to_string().contains("Unsupported operation"),
+            "expected UnsupportedOperation, got: {err}"
+        );
+        assert!(
+            !output.with_extension("nnef").exists(),
+            "no NNEF package directory may be produced"
+        );
 
-        assert!(graph.contains("version 1.0"));
-        assert!(graph.contains("graph network"));
-        assert!(graph.contains("linear"));
-        assert!(graph.contains("softmax"));
-        assert!(graph.contains("layer_normalization"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn test_metadata_generation() {
+    fn export_reports_missing_weights_before_missing_topology() {
         let exporter = NNEFExporter::new();
-        let model = MockModel {
-            config: MockConfig { hidden_size: 768 },
-        };
+        let model = TestModel::empty();
         let config = ExportConfig {
             format: ExportFormat::NNEF,
-            precision: ExportPrecision::FP16,
-            optimize: true,
             ..Default::default()
         };
 
-        let metadata = exporter.build_metadata(&model, &config).expect("operation failed in test");
-
-        assert_eq!(metadata["format"], "NNEF");
-        assert_eq!(metadata["version"], "1.0");
-        assert_eq!(metadata["producer"], "TrustformeRS");
-        assert_eq!(metadata["properties"]["precision"], "FP16");
-        assert_eq!(metadata["properties"]["optimized"], true);
+        let err = exporter.export(&model, &config).expect_err("no weights, no export");
+        assert!(
+            err.to_string().contains("named_tensors"),
+            "expected the missing-weights diagnostic, got: {err}"
+        );
     }
 
     #[test]
@@ -564,9 +382,7 @@ mod tests {
     #[test]
     fn test_validate_model_success() {
         let exporter = NNEFExporter::new();
-        let model = MockModel {
-            config: MockConfig { hidden_size: 768 },
-        };
+        let model = TestModel::with_seed(1.0);
 
         assert!(exporter.validate_model(&model, ExportFormat::NNEF).is_ok());
     }
@@ -574,9 +390,7 @@ mod tests {
     #[test]
     fn test_validate_model_wrong_format() {
         let exporter = NNEFExporter::new();
-        let model = MockModel {
-            config: MockConfig { hidden_size: 768 },
-        };
+        let model = TestModel::with_seed(1.0);
 
         assert!(exporter.validate_model(&model, ExportFormat::ONNX).is_err());
     }

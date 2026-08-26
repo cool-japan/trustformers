@@ -16,18 +16,31 @@ resources:
   - networkpolicy.yaml
 
 images:
+  # Placeholder — see the comment on this field in deployment.yaml. Point
+  # `newTag` (and, once you push to a registry you control, `newName`) at a
+  # real image before applying.
   - name: trustformers/server
     newTag: latest
 
-commonLabels:
-  app.kubernetes.io/managed-by: kustomize
-  app.kubernetes.io/version: v0.1.0
+# `commonLabels` is deprecated in favour of `labels` as of Kustomize v5
+# (`kubectl kustomize` bundles v5.4+); this is the modern spelling of the same
+# two labels.
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/version: v0.2.1
+    includeSelectors: false
 
-configMapGenerator:
-  - name: trustformers-server-config
-    files:
-      - server.yaml
-      - log4rs.yaml
+# No configMapGenerator here: `configmap.yaml` (in `resources:` above) already
+# defines the `trustformers-server-config` ConfigMap directly. A previous
+# version of this file *also* declared a `configMapGenerator` with the same
+# name, generated from `server.yaml` / `log4rs.yaml` files that do not exist
+# anywhere in this directory — `kubectl kustomize .` failed outright on the
+# missing files, and even with them present it would have collided with the
+# plain resource above (Kustomize does not allow two resources with the same
+# `metadata.name`/kind). Verified today: `kubectl kustomize kubernetes/`
+# succeeds with this file as written; no cluster was available to `kubectl
+# apply` it — see README.md.
 
 # Optional: Add secrets
 # secretGenerator:
@@ -40,9 +53,14 @@ replicas:
   - name: trustformers-server
     count: 2
 
-# Patches for different environments
-patchesStrategicMerge:
+# Patches for different environments. `patchesStrategicMerge` (a bare list of
+# file paths) is deprecated as of Kustomize v5 in favour of `patches` (a list
+# of `{path: ...}` objects) — the same v5 migration this file already made for
+# `commonLabels` -> `labels` above. Both entries below are commented out
+# because neither `patches/production.yaml` nor `patches/staging.yaml` exists
+# in this directory; add the file first, then uncomment.
+patches:
   # Uncomment for production
-  # - patches/production.yaml
+  # - path: patches/production.yaml
   # Uncomment for staging
-  # - patches/staging.yaml
+  # - path: patches/staging.yaml

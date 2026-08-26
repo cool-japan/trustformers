@@ -1,6 +1,3 @@
-// Allow dead code for cloud provider infrastructure under development
-#![allow(dead_code)]
-
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -8,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudProviderConfig {
@@ -209,8 +206,13 @@ pub enum OutputData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseMetadata {
+    /// Measured round-trip time of the provider call, in milliseconds.
     pub processing_time_ms: u64,
-    pub queue_time_ms: u64,
+    /// Time the request spent queued before processing.
+    ///
+    /// `None` when the provider does not report it — which is every public
+    /// inference API. It is never guessed.
+    pub queue_time_ms: Option<u64>,
     pub model_load_time_ms: Option<u64>,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
@@ -231,6 +233,12 @@ pub struct PerformanceMetrics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostMetrics {
+    /// Whether these figures came from the provider's API.
+    ///
+    /// When `false`, every amount below is zero because the provider returned
+    /// no billing data — not because the request was free. Never present a
+    /// `false` snapshot as a cost.
+    pub reported_by_provider: bool,
     pub cost_usd: f64,
     pub input_cost_usd: f64,
     pub output_cost_usd: f64,
@@ -316,10 +324,18 @@ pub struct SecurityConfig {
 pub struct ModelDeploymentResponse {
     pub deployment_id: String,
     pub deployment_status: DeploymentStatus,
+    /// Cloud resource identifier returned by the deployment API, when it
+    /// returns one.
+    pub endpoint_arn: Option<String>,
+    /// Publicly invocable URL, when the provider exposes one. `None` for
+    /// SDK-only endpoints such as SageMaker.
     pub endpoint_url: Option<String>,
     pub deployment_time: DateTime<Utc>,
-    pub estimated_cost_per_hour: f64,
-    pub performance_estimate: PerformanceEstimate,
+    /// Hourly price, when the deployment API returns one. `None` means the
+    /// provider published no price — never assume zero cost.
+    pub estimated_cost_per_hour: Option<f64>,
+    /// Provider-published performance estimate, when one exists.
+    pub performance_estimate: Option<PerformanceEstimate>,
     pub monitoring_dashboard_url: Option<String>,
 }
 
@@ -378,10 +394,15 @@ pub struct ModelInfo {
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub supported_formats: Vec<String>,
-    pub max_input_size: u64,
-    pub max_output_size: u64,
-    pub pricing: PricingInfo,
-    pub performance_characteristics: PerformanceCharacteristics,
+    /// Maximum input size the provider publishes, if any.
+    pub max_input_size: Option<u64>,
+    /// Maximum output size the provider publishes, if any.
+    pub max_output_size: Option<u64>,
+    /// Pricing, when the provider publishes it through its API. `None` means
+    /// no price was returned — it is never invented.
+    pub pricing: Option<PricingInfo>,
+    /// Performance characteristics, when the provider publishes them.
+    pub performance_characteristics: Option<PerformanceCharacteristics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,14 +437,21 @@ pub struct HealthStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderMetrics {
     pub provider: String,
+    /// Requests per second measured over this process's observation window.
     pub requests_per_second: f32,
+    /// Mean measured round-trip latency, in milliseconds.
     pub average_latency_ms: u64,
+    /// Observed error ratio in `[0, 1]`.
     pub error_rate: f64,
-    pub cost_per_hour: f64,
+    /// Hourly spend, when the provider reports it. `None` otherwise.
+    pub cost_per_hour: Option<f64>,
     pub active_connections: u32,
     pub queue_depth: u32,
     pub throughput_tokens_per_second: f32,
-    pub resource_utilization: ResourceUtilization,
+    /// Host utilisation, when the provider exposes it. Public inference APIs
+    /// do not, so this is normally `None` rather than a plausible-looking
+    /// invented figure.
+    pub resource_utilization: Option<ResourceUtilization>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,8 +468,8 @@ pub struct CloudProviderManager {
     config: CloudProviderConfig,
     stats: Arc<RwLock<CloudProviderStats>>,
     load_balancer: LoadBalancer,
-    cost_tracker: CostTracker,
-    health_monitor: HealthMonitor,
+    cost_tracker: Arc<RwLock<CostTracker>>,
+    health_monitor: Arc<RwLock<HealthMonitor>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -477,15 +505,35 @@ pub enum LoadBalancingStrategy {
     WeightedRoundRobin(HashMap<String, f32>),
 }
 
+/// Running spend against the operator's configured budget.
+///
+/// 0.2.1: all three fields were written once at construction and never read
+/// again, so `cost_optimization.budget_limit_usd` was configuration that did
+/// nothing -- a manager could spend without limit while appearing to enforce a
+/// budget. [`CloudProviderManager::inference`] now checks it before dispatching
+/// and [`CloudProviderManager::update_stats`] charges every response to it.
 struct CostTracker {
+    /// Ceiling from `cost_optimization.budget_limit_usd`.
     daily_budget: f64,
+    /// Total charged so far.
     current_spend: f64,
+    /// Per-provider breakdown of that total.
     cost_per_provider: HashMap<String, f64>,
 }
 
+/// Cache of the last health sweep, so callers do not re-probe every provider on
+/// every request.
+///
+/// 0.2.1: both fields were written once and never read --
+/// `monitoring.health_check_interval_seconds` governed nothing and no health
+/// result was ever retained.
 struct HealthMonitor {
+    /// Minimum gap between health sweeps, from configuration.
     check_interval: tokio::time::Duration,
+    /// Last observed status per provider.
     provider_health: HashMap<String, HealthStatus>,
+    /// When the last sweep completed, if one has.
+    last_check: Option<tokio::time::Instant>,
 }
 
 impl CloudProviderManager {
@@ -511,15 +559,16 @@ impl CloudProviderManager {
             load_balancer: LoadBalancer {
                 strategy: LoadBalancingStrategy::RoundRobin,
             },
-            cost_tracker: CostTracker {
+            cost_tracker: Arc::new(RwLock::new(CostTracker {
                 daily_budget,
                 current_spend: 0.0,
                 cost_per_provider: HashMap::new(),
-            },
-            health_monitor: HealthMonitor {
+            })),
+            health_monitor: Arc::new(RwLock::new(HealthMonitor {
                 check_interval: tokio::time::Duration::from_secs(check_interval_seconds),
                 provider_health: HashMap::new(),
-            },
+                last_check: None,
+            })),
         })
     }
 
@@ -539,10 +588,29 @@ impl CloudProviderManager {
         }
     }
 
+    /// Dispatch `request` to the selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no provider can be selected, when the configured
+    /// daily budget is already exhausted, or when the provider call itself
+    /// fails.
     pub async fn inference(
         &self,
         request: CloudInferenceRequest,
     ) -> Result<CloudInferenceResponse> {
+        // Refuse before spending rather than after: a configured budget that is
+        // only checked afterwards is not a budget.
+        {
+            let tracker = self.cost_tracker.read().await;
+            if tracker.current_spend >= tracker.daily_budget {
+                return Err(anyhow::anyhow!(
+                    "cloud provider budget exhausted: spent {:.4} USD of a {:.4} USD limit",
+                    tracker.current_spend,
+                    tracker.daily_budget
+                ));
+            }
+        }
         let provider_name = self.select_provider(&request).await?;
         let provider = self
             .providers
@@ -637,6 +705,12 @@ impl CloudProviderManager {
                 provider_stats.successes += 1;
                 provider_stats.total_cost_usd += response.cost.cost_usd;
 
+                // Charge the same real cost to the budget tracker.
+                let mut tracker = self.cost_tracker.write().await;
+                tracker.current_spend += response.cost.cost_usd;
+                *tracker.cost_per_provider.entry(provider_name.to_string()).or_insert(0.0) +=
+                    response.cost.cost_usd;
+
                 let latency_ms = duration.as_millis() as f64;
                 provider_stats.average_latency_ms = (provider_stats.average_latency_ms
                     * (provider_stats.requests - 1) as f64
@@ -669,6 +743,51 @@ impl CloudProviderManager {
         self.stats.read().await.clone()
     }
 
+    /// Total charged to the budget so far, and the configured ceiling.
+    pub async fn budget_status(&self) -> (f64, f64) {
+        let tracker = self.cost_tracker.read().await;
+        (tracker.current_spend, tracker.daily_budget)
+    }
+
+    /// Spend charged to each provider so far.
+    pub async fn cost_per_provider(&self) -> HashMap<String, f64> {
+        self.cost_tracker.read().await.cost_per_provider.clone()
+    }
+
+    /// The most recent health sweep, without probing again.
+    ///
+    /// Returns `None` when no sweep has run yet -- an empty map would read as
+    /// "no providers", which is a different claim.
+    pub async fn cached_health(&self) -> Option<HashMap<String, HealthStatus>> {
+        let monitor = self.health_monitor.read().await;
+        monitor.last_check.map(|_| monitor.provider_health.clone())
+    }
+
+    /// Health of every provider, re-probing only when the configured
+    /// `health_check_interval_seconds` has elapsed since the last sweep.
+    ///
+    /// # Errors
+    ///
+    /// Infallible today: an unreachable provider is reported as `unhealthy`
+    /// rather than aborting the sweep.
+    pub async fn health_check_cached(&self) -> Result<HashMap<String, HealthStatus>> {
+        {
+            let monitor = self.health_monitor.read().await;
+            if let Some(last_check) = monitor.last_check {
+                if last_check.elapsed() < monitor.check_interval {
+                    return Ok(monitor.provider_health.clone());
+                }
+            }
+        }
+        self.health_check().await
+    }
+
+    /// Probe every provider now, and cache the result.
+    ///
+    /// # Errors
+    ///
+    /// Infallible today: an unreachable provider is reported as `unhealthy`
+    /// rather than aborting the sweep.
     pub async fn health_check(&self) -> Result<HashMap<String, HealthStatus>> {
         let mut health_statuses = HashMap::new();
 
@@ -696,389 +815,37 @@ impl CloudProviderManager {
             }
         }
 
+        {
+            let mut monitor = self.health_monitor.write().await;
+            monitor.provider_health = health_statuses.clone();
+            monitor.last_check = Some(tokio::time::Instant::now());
+        }
+
         Ok(health_statuses)
     }
 }
 
-// Provider implementations (placeholders)
-struct AwsSagemakerProvider;
-struct GoogleVertexAiProvider;
-struct AzureMachineLearningProvider;
-struct HuggingFaceProvider;
-struct OpenAiProvider;
-struct AnthropicProvider;
-struct CustomProvider {
-    name: String,
-}
+// ── Provider implementations ─────────────────────────────────────────────────
+//
+// Every provider below performs real API calls; see the module docs of
+// `cloud_providers::rest` and `cloud_providers::sagemaker`. There is no shared
+// macro producing canned responses any more.
 
-macro_rules! impl_provider {
-    ($provider:ident, $type:expr) => {
-        impl $provider {
-            async fn new() -> Result<Self> {
-                Ok(Self)
-            }
-        }
+pub mod errors;
+pub mod rest;
+pub mod sagemaker;
+pub mod support;
 
-        #[async_trait]
-        impl CloudProvider for $provider {
-            async fn initialize(&self, _config: &ProviderConfig) -> Result<()> {
-                info!("Initializing provider: {}", stringify!($provider));
-                Ok(())
-            }
+#[cfg(test)]
+mod cloud_provider_tests;
 
-            async fn inference(&self, request: CloudInferenceRequest) -> Result<CloudInferenceResponse> {
-                // Placeholder implementation
-                Ok(CloudInferenceResponse {
-                    request_id: request.request_id,
-                    provider: stringify!($provider).to_string(),
-                    model_name: request.model_name,
-                    model_version: request.model_version,
-                    output_data: OutputData::Text("Mock response".to_string()),
-                    metadata: ResponseMetadata {
-                        processing_time_ms: 100,
-                        queue_time_ms: 50,
-                        model_load_time_ms: Some(200),
-                        input_tokens: Some(10),
-                        output_tokens: Some(20),
-                        finish_reason: Some("completed".to_string()),
-                        confidence_score: Some(0.95),
-                        provider_metadata: HashMap::new(),
-                    },
-                    performance: PerformanceMetrics {
-                        latency_ms: 150,
-                        throughput_tokens_per_second: Some(100.0),
-                        memory_usage_mb: Some(512),
-                        cpu_usage_percent: Some(25.0),
-                        gpu_usage_percent: Some(80.0),
-                        provider_metrics: HashMap::new(),
-                    },
-                    cost: CostMetrics {
-                        cost_usd: 0.01,
-                        input_cost_usd: 0.005,
-                        output_cost_usd: 0.005,
-                        compute_cost_usd: 0.0,
-                        storage_cost_usd: 0.0,
-                        network_cost_usd: 0.0,
-                        currency: "USD".to_string(),
-                        billing_period: "per_request".to_string(),
-                    },
-                    timestamp: Utc::now(),
-                })
-            }
-
-            async fn batch_inference(&self, requests: Vec<CloudInferenceRequest>) -> Result<Vec<CloudInferenceResponse>> {
-                let mut responses = Vec::new();
-                for request in requests {
-                    responses.push(self.inference(request).await?);
-                }
-                Ok(responses)
-            }
-
-            async fn deploy_model(&self, request: ModelDeploymentRequest) -> Result<ModelDeploymentResponse> {
-                Ok(ModelDeploymentResponse {
-                    deployment_id: request.deployment_id,
-                    deployment_status: DeploymentStatus::Completed,
-                    endpoint_url: Some("https://example.com/endpoint".to_string()),
-                    deployment_time: Utc::now(),
-                    estimated_cost_per_hour: 1.0,
-                    performance_estimate: PerformanceEstimate {
-                        expected_latency_ms: 100,
-                        expected_throughput_rps: 10.0,
-                        max_concurrent_requests: 100,
-                        memory_usage_estimate_mb: 1024,
-                    },
-                    monitoring_dashboard_url: Some("https://example.com/dashboard".to_string()),
-                })
-            }
-
-            async fn update_deployment(&self, _deployment_id: &str, config: ModelDeploymentRequest) -> Result<ModelDeploymentResponse> {
-                self.deploy_model(config).await
-            }
-
-            async fn delete_deployment(&self, _deployment_id: &str) -> Result<()> {
-                Ok(())
-            }
-
-            async fn get_deployment_status(&self, _deployment_id: &str) -> Result<DeploymentStatus> {
-                Ok(DeploymentStatus::Completed)
-            }
-
-            async fn list_deployments(&self) -> Result<Vec<ModelDeploymentResponse>> {
-                Ok(vec![])
-            }
-
-            async fn get_model_info(&self, model_name: &str) -> Result<ModelInfo> {
-                Ok(ModelInfo {
-                    name: model_name.to_string(),
-                    version: "1.0.0".to_string(),
-                    description: Some("Mock model".to_string()),
-                    model_type: "text-generation".to_string(),
-                    input_schema: serde_json::json!({"type": "string"}),
-                    output_schema: serde_json::json!({"type": "string"}),
-                    supported_formats: vec!["text".to_string()],
-                    max_input_size: 4096,
-                    max_output_size: 2048,
-                    pricing: PricingInfo {
-                        input_cost_per_token: 0.0001,
-                        output_cost_per_token: 0.0002,
-                        compute_cost_per_hour: 1.0,
-                        minimum_charge: 0.01,
-                        currency: "USD".to_string(),
-                    },
-                    performance_characteristics: PerformanceCharacteristics {
-                        average_latency_ms: 100,
-                        throughput_tokens_per_second: 50.0,
-                        memory_requirements_mb: 512,
-                        concurrent_request_limit: 100,
-                    },
-                })
-            }
-
-            async fn health_check(&self) -> Result<HealthStatus> {
-                Ok(HealthStatus {
-                    provider: stringify!($provider).to_string(),
-                    status: "healthy".to_string(),
-                    availability: 0.99,
-                    last_check: Utc::now(),
-                    response_time_ms: 50,
-                    error_rate: 0.01,
-                    active_deployments: 5,
-                    region_status: HashMap::new(),
-                })
-            }
-
-            async fn get_metrics(&self) -> Result<ProviderMetrics> {
-                Ok(ProviderMetrics {
-                    provider: stringify!($provider).to_string(),
-                    requests_per_second: 10.0,
-                    average_latency_ms: 100,
-                    error_rate: 0.01,
-                    cost_per_hour: 1.0,
-                    active_connections: 50,
-                    queue_depth: 5,
-                    throughput_tokens_per_second: 100.0,
-                    resource_utilization: ResourceUtilization {
-                        cpu_usage_percent: 25.0,
-                        memory_usage_percent: 60.0,
-                        gpu_usage_percent: 80.0,
-                        network_io_mbps: 10.0,
-                        storage_io_mbps: 5.0,
-                    },
-                })
-            }
-
-            async fn get_cost_estimate(&self, _request: &CloudInferenceRequest) -> Result<f64> {
-                Ok(0.01)
-            }
-
-            fn get_provider_type(&self) -> CloudProviderType {
-                $type
-            }
-
-            fn supports_feature(&self, feature: &str) -> bool {
-                match feature {
-                    "streaming" => true,
-                    "batch" => true,
-                    "deployment" => true,
-                    _ => false,
-                }
-            }
-        }
-    };
-}
-
-impl_provider!(AwsSagemakerProvider, CloudProviderType::AwsSagemaker);
-impl_provider!(GoogleVertexAiProvider, CloudProviderType::GoogleVertexAi);
-impl_provider!(
-    AzureMachineLearningProvider,
-    CloudProviderType::AzureMachineLearning
-);
-impl_provider!(HuggingFaceProvider, CloudProviderType::HuggingFaceInference);
-impl_provider!(OpenAiProvider, CloudProviderType::OpenAiApi);
-impl_provider!(AnthropicProvider, CloudProviderType::AnthropicClaude);
-
-impl CustomProvider {
-    async fn new(name: &str) -> Result<Self> {
-        Ok(Self {
-            name: name.to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl CloudProvider for CustomProvider {
-    async fn initialize(&self, _config: &ProviderConfig) -> Result<()> {
-        info!("Initializing custom provider: {}", self.name);
-        Ok(())
-    }
-
-    async fn inference(&self, request: CloudInferenceRequest) -> Result<CloudInferenceResponse> {
-        Ok(CloudInferenceResponse {
-            request_id: request.request_id,
-            provider: self.name.clone(),
-            model_name: request.model_name,
-            model_version: request.model_version,
-            output_data: OutputData::Text("Custom provider response".to_string()),
-            metadata: ResponseMetadata {
-                processing_time_ms: 100,
-                queue_time_ms: 50,
-                model_load_time_ms: Some(200),
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                finish_reason: Some("completed".to_string()),
-                confidence_score: Some(0.95),
-                provider_metadata: HashMap::new(),
-            },
-            performance: PerformanceMetrics {
-                latency_ms: 150,
-                throughput_tokens_per_second: Some(100.0),
-                memory_usage_mb: Some(512),
-                cpu_usage_percent: Some(25.0),
-                gpu_usage_percent: Some(80.0),
-                provider_metrics: HashMap::new(),
-            },
-            cost: CostMetrics {
-                cost_usd: 0.01,
-                input_cost_usd: 0.005,
-                output_cost_usd: 0.005,
-                compute_cost_usd: 0.0,
-                storage_cost_usd: 0.0,
-                network_cost_usd: 0.0,
-                currency: "USD".to_string(),
-                billing_period: "per_request".to_string(),
-            },
-            timestamp: Utc::now(),
-        })
-    }
-
-    async fn batch_inference(
-        &self,
-        requests: Vec<CloudInferenceRequest>,
-    ) -> Result<Vec<CloudInferenceResponse>> {
-        let mut responses = Vec::new();
-        for request in requests {
-            responses.push(self.inference(request).await?);
-        }
-        Ok(responses)
-    }
-
-    async fn deploy_model(
-        &self,
-        request: ModelDeploymentRequest,
-    ) -> Result<ModelDeploymentResponse> {
-        Ok(ModelDeploymentResponse {
-            deployment_id: request.deployment_id,
-            deployment_status: DeploymentStatus::Completed,
-            endpoint_url: Some("https://custom-provider.com/endpoint".to_string()),
-            deployment_time: Utc::now(),
-            estimated_cost_per_hour: 1.0,
-            performance_estimate: PerformanceEstimate {
-                expected_latency_ms: 100,
-                expected_throughput_rps: 10.0,
-                max_concurrent_requests: 100,
-                memory_usage_estimate_mb: 1024,
-            },
-            monitoring_dashboard_url: Some("https://custom-provider.com/dashboard".to_string()),
-        })
-    }
-
-    async fn update_deployment(
-        &self,
-        _deployment_id: &str,
-        config: ModelDeploymentRequest,
-    ) -> Result<ModelDeploymentResponse> {
-        self.deploy_model(config).await
-    }
-
-    async fn delete_deployment(&self, _deployment_id: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn get_deployment_status(&self, _deployment_id: &str) -> Result<DeploymentStatus> {
-        Ok(DeploymentStatus::Completed)
-    }
-
-    async fn list_deployments(&self) -> Result<Vec<ModelDeploymentResponse>> {
-        Ok(vec![])
-    }
-
-    async fn get_model_info(&self, model_name: &str) -> Result<ModelInfo> {
-        Ok(ModelInfo {
-            name: model_name.to_string(),
-            version: "1.0.0".to_string(),
-            description: Some("Custom provider model".to_string()),
-            model_type: "text-generation".to_string(),
-            input_schema: serde_json::json!({"type": "string"}),
-            output_schema: serde_json::json!({"type": "string"}),
-            supported_formats: vec!["text".to_string()],
-            max_input_size: 4096,
-            max_output_size: 2048,
-            pricing: PricingInfo {
-                input_cost_per_token: 0.0001,
-                output_cost_per_token: 0.0002,
-                compute_cost_per_hour: 1.0,
-                minimum_charge: 0.01,
-                currency: "USD".to_string(),
-            },
-            performance_characteristics: PerformanceCharacteristics {
-                average_latency_ms: 100,
-                throughput_tokens_per_second: 50.0,
-                memory_requirements_mb: 512,
-                concurrent_request_limit: 100,
-            },
-        })
-    }
-
-    async fn health_check(&self) -> Result<HealthStatus> {
-        Ok(HealthStatus {
-            provider: self.name.clone(),
-            status: "healthy".to_string(),
-            availability: 0.99,
-            last_check: Utc::now(),
-            response_time_ms: 50,
-            error_rate: 0.01,
-            active_deployments: 5,
-            region_status: HashMap::new(),
-        })
-    }
-
-    async fn get_metrics(&self) -> Result<ProviderMetrics> {
-        Ok(ProviderMetrics {
-            provider: self.name.clone(),
-            requests_per_second: 10.0,
-            average_latency_ms: 100,
-            error_rate: 0.01,
-            cost_per_hour: 1.0,
-            active_connections: 50,
-            queue_depth: 5,
-            throughput_tokens_per_second: 100.0,
-            resource_utilization: ResourceUtilization {
-                cpu_usage_percent: 25.0,
-                memory_usage_percent: 60.0,
-                gpu_usage_percent: 80.0,
-                network_io_mbps: 10.0,
-                storage_io_mbps: 5.0,
-            },
-        })
-    }
-
-    async fn get_cost_estimate(&self, _request: &CloudInferenceRequest) -> Result<f64> {
-        Ok(0.01)
-    }
-
-    fn get_provider_type(&self) -> CloudProviderType {
-        CloudProviderType::Custom(self.name.clone())
-    }
-
-    fn supports_feature(&self, feature: &str) -> bool {
-        match feature {
-            "streaming" => true,
-            "batch" => true,
-            "deployment" => true,
-            _ => false,
-        }
-    }
-}
+pub use errors::CloudProviderError;
+pub use rest::{
+    AnthropicProvider, AzureMachineLearningProvider, CustomProvider, GoogleVertexAiProvider,
+    HuggingFaceProvider, OpenAiProvider,
+};
+pub use sagemaker::AwsSagemakerProvider;
+pub use support::{ObservedStats, ProviderState};
 
 impl Default for CloudProviderConfig {
     fn default() -> Self {
@@ -1277,6 +1044,7 @@ mod tests {
     #[test]
     fn test_cost_metrics_construction() {
         let cost = CostMetrics {
+            reported_by_provider: true,
             cost_usd: 0.05,
             input_cost_usd: 0.02,
             output_cost_usd: 0.03,
@@ -1288,6 +1056,15 @@ mod tests {
         };
         // Input + output = total
         assert!((cost.input_cost_usd + cost.output_cost_usd - cost.cost_usd).abs() < 1e-10);
+    }
+
+    /// A snapshot the provider did not report must be recognisable as such: the
+    /// zeros are the absence of data, not a zero bill.
+    #[test]
+    fn test_unreported_cost_is_flagged() {
+        let cost = support::unreported_cost();
+        assert!(!cost.reported_by_provider);
+        assert_eq!(cost.cost_usd, 0.0);
     }
 
     #[test]

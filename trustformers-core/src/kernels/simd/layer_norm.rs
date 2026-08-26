@@ -3,8 +3,6 @@
 
 //! SIMD-optimized layer normalization implementation
 //!
-
-#![allow(unused_variables)] // SIMD implementation with architecture-specific code paths
 //! This module provides layer normalization optimized for different SIMD
 //! instruction sets including AVX-512, AVX2, NEON, and RISC-V Vector extensions.
 
@@ -168,12 +166,15 @@ impl SIMDLayerNorm {
         weight: &Tensor,
         bias: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let input_shape = input.shape();
-        let batch_size = if input_shape.len() >= 3 { input_shape[0] } else { 1 };
-        let seq_len = if input_shape.len() >= 3 { input_shape[1] } else { 1 };
-
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            // Only the AVX2 kernel below needs the shape (and its leading dims
+            // split out); the non-x86 fallback branch never reads them, so
+            // (unlike the old top-of-function let-bindings) they no longer show
+            // up as unused on non-x86 targets.
+            let input_shape = input.shape();
+            let batch_size = if input_shape.len() >= 3 { input_shape[0] } else { 1 };
+            let seq_len = if input_shape.len() >= 3 { input_shape[1] } else { 1 };
             let input_data = input.data()?;
             let weight_data = weight.data()?;
             let bias_data = bias.map(|b| b.data()).transpose()?;

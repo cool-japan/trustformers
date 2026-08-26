@@ -49,11 +49,13 @@ Add to your `app.json` or `app.config.js`:
 ```
 */
 
+use crate::inference::MobileInferenceEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
+use trustformers_core::Tensor;
 use trustformers_core::TrustformersError;
 
 /// Configuration for Expo plugin integration
@@ -871,6 +873,10 @@ pub struct ExpoPlugin {
     asset_manager: Arc<Mutex<ExpoAssetManager>>,
     performance_monitor: Option<Arc<Mutex<ExpoPerformanceMonitor>>>,
     dev_server: Option<Arc<Mutex<ExpoDevServer>>>,
+    /// Real inference engine backing `perform_inference`/`execute_inference`.
+    /// Previously `execute_inference` ignored the loaded-module lookup it
+    /// performed and always returned `output_data: vec![1.0, 2.0, 3.0]`.
+    inference_engine: Arc<Mutex<MobileInferenceEngine>>,
 }
 
 impl ExpoPlugin {
@@ -891,16 +897,39 @@ impl ExpoPlugin {
             None
         };
 
+        let inference_engine = Arc::new(Mutex::new(MobileInferenceEngine::new(
+            crate::MobileConfig::default(),
+        )?));
+
         let mut plugin = Self {
             config,
             module_registry,
             asset_manager,
             performance_monitor,
             dev_server,
+            inference_engine,
         };
 
         plugin.initialize()?;
         Ok(plugin)
+    }
+
+    /// Load a real model file into this plugin's inference engine.
+    ///
+    /// Expo's asset-bundling system (resolving a bare `model_id` to the
+    /// bundled asset's on-device path) is coordinated from the JavaScript
+    /// side via Metro/EAS Build and is not reachable from this native Rust
+    /// module in isolation; `ensure_model_loaded`/`ExpoAssetManager` track
+    /// *that* bookkeeping. This method is the real counterpart once a
+    /// concrete file path is known (e.g. resolved by the JS side and passed
+    /// down), and is what `execute_inference` actually depends on: without
+    /// calling this first, `perform_inference` now honestly fails instead
+    /// of returning a fabricated result.
+    pub fn load_model_from_path(&self, model_path: &str) -> Result<(), TrustformersError> {
+        let mut engine = self.inference_engine.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire inference engine lock".to_string())
+        })?;
+        engine.load_model_from_file(model_path)
     }
 
     /// Initialize the plugin
@@ -1052,31 +1081,73 @@ impl ExpoPlugin {
         &self,
         request: &ExpoInferenceRequest,
     ) -> Result<ExpoInferenceResponse, TrustformersError> {
-        let registry = self.module_registry.lock().map_err(|_| {
-            TrustformersError::runtime_error("Failed to acquire module registry lock".to_string())
-        })?;
+        {
+            let registry = self.module_registry.lock().map_err(|_| {
+                TrustformersError::runtime_error(
+                    "Failed to acquire module registry lock".to_string(),
+                )
+            })?;
+            registry.get_module("TrustformersInference").ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "TrustformersInference module not found".to_string(),
+                )
+            })?;
+        }
 
-        let inference_module = registry.get_module("TrustformersInference").ok_or_else(|| {
-            TrustformersError::runtime_error("TrustformersInference module not found".to_string())
-        })?;
+        let module_load_start = std::time::Instant::now();
+        let input_tensor = Tensor::from_vec(request.input_data.clone(), &request.input_shape)
+            .map_err(|e| TrustformersError::invalid_input(format!("invalid input tensor: {e}")))?;
+        let module_load_time_ms = module_load_start.elapsed().as_secs_f64() * 1000.0;
 
-        // For now, return a placeholder response
-        // In a real implementation, this would call the actual inference engine
-        Ok(ExpoInferenceResponse {
-            request_id: request.request_id.clone(),
-            success: true,
-            output_data: vec![1.0, 2.0, 3.0], // Placeholder
-            output_shape: vec![1, 3],
-            inference_time_ms: 100.0,
-            memory_used_mb: 50,
-            error_message: None,
-            expo_metrics: ExpoMetrics {
-                module_load_time_ms: 10.0,
-                asset_load_time_ms: 20.0,
-                cache_hit_ratio: 0.8,
-                bundle_size_kb: 1024,
+        let inference_start = std::time::Instant::now();
+        let result = {
+            let mut engine = self.inference_engine.lock().map_err(|_| {
+                TrustformersError::runtime_error(
+                    "Failed to acquire inference engine lock".to_string(),
+                )
+            })?;
+            engine.inference(&input_tensor)
+        };
+        let inference_time_ms = inference_start.elapsed().as_secs_f64() * 1000.0;
+
+        match result {
+            Ok(output_tensor) => {
+                let output_data = output_tensor.data()?;
+                let output_shape = output_tensor.shape();
+                Ok(ExpoInferenceResponse {
+                    request_id: request.request_id.clone(),
+                    success: true,
+                    output_data,
+                    output_shape,
+                    inference_time_ms: module_load_time_ms + inference_time_ms,
+                    memory_used_mb: (output_tensor.shape().iter().product::<usize>()
+                        * std::mem::size_of::<f32>())
+                        / (1024 * 1024),
+                    error_message: None,
+                    expo_metrics: ExpoMetrics {
+                        module_load_time_ms,
+                        asset_load_time_ms: 0.0,
+                        cache_hit_ratio: 0.0,
+                        bundle_size_kb: 0,
+                    },
+                })
             },
-        })
+            Err(e) => Ok(ExpoInferenceResponse {
+                request_id: request.request_id.clone(),
+                success: false,
+                output_data: Vec::new(),
+                output_shape: Vec::new(),
+                inference_time_ms: module_load_time_ms + inference_time_ms,
+                memory_used_mb: 0,
+                error_message: Some(e.to_string()),
+                expo_metrics: ExpoMetrics {
+                    module_load_time_ms,
+                    asset_load_time_ms: 0.0,
+                    cache_hit_ratio: 0.0,
+                    bundle_size_kb: 0,
+                },
+            }),
+        }
     }
 }
 
@@ -1713,5 +1784,86 @@ mod tests {
         assert_eq!(TargetPlatform::Android, TargetPlatform::Android);
         assert_eq!(TargetPlatform::Both, TargetPlatform::Both);
         assert_ne!(TargetPlatform::iOS, TargetPlatform::Android);
+    }
+
+    fn expo_request(input_data: Vec<f32>, input_shape: Vec<usize>) -> ExpoInferenceRequest {
+        ExpoInferenceRequest {
+            request_id: "req-1".to_string(),
+            model_id: "model-1".to_string(),
+            input_data,
+            input_shape,
+            config_override: None,
+            enable_preprocessing: false,
+            enable_postprocessing: false,
+            expo_context: ExpoContext::default(),
+        }
+    }
+
+    /// Regression test for the previous `execute_inference`, which looked
+    /// up the `TrustformersInference` module and then ignored it entirely,
+    /// always returning `output_data: vec![1.0, 2.0, 3.0]` -- even before
+    /// any model had ever been loaded. With no model loaded, this must now
+    /// report a real, honest failure.
+    #[test]
+    fn test_perform_inference_without_loaded_model_reports_real_failure() {
+        let plugin = ExpoPlugin::new(ExpoConfig::default()).expect("plugin creation");
+        let request = expo_request(vec![1.0, 2.0, 3.0], vec![1, 3]);
+
+        let response = plugin.perform_inference(request).expect("perform_inference call");
+        assert!(
+            !response.success,
+            "no model is loaded, this must not report success"
+        );
+        assert!(response.output_data.is_empty());
+        assert!(response.error_message.is_some());
+    }
+
+    /// End-to-end: load a real two-layer safetensors checkpoint via
+    /// `load_model_from_path`, then run `perform_inference` and check the
+    /// output is the real matmul chain's result (not the old hardcoded
+    /// `[1.0, 2.0, 3.0]`).
+    #[test]
+    fn test_perform_inference_with_loaded_model_runs_real_computation() {
+        use safetensors::tensor::TensorView;
+        use safetensors::Dtype;
+
+        let w0: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let w1: Vec<u8> = [1.0f32, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let view0 = TensorView::new(Dtype::F32, vec![4, 2], &w0).expect("view0");
+        let view1 = TensorView::new(Dtype::F32, vec![2, 1], &w1).expect("view1");
+        let mut tensors: HashMap<String, TensorView> = HashMap::new();
+        tensors.insert("layer.0.weight".to_string(), view0);
+        tensors.insert("layer.1.weight".to_string(), view1);
+        let bytes = safetensors::serialize(&tensors, None).expect("serialize safetensors");
+
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_mobile_expo_test_{}_{}.safetensors",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::write(&path, &bytes).expect("write temp safetensors file");
+
+        let plugin = ExpoPlugin::new(ExpoConfig::default()).expect("plugin creation");
+        let load_result = plugin.load_model_from_path(path.to_str().expect("utf8 path"));
+        let _ = std::fs::remove_file(&path);
+        load_result.expect("a real safetensors file with an unambiguous linear stack must load");
+
+        let request = expo_request(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4]);
+        let response = plugin.perform_inference(request).expect("perform_inference call");
+
+        assert!(response.success, "error was: {:?}", response.error_message);
+        assert_eq!(
+            response.output_shape,
+            vec![1, 1],
+            "the real two-layer projection must reduce width 4 -> 2 -> 1"
+        );
+        assert_ne!(
+            response.output_data,
+            vec![1.0, 2.0, 3.0],
+            "must not be the old hardcoded placeholder response"
+        );
     }
 }

@@ -186,7 +186,11 @@ impl ReasoningEngine {
             description: "Applied mathematical reasoning".to_string(),
             inputs: math_expressions,
             output,
-            confidence: 0.9,
+            // Blend this step's own (high, since math extraction/solving is
+            // deterministic) confidence with the reasoning chain's
+            // accumulated confidence so far, rather than ignoring the
+            // running context entirely.
+            confidence: (0.9 * 0.7 + context.confidence * 0.3).clamp(0.0, 1.0),
         })
     }
 
@@ -203,50 +207,157 @@ impl ReasoningEngine {
             description: "Applied emotional reasoning and empathy".to_string(),
             inputs: vec![input.to_string()],
             output: empathetic_response,
-            confidence: 0.8,
+            // Blend this step's own confidence with the reasoning chain's
+            // accumulated confidence so far, rather than ignoring the
+            // running context entirely.
+            confidence: (0.8 * 0.7 + context.confidence * 0.3).clamp(0.0, 1.0),
         })
     }
 
+    /// Derive what actually follows from `premises` by forward chaining.
+    ///
+    /// Conditionals ("if A then B", "A implies B") are turned into rules and
+    /// combined with the asserted facts using modus ponens and modus tollens,
+    /// drawing on facts already established earlier in `context`. When no rule
+    /// fires the result says so — it does not restate the premises as though
+    /// something had been concluded.
     fn derive_logical_conclusion(
         &self,
         premises: &[String],
         context: &ReasoningContext,
     ) -> Result<String> {
-        // Simple logical derivation (placeholder)
         if premises.is_empty() {
             return Ok("No premises available for logical conclusion".to_string());
         }
 
-        // Look for patterns in existing reasoning chain
-        let related_steps: Vec<_> = context
+        let mut rules: Vec<(String, String)> = Vec::new();
+        let mut facts: Vec<String> = Vec::new();
+
+        // Facts established by earlier logical steps are available as premises.
+        for step in context
             .reasoning_chain
             .iter()
             .filter(|step| matches!(step.step_type, ReasoningType::Logical))
-            .collect();
+        {
+            match parse_conditional(&step.output) {
+                Some(rule) => rules.push(rule),
+                None => facts.push(normalize_proposition(&step.output)),
+            }
+        }
 
-        if !related_steps.is_empty() {
-            Ok(format!(
-                "Based on premises '{}' and previous logical steps, conclusion follows",
+        for premise in premises {
+            match parse_conditional(premise) {
+                Some(rule) => rules.push(rule),
+                None => facts.push(normalize_proposition(premise)),
+            }
+        }
+
+        if rules.is_empty() {
+            return Ok(format!(
+                "No conditional premise was supplied, so nothing follows from: {}",
                 premises.join(", ")
+            ));
+        }
+
+        // Forward chaining: keep applying rules until the fact set stops growing.
+        let mut derived: Vec<String> = Vec::new();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (antecedent, consequent) in &rules {
+                // Modus ponens: antecedent holds, therefore the consequent does.
+                if facts.iter().any(|f| propositions_match(f, antecedent))
+                    && !facts.iter().any(|f| propositions_match(f, consequent))
+                {
+                    facts.push(consequent.clone());
+                    derived.push(format!("{consequent} (modus ponens from \"{antecedent}\")"));
+                    changed = true;
+                }
+                // Modus tollens: the consequent is denied, therefore so is the
+                // antecedent.
+                let denied_consequent = format!("not {consequent}");
+                let denied_antecedent = format!("not {antecedent}");
+                if facts.iter().any(|f| propositions_match(f, &denied_consequent))
+                    && !facts.iter().any(|f| propositions_match(f, &denied_antecedent))
+                {
+                    facts.push(denied_antecedent.clone());
+                    derived.push(format!(
+                        "{denied_antecedent} (modus tollens from \"{consequent}\")"
+                    ));
+                    changed = true;
+                }
+            }
+        }
+
+        if derived.is_empty() {
+            Ok(format!(
+                "No rule applies: none of the {} premise(s) satisfies the antecedent of the \
+                 {} conditional(s)",
+                premises.len(),
+                rules.len()
             ))
         } else {
-            Ok(format!(
-                "Logical conclusion derived from: {}",
-                premises.join(", ")
-            ))
+            Ok(format!("Derived: {}", derived.join("; ")))
         }
     }
 
+    /// Chain stated cause→effect relations forward from `causes`.
+    ///
+    /// Relations come from the causal steps already in `context`; a cause with
+    /// no matching relation is reported as such instead of being echoed back as
+    /// a "predicted effect".
     fn predict_effects(&self, causes: &[String], context: &ReasoningContext) -> Result<String> {
-        // Simple effect prediction (placeholder for actual causal model)
         if causes.is_empty() {
             return Ok("No causes specified for effect prediction".to_string());
         }
 
-        Ok(format!(
-            "Predicted effects based on causes: {}",
-            causes.join(", ")
-        ))
+        // Collect the causal relations this conversation has established.
+        let mut relations: Vec<(String, String)> = Vec::new();
+        for step in context
+            .reasoning_chain
+            .iter()
+            .filter(|step| matches!(step.step_type, ReasoningType::Causal))
+        {
+            if let Some(relation) = parse_causal_relation(&step.output) {
+                relations.push(relation);
+            }
+        }
+
+        if relations.is_empty() {
+            return Ok(format!(
+                "No causal relation has been established for: {}",
+                causes.join(", ")
+            ));
+        }
+
+        // Transitive closure over the known relations.
+        let mut frontier: Vec<String> = causes.iter().map(|c| normalize_proposition(c)).collect();
+        let mut reached: Vec<String> = Vec::new();
+        let mut guard = 0usize;
+        while let Some(current) = frontier.pop() {
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+            for (cause, effect) in &relations {
+                if propositions_match(&current, cause)
+                    && !reached.iter().any(|e| propositions_match(e, effect))
+                {
+                    reached.push(effect.clone());
+                    frontier.push(effect.clone());
+                }
+            }
+        }
+
+        if reached.is_empty() {
+            Ok(format!(
+                "None of the {} known causal relation(s) applies to: {}",
+                relations.len(),
+                causes.join(", ")
+            ))
+        } else {
+            Ok(format!("Follows causally: {}", reached.join(" -> ")))
+        }
     }
 
     fn find_analogies(&self, input: &str, context: &ReasoningContext) -> Result<Vec<String>> {
@@ -312,11 +423,20 @@ impl ReasoningEngine {
             return Ok(format!("Applied creative analysis to: {}", input));
         }
 
-        Ok(format!(
-            "Creative exploration of '{}' focusing on: {}",
-            input,
-            elements.join(", ")
-        ))
+        // Tie the response back to the conversation's stated goal, when the
+        // reasoning context has one, instead of ignoring it.
+        Ok(match &context.current_goal {
+            Some(goal) => format!(
+                "Creative exploration of '{}' (in service of '{goal}') focusing on: {}",
+                input,
+                elements.join(", ")
+            ),
+            None => format!(
+                "Creative exploration of '{}' focusing on: {}",
+                input,
+                elements.join(", ")
+            ),
+        })
     }
 
     fn extract_mathematical_expressions(&self, input: &str) -> Result<Vec<String>> {
@@ -601,9 +721,153 @@ pub struct ReasoningSummary {
     pub assumption_count: usize,
 }
 
+/// Normalise a proposition for comparison: trimmed, lower-cased, without
+/// trailing punctuation or a leading connective.
+fn normalize_proposition(text: &str) -> String {
+    let lowered = text.trim().to_lowercase();
+    let stripped = lowered
+        .trim_start_matches("therefore ")
+        .trim_start_matches("so ")
+        .trim_start_matches("thus ")
+        .trim_start_matches("then ")
+        .trim_end_matches(['.', '!', '?', ',', ';'])
+        .trim();
+    stripped.to_string()
+}
+
+/// Two propositions match when their normalised forms are equal, or when one
+/// fully contains the other (handling "it rains" vs "it rains today").
+fn propositions_match(a: &str, b: &str) -> bool {
+    let (a, b) = (normalize_proposition(a), normalize_proposition(b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a == b || a.contains(&b) || b.contains(&a)
+}
+
+/// Parse a conditional premise into `(antecedent, consequent)`.
+///
+/// Recognises "if A then B", "if A, B", and "A implies B".
+fn parse_conditional(text: &str) -> Option<(String, String)> {
+    let lowered = text.trim().to_lowercase();
+    if let Some(rest) = lowered.strip_prefix("if ") {
+        if let Some((antecedent, consequent)) = rest.split_once(" then ") {
+            return Some((
+                normalize_proposition(antecedent),
+                normalize_proposition(consequent),
+            ));
+        }
+        if let Some((antecedent, consequent)) = rest.split_once(", ") {
+            return Some((
+                normalize_proposition(antecedent),
+                normalize_proposition(consequent),
+            ));
+        }
+        return None;
+    }
+    for marker in [" implies ", " entails "] {
+        if let Some((antecedent, consequent)) = lowered.split_once(marker) {
+            return Some((
+                normalize_proposition(antecedent),
+                normalize_proposition(consequent),
+            ));
+        }
+    }
+    None
+}
+
+/// Parse a causal statement into `(cause, effect)`.
+fn parse_causal_relation(text: &str) -> Option<(String, String)> {
+    let lowered = text.trim().to_lowercase();
+    // Statements produced by `process_causal_reasoning` use "A -> B".
+    if let Some((cause, effect)) = lowered
+        .strip_prefix("causal relationship: ")
+        .and_then(|rest| rest.split_once(" -> "))
+    {
+        return Some((normalize_proposition(cause), normalize_proposition(effect)));
+    }
+    for marker in [" causes ", " leads to ", " results in ", " -> "] {
+        if let Some((cause, effect)) = lowered.split_once(marker) {
+            return Some((normalize_proposition(cause), normalize_proposition(effect)));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Regression: `derive_logical_conclusion` and `predict_effects` used to
+    // return echo templates ("Logical conclusion derived from: …",
+    // "Predicted effects based on causes: …") without performing any
+    // inference. These assert real derivation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn modus_ponens_actually_fires() {
+        let engine = ReasoningEngine::new(default_config());
+        let ctx = make_context();
+        let conclusion = engine
+            .derive_logical_conclusion(
+                &[
+                    "if it rains then the ground is wet".to_string(),
+                    "it rains".to_string(),
+                ],
+                &ctx,
+            )
+            .expect("derivation should succeed");
+        assert!(
+            conclusion.contains("the ground is wet"),
+            "modus ponens must produce the consequent, got: {conclusion}"
+        );
+        assert!(
+            !conclusion.starts_with("Logical conclusion derived from"),
+            "the old echo template must be gone: {conclusion}"
+        );
+    }
+
+    #[test]
+    fn no_rule_means_no_conclusion_is_claimed() {
+        let engine = ReasoningEngine::new(default_config());
+        let ctx = make_context();
+        let conclusion = engine
+            .derive_logical_conclusion(&["the sky is blue".to_string()], &ctx)
+            .expect("derivation should succeed");
+        assert!(
+            conclusion.contains("No conditional premise"),
+            "without a rule nothing follows, got: {conclusion}"
+        );
+    }
+
+    #[test]
+    fn effects_require_an_established_relation() {
+        let engine = ReasoningEngine::new(default_config());
+        let mut ctx = make_context();
+        let unrelated = engine
+            .predict_effects(&["heavy rain".to_string()], &ctx)
+            .expect("prediction should succeed");
+        assert!(
+            unrelated.contains("No causal relation"),
+            "with no relations nothing may be predicted, got: {unrelated}"
+        );
+
+        ctx.reasoning_chain.push(ReasoningStep {
+            step_type: ReasoningType::Causal,
+            description: "known relation".to_string(),
+            inputs: vec!["heavy rain".to_string()],
+            output: "Causal relationship: heavy rain -> flooding".to_string(),
+            confidence: 0.7,
+        });
+        let derived = engine
+            .predict_effects(&["heavy rain".to_string()], &ctx)
+            .expect("prediction should succeed");
+        assert!(
+            derived.contains("flooding"),
+            "the established relation must be followed, got: {derived}"
+        );
+    }
 
     fn make_context() -> ReasoningContext {
         ReasoningContext {

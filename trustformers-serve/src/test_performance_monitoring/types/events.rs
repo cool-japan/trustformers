@@ -264,7 +264,7 @@ pub struct EnrichmentCost {
     pub io_operations: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventIndex {
     pub index_id: String,
     pub indexed_fields: Vec<String>,

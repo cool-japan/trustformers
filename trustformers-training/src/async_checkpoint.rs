@@ -5,20 +5,34 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 // ─── Data structures ────────────────────────────────────────────────────────
 
+/// Bytes occupied by one stored weight value (`f32`).
+const WEIGHT_VALUE_BYTES: usize = std::mem::size_of::<f32>();
+
+/// Leading bytes of a [`SerializeFormat::Binary`] checkpoint file.
+///
+/// [`AsyncCheckpointer::load`] sniffs this so a checkpoint can be read back without the
+/// caller having to remember which format it was written in.
+const BINARY_MAGIC: [u8; 8] = *b"TFCKPT01";
+
 /// What to checkpoint
+///
+/// Weights and optimizer state are stored as `f32` — the precision model parameters
+/// actually have. Widening them to `f64` on the way to disk doubled the checkpoint size
+/// without adding a single bit of information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointData {
     pub step: u64,
     pub epoch: u32,
     /// layer_name -> flat weight vector
-    pub weights: HashMap<String, Vec<f64>>,
-    pub optimizer_state: HashMap<String, Vec<f64>>,
+    pub weights: HashMap<String, Vec<f32>>,
+    pub optimizer_state: HashMap<String, Vec<f32>>,
     /// loss, accuracy, etc.
     pub metrics: HashMap<String, f64>,
     pub config: serde_json::Value,
@@ -36,7 +50,7 @@ impl CheckpointData {
         }
     }
 
-    pub fn add_weight(&mut self, name: impl Into<String>, weights: Vec<f64>) {
+    pub fn add_weight(&mut self, name: impl Into<String>, weights: Vec<f32>) {
         self.weights.insert(name.into(), weights);
     }
 
@@ -44,11 +58,55 @@ impl CheckpointData {
         self.metrics.insert(name.into(), value);
     }
 
-    /// Estimate memory footprint in bytes (8 bytes per f64 value)
+    /// Estimate the bulk footprint in bytes (4 bytes per stored `f32`).
     pub fn estimated_size_bytes(&self) -> usize {
-        let weight_bytes: usize = self.weights.values().map(|v| v.len() * 8).sum();
-        let opt_bytes: usize = self.optimizer_state.values().map(|v| v.len() * 8).sum();
+        let weight_bytes: usize = self.weights.values().map(|v| v.len() * WEIGHT_VALUE_BYTES).sum();
+        let opt_bytes: usize =
+            self.optimizer_state.values().map(|v| v.len() * WEIGHT_VALUE_BYTES).sum();
         weight_bytes + opt_bytes
+    }
+}
+
+/// Wire form of [`CheckpointData`] for the non-self-describing binary format.
+///
+/// `oxicode` (like every bincode-shaped codec) cannot decode a `serde_json::Value`: the
+/// `Value` deserializer calls `deserialize_any`, which a format without type tags cannot
+/// answer. The free-form `config` is therefore carried as its JSON text and re-parsed on
+/// load; everything else round-trips as native binary.
+#[derive(Debug, Serialize, Deserialize)]
+struct BinaryCheckpoint {
+    step: u64,
+    epoch: u32,
+    weights: HashMap<String, Vec<f32>>,
+    optimizer_state: HashMap<String, Vec<f32>>,
+    metrics: HashMap<String, f64>,
+    config_json: String,
+}
+
+impl BinaryCheckpoint {
+    fn from_data(data: &CheckpointData) -> Result<Self, CheckpointError> {
+        Ok(Self {
+            step: data.step,
+            epoch: data.epoch,
+            weights: data.weights.clone(),
+            optimizer_state: data.optimizer_state.clone(),
+            metrics: data.metrics.clone(),
+            config_json: serde_json::to_string(&data.config)
+                .map_err(|e| CheckpointError::Serialization(e.to_string()))?,
+        })
+    }
+
+    fn into_data(self) -> Result<CheckpointData, CheckpointError> {
+        let config: serde_json::Value = serde_json::from_str(&self.config_json)
+            .map_err(|e| CheckpointError::Serialization(e.to_string()))?;
+        Ok(CheckpointData {
+            step: self.step,
+            epoch: self.epoch,
+            weights: self.weights,
+            optimizer_state: self.optimizer_state,
+            metrics: self.metrics,
+            config,
+        })
     }
 }
 
@@ -60,12 +118,25 @@ pub enum MetricMode {
     Max,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SerializeFormat {
-    /// serde_json human-readable (pretty-printed)
+    /// serde_json human-readable (pretty-printed). Debug format only — a real checkpoint
+    /// written this way is roughly an order of magnitude larger than the model.
     Json,
-    /// serde_json compact
+    /// serde_json compact. Still decimal text for every weight.
     Compact,
+    /// `oxicode` binary — 4 bytes per weight, streamed straight to the file. Default.
+    Binary,
+}
+
+impl SerializeFormat {
+    /// File extension used for checkpoints written in this format.
+    fn extension(self) -> &'static str {
+        match self {
+            SerializeFormat::Json | SerializeFormat::Compact => "json",
+            SerializeFormat::Binary => "ckpt",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +163,7 @@ impl Default for AsyncCheckpointConfig {
             save_best_only: false,
             best_metric_name: "val_loss".to_string(),
             best_metric_mode: MetricMode::Min,
-            serialize_format: SerializeFormat::Compact,
+            serialize_format: SerializeFormat::Binary,
         }
     }
 }
@@ -115,7 +186,16 @@ pub struct AsyncCheckpointer {
     pending_handles: Arc<Mutex<Vec<Arc<Mutex<CheckpointHandle>>>>>,
     /// (step, path) ordered history of completed saves
     saved_paths: Arc<Mutex<Vec<(u64, PathBuf)>>>,
-    best_metric: Arc<Mutex<Option<f64>>>,
+    /// Best tracked metric together with the step that produced it, so
+    /// [`AsyncCheckpointer::best_checkpoint`] can name the right file instead of guessing.
+    best_metric: Arc<Mutex<Option<BestMetric>>>,
+}
+
+/// The best value seen for [`AsyncCheckpointConfig::best_metric_name`] and its step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BestMetric {
+    value: f64,
+    step: u64,
 }
 
 impl AsyncCheckpointer {
@@ -145,10 +225,13 @@ impl AsyncCheckpointer {
 
         let handle_clone = Arc::clone(&handle);
         let saved_paths_clone = Arc::clone(&self.saved_paths);
-        let format = self.config.serialize_format.clone();
+        let best_metric_clone = Arc::clone(&self.best_metric);
+        let format = self.config.serialize_format;
+        let metric_name = self.config.best_metric_name.clone();
+        let metric_mode = self.config.best_metric_mode.clone();
 
         thread::spawn(move || {
-            let result = Self::write_to_disk(&data, &path, &format);
+            let result = Self::write_to_disk(&data, &path, format);
             let mut h = match handle_clone.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -159,10 +242,18 @@ impl AsyncCheckpointer {
                     if let Ok(mut sp) = saved_paths_clone.lock() {
                         sp.push((data.step, path));
                     }
-                }
+                    // Background saves must feed the best-metric tracker too, otherwise
+                    // `should_checkpoint(.., save_best_only)` would only ever see the
+                    // checkpoints written synchronously.
+                    if let Some(&value) = data.metrics.get(&metric_name) {
+                        if let Ok(mut best) = best_metric_clone.lock() {
+                            update_best(&mut best, value, data.step, &metric_mode);
+                        }
+                    }
+                },
                 Err(e) => {
                     h.error = Some(e.to_string());
-                }
+                },
             }
         });
 
@@ -187,9 +278,7 @@ impl AsyncCheckpointer {
                     .pending_handles
                     .lock()
                     .map_err(|e| CheckpointError::Thread(e.to_string()))?;
-                pending.iter().all(|h| {
-                    h.lock().map(|g| g.is_complete).unwrap_or(false)
-                })
+                pending.iter().all(|h| h.lock().map(|g| g.is_complete).unwrap_or(false))
             };
             if all_done {
                 break;
@@ -219,76 +308,125 @@ impl AsyncCheckpointer {
     /// Synchronous save (blocks until complete).
     pub fn save_sync(&self, data: &CheckpointData) -> Result<PathBuf, CheckpointError> {
         let path = self.checkpoint_path(data.step);
-        Self::write_to_disk(data, &path, &self.config.serialize_format)?;
+        Self::write_to_disk(data, &path, self.config.serialize_format)?;
         {
-            let mut sp = self
-                .saved_paths
-                .lock()
-                .map_err(|e| CheckpointError::Thread(e.to_string()))?;
+            let mut sp =
+                self.saved_paths.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
             sp.push((data.step, path.clone()));
         }
         // Update best metric tracking
         if let Some(&metric_value) = data.metrics.get(&self.config.best_metric_name) {
-            let mut best = self
-                .best_metric
-                .lock()
-                .map_err(|e| CheckpointError::Thread(e.to_string()))?;
-            *best = Some(match *best {
-                None => metric_value,
-                Some(prev) => match self.config.best_metric_mode {
-                    MetricMode::Min => prev.min(metric_value),
-                    MetricMode::Max => prev.max(metric_value),
-                },
-            });
+            let mut best =
+                self.best_metric.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
+            update_best(
+                &mut best,
+                metric_value,
+                data.step,
+                &self.config.best_metric_mode,
+            );
         }
         self.cleanup_old_checkpoints()?;
         Ok(path)
     }
 
-    /// Load a checkpoint from path.
+    /// Load a checkpoint from `path`, in whichever format it was written.
+    ///
+    /// The format is detected from the file's leading bytes (`BINARY_MAGIC`), not from the
+    /// extension or from any configuration, so a checkpointer configured for one format can
+    /// still read files produced by another. The file is streamed through a `BufReader`
+    /// rather than materialised as one `String`.
     pub fn load(path: &Path) -> Result<CheckpointData, CheckpointError> {
         if !path.exists() {
             return Err(CheckpointError::NotFound {
                 path: path.to_path_buf(),
             });
         }
-        let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| CheckpointError::Serialization(e.to_string()))
+        let file = std::fs::File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        let mut magic = [0u8; BINARY_MAGIC.len()];
+        let read = read_up_to(&mut reader, &mut magic)?;
+        if read == BINARY_MAGIC.len() && magic == BINARY_MAGIC {
+            let (wire, _): (BinaryCheckpoint, usize) =
+                oxicode::serde::decode_from_std_read(&mut reader, oxicode::config::standard())
+                    .map_err(|e| CheckpointError::Serialization(e.to_string()))?;
+            return wire.into_data();
+        }
+
+        // Not a binary checkpoint — rewind and parse it as JSON.
+        reader.seek(SeekFrom::Start(0))?;
+        serde_json::from_reader(reader).map_err(|e| CheckpointError::Serialization(e.to_string()))
+    }
+
+    /// Adopt the checkpoints already present in `checkpoint_dir`.
+    ///
+    /// `saved_paths` is in-memory, so a fresh process starts out believing no checkpoint
+    /// exists. This scans the directory for `checkpoint_step_<step>.{json,ckpt}` — **both**
+    /// extensions, so a directory written before the binary format became the default is
+    /// still found — and merges what it finds into the tracked history, replacing any entry
+    /// for the same step. Returns the discovered `(step, path)` pairs in step order.
+    ///
+    /// Best-metric tracking is *not* reconstructed: that would mean reading every
+    /// checkpoint in full to recover one scalar. [`AsyncCheckpointer::best_checkpoint`]
+    /// therefore reports `None` until this process saves a checkpoint of its own, rather
+    /// than naming a file it has not actually compared.
+    pub fn discover_existing(&self) -> Result<Vec<(u64, PathBuf)>, CheckpointError> {
+        let mut discovered = Vec::new();
+        for entry in std::fs::read_dir(&self.config.checkpoint_dir)? {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(step) = checkpoint_step_from_path(&path) else {
+                continue;
+            };
+            discovered.push((step, path));
+        }
+        discovered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut saved =
+            self.saved_paths.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
+        for (step, path) in &discovered {
+            if let Some(existing) = saved.iter_mut().find(|(s, _)| s == step) {
+                existing.1 = path.clone();
+            } else {
+                saved.push((*step, path.clone()));
+            }
+        }
+        saved.sort_by_key(|(step, _)| *step);
+        Ok(discovered)
     }
 
     /// List all saved checkpoints in step order.
     pub fn list_checkpoints(&self) -> Vec<(u64, PathBuf)> {
-        let mut result = self
-            .saved_paths
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let mut result = self.saved_paths.lock().map(|g| g.clone()).unwrap_or_default();
         result.sort_by_key(|(step, _)| *step);
         result
     }
 
-    /// Get the best checkpoint path (the one with the best tracked metric).
+    /// Path of the checkpoint that produced the best tracked metric.
+    ///
+    /// Returns `None` when no metric has been observed yet, or when the checkpoint that
+    /// produced it has since been rotated away by `max_checkpoints_to_keep` — a stale path
+    /// is worse than an honest `None`.
     pub fn best_checkpoint(&self) -> Option<PathBuf> {
-        let best_val = self.best_metric.lock().ok()?.and_then(|v| {
-            if v.is_nan() { None } else { Some(v) }
-        })?;
+        let best = (*self.best_metric.lock().ok()?)?;
+        if best.value.is_nan() {
+            return None;
+        }
         let saved = self.saved_paths.lock().ok()?;
-        // Find the checkpoint whose filename contains the step that produced the best metric.
-        // We track the best value; we need to re-scan saved checkpoints and find
-        // the one closest to it by step — simplest: return the last saved checkpoint
-        // if save_best_only is true, or the newest otherwise.
-        // Since we don't independently track which step produced the best metric,
-        // we return the checkpoint associated with the best metric by scanning metrics
-        // on disk.  For a lightweight implementation we just return the last saved path.
-        let _ = best_val;
-        saved.last().map(|(_, p)| p.clone())
+        saved.iter().find(|(step, _)| *step == best.step).map(|(_, path)| path.clone())
+    }
+
+    /// Best value observed so far for the configured metric, if any.
+    pub fn best_metric_value(&self) -> Option<f64> {
+        self.best_metric.lock().ok().and_then(|guard| guard.map(|best| best.value))
     }
 
     /// Should we checkpoint at this step?
     pub fn should_checkpoint(&self, step: u64, current_metric: Option<f64>) -> bool {
         // Interval check
-        let interval_hit = step > 0 && step % self.config.save_interval_steps == 0;
+        let interval_hit = step > 0 && step.is_multiple_of(self.config.save_interval_steps);
         if !interval_hit {
             return false;
         }
@@ -307,8 +445,8 @@ impl AsyncCheckpointer {
         match best {
             None => true, // first checkpoint
             Some(prev) => match self.config.best_metric_mode {
-                MetricMode::Min => current < prev,
-                MetricMode::Max => current > prev,
+                MetricMode::Min => current < prev.value,
+                MetricMode::Max => current > prev.value,
             },
         }
     }
@@ -316,10 +454,8 @@ impl AsyncCheckpointer {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     fn cleanup_old_checkpoints(&self) -> Result<(), CheckpointError> {
-        let mut saved = self
-            .saved_paths
-            .lock()
-            .map_err(|e| CheckpointError::Thread(e.to_string()))?;
+        let mut saved =
+            self.saved_paths.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
         saved.sort_by_key(|(s, _)| *s);
         while saved.len() > self.config.max_checkpoints_to_keep {
             let (_, old_path) = saved.remove(0);
@@ -331,25 +467,85 @@ impl AsyncCheckpointer {
     }
 
     fn checkpoint_path(&self, step: u64) -> PathBuf {
+        let extension = self.config.serialize_format.extension();
         self.config
             .checkpoint_dir
-            .join(format!("checkpoint_step_{step:010}.json"))
+            .join(format!("checkpoint_step_{step:010}.{extension}"))
     }
 
+    /// Stream `data` to `path` in `format`.
+    ///
+    /// Every format writes through a `BufWriter` — the checkpoint is never materialised as a
+    /// second in-memory copy (which for JSON meant a `String` several times the size of the
+    /// model itself).
     fn write_to_disk(
         data: &CheckpointData,
         path: &Path,
-        format: &SerializeFormat,
+        format: SerializeFormat,
     ) -> Result<(), CheckpointError> {
-        let serialized = match format {
-            SerializeFormat::Json => serde_json::to_string_pretty(data)
+        let file = std::fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        match format {
+            SerializeFormat::Json => serde_json::to_writer_pretty(&mut writer, data)
                 .map_err(|e| CheckpointError::Serialization(e.to_string()))?,
-            SerializeFormat::Compact => serde_json::to_string(data)
+            SerializeFormat::Compact => serde_json::to_writer(&mut writer, data)
                 .map_err(|e| CheckpointError::Serialization(e.to_string()))?,
-        };
-        std::fs::write(path, serialized)?;
+            SerializeFormat::Binary => {
+                let wire = BinaryCheckpoint::from_data(data)?;
+                writer.write_all(&BINARY_MAGIC)?;
+                oxicode::serde::encode_into_std_write(
+                    &wire,
+                    &mut writer,
+                    oxicode::config::standard(),
+                )
+                .map_err(|e| CheckpointError::Serialization(e.to_string()))?;
+            },
+        }
+        writer.flush()?;
         Ok(())
     }
+}
+
+/// Step encoded in a `checkpoint_step_<step>.{json,ckpt}` filename, if it is one.
+fn checkpoint_step_from_path(path: &Path) -> Option<u64> {
+    let extension = path.extension()?.to_str()?;
+    if extension != "json" && extension != "ckpt" {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    stem.strip_prefix("checkpoint_step_")?.parse::<u64>().ok()
+}
+
+/// Fold `value` (observed at `step`) into the running best under `mode`.
+fn update_best(best: &mut Option<BestMetric>, value: f64, step: u64, mode: &MetricMode) {
+    if value.is_nan() {
+        return;
+    }
+    let improved = match best {
+        None => true,
+        Some(prev) => match mode {
+            MetricMode::Min => value < prev.value,
+            MetricMode::Max => value > prev.value,
+        },
+    };
+    if improved {
+        *best = Some(BestMetric { value, step });
+    }
+}
+
+/// Read up to `buf.len()` bytes, tolerating a file shorter than the buffer.
+///
+/// `Read::read` may return fewer bytes than requested even when more are available, so a
+/// single call is not enough to decide whether the magic header is present.
+fn read_up_to<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
 }
 
 // ─── CheckpointState ────────────────────────────────────────────────────────
@@ -465,7 +661,7 @@ impl CheckpointManager {
     /// - `step > 0`
     /// - `step % save_every_n_steps == 0`
     pub fn should_save(&self, step: usize, save_every_n_steps: usize) -> bool {
-        save_every_n_steps > 0 && step > 0 && step % save_every_n_steps == 0
+        save_every_n_steps > 0 && step > 0 && step.is_multiple_of(save_every_n_steps)
     }
 
     /// Register a checkpoint. Pushes `meta` to the back of the queue.
@@ -480,11 +676,9 @@ impl CheckpointManager {
     ///
     /// Returns `None` if no checkpoints have been registered.
     pub fn get_best_checkpoint(&self) -> Option<&CheckpointMetadata> {
-        self.saved_checkpoints.iter().min_by(|a, b| {
-            a.loss
-                .partial_cmp(&b.loss)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.saved_checkpoints
+            .iter()
+            .min_by(|a, b| a.loss.partial_cmp(&b.loss).unwrap_or(std::cmp::Ordering::Equal))
     }
 
     /// Return a reference to the most recently registered checkpoint.
@@ -608,7 +802,10 @@ mod tests {
         let _h = ckpt.save_async(make_data(50)).unwrap();
         ckpt.wait_all().unwrap();
         let expected = dir.join("checkpoint_step_0000000050.json");
-        assert!(expected.exists(), "checkpoint file should exist at {expected:?}");
+        assert!(
+            expected.exists(),
+            "checkpoint file should exist at {expected:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -655,7 +852,12 @@ mod tests {
 
         let saved = ckpt.list_checkpoints();
         // Should keep only the 2 most recent
-        assert_eq!(saved.len(), 2, "should keep 2 checkpoints, got {}", saved.len());
+        assert_eq!(
+            saved.len(),
+            2,
+            "should keep 2 checkpoints, got {}",
+            saved.len()
+        );
         assert_eq!(saved[0].0, 30);
         assert_eq!(saved[1].0, 40);
 
@@ -768,8 +970,8 @@ mod tests {
         let mut d = CheckpointData::new(0, 0);
         d.add_weight("w", vec![1.0; 1000]);
         d.optimizer_state.insert("m".to_string(), vec![0.0; 500]);
-        // 1000 + 500 = 1500 values * 8 bytes
-        assert_eq!(d.estimated_size_bytes(), 12_000);
+        // 1000 + 500 = 1500 values * 4 bytes (f32, not a widened f64)
+        assert_eq!(d.estimated_size_bytes(), 6_000);
     }
 
     // 14. Pretty Json format roundtrip
@@ -802,6 +1004,254 @@ mod tests {
         ckpt.wait_all().unwrap();
         let saved = ckpt.list_checkpoints();
         assert_eq!(saved.len(), 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── Binary checkpoint format ────────────────────────────────────────────
+
+    /// A checkpoint whose weights are full-precision-looking f32s — the decimal expansion
+    /// of these in JSON is long, which is exactly the cost the binary format removes.
+    fn bulky_data(step: u64, values: usize) -> CheckpointData {
+        let mut d = CheckpointData::new(step, 0);
+        let weights: Vec<f32> = (0..values)
+            .map(|i| (i as f32) * std::f32::consts::PI / 7.0 - 1.234_567_9)
+            .collect();
+        let opt: Vec<f32> = weights.iter().map(|w| w * 0.5).collect();
+        d.add_weight("layer0.weight", weights);
+        d.optimizer_state.insert("layer0.weight.m".to_string(), opt);
+        d.add_metric("val_loss", 0.25);
+        d.config = serde_json::json!({"hidden": 256, "name": "tiny"});
+        d
+    }
+
+    // 33. Binary round-trip is bit-exact and preserves the free-form config.
+    #[test]
+    fn test_binary_format_roundtrip_is_bit_exact() {
+        let dir = std::env::temp_dir().join(format!("ckpt_bin_{}", fastrand::u64(..)));
+        let mut cfg = make_config(dir.clone());
+        cfg.serialize_format = SerializeFormat::Binary;
+        let ckpt = AsyncCheckpointer::new(cfg).expect("checkpointer");
+
+        let mut data = bulky_data(70, 64);
+        // Values that a lossy path would round or clamp.
+        data.add_weight(
+            "edge",
+            vec![f32::MIN_POSITIVE, -f32::MAX, 1e-8, 0.1, 65_504.0, 70_000.0],
+        );
+        let path = ckpt.save_sync(&data).expect("save");
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("ckpt"),
+            "binary checkpoints must not pretend to be .json"
+        );
+
+        let loaded = AsyncCheckpointer::load(&path).expect("load");
+        assert_eq!(loaded.step, 70);
+        for (name, original) in &data.weights {
+            let round_tripped = loaded.weights.get(name).expect("weight survives the round trip");
+            let original_bits: Vec<u32> = original.iter().map(|v| v.to_bits()).collect();
+            let loaded_bits: Vec<u32> = round_tripped.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                original_bits, loaded_bits,
+                "weights '{name}' must be bit-exact"
+            );
+        }
+        assert_eq!(loaded.optimizer_state, data.optimizer_state);
+        assert_eq!(loaded.config["hidden"], 256);
+        assert_eq!(loaded.config["name"], "tiny");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 34. Regression: weights used to be pretty-printed f64 decimal text. The binary
+    //     format must be dramatically smaller than either JSON encoding.
+    #[test]
+    fn test_binary_format_is_far_smaller_than_json() {
+        let dir = std::env::temp_dir().join(format!("ckpt_size_{}", fastrand::u64(..)));
+        let data = bulky_data(10, 4096);
+
+        let mut sizes = HashMap::new();
+        for format in [
+            SerializeFormat::Json,
+            SerializeFormat::Compact,
+            SerializeFormat::Binary,
+        ] {
+            let mut cfg = make_config(dir.clone());
+            cfg.serialize_format = format;
+            let ckpt = AsyncCheckpointer::new(cfg).expect("checkpointer");
+            let path = ckpt.save_sync(&data).expect("save");
+            let len = std::fs::metadata(&path).expect("metadata").len();
+            sizes.insert(format, len);
+            // Every format must still round-trip through the sniffing loader.
+            let loaded = AsyncCheckpointer::load(&path).expect("load");
+            assert_eq!(
+                loaded.weights["layer0.weight"],
+                data.weights["layer0.weight"]
+            );
+        }
+
+        let binary = sizes[&SerializeFormat::Binary];
+        let compact = sizes[&SerializeFormat::Compact];
+        let pretty = sizes[&SerializeFormat::Json];
+        // 8192 f32 values -> ~32 KiB of payload; JSON needs >10 bytes per value.
+        assert!(
+            binary * 2 < compact,
+            "binary ({binary} B) must be far smaller than compact JSON ({compact} B)"
+        );
+        assert!(
+            compact <= pretty,
+            "pretty JSON ({pretty} B) cannot be smaller than compact JSON ({compact} B)"
+        );
+        let expected_payload = (8192 * WEIGHT_VALUE_BYTES) as u64;
+        assert!(
+            binary < expected_payload * 2,
+            "binary ({binary} B) should be within 2x of the raw f32 payload \
+             ({expected_payload} B)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 35. The loader detects the format from the file, not from the configuration.
+    #[test]
+    fn test_load_detects_format_independently_of_config() {
+        let dir = std::env::temp_dir().join(format!("ckpt_sniff_{}", fastrand::u64(..)));
+        let data = bulky_data(20, 8);
+
+        let mut binary_cfg = make_config(dir.clone());
+        binary_cfg.serialize_format = SerializeFormat::Binary;
+        let binary_path = AsyncCheckpointer::new(binary_cfg)
+            .expect("checkpointer")
+            .save_sync(&data)
+            .expect("save");
+
+        let mut json_cfg = make_config(dir.clone());
+        json_cfg.serialize_format = SerializeFormat::Compact;
+        let json_path = AsyncCheckpointer::new(json_cfg)
+            .expect("checkpointer")
+            .save_sync(&data)
+            .expect("save");
+
+        // One static loader reads both.
+        assert_eq!(
+            AsyncCheckpointer::load(&binary_path).expect("binary").step,
+            20
+        );
+        assert_eq!(AsyncCheckpointer::load(&json_path).expect("json").step, 20);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 36. An empty (or truncated) file is an error, never a silently empty checkpoint.
+    #[test]
+    fn test_load_rejects_a_truncated_file() {
+        let dir = std::env::temp_dir().join(format!("ckpt_trunc_{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("empty.ckpt");
+        std::fs::write(&path, b"").expect("write");
+        assert!(matches!(
+            AsyncCheckpointer::load(&path),
+            Err(CheckpointError::Serialization(_))
+        ));
+
+        let short = dir.join("short.ckpt");
+        std::fs::write(&short, BINARY_MAGIC).expect("write");
+        assert!(matches!(
+            AsyncCheckpointer::load(&short),
+            Err(CheckpointError::Serialization(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 37. Regression: `best_checkpoint` used to return the *last* saved path regardless of
+    //     which step actually produced the best metric.
+    #[test]
+    fn test_best_checkpoint_names_the_step_with_the_best_metric() {
+        let dir = std::env::temp_dir().join(format!("ckpt_bestpath_{}", fastrand::u64(..)));
+        let mut cfg = make_config(dir.clone());
+        cfg.max_checkpoints_to_keep = 10;
+        cfg.best_metric_name = "val_loss".to_string();
+        cfg.best_metric_mode = MetricMode::Min;
+        let ckpt = AsyncCheckpointer::new(cfg).expect("checkpointer");
+
+        for (step, loss) in [(10u64, 0.9f64), (20, 0.2), (30, 0.7)] {
+            let mut d = CheckpointData::new(step, 0);
+            d.add_weight("w", vec![step as f32]);
+            d.add_metric("val_loss", loss);
+            ckpt.save_sync(&d).expect("save");
+        }
+
+        let best = ckpt.best_checkpoint().expect("a best checkpoint must be known");
+        assert!(
+            best.to_string_lossy().contains("0000000020"),
+            "step 20 had the lowest val_loss, got {best:?}"
+        );
+        assert_eq!(ckpt.best_metric_value(), Some(0.2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 39. A restarted checkpointer finds the checkpoints already on disk, in either format.
+    #[test]
+    fn test_discover_existing_finds_both_formats() {
+        let dir = std::env::temp_dir().join(format!("ckpt_discover_{}", fastrand::u64(..)));
+        let data = bulky_data(10, 8);
+
+        let mut binary_cfg = make_config(dir.clone());
+        binary_cfg.serialize_format = SerializeFormat::Binary;
+        binary_cfg.max_checkpoints_to_keep = 10;
+        let first = AsyncCheckpointer::new(binary_cfg).expect("checkpointer");
+        first.save_sync(&data).expect("save");
+
+        let mut json_cfg = make_config(dir.clone());
+        json_cfg.serialize_format = SerializeFormat::Compact;
+        json_cfg.max_checkpoints_to_keep = 10;
+        let second = AsyncCheckpointer::new(json_cfg).expect("checkpointer");
+        second.save_sync(&bulky_data(20, 8)).expect("save");
+
+        // A brand-new process: nothing tracked in memory yet.
+        let mut fresh_cfg = make_config(dir.clone());
+        fresh_cfg.max_checkpoints_to_keep = 10;
+        let restarted = AsyncCheckpointer::new(fresh_cfg).expect("checkpointer");
+        assert!(restarted.list_checkpoints().is_empty());
+
+        let found = restarted.discover_existing().expect("scan");
+        let steps: Vec<u64> = found.iter().map(|(step, _)| *step).collect();
+        assert_eq!(
+            steps,
+            vec![10, 20],
+            "both the .ckpt and the .json must be found"
+        );
+        assert_eq!(restarted.list_checkpoints().len(), 2);
+        for (_, path) in &found {
+            AsyncCheckpointer::load(path).expect("every discovered checkpoint must load");
+        }
+        // Nothing was compared, so no checkpoint may be claimed as "best".
+        assert!(restarted.best_checkpoint().is_none());
+
+        // Unrelated files in the directory are ignored, and rescanning is idempotent.
+        std::fs::write(dir.join("notes.txt"), b"hello").expect("write");
+        std::fs::write(dir.join("checkpoint_step_abc.ckpt"), b"x").expect("write");
+        assert_eq!(restarted.discover_existing().expect("rescan").len(), 2);
+        assert_eq!(restarted.list_checkpoints().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 38. Background saves feed the best-metric tracker as well as synchronous ones.
+    #[test]
+    fn test_async_save_updates_best_metric() {
+        let dir = std::env::temp_dir().join(format!("ckpt_asyncbest_{}", fastrand::u64(..)));
+        let mut cfg = make_config(dir.clone());
+        cfg.max_checkpoints_to_keep = 10;
+        cfg.save_best_only = true;
+        let ckpt = AsyncCheckpointer::new(cfg).expect("checkpointer");
+
+        let mut d = CheckpointData::new(10, 0);
+        d.add_metric("val_loss", 0.4);
+        ckpt.save_async(d).expect("save_async");
+        ckpt.wait_all().expect("wait");
+
+        assert_eq!(ckpt.best_metric_value(), Some(0.4));
+        assert!(
+            !ckpt.should_checkpoint(20, Some(0.5)),
+            "0.5 is worse than 0.4"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -850,10 +1300,8 @@ mod tests {
     // 20. CheckpointMetadata::new sets all fields
     #[test]
     fn test_checkpoint_metadata_new() {
-        let ckpt_path = std::env::temp_dir()
-            .join("ckpt_step_100.json")
-            .to_string_lossy()
-            .into_owned();
+        let ckpt_path =
+            std::env::temp_dir().join("ckpt_step_100.json").to_string_lossy().into_owned();
         let before = std::time::SystemTime::now();
         let meta = CheckpointMetadata::new(ckpt_path.clone(), 100, 1, 0.42);
         let after = std::time::SystemTime::now();
@@ -933,7 +1381,11 @@ mod tests {
             0.8,
         ));
         let best = mgr.get_best_checkpoint().expect("should have best");
-        assert!((best.loss - 0.3).abs() < 1e-6, "best loss should be 0.3, got {}", best.loss);
+        assert!(
+            (best.loss - 0.3).abs() < 1e-6,
+            "best loss should be 0.3, got {}",
+            best.loss
+        );
         assert_eq!(best.path, path_b);
     }
 

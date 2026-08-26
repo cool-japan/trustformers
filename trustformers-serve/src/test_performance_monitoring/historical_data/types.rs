@@ -6,7 +6,6 @@ use super::super::analytics::DataPoint;
 pub use super::super::types::*;
 use crate::performance_optimizer::test_characterization::pattern_engine::SeverityLevel;
 use crate::test_performance_monitoring::MonitoringResult;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -304,14 +303,18 @@ pub enum CompressionError {
     InvalidData { details: String },
     InsufficientMemory,
 }
-/// Data retention management system
+/// Data retention management system.
+///
+/// 0.2.1: dropped a `RetentionExecutor` (an id, a schedule string and a
+/// never-set `last_run`, with no method that could run anything) and a
+/// `ComplianceManager` (an id, one rule *name* and an `audit_log_enabled: true`
+/// flag that gated no audit log). Retention decisions are made by
+/// [`Self::check_deletion_allowed`] from the real policies below.
 #[derive(Debug)]
 pub struct RetentionManager {
     retention_policies: Arc<RwLock<HashMap<String, RetentionPolicy>>>,
     cleanup_scheduler: Arc<CleanupScheduler>,
     pub(crate) lifecycle_rules: Arc<RwLock<Vec<LifecycleRule>>>,
-    retention_executor: Arc<RetentionExecutor>,
-    compliance_manager: Arc<ComplianceManager>,
 }
 impl RetentionManager {
     pub fn new<C>(config: &C) -> Self
@@ -324,10 +327,6 @@ impl RetentionManager {
         if let Some(max_items) = config.max_items() {
             cleanup_rules.push(format!("limit_items_{}", max_items));
         }
-        let schedule = match cleanup_interval.as_secs() {
-            0 => "manual".to_string(),
-            secs => format!("every {}s", secs),
-        };
         Self {
             retention_policies: Arc::new(RwLock::new(HashMap::new())),
             cleanup_scheduler: Arc::new(CleanupScheduler {
@@ -336,16 +335,6 @@ impl RetentionManager {
                 enabled: true,
             }),
             lifecycle_rules: Arc::new(RwLock::new(Vec::new())),
-            retention_executor: Arc::new(RetentionExecutor {
-                executor_id: "default".to_string(),
-                schedule,
-                last_run: None,
-            }),
-            compliance_manager: Arc::new(ComplianceManager {
-                manager_id: "default".to_string(),
-                compliance_rules: vec!["retention_policy_audit".to_string()],
-                audit_log_enabled: true,
-            }),
         }
     }
     /// Check if deletion is allowed for a series
@@ -577,45 +566,29 @@ pub struct QualityIssue {
     pub last_detected: SystemTime,
     pub mitigation_suggestions: Vec<String>,
 }
-/// Query engine for historical data
+/// Query engine for historical data.
+///
+/// 0.2.1: dropped a `QueryParser`, `QueryOptimizer`, `QueryExecutionEngine` and
+/// `QueryStatistics`. Each was a struct of descriptive constants -- a syntax
+/// version, an `optimization_level: 2`, a `max_parallelism: 8`, a `cost_model:
+/// "default"` -- with no method between them, so nothing was parsed, optimised,
+/// executed by them or counted. Queries are served from the real `cache_store`
+/// and the time-series data itself.
 #[derive(Debug)]
 pub struct QueryEngine {
-    query_parser: Arc<QueryParser>,
-    query_optimizer: Arc<QueryOptimizer>,
-    execution_engine: Arc<QueryExecutionEngine>,
     result_cache: Arc<QueryResultCache>,
-    query_statistics: Arc<QueryStatistics>,
     cache_store: Arc<RwLock<HashMap<String, (QueryResult, std::time::Instant)>>>,
     cache_max_entries: usize,
 }
 impl QueryEngine {
     pub fn new(config: &HistoricalDataConfig) -> Self {
-        let parser = QueryParser {
-            parser_id: "historical_query_parser".to_string(),
-            syntax_version: "1.0".to_string(),
-            strict_mode: true,
-        };
-        let optimizer = QueryOptimizer {
-            optimizer_id: "historical_query_optimizer".to_string(),
-            optimization_level: 2,
-            cost_model: "default".to_string(),
-        };
-        let execution_engine = QueryExecutionEngine {
-            engine_id: "historical_execution_engine".to_string(),
-            max_parallelism: 8,
-            timeout: config.aggregation_interval.max(Duration::from_secs(1)),
-        };
         let cache = QueryResultCache {
             cache_id: "historical_query_cache".to_string(),
             max_size: (config.cache_config.max_cacheable_size_mb as usize) * 1024 * 1024,
             ttl: config.cache_config.ttl,
         };
         Self {
-            query_parser: Arc::new(parser),
-            query_optimizer: Arc::new(optimizer),
-            execution_engine: Arc::new(execution_engine),
             result_cache: Arc::new(cache),
-            query_statistics: Arc::new(QueryStatistics::default()),
             cache_store: Arc::new(RwLock::new(HashMap::new())),
             cache_max_entries: config.cache_config.max_entries,
         }
@@ -1017,23 +990,24 @@ impl HistoricalDataStatistics {
             Duration::from_secs_f64(new_total_time_secs / perf.query_count as f64);
     }
 }
-/// Time series data storage system
+/// Time series data storage system.
+///
+/// 0.2.1: dropped a `TimeSeriesIndexManager`, a `partitioning_strategy` and a
+/// `storage_optimization`. The index manager built temporal/metric/tag indices
+/// and bloom filters at construction and then had no method to add to, query or
+/// maintain any of them; the other two were configuration copies that no code
+/// path consulted, so nothing was ever partitioned or compacted. Lookup is by
+/// the registry and store below.
 #[derive(Debug)]
 pub struct TimeSeriesStore {
     series_registry: Arc<RwLock<HashMap<String, TimeSeriesMetadata>>>,
     data_store: Arc<RwLock<HashMap<String, TimeSeries>>>,
-    index_manager: Arc<TimeSeriesIndexManager>,
-    partitioning_strategy: PartitioningStrategy,
-    storage_optimization: StorageOptimization,
 }
 impl TimeSeriesStore {
-    fn new(config: &HistoricalDataConfig) -> Self {
+    fn new(_config: &HistoricalDataConfig) -> Self {
         Self {
             series_registry: Arc::new(RwLock::new(HashMap::new())),
             data_store: Arc::new(RwLock::new(HashMap::new())),
-            index_manager: Arc::new(TimeSeriesIndexManager::new(&config.indexing_config)),
-            partitioning_strategy: config.partitioning_strategy.clone(),
-            storage_optimization: config.storage_optimization.clone(),
         }
     }
     async fn store_series(&self, series: TimeSeries) -> Result<(), HistoricalDataError> {
@@ -1146,32 +1120,20 @@ pub struct DataLifecyclePolicy {
     pub compliance_rules: Vec<ComplianceRule>,
     pub monitoring_config: LifecycleMonitoringConfig,
 }
-/// Data lifecycle management
+/// Data lifecycle management.
+///
+/// 0.2.1: dropped a `LifecycleStateTracker` (`current_state: "active"`, set
+/// once and never transitioned), a `TransitionExecutor` (`status: "idle"`,
+/// likewise) and a `LifecycleEventManager` (an empty handler list behind an
+/// `enabled: true`). None had a method; nothing tracked, transitioned or
+/// emitted. Lifecycle decisions come from the real policies below.
 #[derive(Debug)]
 pub struct DataLifecycleManager {
     lifecycle_policies: Arc<RwLock<HashMap<String, DataLifecyclePolicy>>>,
-    state_tracker: Arc<LifecycleStateTracker>,
-    transition_executor: Arc<TransitionExecutor>,
-    lifecycle_events: Arc<LifecycleEventManager>,
     cost_optimizer: Arc<CostOptimizer>,
 }
 impl DataLifecycleManager {
     pub fn new(config: &HistoricalDataConfig) -> Self {
-        let state_tracker = LifecycleStateTracker {
-            state_id: "default".to_string(),
-            current_state: "active".to_string(),
-            last_transition: Utc::now(),
-        };
-        let transition_executor = TransitionExecutor {
-            executor_id: "default".to_string(),
-            transition_type: "automatic".to_string(),
-            status: "idle".to_string(),
-        };
-        let lifecycle_events = LifecycleEventManager {
-            manager_id: "default".to_string(),
-            event_handlers: Vec::new(),
-            enabled: true,
-        };
         let cost_optimizer = CostOptimizer {
             optimizer_id: "default".to_string(),
             optimization_strategy: "balanced".to_string(),
@@ -1179,9 +1141,6 @@ impl DataLifecycleManager {
         };
         Self {
             lifecycle_policies: Arc::new(RwLock::new(HashMap::new())),
-            state_tracker: Arc::new(state_tracker),
-            transition_executor: Arc::new(transition_executor),
-            lifecycle_events: Arc::new(lifecycle_events),
             cost_optimizer: Arc::new(cost_optimizer),
         }
     }
@@ -1236,57 +1195,14 @@ pub struct ArchivalResult {
     pub archived_bytes: usize,
     pub archive_location: String,
 }
-/// Time series index management
-#[derive(Debug)]
-pub struct TimeSeriesIndexManager {
-    temporal_index: Arc<RwLock<TemporalIndex>>,
-    metric_index: Arc<RwLock<MetricIndex>>,
-    tag_index: Arc<RwLock<TagIndex>>,
-    bloom_filters: Arc<RwLock<HashMap<String, BloomFilter>>>,
-    index_statistics: Arc<IndexStatistics>,
-}
-impl TimeSeriesIndexManager {
-    pub fn new(config: &IndexingConfig) -> Self {
-        let temporal_index = TemporalIndex {
-            time_buckets: BTreeMap::new(),
-            bucket_size: config.refresh_interval,
-            index_resolution: config.refresh_interval,
-            total_entries: 0,
-        };
-        let metric_index = MetricIndex {
-            metric_name: config.fields.first().cloned().unwrap_or_default(),
-            indexed_fields: config.fields.clone(),
-            last_updated: Utc::now(),
-        };
-        let tag_index = TagIndex {
-            tag_name: "default".to_string(),
-            tag_values: Vec::new(),
-            usage_count: 0,
-        };
-        let mut bloom_filters_map = HashMap::new();
-        for field in &config.fields {
-            bloom_filters_map.insert(
-                field.clone(),
-                BloomFilter {
-                    size_bits: 2048,
-                    hash_count: 4,
-                    false_positive_rate: 0.01,
-                },
-            );
-        }
-        Self {
-            temporal_index: Arc::new(RwLock::new(temporal_index)),
-            metric_index: Arc::new(RwLock::new(metric_index)),
-            tag_index: Arc::new(RwLock::new(tag_index)),
-            bloom_filters: Arc::new(RwLock::new(bloom_filters_map)),
-            index_statistics: Arc::new(IndexStatistics {
-                index_count: config.fields.len(),
-                total_entries: 0,
-                index_size_bytes: 0,
-            }),
-        }
-    }
-}
+/// 0.2.1: `TimeSeriesIndexManager` lived here. It built a temporal index, a
+/// metric index, a tag index, one bloom filter per configured field and an
+/// `IndexStatistics` at construction, and then offered no method at all -- no
+/// insert, no lookup, no maintenance -- so every one of those structures stayed
+/// exactly as constructed for the process's lifetime and nothing could consult
+/// them. `TimeSeriesStore` held one and never touched it. Both the field and
+/// the type are gone; the store looks series up by its registry.
+
 /// Archival policy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchivalPolicy {

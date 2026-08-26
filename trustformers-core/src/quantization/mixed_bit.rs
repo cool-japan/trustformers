@@ -6,7 +6,7 @@
 
 #![allow(unused_variables)] // Mixed-bit quantization implementation
 
-use crate::errors::Result;
+use crate::errors::{Result, TrustformersError};
 use crate::quantization::base::QuantizationScheme;
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
@@ -112,10 +112,18 @@ pub struct MixedBitQuantizedTensor {
 }
 
 /// A block of quantized data with specific bit width
+///
+/// A block groups every element of the source tensor that was assigned the same
+/// bit width. Those elements are **not** contiguous in the source tensor, so the
+/// block carries the flat source index of each of its elements in
+/// [`QuantizedBlock::element_indices`]; `element_indices[i]` is the position in
+/// the flattened source tensor that `data[i]` was quantized from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizedBlock {
     /// Quantized data
     pub data: Vec<u8>,
+    /// Flat indices into the (row-major) source tensor, one per entry of `data`
+    pub element_indices: Vec<usize>,
     /// Scale factor
     pub scale: f32,
     /// Zero point
@@ -124,7 +132,7 @@ pub struct QuantizedBlock {
     pub bit_width: u8,
     /// Block shape
     pub block_shape: Vec<usize>,
-    /// Block offset in the original tensor
+    /// Block offset in the original tensor (lowest flat index it covers)
     pub block_offset: Vec<usize>,
 }
 
@@ -430,10 +438,24 @@ impl MixedBitQuantizer {
         config: &LayerQuantConfig,
     ) -> Result<Vec<QuantizedBlock>> {
         let data = tensor.data()?;
-        let shape = tensor.shape();
+        let _shape = tensor.shape();
+
+        // A short `bit_allocation` used to be silently truncated by `zip`, which
+        // dropped the tail of the tensor and produced a shorter round-trip.
+        if bit_allocation.len() != data.len() {
+            return Err(TrustformersError::invalid_input(format!(
+                "bit allocation covers {} elements but the tensor has {}",
+                bit_allocation.len(),
+                data.len()
+            )));
+        }
+
         let mut blocks = Vec::new();
 
-        // Group elements by bit width
+        // Group elements by bit width. The groups are *scattered* subsets of the
+        // flattened tensor, so each block must remember the source index of every
+        // element it holds; `HashMap` iteration order is unspecified, which makes
+        // any positional reconstruction non-deterministic as well as wrong.
         let mut bit_groups: HashMap<u8, Vec<(usize, f32)>> = HashMap::new();
         for (i, (&bits, &value)) in bit_allocation.iter().zip(data.iter()).enumerate() {
             bit_groups.entry(bits).or_default().push((i, value));
@@ -447,15 +469,20 @@ impl MixedBitQuantizer {
             let (quantized_data, scale, zero_point) =
                 self.quantize_group(&values, bit_width, config)?;
 
+            let block_offset = indices.iter().copied().min().unwrap_or(0);
             blocks.push(QuantizedBlock {
                 data: quantized_data,
+                element_indices: indices,
                 scale,
                 zero_point,
                 bit_width,
                 block_shape: vec![values.len()],
-                block_offset: vec![indices[0]], // Simplified for now
+                block_offset: vec![block_offset],
             });
         }
+
+        // Deterministic ordering: `HashMap` iteration order varies run to run.
+        blocks.sort_by_key(|block| block.bit_width);
 
         Ok(blocks)
     }
@@ -471,20 +498,36 @@ impl MixedBitQuantizer {
             return Ok((Vec::new(), 1.0, 0));
         }
 
+        if bit_width == 0 || bit_width > 8 {
+            return Err(TrustformersError::invalid_input(format!(
+                "mixed-bit quantization supports 1..=8 bits per element, got {}",
+                bit_width
+            )));
+        }
+
         let min_val = values.iter().fold(f32::INFINITY, |a, &b| a.min(b));
         let max_val = values.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
 
-        let qmin = 0;
-        let qmax = (1 << bit_width) - 1;
+        let qmin = 0i32;
+        let qmax = (1i32 << bit_width) - 1;
 
         let (scale, zero_point) = if config.symmetric {
             let max_abs = max_val.abs().max(min_val.abs());
-            let scale = max_abs / (qmax as f32 / 2.0);
-            (scale, qmax / 2)
+            let zero_point = qmax / 2;
+            // A degenerate (all-zero) group has no range; a zero scale would make
+            // every dequantized value NaN, so fall back to a unit scale.
+            let scale = if max_abs > 0.0 { max_abs / (qmax as f32 / 2.0) } else { 1.0 };
+            (scale, zero_point)
         } else {
-            let scale = (max_val - min_val) / (qmax - qmin) as f32;
-            let zero_point = qmin as f32 - min_val / scale;
-            (scale, zero_point.round() as i32)
+            let range = max_val - min_val;
+            if range > 0.0 {
+                let scale = range / (qmax - qmin) as f32;
+                let zero_point = qmin as f32 - min_val / scale;
+                (scale, zero_point.round() as i32)
+            } else {
+                // Constant group: encode the shared value exactly via the zero point.
+                (1.0, qmin - min_val.round() as i32)
+            }
         };
 
         let mut quantized = Vec::with_capacity(values.len());
@@ -524,18 +567,35 @@ impl MixedBitQuantizer {
 }
 
 impl MixedBitQuantizedTensor {
-    /// Dequantize back to original tensor
+    /// Dequantize back to the original tensor.
+    ///
+    /// Every quantized element is written back to the flat source position it was
+    /// taken from (`QuantizedBlock::element_indices`). The previous implementation
+    /// wrote each block starting at index 0, so with more than one block all but
+    /// the last block were overwritten and the tail of the tensor stayed zero.
     pub fn dequantize(&self) -> Result<Tensor> {
         let total_elements: usize = self.shape.iter().product();
         let mut result = vec![0.0f32; total_elements];
 
         for block in &self.quantized_data {
-            for (i, &quantized_val) in block.data.iter().enumerate() {
-                let dequantized = (quantized_val as i32 - block.zero_point) as f32 * block.scale;
-                // Simplified mapping - in practice, would need proper index mapping
-                if i < result.len() {
-                    result[i] = dequantized;
+            if block.element_indices.len() != block.data.len() {
+                return Err(TrustformersError::invalid_input(format!(
+                    "quantized block holds {} values but {} source indices",
+                    block.data.len(),
+                    block.element_indices.len()
+                )));
+            }
+
+            for (&quantized_val, &target) in block.data.iter().zip(block.element_indices.iter()) {
+                if target >= result.len() {
+                    return Err(TrustformersError::invalid_input(format!(
+                        "quantized block references source index {} but the tensor holds {} \
+                         elements",
+                        target,
+                        result.len()
+                    )));
                 }
+                result[target] = (quantized_val as i32 - block.zero_point) as f32 * block.scale;
             }
         }
 
@@ -698,6 +758,89 @@ mod tests {
         let ratio = quantizer.compression_ratio(tensor.size(), &quantized);
 
         assert!(ratio >= 1.0); // Current implementation stores as bytes, so ratio may be 1.0
+        Ok(())
+    }
+
+    /// Regression test for the multi-block dequantization defect.
+    ///
+    /// Every block used to write its values starting at result index 0, so with
+    /// more than one block only the last block survived and the rest of the
+    /// tensor stayed zero. The tensor below has a wide dynamic range so the
+    /// sensitivity-driven allocator produces several bit-width groups.
+    #[test]
+    fn test_dequantize_round_trip_multiple_blocks() -> Result<()> {
+        let mut quantizer = MixedBitQuantizer::new(MixedBitConfig::default());
+        let values: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.25).collect();
+        let tensor = Tensor::from_vec(values.clone(), &[8, 8])?;
+
+        let quantized = quantizer.quantize(&tensor, "round_trip_layer")?;
+        assert!(
+            quantized.quantized_data.len() > 1,
+            "expected a multi-block allocation, got {} block(s)",
+            quantized.quantized_data.len()
+        );
+
+        // Every source element must be covered exactly once.
+        let mut covered = vec![0usize; values.len()];
+        for block in &quantized.quantized_data {
+            assert_eq!(block.data.len(), block.element_indices.len());
+            for &index in &block.element_indices {
+                covered[index] += 1;
+            }
+        }
+        assert!(
+            covered.iter().all(|&count| count == 1),
+            "each element must belong to exactly one block: {:?}",
+            covered
+        );
+
+        let dequantized = quantized.dequantize()?;
+        assert_eq!(dequantized.shape(), tensor.shape());
+        let restored = dequantized.to_vec_f32()?;
+
+        // The reconstruction must track the input, not collapse onto one block.
+        // Tolerance is one quantization step of the *coarsest* (2-bit) block.
+        let mut worst_step = 0.0f32;
+        for block in &quantized.quantized_data {
+            worst_step = worst_step.max(block.scale);
+        }
+        for (original, restored_value) in values.iter().zip(restored.iter()) {
+            assert!(
+                (original - restored_value).abs() <= worst_step,
+                "round trip error {} exceeds one quantization step {} (orig {}, got {})",
+                (original - restored_value).abs(),
+                worst_step,
+                original,
+                restored_value
+            );
+        }
+
+        // Under the old (index-from-zero) code the tail of the tensor was all
+        // zeros; assert the reconstruction actually varies across the tensor.
+        let restored_min = restored.iter().copied().fold(f32::INFINITY, f32::min);
+        let restored_max = restored.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            restored_max - restored_min > 1.0,
+            "reconstruction is degenerate: min {restored_min}, max {restored_max}"
+        );
+        Ok(())
+    }
+
+    /// A tensor whose elements are all identical must round-trip exactly rather
+    /// than producing NaN through a zero scale.
+    #[test]
+    fn test_dequantize_constant_tensor() -> Result<()> {
+        let mut quantizer = MixedBitQuantizer::new(MixedBitConfig::default());
+        let tensor = Tensor::from_vec(vec![3.0f32; 16], &[4, 4])?;
+
+        let quantized = quantizer.quantize(&tensor, "constant_layer")?;
+        let restored = quantized.dequantize()?.to_vec_f32()?;
+
+        assert!(
+            restored.iter().all(|value| value.is_finite()),
+            "constant tensors must not dequantize to NaN/inf: {:?}",
+            restored
+        );
         Ok(())
     }
 

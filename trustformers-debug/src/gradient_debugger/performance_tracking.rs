@@ -13,7 +13,14 @@ use std::time::{Duration, Instant};
 pub struct GradientPerformanceTracker {
     pub total_gradient_computations: usize,
     pub average_computation_time: Duration,
-    pub memory_usage_bytes: usize,
+    /// Sum of the per-layer average memory usages, over the layers that
+    /// actually reported a memory sample.
+    ///
+    /// `None` while no layer has reported one. It used to be a plain `usize`
+    /// that stayed at `0`, because the only in-tree caller of
+    /// [`Self::record_layer_performance`] passed a hardcoded `0` -- publishing
+    /// "this run used zero bytes" as if it had been measured.
+    pub memory_usage_bytes: Option<usize>,
     pub throughput_gradients_per_second: f64,
     pub bottleneck_layers: Vec<String>,
     pub layer_performance_map: HashMap<String, LayerPerformanceMetrics>,
@@ -26,7 +33,7 @@ impl Default for GradientPerformanceTracker {
         Self {
             total_gradient_computations: 0,
             average_computation_time: Duration::from_millis(0),
-            memory_usage_bytes: 0,
+            memory_usage_bytes: None,
             throughput_gradients_per_second: 0.0,
             bottleneck_layers: Vec::new(),
             layer_performance_map: HashMap::new(),
@@ -45,11 +52,16 @@ impl GradientPerformanceTracker {
         PerformanceTimer::new(layer_name.to_string())
     }
 
+    /// Record one timing (and optionally one memory sample) for `layer_name`.
+    ///
+    /// `memory_used` is `None` when the caller has no real memory figure, which
+    /// keeps the aggregates honestly absent instead of averaging in a
+    /// fabricated zero.
     pub fn record_layer_performance(
         &mut self,
         layer_name: &str,
         computation_time: Duration,
-        memory_used: usize,
+        memory_used: Option<usize>,
     ) {
         let metrics = self
             .layer_performance_map
@@ -75,8 +87,13 @@ impl GradientPerformanceTracker {
         let total_layers = self.layer_performance_map.len();
         self.average_computation_time = total_time / total_layers as u32;
 
-        self.memory_usage_bytes =
-            self.layer_performance_map.values().map(|m| m.average_memory_usage).sum();
+        // Only layers that really reported memory contribute; if none did, the
+        // aggregate stays absent.
+        let mut memory_total = None;
+        for average in self.layer_performance_map.values().filter_map(|m| m.average_memory_usage) {
+            memory_total = Some(memory_total.unwrap_or(0) + average);
+        }
+        self.memory_usage_bytes = memory_total;
 
         // Calculate throughput
         if self.average_computation_time.as_secs_f64() > 0.0 {
@@ -134,15 +151,27 @@ impl GradientPerformanceTracker {
         let older_avg_throughput = older_snapshots.iter().map(|s| s.throughput).sum::<f64>()
             / older_snapshots.len() as f64;
 
-        let recent_avg_memory =
-            recent_snapshots.iter().map(|s| s.memory_usage).sum::<usize>() / recent_snapshots.len();
-
-        let older_avg_memory =
-            older_snapshots.iter().map(|s| s.memory_usage).sum::<usize>() / older_snapshots.len();
+        // Average only over the snapshots that carry a real memory figure; when
+        // either window has none, the memory trend is honestly unknown.
+        let mean_memory = |window: &[&PerformanceSnapshot]| -> Option<f64> {
+            let samples: Vec<usize> = window.iter().filter_map(|s| s.memory_usage).collect();
+            if samples.is_empty() {
+                None
+            } else {
+                Some(samples.iter().sum::<usize>() as f64 / samples.len() as f64)
+            }
+        };
+        let memory_trend = match (
+            mean_memory(&recent_snapshots),
+            mean_memory(&older_snapshots),
+        ) {
+            (Some(recent), Some(older)) => Some(Self::classify_trend(recent, older)),
+            _ => None,
+        };
 
         PerformanceTrends {
             throughput_trend: Self::classify_trend(recent_avg_throughput, older_avg_throughput),
-            memory_trend: Self::classify_trend(recent_avg_memory as f64, older_avg_memory as f64),
+            memory_trend,
             bottleneck_stability: self
                 .analyze_bottleneck_stability(&recent_snapshots, &older_snapshots),
             overall_performance_direction: self
@@ -233,8 +262,8 @@ impl GradientPerformanceTracker {
             }
         }
 
-        // Memory usage analysis
-        if self.memory_usage_bytes > 1_000_000_000 {
+        // Memory usage analysis -- only when a real figure was reported.
+        if self.memory_usage_bytes.is_some_and(|bytes| bytes > 1_000_000_000) {
             // > 1GB
             recommendations.push(OptimizationRecommendation {
                 layer_name: "Global".to_string(),
@@ -298,7 +327,7 @@ impl GradientPerformanceTracker {
         // Reset performance tracking state
         self.total_gradient_computations = 0;
         self.average_computation_time = Duration::from_millis(0);
-        self.memory_usage_bytes = 0;
+        self.memory_usage_bytes = None;
         self.throughput_gradients_per_second = 0.0;
         self.bottleneck_layers.clear();
         self.layer_performance_map.clear();
@@ -333,8 +362,16 @@ pub struct LayerPerformanceMetrics {
     pub computation_count: usize,
     pub total_computation_time: Duration,
     pub average_computation_time: Duration,
-    pub total_memory_usage: usize,
-    pub average_memory_usage: usize,
+    /// Sum of the real memory samples reported for this layer; `None` until
+    /// one is reported.
+    pub total_memory_usage: Option<usize>,
+    /// Mean of the real memory samples reported for this layer; `None` until
+    /// one is reported.
+    pub average_memory_usage: Option<usize>,
+    /// How many memory samples went into the two fields above (which is not
+    /// the same as `computation_count`: timings are always recorded, memory
+    /// only when the caller has a real figure).
+    pub memory_sample_count: usize,
     pub min_computation_time: Duration,
     pub max_computation_time: Duration,
     pub performance_variance: f64,
@@ -347,21 +384,26 @@ impl LayerPerformanceMetrics {
             computation_count: 0,
             total_computation_time: Duration::from_millis(0),
             average_computation_time: Duration::from_millis(0),
-            total_memory_usage: 0,
-            average_memory_usage: 0,
+            total_memory_usage: None,
+            average_memory_usage: None,
+            memory_sample_count: 0,
             min_computation_time: Duration::from_secs(u64::MAX),
             max_computation_time: Duration::from_millis(0),
             performance_variance: 0.0,
         }
     }
 
-    pub fn update(&mut self, computation_time: Duration, memory_used: usize) {
+    pub fn update(&mut self, computation_time: Duration, memory_used: Option<usize>) {
         self.computation_count += 1;
         self.total_computation_time += computation_time;
-        self.total_memory_usage += memory_used;
+        if let Some(bytes) = memory_used {
+            self.memory_sample_count += 1;
+            let total = self.total_memory_usage.unwrap_or(0) + bytes;
+            self.total_memory_usage = Some(total);
+            self.average_memory_usage = Some(total / self.memory_sample_count);
+        }
 
         self.average_computation_time = self.total_computation_time / self.computation_count as u32;
-        self.average_memory_usage = self.total_memory_usage / self.computation_count;
 
         if computation_time < self.min_computation_time {
             self.min_computation_time = computation_time;
@@ -437,7 +479,9 @@ pub struct PerformanceSnapshot {
     pub timestamp: std::time::SystemTime,
     pub total_computations: usize,
     pub average_time: Duration,
-    pub memory_usage: usize,
+    /// Aggregate memory usage at snapshot time; `None` when no layer had
+    /// reported a real memory sample yet.
+    pub memory_usage: Option<usize>,
     pub throughput: f64,
     pub active_bottlenecks: Vec<String>,
     pub layer_count: usize,
@@ -447,7 +491,9 @@ pub struct PerformanceSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceTrends {
     pub throughput_trend: TrendDirection,
-    pub memory_trend: TrendDirection,
+    /// Direction of the memory trend, or `None` when neither comparison window
+    /// contained a snapshot with a real memory figure.
+    pub memory_trend: Option<TrendDirection>,
     pub bottleneck_stability: BottleneckStability,
     pub overall_performance_direction: PerformanceDirection,
 }
@@ -456,7 +502,7 @@ impl Default for PerformanceTrends {
     fn default() -> Self {
         Self {
             throughput_trend: TrendDirection::Stable,
-            memory_trend: TrendDirection::Stable,
+            memory_trend: None,
             bottleneck_stability: BottleneckStability::Stable,
             overall_performance_direction: PerformanceDirection::Stable,
         }

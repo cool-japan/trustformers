@@ -28,7 +28,6 @@ use super::functions::ValidationConfig;
 use super::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -42,29 +41,20 @@ pub use super::types_profilers::*;
 
 /// Performance validator for quality assurance
 pub struct PerformanceValidator {
-    /// Result validation engine
-    validation_engine: ResultValidationEngine,
     /// Consistency checker
     consistency_checker: ConsistencyChecker,
     /// Outlier detection engine
     outlier_detector: OutlierDetector,
     /// Quality assurance engine
     qa_engine: QualityAssuranceEngine,
-    /// Validation configuration
-    config: ValidationConfig,
-    /// Validation state
-    state: Arc<Mutex<ValidationState>>,
 }
 impl PerformanceValidator {
     /// Create a new performance validator
-    pub async fn new(config: ValidationConfig) -> Result<Self> {
+    pub async fn new(_config: ValidationConfig) -> Result<Self> {
         Ok(Self {
-            validation_engine: ResultValidationEngine::new(),
             consistency_checker: ConsistencyChecker::new(),
             outlier_detector: OutlierDetector::new(),
             qa_engine: QualityAssuranceEngine::new(),
-            config,
-            state: Arc::new(Mutex::new(ValidationState::new())),
         })
     }
     /// Validate system readiness for profiling
@@ -226,114 +216,168 @@ impl PerformanceValidator {
     }
 }
 /// Performance results processor and analyzer
+///
+/// ## Removed in 0.2.1: the `statistics_engine` and `trend_analyzer` handles
+///
+/// Both were constructed here and then called only for their side effects —
+/// `process_comprehensive_results` bound their return values to `_statistics`
+/// and `_trends` and threw them away. Both engines now report that they have
+/// nothing to compute from a single profiling snapshot (see
+/// [`StatisticalAnalysisEngine::analyze_results`]), so the handles were
+/// removed with the calls.
 pub struct ProfileResultsProcessor {
-    /// Statistical analysis engine
-    statistics_engine: StatisticalAnalysisEngine,
-    /// Trend analysis engine
-    trend_analyzer: TrendAnalysisEngine,
     /// Optimization recommender
     optimization_recommender: OptimizationRecommender,
     /// Report generator
     report_generator: ReportGenerator,
-    /// Processing configuration
-    config: ResultsProcessingConfig,
-    /// Processing state
-    state: Arc<Mutex<ProcessingState>>,
 }
 impl ProfileResultsProcessor {
     /// Create a new results processor
-    pub async fn new(config: ResultsProcessingConfig) -> Result<Self> {
+    pub async fn new(_config: ResultsProcessingConfig) -> Result<Self> {
         Ok(Self {
-            statistics_engine: StatisticalAnalysisEngine::new(),
-            trend_analyzer: TrendAnalysisEngine::new(),
             optimization_recommender: OptimizationRecommender::new(),
             report_generator: ReportGenerator::new(),
-            config,
-            state: Arc::new(Mutex::new(ProcessingState::new())),
         })
     }
-    /// Process comprehensive profiling results
+    /// Summarise a set of profiling results.
+    ///
+    /// Reports only what the results themselves establish: how many
+    /// subsystems were profiled and which ones. `trends`, `correlations` and
+    /// `bottlenecks` come back empty, because a single snapshot supports none
+    /// of the three.
+    ///
+    /// ## Removed in 0.2.1: the invented analysis
+    ///
+    /// This method used to return, for every input it was ever given:
+    ///
+    /// * `results`, a map of each subsystem name to the literal
+    ///   `vec![1.0, 2.0, 3.0]`;
+    /// * a `correlation_strength` of `0.85`, from a
+    ///   `analyze_performance_correlations` whose `results` parameter was
+    ///   `_results` — it returned the same four correlation coefficients
+    ///   (`0.85`, `0.70`, `0.60`, `0.90`) without looking at anything;
+    /// * a `bottleneck_count` from `identify_system_bottlenecks`, which
+    ///   declared "Memory bandwidth limitation detected" with severity 4 and a
+    ///   25% performance impact whenever the results map happened to contain a
+    ///   key called `"memory"` — the profile under that key was `_result` and
+    ///   was never read, so the finding was about the presence of a string;
+    /// * three `trends` strings formatting those same constants.
+    ///
+    /// Those helpers, along with `calculate_bottleneck_interactions`,
+    /// `generate_executive_summary` (fixed "CPU performance is excellent" /
+    /// score 85.0) and `calculate_overall_performance_score` (`Ok(85.0)`),
+    /// have been deleted rather than rewritten: correlating or trending
+    /// subsystems requires a paired time series, and this method is handed one
+    /// snapshot.
     pub async fn process_comprehensive_results(
         &mut self,
         results: &HashMap<String, ProfileResult>,
     ) -> Result<ProcessedResults> {
         let start_time = Instant::now();
-        let _statistics = self.statistics_engine.analyze_results(results).await?;
-        let _trends = self.trend_analyzer.analyze_performance_trends(results).await?;
-        let correlations = self.analyze_performance_correlations(results).await?;
-        let bottlenecks = self.identify_system_bottlenecks(results).await?;
-        let results_map: HashMap<String, Vec<f64>> =
-            results.keys().map(|k| (k.clone(), vec![1.0, 2.0, 3.0])).collect();
+
         let mut statistics = HashMap::new();
         statistics.insert("total_profiles".to_string(), results.len() as f64);
-        statistics.insert(
-            "correlation_strength".to_string(),
-            correlations.cpu_memory_correlation,
-        );
-        statistics.insert(
-            "bottleneck_count".to_string(),
-            bottlenecks.identified_bottlenecks.len() as f64,
-        );
-        let trends = vec![
-            format!(
-                "CPU-Memory correlation: {:.2}",
-                correlations.cpu_memory_correlation
-            ),
-            format!(
-                "Memory-IO correlation: {:.2}",
-                correlations.memory_io_correlation
-            ),
-            format!(
-                "Network-CPU correlation: {:.2}",
-                correlations.network_cpu_correlation
-            ),
-        ];
+        for (subsystem, result) in results {
+            let kind = match result {
+                ProfileResult::Cpu(_) => "cpu",
+                ProfileResult::Memory(_) => "memory",
+                ProfileResult::Io(_) => "io",
+                ProfileResult::Network(_) => "network",
+                ProfileResult::Gpu(_) => "gpu",
+                ProfileResult::Cache(_) => "cache",
+            };
+            statistics.insert(format!("profiled.{subsystem}.{kind}"), 1.0);
+        }
+
         let mut metadata = HashMap::new();
-        metadata.insert("analysis_type".to_string(), "comprehensive".to_string());
+        metadata.insert("analysis_type".to_string(), "inventory".to_string());
         metadata.insert("profile_count".to_string(), results.len().to_string());
+
         Ok(ProcessedResults {
-            results: results_map,
+            results: HashMap::new(),
             metadata,
             timestamp: Utc::now(),
             statistics,
-            trends,
-            correlations: correlations.correlations,
-            bottlenecks: bottlenecks.contributing_factors,
+            trends: Vec::new(),
+            correlations: HashMap::new(),
+            bottlenecks: Vec::new(),
             processing_duration: start_time.elapsed(),
         })
     }
-    /// Generate comprehensive analysis report
+    /// Render an analysis report over a completed profiling run.
+    ///
+    /// The report states which subsystems were profiled and reproduces the
+    /// statistics gathered for them. It contains no verdicts: the previous
+    /// implementation hard-coded `memory_analysis` to "Memory usage is
+    /// optimal", `io_analysis` to "I/O performance is within expected range",
+    /// `network_analysis` to "Network performance is stable" and
+    /// `gpu_analysis` to "GPU utilization is efficient" — four assessments
+    /// that were identical on a healthy machine and a failing one, and that
+    /// contradicted the "Memory bandwidth limitation detected" bottleneck the
+    /// same call had just manufactured.
+    ///
+    /// `recommendations` is empty and `performance_score` is `f64::NAN`:
+    /// nothing on this build maps a profiling snapshot to either. A caller
+    /// that needs recommendations should call
+    /// [`Self::generate_optimization_recommendations`], which reports why it
+    /// cannot produce them.
     pub async fn generate_comprehensive_analysis(
         &mut self,
         results: &ComprehensivePerformanceResults,
     ) -> Result<PerformanceAnalysisReport> {
         let processed_results =
             self.process_comprehensive_results(&results.profile_results).await?;
-        let optimization_recommendations = self
-            .optimization_recommender
-            .generate_recommendations(&processed_results.statistics)
-            .await?;
         let detailed_report = self
             .report_generator
             .generate_detailed_report(&processed_results.statistics)
             .await?;
+
+        let describe = |subsystem: &str| -> String {
+            if results.profile_results.contains_key(subsystem) {
+                format!(
+                    "{subsystem}: profiled; see the detailed analysis for the collected statistics"
+                )
+            } else {
+                format!("{subsystem}: not profiled in this run")
+            }
+        };
+
         Ok(PerformanceAnalysisReport {
-            summary: "Comprehensive performance analysis completed".to_string(),
-            cpu_analysis: format!("CPU performance analysis: {}", detailed_report),
-            memory_analysis: "Memory usage is optimal".to_string(),
-            io_analysis: "I/O performance is within expected range".to_string(),
-            network_analysis: "Network performance is stable".to_string(),
-            gpu_analysis: "GPU utilization is efficient".to_string(),
-            recommendations: optimization_recommendations.recommendations.clone(),
-            executive_summary: self.generate_executive_summary(&processed_results).await?,
+            summary: format!(
+                "Profiled {} subsystem(s) in {:?}",
+                results.profile_results.len(),
+                results.profiling_duration
+            ),
+            cpu_analysis: describe("cpu"),
+            memory_analysis: describe("memory"),
+            io_analysis: describe("io"),
+            network_analysis: describe("network"),
+            gpu_analysis: describe("gpu"),
+            recommendations: Vec::new(),
+            executive_summary: ExecutiveSummary {
+                key_findings: processed_results
+                    .statistics
+                    .keys()
+                    .filter(|k| k.starts_with("profiled."))
+                    .cloned()
+                    .collect(),
+                performance_score: f64::NAN,
+                critical_issues: Vec::new(),
+                overall_performance_rating: "not rated".to_string(),
+                critical_recommendations: Vec::new(),
+            },
             detailed_analysis: detailed_report,
-            optimization_recommendations: optimization_recommendations.recommendations,
-            performance_score: self.calculate_overall_performance_score(&processed_results).await?
-                as f64,
+            optimization_recommendations: Vec::new(),
+            performance_score: f64::NAN,
             analysis_timestamp: Utc::now(),
         })
     }
     /// Generate optimization recommendations
+    ///
+    /// Delegates to [`OptimizationRecommender::generate_recommendations`],
+    /// which reports that no rule set maps profiling statistics to
+    /// recommendations on this build rather than returning the fixed
+    /// three-item list it used to.
     pub async fn generate_optimization_recommendations(
         &mut self,
         results: &ComprehensivePerformanceResults,
@@ -343,136 +387,6 @@ impl ProfileResultsProcessor {
         self.optimization_recommender
             .generate_recommendations(&processed_results.statistics)
             .await
-    }
-    async fn analyze_performance_correlations(
-        &self,
-        _results: &HashMap<String, ProfileResult>,
-    ) -> Result<PerformanceCorrelations> {
-        Ok(PerformanceCorrelations {
-            correlations: HashMap::from([
-                ("cpu_memory".to_string(), 0.85),
-                ("memory_io".to_string(), 0.70),
-                ("network_cpu".to_string(), 0.60),
-                ("gpu_memory".to_string(), 0.90),
-            ]),
-            strong_correlations: vec![
-                ("cpu".to_string(), "memory".to_string(), 0.85),
-                ("gpu".to_string(), "memory".to_string(), 0.90),
-            ],
-            cpu_memory_correlation: 0.85,
-            memory_io_correlation: 0.70,
-            network_cpu_correlation: 0.60,
-            gpu_memory_correlation: 0.90,
-            cross_subsystem_dependencies: HashMap::from([
-                (
-                    "cpu".to_string(),
-                    vec!["memory".to_string(), "cache".to_string()],
-                ),
-                ("memory".to_string(), vec!["io".to_string()]),
-                ("network".to_string(), vec!["cpu".to_string()]),
-            ]),
-        })
-    }
-    async fn identify_system_bottlenecks(
-        &self,
-        results: &HashMap<String, ProfileResult>,
-    ) -> Result<BottleneckAnalysis> {
-        let mut bottlenecks = Vec::new();
-        for (subsystem, result) in results {
-            if let Some(bottleneck) = self.analyze_subsystem_bottleneck(subsystem, result).await? {
-                bottlenecks.push(bottleneck);
-            }
-        }
-        bottlenecks.sort_by(|a, b| {
-            b.severity_score
-                .partial_cmp(&a.severity_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let primary_bottleneck = bottlenecks
-            .first()
-            .map(|b| b.subsystem.clone())
-            .unwrap_or_else(|| "none".to_string());
-        let bottleneck_severity = bottlenecks.first().map(|b| b.severity_score).unwrap_or(0.0);
-        let contributing_factors =
-            bottlenecks.iter().flat_map(|b| b.recommended_actions.clone()).collect();
-        Ok(BottleneckAnalysis {
-            primary_bottleneck,
-            bottleneck_severity,
-            contributing_factors,
-            identified_bottlenecks: bottlenecks,
-            bottleneck_interaction_matrix: self.calculate_bottleneck_interactions().await?,
-        })
-    }
-    async fn analyze_subsystem_bottleneck(
-        &self,
-        subsystem: &str,
-        _result: &ProfileResult,
-    ) -> Result<Option<PerformanceBottleneck>> {
-        match subsystem {
-            "memory" => Ok(Some(PerformanceBottleneck {
-                component: "Memory".to_string(),
-                severity: 4,
-                description: "Memory bandwidth limitation detected".to_string(),
-                performance_impact: 25.0,
-                solutions: vec![
-                    "Consider memory upgrade".to_string(),
-                    "Optimize memory access patterns".to_string(),
-                ],
-                subsystem: subsystem.to_string(),
-                bottleneck_type: "Memory".to_string(),
-                severity_score: 0.8,
-                impact_percentage: 25.0,
-                recommended_actions: vec![
-                    "Consider memory upgrade".to_string(),
-                    "Optimize memory access patterns".to_string(),
-                ],
-            })),
-            _ => Ok(None),
-        }
-    }
-    async fn calculate_bottleneck_interactions(&self) -> Result<BottleneckInteractionMatrix> {
-        Ok(BottleneckInteractionMatrix {
-            interactions: HashMap::from([
-                (
-                    "cpu".to_string(),
-                    HashMap::from([("memory".to_string(), 0.9), ("network".to_string(), 0.5)]),
-                ),
-                (
-                    "memory".to_string(),
-                    HashMap::from([("io".to_string(), 0.7)]),
-                ),
-            ]),
-            interaction_coefficients: HashMap::from([
-                ("cpu_memory".to_string(), 0.9),
-                ("memory_io".to_string(), 0.7),
-                ("cpu_network".to_string(), 0.5),
-            ]),
-        })
-    }
-    async fn generate_executive_summary(
-        &self,
-        _processed: &ProcessedResults,
-    ) -> Result<ExecutiveSummary> {
-        Ok(ExecutiveSummary {
-            key_findings: vec![
-                "CPU performance is excellent".to_string(),
-                "Memory bandwidth could be improved".to_string(),
-                "I/O performance is adequate".to_string(),
-            ],
-            performance_score: 85.0,
-            critical_issues: vec!["Memory bandwidth bottleneck detected".to_string()],
-            overall_performance_rating: "Good".to_string(),
-            critical_recommendations: vec![
-                "Consider memory upgrade for optimal performance".to_string(),
-                "Optimize cache usage patterns".to_string(),
-            ],
-        })
-    }
-    async fn calculate_overall_performance_score(
-        &self,
-        _processed: &ProcessedResults,
-    ) -> Result<f32> {
-        Ok(85.0)
     }
 }
 /// Memory bandwidth tester (stub implementation)
@@ -534,21 +448,15 @@ pub struct MemoryProfiler {
     latency_tester: MemoryLatencyTester,
     /// NUMA topology analyzer
     numa_analyzer: NumaTopologyAnalyzer,
-    /// Memory profiling configuration
-    config: MemoryProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<MemoryProfilingState>>,
 }
 impl MemoryProfiler {
     /// Create a new memory profiler
-    pub async fn new(config: MemoryProfilingConfig) -> Result<Self> {
+    pub async fn new(_config: MemoryProfilingConfig) -> Result<Self> {
         Ok(Self {
             hierarchy_analyzer: MemoryHierarchyAnalyzer::new(),
             bandwidth_tester: MemoryBandwidthTester::new(),
             latency_tester: MemoryLatencyTester::new(),
             numa_analyzer: NumaTopologyAnalyzer::new(),
-            config,
-            state: Arc::new(Mutex::new(MemoryProfilingState::default())),
         })
     }
     /// Profile comprehensive memory performance
@@ -626,12 +534,8 @@ pub struct BenchmarkExecutor {
     workload_analyzer: RealWorkloadAnalyzer,
     /// Micro-benchmark engine
     micro_benchmarks: MicroBenchmarkEngine,
-    /// Benchmark orchestrator
-    orchestrator: BenchmarkOrchestrator,
     /// Execution configuration
     config: BenchmarkConfig,
-    /// Execution state
-    state: Arc<Mutex<BenchmarkExecutionState>>,
 }
 impl BenchmarkExecutor {
     /// Create a new benchmark executor
@@ -640,9 +544,7 @@ impl BenchmarkExecutor {
             synthetic_benchmarks: SyntheticBenchmarkSuite::new(),
             workload_analyzer: RealWorkloadAnalyzer::new(),
             micro_benchmarks: MicroBenchmarkEngine::new(),
-            orchestrator: BenchmarkOrchestrator::new(),
             config,
-            state: Arc::new(Mutex::new(BenchmarkExecutionState::new())),
         })
     }
     /// Execute comprehensive benchmark suite
@@ -917,10 +819,6 @@ pub struct CpuProfiler {
     benchmark_suite: CpuBenchmarkSuite,
     /// Cache profiling engine
     cache_profiler: Arc<RwLock<CacheAnalyzer>>,
-    /// CPU profiling configuration
-    config: CpuProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<CpuProfilingState>>,
 }
 impl CpuProfiler {
     /// Create a new CPU profiler with vendor optimizations
@@ -940,8 +838,6 @@ impl CpuProfiler {
             vendor_detector,
             benchmark_suite,
             cache_profiler,
-            config,
-            state: Arc::new(Mutex::new(CpuProfilingState::default())),
         })
     }
     /// Profile comprehensive CPU performance

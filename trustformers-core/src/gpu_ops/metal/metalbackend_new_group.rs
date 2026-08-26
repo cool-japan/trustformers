@@ -620,6 +620,21 @@ impl MetalBackend {
             // Output: [num_heads, seq_len, seq_len] attention weights
             // Each thread handles one row (sequence position) for one head
             // Computes: softmax(Q[h,i,:] @ K^T[h,:,:] * alpha) with causal mask
+            //
+            // UNBOUNDED IN seq_len. The previous formulation stashed the score row in a
+            // `float scores[256]` thread-private array, so every seq_len > 256 wrote past
+            // the end of that array - silent GPU memory corruption on any GPT-2 style
+            // context (n_positions = 1024). This version keeps no per-thread score array:
+            //
+            //   pass 1: stream the dot products, writing the RAW score into the output row
+            //           (which is exactly seq_len wide and already allocated) while
+            //           maintaining a running max and a rescaled running sum
+            //           (online / "flash" softmax recurrence);
+            //   pass 2: walk the output row once more turning raw scores into
+            //           exp(score - max) / sum, and zeroing the causally masked tail.
+            //
+            // Cost: one dot-product pass (unchanged) plus one cheap linear pass over the
+            // row. Numerics are identical to the max-subtracted textbook softmax.
             kernel void batched_scaled_matmul_softmax_causal(
                 device const float* Q [[buffer(0)]],      // [num_heads, seq_len, head_dim]
                 device const float* K_T [[buffer(1)]],    // [num_heads, head_dim, seq_len]
@@ -640,12 +655,12 @@ impl MetalBackend {
                 uint k_base = h * (head_dim * seq_len);                    // K^T[h, :, :]
                 uint out_base = h * (seq_len * seq_len) + row * seq_len;  // output[h, row, :]
 
-                // Step 1: Compute scaled dot products (Q @ K^T) for this row
-                // Only compute up to current position (causal mask)
-                float scores[256];  // Max seq_len = 256 for local array
+                // Step 1: stream scaled dot products (Q @ K^T) for this row into the
+                // output row, maintaining the online-softmax running max and sum.
+                // Only positions <= row participate (causal mask).
                 float max_score = -3.402823466e+38f;  // -FLT_MAX
+                float sum = 0.0f;
 
-                // Compute scores and find max for numerical stability
                 for (uint col = 0; col <= row && col < seq_len; ++col) {
                     float dot = 0.0f;
 
@@ -654,21 +669,27 @@ impl MetalBackend {
                         dot += Q[q_base + k] * K_T[k_base + k * seq_len + col];
                     }
 
-                    scores[col] = alpha * dot;  // Apply scaling
-                    max_score = max(max_score, scores[col]);
+                    float score = alpha * dot;  // Apply scaling
+                    // Park the raw score in global memory: the output row is seq_len
+                    // wide, so this needs no thread-private storage at all.
+                    output[out_base + col] = score;
+
+                    // Online softmax recurrence: rescale the running sum whenever the
+                    // running maximum moves, then fold in the new term.
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
                 }
 
-                // Step 2: Compute exp and sum for softmax
-                float sum = 0.0f;
-                for (uint col = 0; col <= row && col < seq_len; ++col) {
-                    scores[col] = exp(scores[col] - max_score);  // Numerically stable
-                    sum += scores[col];
-                }
+                // A fully masked row cannot happen (col == row is always allowed), but
+                // guard the division anyway so a degenerate dispatch cannot emit NaN.
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
 
-                // Step 3: Normalize and write output with causal masking
+                // Step 2: normalize in place and zero the causally masked tail.
                 for (uint col = 0; col < seq_len; ++col) {
                     if (col <= row) {
-                        output[out_base + col] = scores[col] / sum;  // Normalized attention weight
+                        output[out_base + col] =
+                            exp(output[out_base + col] - max_score) * inv_sum;
                     } else {
                         output[out_base + col] = 0.0f;  // Causal mask: future positions zeroed
                     }
@@ -702,12 +723,17 @@ impl MetalBackend {
                 uint k_base = h * (head_dim * kv_seq_len);                       // K^T[h, :, :]
                 uint out_base = h * (q_seq_len * kv_seq_len) + q_row * kv_seq_len;  // output[h, q_row, :]
 
-                // Step 1: Compute scaled dot products (Q @ K^T) for this query row
-                // Attend to ALL kv positions (they're all in the past for generation)
-                float scores[512];  // Max kv_seq_len = 512 for local array
+                // Step 1: stream scaled dot products (Q @ K^T) for this query row into
+                // the output row, maintaining the online-softmax running max and sum.
+                // Attend to ALL kv positions (they're all in the past for generation).
+                //
+                // UNBOUNDED IN kv_seq_len. This used to keep the score row in a
+                // `float scores[512]` thread-private array, so any generation whose
+                // cached context crossed 512 tokens wrote out of bounds - which is the
+                // ordinary decode path, since kv_seq_len grows by one per emitted token.
                 float max_score = -3.402823466e+38f;  // -FLT_MAX
+                float sum = 0.0f;
 
-                // Compute scores and find max for numerical stability
                 for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
                     float dot = 0.0f;
 
@@ -716,20 +742,106 @@ impl MetalBackend {
                         dot += Q[q_base + k] * K_T[k_base + k * kv_seq_len + kv_col];
                     }
 
-                    scores[kv_col] = alpha * dot;  // Apply scaling
-                    max_score = max(max_score, scores[kv_col]);
+                    float score = alpha * dot;  // Apply scaling
+                    output[out_base + kv_col] = score;  // Park raw score in global memory
+
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
                 }
 
-                // Step 2: Compute exp and sum for softmax
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+
+                // Step 2: normalize in place (no causal masking - all KV valid)
+                for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
+                    output[out_base + kv_col] =
+                        exp(output[out_base + kv_col] - max_score) * inv_sum;
+                }
+            }
+
+            // Fused scaled matmul + softmax with an OFFSET causal mask (chunked generation)
+            // Q: [num_heads, q_seq_len, head_dim], K^T: [num_heads, head_dim, kv_seq_len]
+            // Output: [num_heads, q_seq_len, kv_seq_len] attention weights
+            //
+            // This is the masked sibling of `batched_scaled_matmul_softmax_gen`. That
+            // kernel lets every query row see every key column, which is only correct
+            // when the query block is a single token sitting at the end of the key
+            // sequence. Feed it a CHUNK of new tokens against a warm KV cache
+            // (1 < q_seq_len < kv_seq_len) and each row of the chunk also attends to the
+            // later rows of its own chunk - measured on (q_seq 3, kv_seq 5) as an exact
+            // match to a NON-causal reference and a 0.29 miss (on |signal| 0.9) against
+            // the causal one.
+            //
+            // Here query row i is the absolute key position `q_offset + i`, so it may
+            // attend to kv columns 0..=(q_offset + i) and nothing beyond. `q_offset` is
+            // the length of the cached prefix (kv_seq_len - q_seq_len) for a chunked
+            // continuation and 0 for a full prefill, but it is passed explicitly rather
+            // than derived so the primitive is usable for any block alignment.
+            //
+            // Same two-pass online-softmax structure as its siblings, so it is unbounded
+            // in kv_seq_len: pass 1 parks raw scores in the (already allocated) output
+            // row while maintaining a rescaled running max/sum, pass 2 normalises and
+            // zeroes the masked tail.
+            kernel void batched_scaled_matmul_softmax_gen_causal(
+                device const float* Q [[buffer(0)]],         // [num_heads, q_seq_len, head_dim]
+                device const float* K_T [[buffer(1)]],       // [num_heads, head_dim, kv_seq_len]
+                device float* output [[buffer(2)]],          // [num_heads, q_seq_len, kv_seq_len]
+                constant uint& num_heads [[buffer(3)]],
+                constant uint& q_seq_len [[buffer(4)]],
+                constant uint& kv_seq_len [[buffer(5)]],
+                constant uint& head_dim [[buffer(6)]],
+                constant float& alpha [[buffer(7)]],         // Scaling factor (1/sqrt(head_dim))
+                constant uint& q_offset [[buffer(8)]],       // Absolute key position of query row 0
+                uint2 gid [[thread_position_in_grid]]
+            ) {
+                uint h = gid.y;        // head index
+                uint q_row = gid.x;    // query sequence position within the chunk
+
+                if (h >= num_heads || q_row >= q_seq_len) return;
+
+                uint q_base = h * (q_seq_len * head_dim) + q_row * head_dim;
+                uint k_base = h * (head_dim * kv_seq_len);
+                uint out_base = h * (q_seq_len * kv_seq_len) + q_row * kv_seq_len;
+
+                // Last key column this query row may see. Clamped so that a caller who
+                // declared an offset running past the end of the key sequence gets a
+                // fully-visible row instead of an out-of-bounds read.
+                uint last = q_offset + q_row;
+                if (last >= kv_seq_len) {
+                    last = kv_seq_len - 1;
+                }
+
+                // Pass 1: stream the scaled dot products for the visible prefix.
+                float max_score = -3.402823466e+38f;  // -FLT_MAX
                 float sum = 0.0f;
-                for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
-                    scores[kv_col] = exp(scores[kv_col] - max_score);  // Numerically stable
-                    sum += scores[kv_col];
+
+                for (uint kv_col = 0; kv_col <= last; ++kv_col) {
+                    float dot = 0.0f;
+
+                    for (uint k = 0; k < head_dim; ++k) {
+                        dot += Q[q_base + k] * K_T[k_base + k * kv_seq_len + kv_col];
+                    }
+
+                    float score = alpha * dot;
+                    output[out_base + kv_col] = score;  // Park raw score in global memory
+
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
                 }
 
-                // Step 3: Normalize and write output (no causal masking - all KV valid)
+                // Column 0 is always visible, so a fully masked row cannot happen; guard
+                // the division anyway so a degenerate dispatch cannot emit NaN.
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+
+                // Pass 2: normalise in place and zero the masked tail.
                 for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
-                    output[out_base + kv_col] = scores[kv_col] / sum;  // Normalized attention weight
+                    if (kv_col <= last) {
+                        output[out_base + kv_col] =
+                            exp(output[out_base + kv_col] - max_score) * inv_sum;
+                    } else {
+                        output[out_base + kv_col] = 0.0f;  // Masked: strictly future key
+                    }
                 }
             }
 
@@ -883,12 +995,25 @@ impl MetalBackend {
                 const uint q_block_start = q_block_idx * 32;  // BLOCK_Q = 32
                 const uint q_idx = q_block_start + q_idx_in_block;
 
-                // Early exit if beyond sequence length
-                if (q_idx >= params.q_seq_len) {
-                    return;
-                }
+                // NO early `return` here. BLOCK_Q is 32 and the tail threadgroup of a
+                // q_seq_len that is not a multiple of 32 contains inactive threads; if
+                // those returned, the `threadgroup_barrier`s below would be executed by
+                // a non-uniform subset of the threadgroup (undefined behaviour under
+                // Metal's SIMT model) and `load_kv_block`, which strides its cooperative
+                // load by thread_idx, would leave part of the KV tile unwritten.
+                // Instead every thread runs the whole kernel and `active` masks the
+                // loads and the final stores.
+                const bool active = q_idx < params.q_seq_len;
 
-                // Load Q block into shared memory
+                // Absolute position of query row 0 in the key sequence. A query block
+                // longer than the key sequence is a caller error rather than a shape the
+                // mask can express; treat it as offset 0 instead of underflowing `uint`.
+                const uint kv_offset = (params.kv_seq_len > params.q_seq_len)
+                    ? (params.kv_seq_len - params.q_seq_len)
+                    : 0u;
+
+                // Load Q block into shared memory (load_q_block zero-fills out-of-range
+                // rows, so inactive lanes still contribute a well-defined tile entry).
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 load_q_block(Q, shared_Q, batch_idx, head_idx, q_block_start, q_idx_in_block, params);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -919,8 +1044,15 @@ impl MetalBackend {
                     for (uint kv_idx_in_block = 0; kv_idx_in_block < kv_block_size; ++kv_idx_in_block) {
                         const uint kv_idx = kv_block_start + kv_idx_in_block;
 
-                        // Apply causal mask: only attend to past tokens
-                        if (params.use_causal_mask && kv_idx > q_idx) {
+                        // Apply causal mask: only attend to keys at or before this
+                        // query's ABSOLUTE position. The query block covers the LAST
+                        // q_seq_len positions of the key sequence, so with a warm KV
+                        // cache (q_seq_len < kv_seq_len) query row `q_idx` lives at
+                        // absolute position `q_idx + kv_offset`. Comparing against the
+                        // block-relative `q_idx` instead - which is what this kernel did
+                        // - masked away the whole cached prefix: a single-token decode
+                        // against a 100-token cache saw only key position 0.
+                        if (params.use_causal_mask && kv_idx > q_idx + kv_offset) {
                             continue;
                         }
 
@@ -956,15 +1088,18 @@ impl MetalBackend {
                     }
                 }
 
-                // Write output to global memory
-                uint out_offset = ((batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx) * params.head_dim;
-                for (uint d = 0; d < params.head_dim; ++d) {
-                    O[out_offset + d] = output[d];
-                }
+                // Write output to global memory (inactive tail lanes stay silent).
+                if (active) {
+                    uint out_offset = ((batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx) * params.head_dim;
+                    for (uint d = 0; d < params.head_dim; ++d) {
+                        O[out_offset + d] = output[d];
+                    }
 
-                // Write logsumexp for reference (can be used for backward pass)
-                uint l_offset = (batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx;
-                L[l_offset] = max_score + log(sum_exp);
+                    // Write logsumexp for reference (can be used for backward pass)
+                    uint l_offset = (batch_idx * params.num_heads + head_idx) * params.q_seq_len + q_idx;
+                    L[l_offset] = (sum_exp > 0.0f) ? (max_score + log(sum_exp))
+                                                   : -3.402823466e+38f;
+                }
             }
         "#;
         let library = device
@@ -1294,6 +1429,32 @@ impl MetalBackend {
                     "MetalBackend::new",
                 )
             })?;
+        let batched_scaled_matmul_softmax_gen_causal_kernel = library
+            .get_function("batched_scaled_matmul_softmax_gen_causal", None)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!(
+                        "Failed to get batched_scaled_matmul_softmax_gen_causal kernel \
+                         function: {}",
+                        e
+                    ),
+                    "MetalBackend::new",
+                )
+            })?;
+        let batched_scaled_matmul_softmax_gen_causal_pipeline = device
+            .new_compute_pipeline_state_with_function(
+                &batched_scaled_matmul_softmax_gen_causal_kernel,
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!(
+                        "Failed to create batched_scaled_matmul_softmax_gen_causal \
+                         pipeline: {}",
+                        e
+                    ),
+                    "MetalBackend::new",
+                )
+            })?;
         let concat_seq_dim_kernel = library.get_function("concat_seq_dim", None).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to get concat_seq_dim kernel function: {}", e),
@@ -1332,6 +1493,7 @@ impl MetalBackend {
             device,
             command_queue,
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
+            pending_command_buffers: Arc::new(std::sync::Mutex::new(Vec::new())),
             matmul_pipeline: Arc::new(matmul_pipeline),
             gelu_pipeline: Arc::new(gelu_pipeline),
             matmul_gelu_pipeline: Arc::new(matmul_gelu_pipeline),
@@ -1356,6 +1518,9 @@ impl MetalBackend {
             ),
             batched_scaled_matmul_softmax_gen_pipeline: Arc::new(
                 batched_scaled_matmul_softmax_gen_pipeline,
+            ),
+            batched_scaled_matmul_softmax_gen_causal_pipeline: Arc::new(
+                batched_scaled_matmul_softmax_gen_causal_pipeline,
             ),
             concat_seq_dim_pipeline: Arc::new(concat_seq_dim_pipeline),
             flash_attention_pipeline: Arc::new(flash_attention_pipeline),

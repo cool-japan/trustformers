@@ -6,6 +6,7 @@ pub mod memory;
 pub mod metrics;
 pub mod profiler;
 pub mod tensorboard;
+pub mod tfrecord;
 
 pub use activation_stats::*;
 pub use attention::*;

@@ -6,7 +6,7 @@
 //! This module provides resource allocation strategies, load balancing, memory management,
 //! and memory pressure monitoring for hardware devices.
 
-use super::config::{AllocationStrategy, LoadBalancingStrategy, MemoryUsageStats};
+use super::config::{AllocationStrategy, DeviceInfo, LoadBalancingStrategy, MemoryUsageStats};
 use super::traits::{MemoryType, OperationParameter};
 use super::HardwareResult;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ pub struct ResourceAllocator {
     pub history: Vec<AllocationRecord>,
     /// Resource limits per device
     pub limits: HashMap<String, ResourceLimits>,
+    /// Round-robin cursor over the most recently seen device list.
+    round_robin_cursor: usize,
 }
 
 /// Resource reservation details
@@ -90,6 +92,11 @@ pub struct LoadBalancer {
     pub load_history: HashMap<String, Vec<(SystemTime, f64)>>,
     /// Adaptive thresholds for dynamic balancing
     pub adaptive_thresholds: HashMap<String, f64>,
+    /// Round-robin cursor over the most recently seen device list.
+    round_robin_cursor: usize,
+    /// Fractional credit accumulator per device for smooth weighted
+    /// round-robin (classic "current weight" scheduling algorithm).
+    weighted_credits: HashMap<String, f64>,
 }
 
 /// Memory manager for device memory pools and allocation
@@ -188,21 +195,53 @@ impl ResourceAllocator {
             reservations: HashMap::new(),
             history: Vec::new(),
             limits: HashMap::new(),
+            round_robin_cursor: 0,
         }
     }
 
-    /// Allocate resources on the best available device
-    pub fn allocate(&mut self, requirements: &HashMap<String, f64>) -> HardwareResult<String> {
-        // Placeholder implementation - in practice, this would implement
-        // sophisticated allocation logic based on the strategy
-        let device_id = match self.strategy {
-            AllocationStrategy::FirstAvailable => "device_0".to_string(),
-            AllocationStrategy::BestFit => self.find_best_fit_device(requirements)?,
-            AllocationStrategy::RoundRobin => self.next_round_robin_device(),
-            AllocationStrategy::LoadAware => self.find_least_loaded_device()?,
-            AllocationStrategy::PerformanceOptimized => self.find_highest_performance_device()?,
-            AllocationStrategy::PowerEfficient => self.find_most_power_efficient_device()?,
+    /// Allocate resources on the best available device, selected for real
+    /// from `available_devices` according to `self.strategy`. Returns an
+    /// error (recorded in history as a failed allocation) when no device
+    /// satisfies `requirements`, rather than fabricating a device ID that
+    /// corresponds to nothing.
+    pub fn allocate(
+        &mut self,
+        requirements: &HashMap<String, f64>,
+        available_devices: &[DeviceInfo],
+    ) -> HardwareResult<String> {
+        let selected = match self.strategy {
+            AllocationStrategy::FirstAvailable => available_devices.first(),
+            AllocationStrategy::BestFit => {
+                self.find_best_fit_device(requirements, available_devices)
+            },
+            AllocationStrategy::RoundRobin => self.next_round_robin_device(available_devices),
+            AllocationStrategy::LoadAware => self.find_least_loaded_device(available_devices),
+            AllocationStrategy::PerformanceOptimized => {
+                self.find_highest_performance_device(available_devices)
+            },
+            AllocationStrategy::PowerEfficient => {
+                self.find_most_power_efficient_device(available_devices)
+            },
         };
+
+        let Some(device) = selected else {
+            let record = AllocationRecord {
+                device_id: String::new(),
+                timestamp: SystemTime::now(),
+                duration: std::time::Duration::from_secs(0),
+                resources: requirements.clone(),
+                operation_params: vec![],
+                success: false,
+                performance_metrics: HashMap::new(),
+            };
+            self.history.push(record);
+            return Err(super::TrustformersError::hardware_error(
+                "No available device satisfies the allocation requirements",
+                "allocate",
+            ));
+        };
+
+        let device_id = device.id.clone();
 
         // Record the allocation
         let record = AllocationRecord {
@@ -219,34 +258,71 @@ impl ResourceAllocator {
         Ok(device_id)
     }
 
-    /// Find device with best fit for requirements
-    fn find_best_fit_device(&self, _requirements: &HashMap<String, f64>) -> HardwareResult<String> {
-        // Placeholder - would implement actual best-fit algorithm
-        Ok("best_fit_device".to_string())
+    /// Find the device with the smallest free memory that still satisfies
+    /// `requirements["memory"]` (classic best-fit bin packing: minimizes
+    /// wasted capacity rather than grabbing the first sufficient device).
+    /// Falls back to the device with the most free memory when no memory
+    /// requirement is specified.
+    fn find_best_fit_device<'a>(
+        &self,
+        requirements: &HashMap<String, f64>,
+        available_devices: &'a [DeviceInfo],
+    ) -> Option<&'a DeviceInfo> {
+        match requirements.get("memory").copied() {
+            Some(needed) => available_devices
+                .iter()
+                .filter(|d| d.status.memory_usage.free as f64 >= needed)
+                .min_by(|a, b| a.status.memory_usage.free.cmp(&b.status.memory_usage.free)),
+            None => available_devices.iter().max_by_key(|d| d.status.memory_usage.free),
+        }
     }
 
-    /// Get next device in round-robin order
-    fn next_round_robin_device(&self) -> String {
-        // Placeholder - would maintain round-robin state
-        "round_robin_device".to_string()
+    /// Get next device in round-robin order, cycling through
+    /// `available_devices` using a cursor carried across calls.
+    fn next_round_robin_device<'a>(
+        &mut self,
+        available_devices: &'a [DeviceInfo],
+    ) -> Option<&'a DeviceInfo> {
+        if available_devices.is_empty() {
+            return None;
+        }
+        let idx = self.round_robin_cursor % available_devices.len();
+        self.round_robin_cursor = self.round_robin_cursor.wrapping_add(1);
+        available_devices.get(idx)
     }
 
-    /// Find device with lowest current load
-    fn find_least_loaded_device(&self) -> HardwareResult<String> {
-        // Placeholder - would check actual device loads
-        Ok("least_loaded_device".to_string())
+    /// Find device with the lowest current reported utilization.
+    fn find_least_loaded_device<'a>(
+        &self,
+        available_devices: &'a [DeviceInfo],
+    ) -> Option<&'a DeviceInfo> {
+        available_devices
+            .iter()
+            .min_by(|a, b| a.status.utilization.total_cmp(&b.status.utilization))
     }
 
-    /// Find device with highest performance rating
-    fn find_highest_performance_device(&self) -> HardwareResult<String> {
-        // Placeholder - would check performance metrics
-        Ok("high_perf_device".to_string())
+    /// Find device with the highest advertised compute unit count.
+    fn find_highest_performance_device<'a>(
+        &self,
+        available_devices: &'a [DeviceInfo],
+    ) -> Option<&'a DeviceInfo> {
+        available_devices
+            .iter()
+            .max_by_key(|d| d.capabilities.compute_units.unwrap_or(0))
     }
 
-    /// Find most power-efficient device
-    fn find_most_power_efficient_device(&self) -> HardwareResult<String> {
-        // Placeholder - would check power efficiency ratings
-        Ok("power_efficient_device".to_string())
+    /// Find device with the lowest advertised power consumption. Devices
+    /// with unknown power consumption are deprioritized (treated as
+    /// infinite) rather than assumed efficient.
+    fn find_most_power_efficient_device<'a>(
+        &self,
+        available_devices: &'a [DeviceInfo],
+    ) -> Option<&'a DeviceInfo> {
+        available_devices.iter().min_by(|a, b| {
+            let pa = a.capabilities.power_consumption.unwrap_or(f64::INFINITY);
+            let pb = b.capabilities.power_consumption.unwrap_or(f64::INFINITY);
+            pa.total_cmp(&pb)
+        })
     }
 
     /// Set resource limits for a device
@@ -269,6 +345,8 @@ impl LoadBalancer {
             connections: HashMap::new(),
             load_history: HashMap::new(),
             adaptive_thresholds: HashMap::new(),
+            round_robin_cursor: 0,
+            weighted_credits: HashMap::new(),
         }
     }
 
@@ -304,9 +382,13 @@ impl LoadBalancer {
         Ok(selected)
     }
 
-    fn round_robin_select(&self, devices: &[String]) -> String {
-        // Placeholder - would maintain state for round-robin
-        devices[0].clone()
+    /// Cycle through `devices` using a cursor carried across calls, so
+    /// repeated calls with the same device list actually round-robin
+    /// instead of always returning the first entry.
+    fn round_robin_select(&mut self, devices: &[String]) -> String {
+        let idx = self.round_robin_cursor % devices.len();
+        self.round_robin_cursor = self.round_robin_cursor.wrapping_add(1);
+        devices[idx].clone()
     }
 
     fn least_connections_select(&self, devices: &[String]) -> String {
@@ -317,24 +399,94 @@ impl LoadBalancer {
             .unwrap_or_default()
     }
 
+    /// Pick the device with the lowest most-recent utilization sample in
+    /// `self.load_history`. Devices with no recorded history are treated as
+    /// unknown load (deprioritized below any device with a known, lower
+    /// reading) rather than assumed idle.
     fn least_utilization_select(&self, devices: &[String]) -> String {
-        // Placeholder - would check actual utilization
-        devices[0].clone()
+        devices
+            .iter()
+            .min_by(|a, b| self.latest_utilization(a).total_cmp(&self.latest_utilization(b)))
+            .cloned()
+            .unwrap_or_default()
     }
 
-    fn weighted_round_robin_select(&self, devices: &[String]) -> String {
-        // Placeholder - would implement weighted selection
-        devices[0].clone()
+    fn latest_utilization(&self, device: &str) -> f64 {
+        self.load_history
+            .get(device)
+            .and_then(|history| history.last())
+            .map(|(_, utilization)| *utilization)
+            .unwrap_or(f64::INFINITY)
     }
 
+    /// Smooth weighted round-robin (the algorithm used by nginx/LVS):
+    /// each device accrues credit equal to its configured `weights` entry
+    /// every call; the device with the highest accumulated credit is
+    /// selected and has `total_weight` deducted, so devices with higher
+    /// weight are picked more often while every device still gets a turn.
+    fn weighted_round_robin_select(&mut self, devices: &[String]) -> String {
+        let total_weight: f64 =
+            devices.iter().map(|d| self.weights.get(d).copied().unwrap_or(1.0)).sum();
+
+        for device in devices {
+            let weight = self.weights.get(device).copied().unwrap_or(1.0);
+            *self.weighted_credits.entry(device.clone()).or_insert(0.0) += weight;
+        }
+
+        let selected = devices
+            .iter()
+            .max_by(|a, b| {
+                let ca = self.weighted_credits.get(*a).copied().unwrap_or(0.0);
+                let cb = self.weighted_credits.get(*b).copied().unwrap_or(0.0);
+                ca.total_cmp(&cb)
+            })
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(credit) = self.weighted_credits.get_mut(&selected) {
+            *credit -= total_weight.max(f64::MIN_POSITIVE);
+        }
+
+        selected
+    }
+
+    /// Pick the device with the highest configured weight, treated here as
+    /// a relative performance rating (distinct from `load_history`, which
+    /// `least_utilization_select` already uses).
     fn performance_based_select(&self, devices: &[String]) -> String {
-        // Placeholder - would select based on performance metrics
-        devices[0].clone()
+        devices
+            .iter()
+            .max_by(|a, b| {
+                let wa = self.weights.get(*a).copied().unwrap_or(0.0);
+                let wb = self.weights.get(*b).copied().unwrap_or(0.0);
+                wa.total_cmp(&wb)
+            })
+            .cloned()
+            .unwrap_or_default()
     }
 
+    /// Pick the device with the most headroom below its own configured
+    /// adaptive threshold (`self.adaptive_thresholds[device] -
+    /// current_utilization`), combining both fields the struct already
+    /// carries. Devices without a configured threshold default to 1.0
+    /// (fully open); devices without utilization history are treated as
+    /// unknown load and deprioritized.
     fn adaptive_select(&self, devices: &[String]) -> String {
-        // Placeholder - would implement adaptive selection
-        devices[0].clone()
+        devices
+            .iter()
+            .max_by(|a, b| self.adaptive_headroom(a).total_cmp(&self.adaptive_headroom(b)))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn adaptive_headroom(&self, device: &str) -> f64 {
+        let threshold = self.adaptive_thresholds.get(device).copied().unwrap_or(1.0);
+        let utilization = self.latest_utilization(device);
+        if utilization.is_infinite() {
+            f64::NEG_INFINITY
+        } else {
+            threshold - utilization
+        }
     }
 
     /// Update device weight
@@ -559,5 +711,192 @@ impl Default for MemoryManager {
 impl Default for MemoryPressureMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::traits::{DeviceStatus, MemoryUsage};
+    use super::super::{DataType, HardwareCapabilities, HardwareType};
+    use super::*;
+
+    fn device(
+        id: &str,
+        free_memory: usize,
+        utilization: f64,
+        compute_units: Option<u32>,
+        power: Option<f64>,
+    ) -> DeviceInfo {
+        DeviceInfo {
+            id: id.to_string(),
+            hardware_type: HardwareType::CPU,
+            capabilities: HardwareCapabilities {
+                data_types: vec![DataType::F32],
+                max_dimensions: 4,
+                memory_size: Some(free_memory),
+                clock_frequency: None,
+                compute_units,
+                operations: vec![],
+                power_consumption: power,
+                thermal_design_power: None,
+            },
+            status: DeviceStatus {
+                online: true,
+                busy: false,
+                error: None,
+                memory_usage: MemoryUsage {
+                    used: 0,
+                    total: free_memory,
+                    free: free_memory,
+                    fragmentation: 0.0,
+                },
+                temperature: None,
+                power_consumption: power,
+                utilization,
+            },
+            last_seen: SystemTime::now(),
+            weight: 1.0,
+            priority: 0,
+            tags: vec![],
+        }
+    }
+
+    /// Regression test: `allocate` used to return the literal string
+    /// `"device_0"` for `FirstAvailable` regardless of what devices (if
+    /// any) actually existed. It must now return a real device's id, and
+    /// error when there is nothing to allocate.
+    #[test]
+    fn test_allocate_first_available_returns_real_device_id() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::FirstAvailable);
+        let devices = vec![device("real-device-7", 1024, 0.1, Some(4), Some(50.0))];
+        let id = allocator
+            .allocate(&HashMap::new(), &devices)
+            .expect("allocation should succeed");
+        assert_eq!(id, "real-device-7");
+    }
+
+    #[test]
+    fn test_allocate_errors_when_no_devices_available() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::FirstAvailable);
+        let result = allocator.allocate(&HashMap::new(), &[]);
+        assert!(
+            result.is_err(),
+            "must error rather than fabricate a device id"
+        );
+    }
+
+    #[test]
+    fn test_allocate_load_aware_picks_least_utilized_device() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::LoadAware);
+        let devices = vec![
+            device("busy", 1024, 0.9, None, None),
+            device("idle", 1024, 0.05, None, None),
+            device("medium", 1024, 0.5, None, None),
+        ];
+        let id = allocator
+            .allocate(&HashMap::new(), &devices)
+            .expect("allocation should succeed");
+        assert_eq!(id, "idle");
+    }
+
+    #[test]
+    fn test_allocate_performance_optimized_picks_most_compute_units() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::PerformanceOptimized);
+        let devices = vec![
+            device("small", 1024, 0.0, Some(4), None),
+            device("big", 1024, 0.0, Some(64), None),
+        ];
+        let id = allocator
+            .allocate(&HashMap::new(), &devices)
+            .expect("allocation should succeed");
+        assert_eq!(id, "big");
+    }
+
+    #[test]
+    fn test_allocate_power_efficient_picks_lowest_power() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::PowerEfficient);
+        let devices = vec![
+            device("hungry", 1024, 0.0, None, Some(300.0)),
+            device("thrifty", 1024, 0.0, None, Some(15.0)),
+        ];
+        let id = allocator
+            .allocate(&HashMap::new(), &devices)
+            .expect("allocation should succeed");
+        assert_eq!(id, "thrifty");
+    }
+
+    #[test]
+    fn test_allocate_best_fit_picks_tightest_sufficient_device() {
+        let mut allocator = ResourceAllocator::new(AllocationStrategy::BestFit);
+        let devices = vec![
+            device("huge", 1_000_000, 0.0, None, None),
+            device("snug", 200, 0.0, None, None),
+            device("too_small", 50, 0.0, None, None),
+        ];
+        let mut requirements = HashMap::new();
+        requirements.insert("memory".to_string(), 100.0);
+        let id = allocator.allocate(&requirements, &devices).expect("allocation should succeed");
+        assert_eq!(
+            id, "snug",
+            "best-fit must pick the smallest device that still satisfies the requirement"
+        );
+    }
+
+    /// Regression test: `round_robin_select`/`least_utilization_select`/
+    /// `weighted_round_robin_select`/`performance_based_select`/
+    /// `adaptive_select` used to all return `devices[0]` unconditionally.
+    #[test]
+    fn test_load_balancer_round_robin_actually_cycles() {
+        let mut lb = LoadBalancer::new(LoadBalancingStrategy::RoundRobin);
+        let devices = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let first = lb.select_device(&devices).expect("select should succeed");
+        let second = lb.select_device(&devices).expect("select should succeed");
+        let third = lb.select_device(&devices).expect("select should succeed");
+        assert_ne!(
+            first, second,
+            "round robin must not pick the same device twice in a row"
+        );
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn test_load_balancer_least_utilization_uses_load_history() {
+        let mut lb = LoadBalancer::new(LoadBalancingStrategy::LeastUtilization);
+        lb.load_history.insert("busy".to_string(), vec![(SystemTime::now(), 0.95)]);
+        lb.load_history.insert("idle".to_string(), vec![(SystemTime::now(), 0.02)]);
+        let devices = vec!["busy".to_string(), "idle".to_string()];
+        let selected = lb.select_device(&devices).expect("select should succeed");
+        assert_eq!(selected, "idle");
+    }
+
+    #[test]
+    fn test_load_balancer_performance_based_uses_weights() {
+        let mut lb = LoadBalancer::new(LoadBalancingStrategy::PerformanceBased);
+        lb.set_weight("weak", 1.0);
+        lb.set_weight("strong", 10.0);
+        let devices = vec!["weak".to_string(), "strong".to_string()];
+        let selected = lb.select_device(&devices).expect("select should succeed");
+        assert_eq!(selected, "strong");
+    }
+
+    #[test]
+    fn test_load_balancer_weighted_round_robin_favors_higher_weight() {
+        let mut lb = LoadBalancer::new(LoadBalancingStrategy::WeightedRoundRobin);
+        lb.set_weight("light", 1.0);
+        lb.set_weight("heavy", 3.0);
+        let devices = vec!["light".to_string(), "heavy".to_string()];
+
+        let mut heavy_count = 0;
+        for _ in 0..8 {
+            if lb.select_device(&devices).expect("select should succeed") == "heavy" {
+                heavy_count += 1;
+            }
+        }
+        // With weight 3:1 over 8 selections, "heavy" should be picked
+        // noticeably more than half the time.
+        assert!(
+            heavy_count >= 5,
+            "expected heavy (weight 3) to be selected more often, got {heavy_count}/8"
+        );
     }
 }

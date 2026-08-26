@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Import commonly used types from core
-use super::core::TestCharacterizationResult;
+use super::core::{TestCharacterizationError, TestCharacterizationResult};
 
 // Import cross-module types
 use super::alerts::DashboardData;
@@ -56,10 +57,14 @@ pub struct InsightModel {
 }
 
 impl InsightModel {
-    /// Update the model with recent data
-    pub fn update_with_recent_data(&mut self, data: &[f64]) {
-        // Placeholder implementation
-        // In a real implementation, this would retrain or update the model
+    /// Record that `data` was observed.
+    ///
+    /// Only `training_data_size` changes: no model is fitted here, and
+    /// `accuracy` is therefore left exactly as the caller set it rather than
+    /// being nudged toward a number no evaluation produced. Before 0.2.1 the
+    /// method was named as an update and documented as "would retrain", which
+    /// read as though the model had learned something.
+    pub fn record_observed_data(&mut self, data: &[f64]) {
         self.training_data_size += data.len();
     }
 }
@@ -129,10 +134,17 @@ pub struct RecommendationStrategy {
 }
 
 #[derive(Debug, Clone)]
+/// Produces recommendations from the strategies registered with it.
+///
+/// `strategies` used to be a `Vec<String>` of bare names carrying no
+/// effectiveness figure, so nothing could be ranked against
+/// `confidence_threshold` even in principle; `generate_recommendations`
+/// returned an empty list regardless.
 pub struct RecommendationSystem {
-    pub strategies: Vec<String>,
+    pub strategies: Vec<RecommendationStrategy>,
     pub confidence_threshold: f64,
     pub max_recommendations: usize,
+    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -358,30 +370,76 @@ impl RecommendationSystem {
             strategies: Vec::new(),
             confidence_threshold: 0.7,
             max_recommendations: 10,
+            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Start the recommendation system
-    pub async fn start_recommendations(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would initialize recommendation generation
+    /// Register a strategy the system may recommend.
+    pub fn register_strategy(&mut self, strategy: RecommendationStrategy) {
+        self.strategies.push(strategy);
+    }
+
+    /// Start the recommendation system.
+    pub fn start_recommendations(&self) -> TestCharacterizationResult<()> {
+        self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop the recommendation system
-    pub async fn stop_recommendations(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would stop recommendation generation
+    /// Stop the recommendation system.
+    pub fn stop_recommendations(&self) -> TestCharacterizationResult<()> {
+        self.running.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Generate recommendations based on current data
-    pub async fn generate_recommendations(
-        &self,
-    ) -> TestCharacterizationResult<Vec<Recommendation>> {
-        // Placeholder implementation
-        // In a real implementation, this would analyze data and generate recommendations
-        Ok(Vec::new())
+    /// Whether the system is running right now.
+    pub fn is_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Recommendations from the registered strategies that clear the
+    /// confidence threshold.
+    ///
+    /// Before 0.2.1 this returned `Ok(Vec::new())` whatever was registered, so
+    /// `strategies` and `confidence_threshold` were both inert and every caller
+    /// saw an empty list it could not distinguish from "nothing to recommend".
+    pub fn generate_recommendations(&self) -> TestCharacterizationResult<Vec<Recommendation>> {
+        if !self.is_running() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "recommendation system is not running; call start_recommendations first"
+                    .to_string(),
+                field: "running".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let mut recommendations: Vec<Recommendation> = self
+            .strategies
+            .iter()
+            .filter(|strategy| strategy.effectiveness >= self.confidence_threshold)
+            .map(|strategy| Recommendation {
+                recommendation_id: format!("strategy:{}", strategy.strategy_name),
+                recommendation_type: RecommendationType::Performance,
+                description: format!(
+                    "`{}` applies to {} scenario(s) with a recorded effectiveness of {:.3}",
+                    strategy.strategy_name,
+                    strategy.applicable_scenarios.len(),
+                    strategy.effectiveness
+                ),
+                // Priority orders by the strategy's own recorded effectiveness;
+                // the strongest strategy is priority 1.
+                priority: 1,
+                expected_impact: strategy.effectiveness,
+            })
+            .collect();
+        recommendations.sort_by(|a, b| {
+            b.expected_impact
+                .partial_cmp(&a.expected_impact)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (index, recommendation) in recommendations.iter_mut().enumerate() {
+            recommendation.priority = index as u32 + 1;
+        }
+        recommendations.truncate(self.max_recommendations);
+        Ok(recommendations)
     }
 }
 

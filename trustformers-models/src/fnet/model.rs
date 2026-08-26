@@ -1,9 +1,14 @@
 use crate::common::ActivationType;
 use crate::fnet::config::FNetConfig;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_head_layer_norm, bind_head_linear, bind_linear, take_norm_bias,
+    take_norm_weight, BoundNamespaces,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::Result,
+    errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -59,24 +64,55 @@ impl FourierTransform {
         }
     }
 
-    /// Apply Discrete Fourier Transform (DFT)
+    /// Apply the 2-D Discrete Fourier Transform and keep its real part.
+    ///
+    /// This is FNet's token-mixing operation: `Re(F_seq(F_hidden(x)))`.
+    ///
+    /// # Why this needs complex arithmetic
+    ///
+    /// A previous revision built a single matrix holding only
+    /// `cos(-2πkj/N)/√N` and applied it twice. That is **not** the real part of
+    /// the 2-D DFT. Writing the 1-D basis as `e^{-2πi kn/N} = c - i·s`, the
+    /// separable 2-D transform gives
+    ///
+    /// ```text
+    /// Re(X)[k, l] = Σ_n Σ_m x[n, m] · (c_kn·c_lm − s_kn·s_lm)
+    /// ```
+    ///
+    /// The dropped `−s·s` term is exactly what the cosine-only version threw
+    /// away, so its output was a *different linear map* — cosine mixing, not a
+    /// Fourier transform. Both the sine and the cosine components are carried
+    /// through here, so the imaginary part produced by the first axis
+    /// contributes to the real part after the second, as it must.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input is neither 2-D (`[seq, hidden]`) nor 3-D
+    /// (`[batch, seq, hidden]`), or when an intermediate reshape fails.
     fn apply_dft(&self, x: &Tensor) -> Result<Tensor> {
         // x: [batch_size, seq_len, hidden_size] or [seq_len, hidden_size]
         // Normalise to 3-D so all downstream math is consistent.
         let (x3d, was_2d) =
             if x.shape().len() == 2 { (x.unsqueeze(0)?, true) } else { (x.clone(), false) };
-        let _batch_size = x3d.shape()[0];
-        let _seq_len = x3d.shape()[1];
-        let _hidden_size = x3d.shape()[2];
+        if x3d.shape().len() != 3 {
+            return Err(tensor_op_error(
+                "FourierTransform::apply_dft",
+                format!(
+                    "expected a [seq, hidden] or [batch, seq, hidden] tensor, got shape {:?}",
+                    x.shape()
+                ),
+            ));
+        }
 
-        // Apply DFT along sequence dimension first
-        let x_seq_dft = self.dft_1d(&x3d, 1)?; // DFT along dimension 1 (seq_len)
+        // DFT along the sequence axis. The input is real, so the transform's
+        // imaginary part starts here.
+        let (real_seq, imag_seq) = self.dft_1d_complex(&x3d, None, 1)?;
 
-        // Apply DFT along hidden dimension
-        let x_both_dft = self.dft_1d(&x_seq_dft, 2)?; // DFT along dimension 2 (hidden_size)
+        // DFT along the hidden axis, carrying the complex intermediate.
+        let (real_both, _imag_both) = self.dft_1d_complex(&real_seq, Some(&imag_seq), 2)?;
 
-        // Take real part only (common practice in FNet)
-        let out3d = self.real_part(&x_both_dft)?;
+        // Take the real part (FNet discards the imaginary component).
+        let out3d = real_both;
 
         // Restore original rank if input was 2-D
         if was_2d {
@@ -87,9 +123,17 @@ impl FourierTransform {
     }
 
     /// Apply Real DFT (more efficient variant)
+    ///
+    /// For a real-valued input the negative frequencies are the conjugates of
+    /// the positive ones, so the real part of the full transform is identical to
+    /// the real part of the half-spectrum transform. The result is therefore the
+    /// same as [`FourierTransform::apply_dft`], and this variant delegates to it
+    /// rather than pretending to a different numeric result.
+    ///
+    /// # Errors
+    ///
+    /// See [`FourierTransform::apply_dft`].
     fn apply_real_dft(&self, x: &Tensor) -> Result<Tensor> {
-        // Similar to DFT but optimized for real inputs
-        // For simplicity, we'll implement this as regular DFT taking real part
         self.apply_dft(x)
     }
 
@@ -159,73 +203,125 @@ impl FourierTransform {
         Tensor::from_vec(matrix, &[n, n])
     }
 
-    /// 1D DFT implementation (simplified)
-    fn dft_1d(&self, x: &Tensor, dim: i32) -> Result<Tensor> {
-        // This is a simplified implementation
-        // In practice, you'd use an efficient FFT library
-
-        let shape = x.shape();
-        let n = shape[dim as usize];
-
-        // For simplicity, we'll approximate DFT with a learned transformation
-        // that captures the frequency domain mixing behavior
-
-        // Create a pseudo-DFT matrix that mixes elements
-        let mut dft_matrix = Vec::new();
-        let pi = std::f32::consts::PI;
-
+    /// Orthonormal 1-D DFT basis matrices `C[k, j] = cos(2πkj/n)/√n` and
+    /// `S[k, j] = sin(2πkj/n)/√n`.
+    ///
+    /// The forward transform is `X[k] = Σ_j x[j] e^{-2πi kj/n} / √n`, i.e.
+    /// `Re(X) = C·x` and `Im(X) = −S·x` for a real `x`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `n` is 0 or when the basis tensors cannot be built.
+    fn dft_basis(&self, n: usize) -> Result<(Tensor, Tensor)> {
+        if n == 0 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_basis",
+                "cannot build a DFT basis for a zero-length axis".to_string(),
+            ));
+        }
+        let mut cos_matrix = Vec::with_capacity(n * n);
+        let mut sin_matrix = Vec::with_capacity(n * n);
+        let scale = 1.0 / (n as f32).sqrt();
+        let two_pi = 2.0 * std::f32::consts::PI;
         for k in 0..n {
             for j in 0..n {
-                let angle = -2.0 * pi * (k * j) as f32 / n as f32;
-                let real_part = angle.cos() / (n as f32).sqrt();
-                dft_matrix.push(real_part);
+                // (k*j) mod n keeps the angle small for long axes, which matters
+                // for f32 precision once k*j exceeds 2^24.
+                let angle = two_pi * ((k * j) % n) as f32 / n as f32;
+                cos_matrix.push(angle.cos() * scale);
+                sin_matrix.push(angle.sin() * scale);
             }
         }
-
-        let dft_tensor = Tensor::from_vec(dft_matrix, &[n, n])?;
-
-        // Apply transformation along the specified dimension.
-        // Both dim=1 (seq) and dim=2 (hidden) use the same reshape strategy:
-        // flatten all outer dims into one batch axis so the matmul is always 2-D.
-        let dft_shape = dft_tensor.shape();
-        let dft_dim0 = dft_shape.len().saturating_sub(2);
-        let dft_dim1 = dft_shape.len().saturating_sub(1);
-        let dft_t = dft_tensor.transpose(dft_dim0, dft_dim1)?;
-
-        if dim == 1 {
-            // Along sequence dimension: treat [batch, seq_len, hidden_size] as
-            // [batch * hidden_size, seq_len] by transposing seq<->hidden first.
-            let batch_size = shape[0];
-            let seq_len = shape[1];
-            let hidden_size = shape[2];
-
-            // Transpose to [batch, hidden_size, seq_len]
-            let x_t = x.transpose(1, 2)?;
-            // Flatten to [batch * hidden_size, seq_len]
-            let reshaped = x_t.reshape(&[batch_size * hidden_size, seq_len])?;
-            // Apply DFT: [batch*hidden, seq] @ [seq, seq] -> [batch*hidden, seq]
-            let transformed = reshaped.matmul(&dft_t)?;
-            // Restore to [batch, hidden_size, seq_len] then transpose back
-            let restored = transformed.reshape(&[batch_size, hidden_size, seq_len])?;
-            restored.transpose(1, 2)
-        } else {
-            // Along hidden dimension - reshape [batch, seq_len, hidden_size] into
-            // [batch * seq_len, hidden_size] so the matmul is 2-D.
-            let batch_size = shape[0];
-            let seq_len = shape[1];
-            let hidden_size = shape[2];
-
-            let reshaped = x.reshape(&[batch_size * seq_len, hidden_size])?;
-            let transformed = reshaped.matmul(&dft_t)?;
-            transformed.reshape(&[batch_size, seq_len, hidden_size])
-        }
+        Ok((
+            Tensor::from_vec(cos_matrix, &[n, n])?,
+            Tensor::from_vec(sin_matrix, &[n, n])?,
+        ))
     }
 
-    /// Extract real part of complex tensor
-    fn real_part(&self, x: &Tensor) -> Result<Tensor> {
-        // Since we're working with real tensors, just return as-is
-        // In a full implementation, this would handle complex numbers
-        Ok(x.clone())
+    /// Apply a 1-D DFT along `dim` to a complex-valued 3-D tensor.
+    ///
+    /// The input is `real + i·imag` (`imag = None` means a real input). The
+    /// transform is the orthonormal forward DFT, so with `C = cos` and
+    /// `S = sin` bases:
+    ///
+    /// ```text
+    /// Re(out) = C·real + S·imag
+    /// Im(out) = C·imag − S·real
+    /// ```
+    ///
+    /// Both components are returned, because dropping the imaginary part between
+    /// the two axes of a 2-D transform changes the result — that omission is
+    /// what made the previous cosine-only implementation something other than a
+    /// Fourier transform.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `dim` is not 1 or 2, when the tensor is not 3-D, or when a
+    /// reshape / matmul fails.
+    fn dft_1d_complex(
+        &self,
+        real: &Tensor,
+        imag: Option<&Tensor>,
+        dim: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let shape = real.shape();
+        if shape.len() != 3 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_1d_complex",
+                format!("expected a 3-D tensor, got shape {shape:?}"),
+            ));
+        }
+        if dim != 1 && dim != 2 {
+            return Err(tensor_op_error(
+                "FourierTransform::dft_1d_complex",
+                format!("DFT axis must be 1 (sequence) or 2 (hidden), got {dim}"),
+            ));
+        }
+        let batch_size = shape[0];
+        let seq_len = shape[1];
+        let hidden_size = shape[2];
+        let n = shape[dim];
+
+        let (cos_basis, sin_basis) = self.dft_basis(n)?;
+        // The rows of the basis are frequencies; a right-multiply `x @ Bᵀ`
+        // computes `Σ_j x[.., j] B[k, j]` for every k, which is the transform.
+        let cos_t = cos_basis.transpose(0, 1)?;
+        let sin_t = sin_basis.transpose(0, 1)?;
+
+        // Flatten so the axis under transform is the last one and the matmul is 2-D.
+        let flatten = |t: &Tensor| -> Result<Tensor> {
+            if dim == 1 {
+                // [batch, seq, hidden] -> [batch, hidden, seq] -> [batch*hidden, seq]
+                t.transpose(1, 2)?.reshape(&[batch_size * hidden_size, seq_len])
+            } else {
+                t.reshape(&[batch_size * seq_len, hidden_size])
+            }
+        };
+        let restore = |t: Tensor| -> Result<Tensor> {
+            if dim == 1 {
+                t.reshape(&[batch_size, hidden_size, seq_len])?.transpose(1, 2)
+            } else {
+                t.reshape(&[batch_size, seq_len, hidden_size])
+            }
+        };
+
+        let real_flat = flatten(real)?;
+        let real_cos = real_flat.matmul(&cos_t)?;
+        let real_sin = real_flat.matmul(&sin_t)?;
+
+        let (out_real_flat, out_imag_flat) = match imag {
+            Some(imag) => {
+                let imag_flat = flatten(imag)?;
+                let imag_cos = imag_flat.matmul(&cos_t)?;
+                let imag_sin = imag_flat.matmul(&sin_t)?;
+                // Re = C·re + S·im ; Im = C·im − S·re
+                (real_cos.add(&imag_sin)?, imag_cos.sub(&real_sin)?)
+            },
+            // Real input: Re = C·re ; Im = −S·re
+            None => (real_cos, real_sin.scalar_mul(-1.0)?),
+        };
+
+        Ok((restore(out_real_flat)?, restore(out_imag_flat)?))
     }
 }
 
@@ -257,8 +353,8 @@ impl Layer for FourierTransform {
 
 /// FNet feed-forward network (same as BERT)
 pub struct FNetFeedForward {
-    dense1: Linear,
-    dense2: Linear,
+    pub(crate) dense1: Linear,
+    pub(crate) dense2: Linear,
     activation: ActivationType,
     #[allow(dead_code)]
     dropout: f32,
@@ -315,9 +411,9 @@ impl Layer for FNetFeedForward {
 /// FNet encoder layer (Fourier + FFN)
 pub struct FNetLayer {
     fourier_transform: FourierTransform,
-    feed_forward: FNetFeedForward,
-    fourier_norm: LayerNorm,
-    output_norm: LayerNorm,
+    pub(crate) feed_forward: FNetFeedForward,
+    pub(crate) fourier_norm: LayerNorm,
+    pub(crate) output_norm: LayerNorm,
     device: Device,
 }
 
@@ -374,10 +470,10 @@ impl Layer for FNetLayer {
 
 /// FNet embeddings (same as BERT)
 pub struct FNetEmbeddings {
-    word_embeddings: Embedding,
-    position_embeddings: Embedding,
-    token_type_embeddings: Embedding,
-    layer_norm: LayerNorm,
+    pub(crate) word_embeddings: Embedding,
+    pub(crate) position_embeddings: Embedding,
+    pub(crate) token_type_embeddings: Embedding,
+    pub(crate) layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
     device: Device,
@@ -453,7 +549,7 @@ impl Layer for FNetEmbeddings {
 
 /// FNet encoder
 pub struct FNetEncoder {
-    layers: Vec<FNetLayer>,
+    pub(crate) layers: Vec<FNetLayer>,
     device: Device,
 }
 
@@ -538,8 +634,13 @@ impl Model for FNetModel {
         Ok(sequence_output)
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        Ok(())
+    /// Load a HuggingFace FNet checkpoint (safetensors or `torch.save`).
+    ///
+    /// A previous revision was `Ok(())` — the reader was never touched, so every
+    /// "load" left the model randomly initialised while reporting success. See
+    /// [`FNetModel::load_from_checkpoint`] for the name map.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -602,8 +703,13 @@ impl Model for FNetForSequenceClassification {
         self.classifier.forward(cls_output)
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the classifier head.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetForSequenceClassification::load_pretrained_report`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.fnet.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -615,21 +721,122 @@ impl Model for FNetForSequenceClassification {
     }
 }
 
+impl FNetForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
+    /// Load the encoder and the classification head, reporting what was bound.
+    ///
+    /// A previous revision delegated straight to `FNetModel::load_pretrained`,
+    /// which binds the encoder only. `FNetModel`'s unused-tensor policy tolerates
+    /// the `classifier.` namespace, so a fine-tuned checkpoint's head was
+    /// silently dropped: inference then ran through a constructor-initialised
+    /// classifier while `load_pretrained` returned `Ok(())`.
+    ///
+    /// A checkpoint that carries no head at all — a plain pretrained encoder — is
+    /// still accepted, but the absent head tensors are recorded in
+    /// [`LoadReport::missing`] so the caller can see the layer kept its
+    /// initialisation rather than being told everything was loaded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.fnet.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.fnet.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
+    }
+}
+
+/// FNet's masked-language-modelling prediction head.
+///
+/// HuggingFace's `FNetLMPredictionHead` is a `transform` block — a square dense
+/// projection, GELU and a `LayerNorm` — followed by a `decoder` back to the
+/// vocabulary, exactly the layout BERT uses. A previous revision of this crate
+/// collapsed the head to a single `Linear`, which meant a real
+/// `FNetForMaskedLM` checkpoint could not be represented at all: its
+/// `cls.predictions.transform.*` tensors had nowhere to land and were dropped
+/// while the load reported success.
+pub struct FNetLMHead {
+    dense: Linear,
+    layer_norm: LayerNorm,
+    decoder: Linear,
+}
+
+impl FNetLMHead {
+    /// Build the head for `config` on `device`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the LayerNorm cannot be constructed for `hidden_size`.
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
+        Ok(Self {
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
+            decoder: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+        })
+    }
+
+    /// dense → GELU → LayerNorm → decoder.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any layer failure.
+    pub fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
+        let hidden_states = self.dense.forward(hidden_states)?;
+        let hidden_states = trustformers_core::ops::activations::gelu(&hidden_states)?;
+        let hidden_states = self.layer_norm.forward(hidden_states)?;
+        self.decoder.forward(hidden_states)
+    }
+
+    /// Total learnable parameters of the head.
+    pub fn parameter_count(&self) -> usize {
+        self.dense.parameter_count()
+            + self.layer_norm.parameter_count()
+            + self.decoder.parameter_count()
+    }
+}
+
 /// FNet for masked language modeling
 pub struct FNetForMaskedLM {
     fnet: FNetModel,
-    mlm_head: Linear,
+    mlm_head: FNetLMHead,
     device: Device,
 }
 
 impl FNetForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["cls.predictions."]);
+
     pub fn new(config: FNetConfig) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
 
     pub fn new_with_device(config: FNetConfig, device: Device) -> Result<Self> {
         let fnet = FNetModel::new_with_device(config.clone(), device)?;
-        let mlm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, true, device);
+        let mlm_head = FNetLMHead::new_with_device(&config, device)?;
 
         Ok(Self {
             fnet,
@@ -640,6 +847,75 @@ impl FNetForMaskedLM {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Load the encoder and the masked-LM head, reporting what was bound.
+    ///
+    /// A previous revision delegated straight to `FNetModel::load_pretrained`,
+    /// which binds the encoder only. `FNetModel`'s unused-tensor policy tolerates
+    /// the `cls.` namespace, so the whole prediction head was silently dropped
+    /// while `load_pretrained` returned `Ok(())`.
+    ///
+    /// HuggingFace declares the decoder with `bias=False` and aliases
+    /// `decoder.bias` onto a separate `cls.predictions.bias` parameter, so a real
+    /// checkpoint may spell the output bias either way; both are accepted, and
+    /// the canonical `cls.predictions.bias` wins when the checkpoint has both.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.fnet.load_from_checkpoint(&checkpoint)?;
+
+        let config = self.fnet.get_config().clone();
+        let hidden = config.hidden_size;
+        let vocab = config.vocab_size;
+
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "cls.predictions.transform.dense",
+            [hidden, hidden],
+            &mut self.mlm_head.dense,
+        )?;
+        bind_head_layer_norm(
+            &checkpoint,
+            &mut report,
+            "cls.predictions.transform.LayerNorm",
+            hidden,
+            &mut self.mlm_head.layer_norm,
+        )?;
+
+        let decoder_weight = "cls.predictions.decoder.weight";
+        match checkpoint.take_shaped(decoder_weight, &[vocab, hidden])? {
+            Some(weight) => {
+                self.mlm_head.decoder.set_weight(weight)?;
+                report.mark_loaded(decoder_weight);
+            },
+            None => report.note_absent(decoder_weight),
+        }
+
+        let canonical_bias = "cls.predictions.bias";
+        let aliased_bias = "cls.predictions.decoder.bias";
+        let bias_name =
+            if checkpoint.contains(canonical_bias) { canonical_bias } else { aliased_bias };
+        match checkpoint.take_shaped(bias_name, &[vocab])? {
+            Some(bias) => {
+                self.mlm_head.decoder.set_bias(bias)?;
+                report.mark_loaded(bias_name);
+                // The two spellings alias one parameter; note the other as
+                // consumed so a checkpoint carrying both is fully accounted for.
+                if checkpoint.contains(aliased_bias) && bias_name == canonical_bias {
+                    report.mark_loaded(aliased_bias);
+                }
+            },
+            None => report.note_absent(canonical_bias),
+        }
+
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
     }
 }
 
@@ -653,8 +929,13 @@ impl Model for FNetForMaskedLM {
         self.mlm_head.forward(sequence_output)
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the prediction head.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetForMaskedLM::load_pretrained_report`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.fnet.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -663,6 +944,122 @@ impl Model for FNetForMaskedLM {
 
     fn num_parameters(&self) -> usize {
         self.fnet.num_parameters() + self.mlm_head.parameter_count()
+    }
+}
+
+impl FNetModel {
+    /// Checkpoint namespaces an FNet encoder legitimately does not consume.
+    pub(crate) const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] =
+        &["cls.", "classifier.", "qa_outputs.", "pooler."];
+
+    /// Non-parameter buffers HuggingFace stores alongside FNet's weights.
+    pub(crate) const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] =
+        &["embeddings.position_ids", "embeddings.token_type_ids"];
+
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetModel::load_from_checkpoint`].
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
+
+    /// Bind an already-parsed checkpoint into this model.
+    ///
+    /// FNet is BERT with self-attention replaced by a parameter-free 2-D Fourier
+    /// transform, so its checkpoints carry BERT's embedding and feed-forward
+    /// tensors and simply *omit* every `attention.self.*` / `attention.output.*`
+    /// projection — the mixing layer has no weights to store. The two per-layer
+    /// norms keep their HuggingFace spellings (`fourier.output.LayerNorm` and
+    /// `output.LayerNorm`).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint does not look like an FNet checkpoint, when a
+    /// tensor has the wrong shape, when a parameter is missing, or when the
+    /// checkpoint carries weights this architecture does not recognise.
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        let prefix =
+            checkpoint.detect_prefix(&["", "fnet."], "embeddings.word_embeddings.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let config = self.config.clone();
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embeddings.word_embeddings",
+            config.vocab_size,
+            hidden,
+            &mut self.embeddings.word_embeddings,
+        )?;
+        bind_embedding(
+            &mut binder,
+            "embeddings.position_embeddings",
+            config.max_position_embeddings,
+            hidden,
+            &mut self.embeddings.position_embeddings,
+        )?;
+        bind_embedding(
+            &mut binder,
+            "embeddings.token_type_embeddings",
+            config.type_vocab_size,
+            hidden,
+            &mut self.embeddings.token_type_embeddings,
+        )?;
+        if let Some(w) = take_norm_weight(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_weight(w)?;
+        }
+        if let Some(b) = take_norm_bias(&mut binder, "embeddings.LayerNorm", hidden)? {
+            self.embeddings.layer_norm.set_bias(b)?;
+        }
+
+        for (index, layer) in self.encoder.layers.iter_mut().enumerate() {
+            let base = format!("encoder.layer.{index}");
+
+            // The Fourier mixing layer itself has no parameters; only the
+            // residual norm that follows it does.
+            let fourier_norm = format!("{base}.fourier.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &fourier_norm, hidden)? {
+                layer.fourier_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &fourier_norm, hidden)? {
+                layer.fourier_norm.set_bias(b)?;
+            }
+
+            bind_linear(
+                &mut binder,
+                &format!("{base}.intermediate.dense"),
+                intermediate,
+                hidden,
+                true,
+                &mut layer.feed_forward.dense1,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{base}.output.dense"),
+                hidden,
+                intermediate,
+                true,
+                &mut layer.feed_forward.dense2,
+            )?;
+
+            let output_norm = format!("{base}.output.LayerNorm");
+            if let Some(w) = take_norm_weight(&mut binder, &output_norm, hidden)? {
+                layer.output_norm.set_weight(w)?;
+            }
+            if let Some(b) = take_norm_bias(&mut binder, &output_norm, hidden)? {
+                layer.output_norm.set_bias(b)?;
+            }
+        }
+
+        binder.finish(UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Self::ALLOWED_UNUSED_SUFFIXES,
+        ))
     }
 }
 
@@ -704,6 +1101,118 @@ mod tests {
     fn make_input(seq_len: usize) -> (Vec<u32>, Option<Vec<u32>>, Option<Vec<u32>>) {
         let ids: Vec<u32> = (0..seq_len as u32).collect();
         (ids, None, None)
+    }
+
+    // ── Fourier transform correctness ────────────────────────────────────────
+
+    /// Reference orthonormal 2-D DFT real part, computed directly from the
+    /// definition with `f64` complex accumulation.
+    fn reference_dft_real(values: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * cols];
+        let scale = 1.0 / ((rows as f64).sqrt() * (cols as f64).sqrt());
+        for k in 0..rows {
+            for l in 0..cols {
+                let mut re = 0.0f64;
+                for n in 0..rows {
+                    for m in 0..cols {
+                        let angle = -2.0
+                            * std::f64::consts::PI
+                            * ((k * n) as f64 / rows as f64 + (l * m) as f64 / cols as f64);
+                        re += values[n * cols + m] as f64 * angle.cos();
+                    }
+                }
+                out[k * cols + l] = (re * scale) as f32;
+            }
+        }
+        out
+    }
+
+    fn fourier_layer(kind: &str) -> FourierTransform {
+        let mut config = tiny_config();
+        config.fourier_transform_type = kind.to_string();
+        config.use_bias_in_fourier = false;
+        FourierTransform::new(&config).expect("Fourier layer must build")
+    }
+
+    /// Regression: `apply_dft` used a cosine-only basis applied twice, dropping
+    /// the `−sin·sin` cross term of the separable 2-D transform. That is a
+    /// different linear map, so its output does not match the real part of a
+    /// genuine 2-D DFT and this comparison fails against it.
+    #[test]
+    fn dft_matches_the_real_part_of_a_direct_2d_fourier_transform() {
+        let rows = 6usize;
+        let cols = 4usize;
+        // A deterministic, non-symmetric signal: a symmetric one would hide the
+        // missing sine term because its sine components vanish.
+        let values: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 7) % 13) as f32 - 6.0 + 0.25 * i as f32)
+            .collect();
+        let input = Tensor::from_vec(values.clone(), &[rows, cols]).expect("input must build");
+
+        let layer = fourier_layer("dft");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        let got = output.data().expect("output must be readable");
+        let want = reference_dft_real(&values, rows, cols);
+
+        assert_eq!(got.len(), want.len());
+        for (idx, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-3,
+                "element {idx}: FNet produced {g}, the true 2-D DFT real part is {w}"
+            );
+        }
+    }
+
+    /// Parseval / DC sanity: the `[0, 0]` output bin of an orthonormal 2-D DFT
+    /// is the signal's sum divided by `sqrt(rows*cols)`, for any signal.
+    #[test]
+    fn dft_dc_bin_equals_the_normalised_signal_sum() {
+        let rows = 4usize;
+        let cols = 8usize;
+        let values: Vec<f32> = (0..rows * cols).map(|i| (i as f32) * 0.3 - 2.0).collect();
+        let input = Tensor::from_vec(values.clone(), &[rows, cols]).expect("input must build");
+
+        let layer = fourier_layer("dft");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        let got = output.data().expect("output must be readable");
+
+        let expected_dc =
+            values.iter().sum::<f32>() / ((rows as f32).sqrt() * (cols as f32).sqrt());
+        assert!(
+            (got[0] - expected_dc).abs() < 1e-3,
+            "DC bin {} must equal the normalised sum {expected_dc}",
+            got[0]
+        );
+    }
+
+    #[test]
+    fn dft_preserves_the_input_shape_for_batched_input() {
+        let layer = fourier_layer("dft");
+        let input = Tensor::from_vec((0..2 * 5 * 3).map(|i| i as f32).collect(), &[2, 5, 3])
+            .expect("input must build");
+        let output = layer.forward(input).expect("Fourier transform must succeed");
+        assert_eq!(output.shape(), vec![2, 5, 3]);
+    }
+
+    #[test]
+    fn real_dft_agrees_with_the_full_dft_for_real_input() {
+        let values: Vec<f32> = (0..4 * 4).map(|i| ((i * 5) % 7) as f32).collect();
+        let full = fourier_layer("dft")
+            .forward(Tensor::from_vec(values.clone(), &[4, 4]).expect("input must build"))
+            .expect("dft must succeed")
+            .data()
+            .expect("readable");
+        let real = fourier_layer("real_dft")
+            .forward(Tensor::from_vec(values, &[4, 4]).expect("input must build"))
+            .expect("real_dft must succeed")
+            .data()
+            .expect("readable");
+        for (a, b) in full.iter().zip(real.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "real_dft diverged from dft: {a} vs {b}"
+            );
+        }
     }
 
     // ── Config tests ─────────────────────────────────────────────────────────
@@ -935,5 +1444,493 @@ mod tests {
             cfg.hidden_size,
             "embedding dim must match hidden_size"
         );
+    }
+
+    // ── Real checkpoint loading (regression for the silent `Ok(())`) ────────
+
+    use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+    fn loading_config() -> FNetConfig {
+        FNetConfig {
+            vocab_size: 16,
+            hidden_size: 8,
+            num_hidden_layers: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 8,
+            type_vocab_size: 2,
+            ..tiny_config()
+        }
+    }
+
+    /// Every tensor an FNet checkpoint of this shape carries.
+    ///
+    /// Note the absence of any `attention.*` projection: FNet's mixing layer is
+    /// a parameter-free Fourier transform, so those tensors simply do not exist.
+    fn fnet_tensors(config: &FNetConfig, prefix: &str) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        let mut seed = 0.0f32;
+        let mut next = || {
+            seed += 1.0;
+            seed
+        };
+
+        let mut tensors = vec![
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.word_embeddings.weight"),
+                &[config.vocab_size, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.position_embeddings.weight"),
+                &[config.max_position_embeddings, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.token_type_embeddings.weight"),
+                &[config.type_vocab_size, hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ),
+            F32Tensor::ramp(
+                &format!("{prefix}embeddings.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ),
+        ];
+
+        for layer in 0..config.num_hidden_layers {
+            let base = format!("{prefix}encoder.layer.{layer}");
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.fourier.output.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.fourier.output.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.intermediate.dense.weight"),
+                &[intermediate, hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.intermediate.dense.bias"),
+                &[intermediate],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.dense.weight"),
+                &[hidden, intermediate],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.dense.bias"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.LayerNorm.weight"),
+                &[hidden],
+                next(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{base}.output.LayerNorm.bias"),
+                &[hidden],
+                next(),
+            ));
+        }
+
+        tensors
+    }
+
+    /// Regression: `load_pretrained` was `Ok(())`, so the reader was never read
+    /// and the model kept its random initialisation while reporting success.
+    #[test]
+    fn load_pretrained_binds_the_checkpoint_instead_of_returning_ok() {
+        let config = loading_config();
+        let tensors = fnet_tensors(&config, "fnet.");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert_eq!(
+            report.loaded.len(),
+            tensors.len(),
+            "every fixture tensor must reach the model"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.retain(|t| t.name != "fnet.encoder.layer.1.output.dense.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("encoder.layer.1.output.dense.weight"),
+            "the error must name the gap: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        // An attention projection has no place in an FNet checkpoint.
+        tensors.push(F32Tensor::ramp(
+            "fnet.encoder.layer.0.attention.self.query.weight",
+            &[8, 8],
+            42.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("attention.self.query"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = FNetModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ── Task heads (regression for the head-dropping delegation) ────────────
+
+    /// The tensors a fine-tuned `FNetForSequenceClassification` export adds on
+    /// top of the encoder.
+    fn classifier_tensors(config: &FNetConfig, num_labels: usize) -> Vec<F32Tensor> {
+        vec![
+            F32Tensor::ramp("classifier.weight", &[num_labels, config.hidden_size], 90.0),
+            F32Tensor::ramp("classifier.bias", &[num_labels], 95.0),
+        ]
+    }
+
+    /// The tensors a `FNetForMaskedLM` export adds on top of the encoder.
+    fn prediction_head_tensors(config: &FNetConfig, aliased_bias: bool) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        let bias_name = if aliased_bias {
+            "cls.predictions.decoder.bias"
+        } else {
+            "cls.predictions.bias"
+        };
+        vec![
+            F32Tensor::ramp(
+                "cls.predictions.transform.dense.weight",
+                &[hidden, hidden],
+                60.0,
+            ),
+            F32Tensor::ramp("cls.predictions.transform.dense.bias", &[hidden], 65.0),
+            F32Tensor::ramp(
+                "cls.predictions.transform.LayerNorm.weight",
+                &[hidden],
+                70.0,
+            ),
+            F32Tensor::ramp("cls.predictions.transform.LayerNorm.bias", &[hidden], 75.0),
+            F32Tensor::ramp(
+                "cls.predictions.decoder.weight",
+                &[config.vocab_size, hidden],
+                80.0,
+            ),
+            F32Tensor::ramp(bias_name, &[config.vocab_size], 85.0),
+        ]
+    }
+
+    /// Regression: the wrapper delegated to `FNetModel::load_pretrained`, whose
+    /// unused-tensor policy tolerates the `classifier.` namespace. The head was
+    /// therefore dropped on the floor while the load returned `Ok(())`.
+    #[test]
+    fn sequence_classification_load_pretrained_binds_the_classifier_head() {
+        let config = loading_config();
+        let num_labels = 3;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, num_labels));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            FNetForSequenceClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"classifier.weight".to_string())
+                && report.loaded.contains(&"classifier.bias".to_string()),
+            "the classification head must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    /// A plain pretrained encoder ships without a fine-tuned head. That is
+    /// accepted, but the gap is reported rather than passed off as a full load.
+    #[test]
+    fn sequence_classification_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&fnet_tensors(&config, "fnet."));
+
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            !report.is_complete(),
+            "a checkpoint without a head must not be reported as complete"
+        );
+        assert!(
+            report.missing.contains(&"classifier.weight".to_string()),
+            "the absent head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_rejects_a_head_of_the_wrong_width() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, 7));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a 7-label head must not be reshaped into a 3-label model");
+        assert!(
+            err.to_string().contains("classifier.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Regression: the masked-LM wrapper delegated to the encoder loader, whose
+    /// policy tolerates the whole `cls.` namespace, so the prediction head was
+    /// silently discarded.
+    #[test]
+    fn masked_lm_load_pretrained_binds_the_prediction_head() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        for name in [
+            "cls.predictions.transform.dense.weight",
+            "cls.predictions.transform.LayerNorm.weight",
+            "cls.predictions.decoder.weight",
+            "cls.predictions.bias",
+        ] {
+            assert!(
+                report.loaded.contains(&name.to_string()),
+                "{name} must be among the loaded tensors: {:?}",
+                report.loaded
+            );
+        }
+    }
+
+    /// HuggingFace aliases `cls.predictions.decoder.bias` onto
+    /// `cls.predictions.bias`; an export may carry either spelling.
+    #[test]
+    fn masked_lm_load_pretrained_accepts_the_aliased_decoder_bias() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, true));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the aliased bias spelling must load");
+        assert!(
+            report.loaded.contains(&"cls.predictions.decoder.bias".to_string()),
+            "the aliased bias must be consumed: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&fnet_tensors(&config, "fnet."));
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            report.missing.contains(&"cls.predictions.decoder.weight".to_string()),
+            "the absent prediction head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_rejects_a_head_for_a_different_vocabulary() {
+        let config = loading_config();
+        let wider = FNetConfig {
+            vocab_size: config.vocab_size * 2,
+            ..config.clone()
+        };
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&wider, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a head for a bigger vocabulary must not be reshaped into place");
+        assert!(
+            err.to_string().contains("cls.predictions.decoder.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ── Contextual strictness: wrapper path vs bare-encoder path ────────────
+
+    /// A task wrapper must refuse a checkpoint entry it does not recognise
+    /// inside a namespace it binds itself.
+    ///
+    /// [`FNetModel::ALLOWED_UNUSED_PREFIXES`] tolerates `cls.` and
+    /// `classifier.` so that a *bare encoder* can be lifted out of a fine-tuned
+    /// checkpoint. The task wrappers used to inherit that tolerance even though
+    /// they bind those namespaces, so a misspelling such as
+    /// `cls.predictions.transform.dens.weight` was reported as merely
+    /// `ignored`: the load returned `Ok` and the dense layer the typo was meant
+    /// to fill kept its random initialisation. See
+    /// [`crate::weight_loading::binding::BoundNamespaces`].
+    #[test]
+    fn a_wrapper_rejects_an_unknown_tensor_inside_a_namespace_it_binds() {
+        // Masked LM: a misspelling one level below the namespace it binds.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        tensors.push(F32Tensor::ramp(
+            "cls.predictions.transform.dens.weight",
+            &[hidden, hidden],
+            96.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt head tensor must not be tolerated by the head's own binder");
+        let message = err.to_string();
+        assert!(
+            message.contains("cls.predictions.transform.dens.weight"),
+            "the offending name must be reported: {message}"
+        );
+        // The refusal must come from the wrapper's own namespace check, not
+        // from a shape or missing-parameter error that happens to mention the
+        // name: only `BoundNamespaces::verify` phrases it this way.
+        assert!(
+            message.contains("does not recognise inside the head namespace"),
+            "the refusal must be the bound-namespace check: {message}"
+        );
+
+        // Sequence classification: a misspelling under `classifier.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, 3));
+        tensors.push(F32Tensor::ramp("classifier.weigth", &[3, hidden], 97.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt classifier tensor must be refused");
+        assert!(
+            err.to_string().contains("classifier.weigth"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The strictness above must not turn into "every checkpoint entry must be
+    /// consumed": a pretraining checkpoint legitimately carries heads a
+    /// particular model does not bind, and the bare encoder binds none of them.
+    #[test]
+    fn namespaces_a_model_does_not_bind_stay_tolerated() {
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        // A next-sentence head under `cls.`, which the masked-LM wrapper does
+        // not bind: it claims `cls.predictions.`, not `cls.` as a whole.
+        tensors.push(F32Tensor::ramp(
+            "cls.seq_relationship.weight",
+            &[2, hidden],
+            98.0,
+        ));
+        tensors.push(F32Tensor::ramp("cls.seq_relationship.bias", &[2], 99.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a next-sentence head this model does not bind must stay tolerated");
+        assert!(
+            report.ignored.iter().any(|name| name == "cls.seq_relationship.weight"),
+            "the unbound head must be reported as ignored: {:?}",
+            report.ignored
+        );
+
+        // The same checkpoint through the bare encoder: `cls.` as a whole is not
+        // bound there, so the entire namespace stays tolerated.
+        let mut encoder = FNetModel::new(loading_config()).expect("model must build");
+        let encoder_report = encoder
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the bare encoder must keep tolerating a head namespace it never binds");
+        for name in [
+            "cls.predictions.transform.dense.weight",
+            "cls.seq_relationship.weight",
+        ] {
+            assert!(
+                encoder_report.ignored.iter().any(|ignored| ignored == name),
+                "{name} must stay tolerated on the bare-encoder path: {:?}",
+                encoder_report.ignored
+            );
+        }
     }
 }

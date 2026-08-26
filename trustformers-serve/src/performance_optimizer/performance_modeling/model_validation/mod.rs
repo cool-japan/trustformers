@@ -10,6 +10,7 @@ pub mod maecalculator_traits;
 pub mod mapecalculator_traits;
 pub mod modelvalidationorchestrator_traits;
 pub mod mslecalculator_traits;
+pub mod residuals;
 pub mod rmsecalculator_traits;
 pub mod rsquaredcalculator_traits;
 pub mod timeseriesvalidation_traits;

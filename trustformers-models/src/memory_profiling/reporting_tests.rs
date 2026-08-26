@@ -89,7 +89,6 @@ mod tests {
             total_deallocations: 0,
             leaked_allocations: 0,
             fragmentation_events: 0,
-            gc_pressure_events: 0,
             alert_count_by_severity: HashMap::new(),
         };
         assert!((summary.total_runtime_seconds - 0.0).abs() < f64::EPSILON);
@@ -111,7 +110,6 @@ mod tests {
             total_deallocations: 99000,
             leaked_allocations: 1000,
             fragmentation_events: 50,
-            gc_pressure_events: 10,
             alert_count_by_severity: alert_counts,
         };
         assert!((summary.memory_efficiency_score - 0.85).abs() < f64::EPSILON);
@@ -130,7 +128,6 @@ mod tests {
             total_deallocations: 10000,
             leaked_allocations: 0,
             fragmentation_events: 0,
-            gc_pressure_events: 0,
             alert_count_by_severity: HashMap::new(),
         };
         assert!(summary.memory_efficiency_score > 0.0);
@@ -148,7 +145,6 @@ mod tests {
             total_deallocations: 5000,
             leaked_allocations: 0,
             fragmentation_events: 2,
-            gc_pressure_events: 0,
             alert_count_by_severity: HashMap::new(),
         };
         assert_eq!(summary.leaked_allocations, 0);

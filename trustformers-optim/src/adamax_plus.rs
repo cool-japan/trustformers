@@ -425,9 +425,10 @@ impl Optimizer for AdaMaxPlus {
     }
 
     fn update(&mut self, parameter: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        // Get parameter data (bind to variable before taking pointer)
+        // Stable parameter identity (see `crate::param_id`). `data()` returns a
+        // fresh copy, so its address used to change on every single call.
+        let param_id = self.state.state.param_key_for_tensor(parameter)?;
         let param_data = parameter.data()?;
-        let param_id = format!("{:p}", param_data.as_ptr());
         let param_size = param_data.len();
         self.state.step_count += 1;
 

@@ -1,19 +1,44 @@
-// GGML export functionality for llama.cpp compatibility
+//! Legacy GGML export surface.
+//!
+//! # Why no `.ggml` file is written
+//!
+//! A legacy GGML file is a fixed header of architecture hyper-parameters
+//! (`n_vocab`, `n_ctx`, `n_embd`, `n_head`, `n_layer`, `n_rot`, `ftype`),
+//! **followed by the full tokenizer vocabulary**, and only then the tensors. The
+//! [`Model`] trait supplies none of that: [`Model::named_tensors`] yields parameters,
+//! and there is no vocabulary or head count to be had.
+//!
+//! Earlier revisions filled the gap by hard-coding GPT-2's numbers
+//! (`n_vocab = 50257`, `n_embd = 768`, `n_layer = 12`), emitting a vocabulary of
+//! `token_0 … token_50256`, and generating every weight from `thread_rng()`. That
+//! artifact described a model that did not exist, so it is no longer produced:
+//! [`GGMLExporter::export`] returns a structured
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation).
+//!
+//! GGML has in any case been superseded by GGUF, which is self-describing and needs
+//! no vocabulary. Use [`super::gguf::GGUFExporter`], which writes the model's real
+//! parameters.
 
-use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
+use super::{collect_model_tensors, ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
+use crate::errors::unsupported_operation;
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
-use byteorder::{LittleEndian, WriteBytesExt};
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
-/// GGML file format constants
-const GGML_MAGIC: u32 = 0x67676d6c; // "ggml" in ASCII
-const GGML_VERSION: u32 = 1;
+/// `"ggml"` in ASCII, little endian.
+pub const GGML_MAGIC: u32 = 0x6767_6d6c;
 
-/// GGML tensor types
-#[derive(Debug, Clone, Copy)]
+/// Version tag of the legacy GGML container.
+pub const GGML_VERSION: u32 = 1;
+
+/// Explanation attached to every refusal to write a GGML file.
+pub const GGML_UNSUPPORTED_REASON: &str =
+    "a legacy GGML file begins with architecture hyper-parameters and the complete \
+     tokenizer vocabulary, neither of which the `Model` trait exposes; TrustformeRS \
+     will not substitute hard-coded GPT-2 numbers and a generated vocabulary. Export \
+     to GGUF instead, which is self-describing and carries the model's real tensors.";
+
+/// GGML tensor element types (`ggml_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GGMLType {
     F32 = 0,
     F16 = 1,
@@ -32,7 +57,8 @@ pub enum GGMLType {
 }
 
 impl GGMLType {
-    fn from_precision(precision: ExportPrecision) -> Self {
+    /// Map an export precision onto the tensor type used for weights.
+    pub fn from_precision(precision: ExportPrecision) -> Self {
         match precision {
             ExportPrecision::FP32 => GGMLType::F32,
             ExportPrecision::FP16 => GGMLType::F16,
@@ -41,29 +67,43 @@ impl GGMLType {
         }
     }
 
-    #[allow(dead_code)]
-    fn element_size(&self) -> usize {
+    /// Number of elements packed into one storage block.
+    pub fn block_size(&self) -> usize {
+        match self {
+            GGMLType::F32 | GGMLType::F16 => 1,
+            GGMLType::Q2K
+            | GGMLType::Q3K
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
+            | GGMLType::Q8K => 256,
+            _ => 32,
+        }
+    }
+
+    /// Size in bytes of one storage block.
+    pub fn type_size(&self) -> usize {
         match self {
             GGMLType::F32 => 4,
             GGMLType::F16 => 2,
-            GGMLType::Q4_0 => 2, // Approximation for quantized
-            GGMLType::Q4_1 => 2,
-            GGMLType::Q5_0 => 3,
-            GGMLType::Q5_1 => 3,
-            GGMLType::Q8_0 => 1,
-            GGMLType::Q8_1 => 1,
-            GGMLType::Q2K => 1,
-            GGMLType::Q3K => 1,
-            GGMLType::Q4K => 1,
-            GGMLType::Q5K => 1,
-            GGMLType::Q6K => 1,
-            GGMLType::Q8K => 1,
+            GGMLType::Q4_0 => 18,
+            GGMLType::Q4_1 => 20,
+            GGMLType::Q5_0 => 22,
+            GGMLType::Q5_1 => 24,
+            GGMLType::Q8_0 => 34,
+            GGMLType::Q8_1 => 36,
+            GGMLType::Q2K => 84,
+            GGMLType::Q3K => 110,
+            GGMLType::Q4K => 144,
+            GGMLType::Q5K => 176,
+            GGMLType::Q6K => 210,
+            GGMLType::Q8K => 292,
         }
     }
 }
 
-/// GGML tensor representation
-#[derive(Debug)]
+/// One tensor of a GGML container.
+#[derive(Debug, Clone)]
 pub struct GGMLTensor {
     pub name: String,
     pub tensor_type: GGMLType,
@@ -71,359 +111,55 @@ pub struct GGMLTensor {
     pub data: Vec<u8>,
 }
 
-/// GGML model representation
-#[derive(Debug)]
-pub struct GGMLModel {
-    pub magic: u32,
-    pub version: u32,
-    pub vocab_size: usize,
-    pub context_length: usize,
-    pub embedding_length: usize,
-    pub head_count: usize,
-    pub head_count_kv: usize,
-    pub layer_count: usize,
-    pub rope_dimension_count: usize,
-    pub file_type: u32,
-    pub tensors: Vec<GGMLTensor>,
-    pub vocab: HashMap<String, u32>,
-}
-
-/// GGML exporter implementation
-#[derive(Clone)]
+/// GGML exporter.
+#[derive(Clone, Debug, Default)]
 pub struct GGMLExporter {
     quantization_enabled: bool,
 }
 
-impl Default for GGMLExporter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl GGMLExporter {
+    /// Create a GGML exporter.
     pub fn new() -> Self {
-        Self {
-            quantization_enabled: false,
-        }
+        Self::default()
     }
 
+    /// Request quantized weights. Recorded but currently unreachable, because
+    /// [`GGMLExporter::export`] never writes a file — see the module docs.
     pub fn with_quantization(mut self, enabled: bool) -> Self {
         self.quantization_enabled = enabled;
         self
     }
 
-    fn create_ggml_model<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<GGMLModel> {
-        // Extract model hyperparameters (these would come from the actual model)
-        let vocab_size = 50257; // Example for GPT-2
-        let context_length = config.sequence_length.unwrap_or(2048);
-        let embedding_length = 768; // Example
-        let head_count = 12; // Example
-        let head_count_kv = head_count; // For models without GQA
-        let layer_count = 12; // Example
-        let rope_dimension_count = embedding_length / head_count;
-
-        let file_type = match config.precision {
-            ExportPrecision::FP32 => 0,
-            ExportPrecision::FP16 => 1,
-            ExportPrecision::INT8 => 8,
-            ExportPrecision::INT4 => 2,
-        };
-
-        let mut tensors = Vec::new();
-
-        // Convert model weights to GGML tensors
-        self.convert_model_weights(model, &mut tensors, config)?;
-
-        // Create vocabulary (placeholder)
-        let mut vocab = HashMap::new();
-        for i in 0..vocab_size {
-            vocab.insert(format!("token_{}", i), i as u32);
-        }
-
-        Ok(GGMLModel {
-            magic: GGML_MAGIC,
-            version: GGML_VERSION,
-            vocab_size,
-            context_length,
-            embedding_length,
-            head_count,
-            head_count_kv,
-            layer_count,
-            rope_dimension_count,
-            file_type,
-            tensors,
-            vocab,
-        })
-    }
-
-    fn convert_model_weights<M: Model>(
-        &self,
-        _model: &M,
-        tensors: &mut Vec<GGMLTensor>,
-        config: &ExportConfig,
-    ) -> Result<()> {
-        let tensor_type = GGMLType::from_precision(config.precision);
-
-        // Convert embedding weights
-        self.add_tensor(
-            tensors,
-            "token_embd.weight",
-            tensor_type,
-            vec![50257, 768], // vocab_size, embed_dim
-            &self.generate_dummy_weights(50257 * 768, tensor_type)?,
-        );
-
-        // Convert transformer layers
-        for layer_idx in 0..12 {
-            let layer_prefix = format!("blk.{}", layer_idx);
-
-            // Attention weights
-            self.add_tensor(
-                tensors,
-                &format!("{}.attn_q.weight", layer_prefix),
-                tensor_type,
-                vec![768, 768],
-                &self.generate_dummy_weights(768 * 768, tensor_type)?,
-            );
-
-            self.add_tensor(
-                tensors,
-                &format!("{}.attn_k.weight", layer_prefix),
-                tensor_type,
-                vec![768, 768],
-                &self.generate_dummy_weights(768 * 768, tensor_type)?,
-            );
-
-            self.add_tensor(
-                tensors,
-                &format!("{}.attn_v.weight", layer_prefix),
-                tensor_type,
-                vec![768, 768],
-                &self.generate_dummy_weights(768 * 768, tensor_type)?,
-            );
-
-            self.add_tensor(
-                tensors,
-                &format!("{}.attn_output.weight", layer_prefix),
-                tensor_type,
-                vec![768, 768],
-                &self.generate_dummy_weights(768 * 768, tensor_type)?,
-            );
-
-            // Feed-forward weights
-            self.add_tensor(
-                tensors,
-                &format!("{}.ffn_up.weight", layer_prefix),
-                tensor_type,
-                vec![768, 3072],
-                &self.generate_dummy_weights(768 * 3072, tensor_type)?,
-            );
-
-            self.add_tensor(
-                tensors,
-                &format!("{}.ffn_down.weight", layer_prefix),
-                tensor_type,
-                vec![3072, 768],
-                &self.generate_dummy_weights(3072 * 768, tensor_type)?,
-            );
-
-            // Layer norm weights
-            self.add_tensor(
-                tensors,
-                &format!("{}.attn_norm.weight", layer_prefix),
-                tensor_type,
-                vec![768],
-                &self.generate_dummy_weights(768, tensor_type)?,
-            );
-
-            self.add_tensor(
-                tensors,
-                &format!("{}.ffn_norm.weight", layer_prefix),
-                tensor_type,
-                vec![768],
-                &self.generate_dummy_weights(768, tensor_type)?,
-            );
-        }
-
-        // Final layer norm and output projection
-        self.add_tensor(
-            tensors,
-            "norm.weight",
-            tensor_type,
-            vec![768],
-            &self.generate_dummy_weights(768, tensor_type)?,
-        );
-
-        self.add_tensor(
-            tensors,
-            "output.weight",
-            tensor_type,
-            vec![768, 50257],
-            &self.generate_dummy_weights(768 * 50257, tensor_type)?,
-        );
-
-        Ok(())
-    }
-
-    fn add_tensor(
-        &self,
-        tensors: &mut Vec<GGMLTensor>,
-        name: &str,
-        tensor_type: GGMLType,
-        dimensions: Vec<usize>,
-        data: &[u8],
-    ) {
-        tensors.push(GGMLTensor {
-            name: name.to_string(),
-            tensor_type,
-            dimensions,
-            data: data.to_vec(),
-        });
-    }
-
-    fn generate_dummy_weights(&self, size: usize, tensor_type: GGMLType) -> Result<Vec<u8>> {
-        // Generate realistic weight patterns based on neural network initialization schemes
-        let mut data = Vec::new();
-        use scirs2_core::random::*;
-        let mut rng = thread_rng();
-
-        match tensor_type {
-            GGMLType::F32 => {
-                for _ in 0..size {
-                    // Use Xavier/Glorot initialization for realistic weights
-                    let val = if rng.random::<f32>() < 0.5 {
-                        // Xavier normal initialization: N(0, sqrt(2/(fan_in + fan_out)))
-                        let std_dev = (2.0 / (size as f32).sqrt()).sqrt();
-                        rng.random_range(-3.0 * std_dev..3.0 * std_dev)
-                    } else {
-                        // He initialization for ReLU networks: N(0, sqrt(2/fan_in))
-                        let std_dev = (2.0 / size as f32).sqrt();
-                        rng.random_range(-3.0 * std_dev..3.0 * std_dev)
-                    };
-                    data.extend_from_slice(&val.to_le_bytes());
-                }
-            },
-            GGMLType::F16 => {
-                for _ in 0..size {
-                    // Similar initialization for F16 with appropriate precision
-                    let std_dev = (2.0 / (size as f32).sqrt()).sqrt();
-                    let val = rng.random_range(-2.0 * std_dev..2.0 * std_dev);
-                    let f16_val = half::f16::from_f32(val.clamp(-65504.0, 65504.0)); // F16 limits
-                    data.extend_from_slice(&f16_val.to_le_bytes());
-                }
-            },
-            GGMLType::Q8_0 => {
-                // Realistic Q8_0 quantization with proper scaling
-                // Q8_0 format: 32 float values -> 1 scale + 32 quantized values
-                let block_size = 32;
-                let num_blocks = size.div_ceil(block_size);
-
-                for _ in 0..num_blocks {
-                    // Generate a realistic scale factor for this block
-                    let scale = rng.random_range(0.001..0.1f32);
-                    data.extend_from_slice(&scale.to_le_bytes());
-
-                    // Generate quantized values for this block
-                    for _ in 0..block_size {
-                        let normalized_val = rng.random_range(-1.0..1.0f32);
-                        let quantized =
-                            (normalized_val / scale * 127.0).round().clamp(-128.0, 127.0) as i8;
-                        data.push(quantized as u8);
-                    }
-                }
-            },
-            GGMLType::Q4_0 => {
-                // Simplified Q4_0 quantization (pack 2 values per byte)
-                for i in (0..size).step_by(2) {
-                    let val1 = (i as f32 * 0.001).sin();
-                    let val2 = ((i + 1) as f32 * 0.001).sin();
-
-                    let q1 = (val1 * 7.0).round().clamp(-8.0, 7.0) as i8;
-                    let q2 = (val2 * 7.0).round().clamp(-8.0, 7.0) as i8;
-
-                    let packed = ((q1 & 0xF) | ((q2 & 0xF) << 4)) as u8;
-                    data.push(packed);
-                }
-            },
-            _ => {
-                return Err(anyhow!("Unsupported tensor type: {:?}", tensor_type));
-            },
-        }
-
-        Ok(data)
-    }
-
-    fn serialize_ggml_model(&self, model: &GGMLModel, output_path: &str) -> Result<()> {
-        let file = File::create(format!("{}.ggml", output_path))?;
-        let mut writer = BufWriter::new(file);
-
-        // Write header
-        writer.write_u32::<LittleEndian>(model.magic)?;
-        writer.write_u32::<LittleEndian>(model.version)?;
-
-        // Write hyperparameters
-        writer.write_u32::<LittleEndian>(model.vocab_size as u32)?;
-        writer.write_u32::<LittleEndian>(model.context_length as u32)?;
-        writer.write_u32::<LittleEndian>(model.embedding_length as u32)?;
-        writer.write_u32::<LittleEndian>(model.head_count as u32)?;
-        writer.write_u32::<LittleEndian>(model.head_count_kv as u32)?;
-        writer.write_u32::<LittleEndian>(model.layer_count as u32)?;
-        writer.write_u32::<LittleEndian>(model.rope_dimension_count as u32)?;
-        writer.write_u32::<LittleEndian>(model.file_type)?;
-
-        // Write vocabulary
-        writer.write_u32::<LittleEndian>(model.vocab.len() as u32)?;
-        for (token, id) in &model.vocab {
-            writer.write_u32::<LittleEndian>(*id)?;
-            writer.write_u32::<LittleEndian>(token.len() as u32)?;
-            writer.write_all(token.as_bytes())?;
-        }
-
-        // Write tensors
-        writer.write_u32::<LittleEndian>(model.tensors.len() as u32)?;
-        for tensor in &model.tensors {
-            // Write tensor metadata
-            writer.write_u32::<LittleEndian>(tensor.name.len() as u32)?;
-            writer.write_all(tensor.name.as_bytes())?;
-
-            writer.write_u32::<LittleEndian>(tensor.dimensions.len() as u32)?;
-            for &dim in &tensor.dimensions {
-                writer.write_u32::<LittleEndian>(dim as u32)?;
-            }
-
-            writer.write_u32::<LittleEndian>(tensor.tensor_type as u32)?;
-            writer.write_u32::<LittleEndian>(tensor.data.len() as u32)?;
-
-            // Write tensor data
-            writer.write_all(&tensor.data)?;
-        }
-
-        writer.flush()?;
-        Ok(())
+    /// Whether quantization was requested.
+    pub fn quantization_enabled(&self) -> bool {
+        self.quantization_enabled
     }
 }
 
 impl ModelExporter for GGMLExporter {
+    /// Always fails with a structured `UnsupportedOperation` error.
+    ///
+    /// See the [module documentation](self) for why no `.ggml` file is written.
     fn export<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
         if config.format != ExportFormat::GGML {
             return Err(anyhow!("GGMLExporter only supports GGML format"));
         }
 
-        let ggml_model = self.create_ggml_model(model, config)?;
-        self.serialize_ggml_model(&ggml_model, &config.output_path)?;
-
-        println!("Model exported to {}.ggml", config.output_path);
-        Ok(())
+        // Surface the "no weights at all" problem first: it is the caller's bug,
+        // whereas the missing vocabulary is a limitation of the `Model` trait.
+        let _tensors = collect_model_tensors(model)?;
+        Err(unsupported_operation("legacy GGML export", GGML_UNSUPPORTED_REASON).into())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
         vec![ExportFormat::GGML]
     }
 
-    fn validate_model<M: Model>(&self, _model: &M, format: ExportFormat) -> Result<()> {
+    fn validate_model<M: Model>(&self, model: &M, format: ExportFormat) -> Result<()> {
         if format != ExportFormat::GGML {
             return Err(anyhow!("GGMLExporter only supports GGML format"));
         }
+        collect_model_tensors(model)?;
         Ok(())
     }
 }
@@ -431,14 +167,13 @@ impl ModelExporter for GGMLExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::test_support::TestModel;
 
     #[test]
     fn test_ggml_exporter_creation() {
         let exporter = GGMLExporter::new();
-        assert!(!exporter.quantization_enabled);
-
-        let exporter_quant = exporter.with_quantization(true);
-        assert!(exporter_quant.quantization_enabled);
+        assert!(!exporter.quantization_enabled());
+        assert!(exporter.with_quantization(true).quantization_enabled());
     }
 
     #[test]
@@ -450,53 +185,63 @@ mod tests {
     }
 
     #[test]
-    fn test_ggml_type_element_size() {
-        assert_eq!(GGMLType::F32.element_size(), 4);
-        assert_eq!(GGMLType::F16.element_size(), 2);
-        assert_eq!(GGMLType::Q8_0.element_size(), 1);
-        assert_eq!(GGMLType::Q4_0.element_size(), 2);
+    fn test_ggml_block_layout_matches_llama_cpp() {
+        assert_eq!(GGMLType::F32.type_size(), 4);
+        assert_eq!(GGMLType::F16.type_size(), 2);
+        assert_eq!(GGMLType::Q8_0.block_size(), 32);
+        assert_eq!(GGMLType::Q8_0.type_size(), 34);
+        assert_eq!(GGMLType::Q4_0.type_size(), 18);
     }
 
     #[test]
     fn test_supported_formats() {
-        let exporter = GGMLExporter::new();
-        let formats = exporter.supported_formats();
-        assert_eq!(formats.len(), 1);
-        assert_eq!(formats[0], ExportFormat::GGML);
+        assert_eq!(
+            GGMLExporter::new().supported_formats(),
+            vec![ExportFormat::GGML]
+        );
     }
 
     #[test]
     fn test_ggml_constants() {
-        assert_eq!(GGML_MAGIC, 0x67676d6c);
+        assert_eq!(GGML_MAGIC.to_le_bytes(), *b"lmgg");
         assert_eq!(GGML_VERSION, 1);
     }
 
+    /// Regression test for the exporter that used to write a hard-coded GPT-2
+    /// header, a `token_0 … token_50256` vocabulary and `thread_rng()` weights.
     #[test]
-    fn test_dummy_weight_generation() {
-        let exporter = GGMLExporter::new();
+    fn export_refuses_to_write_a_synthesized_container() {
+        let dir = std::env::temp_dir().join("trustformers_ggml_export_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("model");
 
-        // Test F32 weights
-        let f32_weights = exporter
-            .generate_dummy_weights(10, GGMLType::F32)
-            .expect("operation failed in test");
-        assert_eq!(f32_weights.len(), 10 * 4); // 4 bytes per f32
+        let config = ExportConfig {
+            format: ExportFormat::GGML,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
 
-        // Test F16 weights
-        let f16_weights = exporter
-            .generate_dummy_weights(10, GGMLType::F16)
-            .expect("operation failed in test");
-        assert_eq!(f16_weights.len(), 10 * 2); // 2 bytes per f16
+        let err = GGMLExporter::new()
+            .export(&TestModel::with_seed(1.0), &config)
+            .expect_err("must not fabricate a container");
+        assert!(err.to_string().contains("Unsupported operation"), "{err}");
+        assert!(
+            !output.with_extension("ggml").exists(),
+            "no .ggml may be produced"
+        );
 
-        // Test Q8_0 weights (block format: 4 bytes scale + 32 bytes data per block)
-        let q8_weights = exporter
-            .generate_dummy_weights(10, GGMLType::Q8_0)
-            .expect("operation failed in test");
-        assert_eq!(q8_weights.len(), 36); // 1 block: 4 bytes (scale) + 32 bytes (quantized values)
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // Test Q4_0 weights
-        let q4_weights = exporter
-            .generate_dummy_weights(10, GGMLType::Q4_0)
-            .expect("operation failed in test");
-        assert_eq!(q4_weights.len(), 5); // 2 elements per byte
+    #[test]
+    fn export_reports_missing_weights_first() {
+        let config = ExportConfig {
+            format: ExportFormat::GGML,
+            ..Default::default()
+        };
+        let err = GGMLExporter::new()
+            .export(&TestModel::empty(), &config)
+            .expect_err("no weights, no export");
+        assert!(err.to_string().contains("named_tensors"), "{err}");
     }
 }

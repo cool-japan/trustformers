@@ -3,6 +3,8 @@
 
 use crate::roberta::config::RobertaConfig;
 use crate::roberta::model::RobertaModel;
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear, BoundNamespaces};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
@@ -102,8 +104,13 @@ impl Model for RobertaForSequenceClassification {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.roberta.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -204,8 +211,13 @@ impl Model for RobertaForMaskedLM {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.roberta.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -276,8 +288,13 @@ impl Model for RobertaForTokenClassification {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.roberta.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -353,8 +370,13 @@ impl Model for RobertaForQuestionAnswering {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.roberta.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -364,6 +386,182 @@ impl Model for RobertaForQuestionAnswering {
     fn num_parameters(&self) -> usize {
         // Delegate to underlying model or provide reasonable default
         self.roberta.num_parameters()
+    }
+}
+
+/// Why the task heads are bound here rather than by `RobertaModel`.
+///
+/// `RobertaModel::load_from_checkpoint` finishes through BERT's unused-tensor
+/// policy, which deliberately tolerates the `classifier.`, `qa_outputs.` and
+/// `lm_head.` namespaces so that a bare-encoder load does not fail on a
+/// fine-tuned checkpoint. Delegating a task wrapper's `load_pretrained` straight
+/// to it therefore *dropped the head*: the encoder was bound, the head kept its
+/// constructor initialisation, and the call returned `Ok(())`. Each wrapper now
+/// binds its own head off the same parsed checkpoint and records the outcome in
+/// the [`LoadReport`].
+impl RobertaForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
+    /// Load the encoder and the two-layer classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.roberta.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.roberta.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier.dense",
+            [hidden, hidden],
+            &mut self.classifier.dense,
+        )?;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier.out_proj",
+            [self.num_labels, hidden],
+            &mut self.classifier.out_proj,
+        )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
+    }
+}
+
+impl RobertaForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["lm_head."]);
+
+    /// Load the encoder and the masked-LM head.
+    ///
+    /// RoBERTa's head is `lm_head.dense` → GELU → `lm_head.layer_norm` →
+    /// `lm_head.decoder`, and HuggingFace aliases the decoder's bias onto a
+    /// separate `lm_head.bias`; both spellings are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.roberta.load_from_checkpoint(&checkpoint)?;
+        let config = self.roberta.get_config().clone();
+        let hidden = config.hidden_size;
+        let vocab = config.vocab_size;
+
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "lm_head.dense",
+            [hidden, hidden],
+            &mut self.lm_head.dense,
+        )?;
+        bind_head_layer_norm(
+            &checkpoint,
+            &mut report,
+            "lm_head.layer_norm",
+            hidden,
+            &mut self.lm_head.layer_norm,
+        )?;
+
+        let decoder_weight = "lm_head.decoder.weight";
+        match checkpoint.take_shaped(decoder_weight, &[vocab, hidden])? {
+            Some(weight) => {
+                self.lm_head.decoder.set_weight(weight)?;
+                report.mark_loaded(decoder_weight);
+            },
+            None => report.note_absent(decoder_weight),
+        }
+
+        let aliased_bias = "lm_head.decoder.bias";
+        let canonical_bias = "lm_head.bias";
+        let bias_name =
+            if checkpoint.contains(canonical_bias) { canonical_bias } else { aliased_bias };
+        match checkpoint.take_shaped(bias_name, &[vocab])? {
+            Some(bias) => {
+                self.lm_head.decoder.set_bias(bias)?;
+                report.mark_loaded(bias_name);
+                if bias_name == canonical_bias && checkpoint.contains(aliased_bias) {
+                    report.mark_loaded(aliased_bias);
+                }
+            },
+            None => report.note_absent(canonical_bias),
+        }
+
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
+    }
+}
+
+impl RobertaForTokenClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
+    /// Load the encoder and the per-token classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.roberta.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.roberta.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
+    }
+}
+
+impl RobertaForQuestionAnswering {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["qa_outputs."]);
+
+    /// Load the encoder and the span head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.roberta.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.roberta.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "qa_outputs",
+            [2, hidden],
+            &mut self.qa_outputs,
+        )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
+        Ok(report)
     }
 }
 

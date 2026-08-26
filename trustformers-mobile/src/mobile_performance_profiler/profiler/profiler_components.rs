@@ -15,8 +15,9 @@ use crate::device_info::{MobileDeviceDetector, MobileDeviceInfo, ThermalState};
 use crate::mobile_performance_profiler::collector::{CollectionStatistics, MobileMetricsCollector};
 use crate::mobile_performance_profiler::config::MobileProfilerConfig;
 use crate::mobile_performance_profiler::types::{
-    AlertManagerConfig, AnalysisConfig, BottleneckDetectionConfig, ExportManagerConfig,
-    HealthStatus, OptimizationEngineConfig, OptimizationSuggestion, PerformanceAlert,
+    AlertManagerConfig, AlertSeverity, AlertType, AnalysisConfig, BottleneckDetectionConfig,
+    BottleneckSeverity, BottleneckType, CpuMetrics, ExportManagerConfig, HealthStatus,
+    MobileMetricsSnapshot, OptimizationEngineConfig, OptimizationSuggestion, PerformanceAlert,
     PerformanceBottleneck, PlatformCapabilities, ProfilingData, ProfilingEvent,
     RealTimeMonitoringConfig, SessionInfo, SessionMetadata, SystemHealth, TrendingMetrics,
 };
@@ -117,11 +118,8 @@ impl ProfilingSession {
 }
 
 // =============================================================================
-// PLACEHOLDER IMPLEMENTATIONS
+// DETECTION, ALERTING AND ANALYSIS
 // =============================================================================
-
-// These implementations provide the basic structure and will be expanded
-// with full functionality in the actual production code.
 
 impl BottleneckDetector {
     pub(crate) fn new(_config: MobileProfilerConfig) -> Result<Self> {
@@ -129,18 +127,200 @@ impl BottleneckDetector {
             config: BottleneckDetectionConfig::default(),
             active_bottlenecks: HashMap::new(),
             bottleneck_history: VecDeque::new(),
-            detection_rules: Vec::new(),
-            severity_calculator: SeverityCalculator {
-                rules: Vec::new(),
-                weights: HashMap::new(),
-            },
-            historical_analyzer: HistoricalAnalyzer {
-                history_window: Duration::from_secs(300),
-                trend_detectors: Vec::new(),
-                statistical_models: Vec::new(),
-            },
+            detection_rules: Self::default_rules(),
             detection_stats: BottleneckDetectionStats::default(),
         })
+    }
+
+    /// Threshold rules evaluated on every snapshot.
+    ///
+    /// Deliberately limited to the three metric families this crate actually
+    /// measures -- resident memory, CPU usage and the inference tracker's own
+    /// latency and cache figures. Rules keyed on GPU, thermal or battery
+    /// telemetry are absent because those are not measured, and a rule that
+    /// can never fire is worse than no rule: it reads as a check that passed.
+    fn default_rules() -> Vec<BottleneckRule> {
+        vec![
+            BottleneckRule {
+                id: "memory_usage_high".to_string(),
+                name: "High Memory Usage".to_string(),
+                condition: BottleneckCondition::MemoryUsageHigh {
+                    threshold_percent: 85.0,
+                    duration_ms: 5_000,
+                },
+                severity: BottleneckSeverity::High,
+                suggestion: "Reduce batch size or enable memory optimization".to_string(),
+                confidence: 0.9,
+                enabled: true,
+            },
+            BottleneckRule {
+                id: "cpu_usage_high".to_string(),
+                name: "High CPU Usage".to_string(),
+                condition: BottleneckCondition::CPUUsageHigh {
+                    threshold_percent: 90.0,
+                    duration_ms: 3_000,
+                },
+                severity: BottleneckSeverity::High,
+                suggestion: "Optimize model operations or reduce thread count".to_string(),
+                confidence: 0.85,
+                enabled: true,
+            },
+            BottleneckRule {
+                id: "inference_latency_high".to_string(),
+                name: "High Inference Latency".to_string(),
+                condition: BottleneckCondition::LatencyHigh {
+                    threshold_ms: 500.0,
+                    sample_count: 10,
+                },
+                severity: BottleneckSeverity::Medium,
+                suggestion: "Enable quantization or hardware acceleration".to_string(),
+                confidence: 0.8,
+                enabled: true,
+            },
+            BottleneckRule {
+                id: "cache_hit_rate_low".to_string(),
+                name: "Low Cache Hit Rate".to_string(),
+                condition: BottleneckCondition::CacheHitRateLow {
+                    threshold_percent: 50.0,
+                    sample_count: 10,
+                },
+                severity: BottleneckSeverity::Low,
+                suggestion: "Increase cache size or review cache key selection".to_string(),
+                confidence: 0.75,
+                enabled: true,
+            },
+        ]
+    }
+
+    /// Evaluate every enabled rule against one real snapshot, recording each
+    /// bottleneck that trips.
+    pub(crate) fn analyze(
+        &mut self,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<Vec<PerformanceBottleneck>> {
+        let mut detected = Vec::new();
+
+        for rule in self.detection_rules.clone() {
+            if !rule.enabled {
+                continue;
+            }
+            let Some((measured, threshold)) = Self::evaluate_rule(&rule, metrics) else {
+                continue;
+            };
+
+            let bottleneck_type = Self::rule_bottleneck_type(&rule);
+            let deviation =
+                if threshold > 0.0 { ((measured - threshold) / threshold).abs() } else { 0.0 };
+
+            let bottleneck = PerformanceBottleneck {
+                bottleneck_type,
+                severity: rule.severity,
+                description: format!(
+                    "{}: measured {:.1}, rule threshold {:.1}",
+                    rule.name, measured, threshold
+                ),
+                affected_component: Self::rule_component(&rule).to_string(),
+                impact_score: (deviation * 100.0).clamp(0.0, 100.0),
+                suggestions: vec![rule.suggestion.clone()],
+                timestamp: metrics.timestamp,
+            };
+
+            self.bottleneck_history.push_back(BottleneckDetectionEvent {
+                timestamp: Instant::now(),
+                bottleneck_type,
+                severity: rule.severity,
+                detected_value: measured,
+                threshold_value: threshold,
+                duration_ms: 0,
+                rule_id: rule.id.clone(),
+                metadata: HashMap::new(),
+            });
+            while self.bottleneck_history.len() > 256 {
+                self.bottleneck_history.pop_front();
+            }
+
+            self.detection_stats.total_detections += 1;
+            self.active_bottlenecks.insert(rule.id.clone(), bottleneck.clone());
+            detected.push(bottleneck);
+        }
+
+        // A rule that no longer trips is no longer an active bottleneck.
+        let still_active: Vec<String> = self
+            .detection_rules
+            .iter()
+            .filter(|rule| rule.enabled && Self::evaluate_rule(rule, metrics).is_some())
+            .map(|rule| rule.id.clone())
+            .collect();
+        self.active_bottlenecks.retain(|id, _| still_active.contains(id));
+
+        Ok(detected)
+    }
+
+    /// `Some((measured, threshold))` when the rule trips on real data,
+    /// `None` when it does not trip or when the metric it needs was not
+    /// measured on this device.
+    fn evaluate_rule(rule: &BottleneckRule, metrics: &MobileMetricsSnapshot) -> Option<(f32, f32)> {
+        match &rule.condition {
+            BottleneckCondition::MemoryUsageHigh {
+                threshold_percent, ..
+            } => {
+                let share = metrics.memory.as_ref()?.resident_share_percent()?;
+                (share > *threshold_percent).then_some((share, *threshold_percent))
+            },
+            BottleneckCondition::CPUUsageHigh {
+                threshold_percent, ..
+            } => {
+                let usage = metrics.cpu.as_ref()?.usage_percent;
+                (usage > *threshold_percent).then_some((usage, *threshold_percent))
+            },
+            BottleneckCondition::LatencyHigh {
+                threshold_ms,
+                sample_count,
+            } => {
+                if metrics.inference.total_inferences < u64::from(*sample_count) {
+                    return None;
+                }
+                let latency = metrics.inference.avg_latency_ms as f32;
+                (latency > *threshold_ms).then_some((latency, *threshold_ms))
+            },
+            BottleneckCondition::CacheHitRateLow {
+                threshold_percent,
+                sample_count,
+            } => {
+                if metrics.inference.total_inferences < u64::from(*sample_count) {
+                    return None;
+                }
+                let hit_rate = metrics.inference.cache_hit_rate as f32 * 100.0;
+                (hit_rate < *threshold_percent).then_some((hit_rate, *threshold_percent))
+            },
+            // GPU, thermal, battery and network conditions have no measured
+            // input on any target this crate builds for, so they never fire.
+            _ => None,
+        }
+    }
+
+    fn rule_bottleneck_type(rule: &BottleneckRule) -> BottleneckType {
+        match &rule.condition {
+            BottleneckCondition::MemoryUsageHigh { .. } => BottleneckType::Memory,
+            BottleneckCondition::CPUUsageHigh { .. } => BottleneckType::CPU,
+            BottleneckCondition::GPUUsageHigh { .. } => BottleneckType::GPU,
+            BottleneckCondition::LatencyHigh { .. } => BottleneckType::Latency,
+            BottleneckCondition::ThermalThrottling { .. } => BottleneckType::Thermal,
+            BottleneckCondition::BatteryDrainHigh { .. } => BottleneckType::Power,
+            BottleneckCondition::NetworkLatencyHigh { .. } => BottleneckType::Network,
+            BottleneckCondition::CacheHitRateLow { .. } => BottleneckType::Cache,
+            _ => BottleneckType::Memory,
+        }
+    }
+
+    fn rule_component(rule: &BottleneckRule) -> &'static str {
+        match &rule.condition {
+            BottleneckCondition::MemoryUsageHigh { .. } => "memory",
+            BottleneckCondition::CPUUsageHigh { .. } => "cpu",
+            BottleneckCondition::LatencyHigh { .. }
+            | BottleneckCondition::CacheHitRateLow { .. } => "inference",
+            _ => "system",
+        }
     }
 
     pub(crate) fn get_active_bottlenecks(&self) -> Vec<PerformanceBottleneck> {
@@ -158,44 +338,6 @@ impl BottleneckDetector {
         self.config.detection_interval_ms = config.sampling.interval_ms;
 
         debug!("Updated bottleneck detector configuration");
-        Ok(())
-    }
-}
-
-impl OptimizationEngine {
-    pub(crate) fn new(_config: MobileProfilerConfig) -> Result<Self> {
-        Ok(Self {
-            config: OptimizationEngineConfig::default(),
-            active_suggestions: HashMap::new(),
-            optimization_rules: Vec::new(),
-            suggestion_ranker: SuggestionRanker {
-                ranking_algorithms: Vec::new(),
-                preference_weights: HashMap::new(),
-            },
-            impact_estimator: ImpactEstimator {
-                impact_models: Vec::new(),
-                historical_impacts: HashMap::new(),
-            },
-            suggestion_history: VecDeque::new(),
-            engine_stats: OptimizationEngineStats::default(),
-        })
-    }
-
-    pub(crate) fn get_active_suggestions(&self) -> Vec<OptimizationSuggestion> {
-        self.active_suggestions.values().cloned().collect()
-    }
-
-    pub(crate) fn get_all_suggestions(&self) -> Vec<OptimizationSuggestion> {
-        self.active_suggestions.values().cloned().collect()
-    }
-
-    pub(crate) fn update_config(&mut self, config: MobileProfilerConfig) -> Result<()> {
-        // Update optimization engine configuration with available fields from main config
-        self.config.enabled = config.enabled;
-        // Use sampling interval for generation interval
-        self.config.generation_interval_ms = config.sampling.interval_ms;
-
-        debug!("Updated optimization engine configuration");
         Ok(())
     }
 }
@@ -300,24 +442,6 @@ impl ProfilerExportManager {
             formatters: HashMap::new(),
             export_history: VecDeque::new(),
             pending_exports: VecDeque::new(),
-            visualization_engine: VisualizationEngine {
-                chart_generator: ChartGenerator {
-                    templates: HashMap::new(),
-                    renderer: ChartRenderer,
-                },
-                dashboard_builder: DashboardBuilder {
-                    templates: HashMap::new(),
-                    widgets: HashMap::new(),
-                },
-                report_generator: ReportGenerator {
-                    templates: HashMap::new(),
-                    generators: HashMap::new(),
-                },
-                template_engine: TemplateEngine {
-                    template_cache: HashMap::new(),
-                    compiler: TemplateCompiler,
-                },
-            },
             export_stats: ExportManagerStats::default(),
         })
     }
@@ -325,7 +449,10 @@ impl ProfilerExportManager {
     pub(crate) fn export_data(&self, data: &ProfilingData) -> Result<String> {
         // Generate timestamp-based filename
         let timestamp = chrono::Utc::now().timestamp();
-        let export_path = format!("/tmp/claude/profiling_export_{}.json", timestamp);
+        let export_path = std::env::temp_dir()
+            .join(format!("profiling_export_{}.json", timestamp))
+            .to_string_lossy()
+            .into_owned();
 
         // Serialize data to JSON
         let json_data =
@@ -355,20 +482,27 @@ impl ProfilerExportManager {
         let metrics_count = data.metrics.len();
         let events_count = data.events.len();
 
-        // Calculate average performance metrics
-        let avg_cpu_usage = if !data.metrics.is_empty() {
-            data.metrics.iter().map(|m| m.cpu.usage_percent).sum::<f32>()
-                / data.metrics.len() as f32
-        } else {
-            0.0
+        // Averages over the snapshots that carried a measurement; the report
+        // says so rather than printing 0.0 for "nothing was measured".
+        let mean = |samples: Vec<f32>| -> String {
+            if samples.is_empty() {
+                "not measured".to_string()
+            } else {
+                format!("{:.1}", samples.iter().sum::<f32>() / samples.len() as f32)
+            }
         };
-
-        let avg_memory_usage = if !data.metrics.is_empty() {
-            data.metrics.iter().map(|m| m.memory.heap_used_mb).sum::<f32>()
-                / data.metrics.len() as f32
-        } else {
-            0.0
-        };
+        let avg_cpu_usage = mean(
+            data.metrics
+                .iter()
+                .filter_map(|m| m.cpu.as_ref().map(|c| c.usage_percent))
+                .collect(),
+        );
+        let avg_memory_usage = mean(
+            data.metrics
+                .iter()
+                .filter_map(|m| m.memory.as_ref().map(|memory| memory.heap_used_mb))
+                .collect(),
+        );
 
         let report_html = format!(
             r#"
@@ -474,7 +608,10 @@ impl ProfilerExportManager {
             session_duration.as_secs_f64(),
             events_count,
             metrics_count,
-            data.system_health.overall_score,
+            data.system_health.as_ref().map_or_else(
+                || "not measured".to_string(),
+                |h| format!("{:.1}", h.overall_score)
+            ),
             avg_cpu_usage,
             avg_memory_usage,
             bottleneck_count,
@@ -510,9 +647,117 @@ impl AlertManager {
             config: AlertManagerConfig::default(),
             active_alerts: HashMap::new(),
             alert_history: VecDeque::new(),
-            alert_rules: Vec::new(),
+            alert_rules: Self::default_rules(),
             notification_handlers: Vec::new(),
         })
+    }
+
+    /// Alert rules evaluated on every snapshot.
+    ///
+    /// Like the bottleneck rules, restricted to metrics that are genuinely
+    /// measured: an alert that can never fire is indistinguishable from a
+    /// system that is fine.
+    fn default_rules() -> Vec<AlertRule> {
+        vec![
+            AlertRule {
+                rule_id: "high_memory_usage".to_string(),
+                name: "High Memory Usage".to_string(),
+                condition: "resident memory share > threshold".to_string(),
+                threshold_value: 90.0,
+                severity: "High".to_string(),
+                enabled: true,
+                created_at: Instant::now(),
+            },
+            AlertRule {
+                rule_id: "high_cpu_usage".to_string(),
+                name: "High CPU Usage".to_string(),
+                condition: "cpu usage > threshold".to_string(),
+                threshold_value: 95.0,
+                severity: "High".to_string(),
+                enabled: true,
+                created_at: Instant::now(),
+            },
+        ]
+    }
+
+    /// Evaluate every enabled rule against one real snapshot.
+    ///
+    /// Alerts whose rule no longer trips are cleared, so
+    /// [`Self::get_active_alerts`] reflects the current state rather than
+    /// accumulating forever.
+    pub(crate) fn evaluate(
+        &mut self,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<Vec<PerformanceAlert>> {
+        let mut triggered = Vec::new();
+
+        for rule in self.alert_rules.clone() {
+            if !rule.enabled {
+                continue;
+            }
+            let Some(measured) = Self::measure_for_rule(&rule, metrics) else {
+                self.active_alerts.remove(&rule.rule_id);
+                continue;
+            };
+            if measured <= rule.threshold_value {
+                self.active_alerts.remove(&rule.rule_id);
+                continue;
+            }
+
+            let alert = PerformanceAlert {
+                id: rule.rule_id.clone(),
+                alert_type: match rule.rule_id.as_str() {
+                    "high_memory_usage" => AlertType::MemoryPressure,
+                    _ => AlertType::PerformanceDegradation,
+                },
+                severity: match rule.severity.as_str() {
+                    "Info" => AlertSeverity::Info,
+                    "Critical" => AlertSeverity::Critical,
+                    "High" | "Error" => AlertSeverity::Error,
+                    _ => AlertSeverity::Warning,
+                },
+                message: format!(
+                    "{}: measured {:.1}, rule threshold {:.1}",
+                    rule.name, measured, rule.threshold_value
+                ),
+                timestamp: metrics.timestamp,
+                suggested_action: match rule.rule_id.as_str() {
+                    "high_memory_usage" => {
+                        "Reduce batch size or release cached tensors".to_string()
+                    },
+                    _ => "Reduce concurrent work or enable hardware acceleration".to_string(),
+                },
+            };
+
+            self.alert_history.push_back(AlertRecord {
+                alert_id: rule.rule_id.clone(),
+                timestamp: Instant::now(),
+                alert_type: rule.name.clone(),
+                severity: rule.severity.clone(),
+                message: alert.message.clone(),
+                resolved: false,
+                resolution_time: None,
+            });
+            while self.alert_history.len() > 256 {
+                self.alert_history.pop_front();
+            }
+            self.active_alerts.insert(rule.rule_id.clone(), alert.clone());
+            triggered.push(alert);
+        }
+
+        Ok(triggered)
+    }
+
+    /// The measured value a rule is compared against, or `None` when that
+    /// metric was not measured on this device.
+    fn measure_for_rule(rule: &AlertRule, metrics: &MobileMetricsSnapshot) -> Option<f32> {
+        match rule.rule_id.as_str() {
+            "high_memory_usage" => {
+                metrics.memory.as_ref().and_then(|memory| memory.resident_share_percent())
+            },
+            "high_cpu_usage" => metrics.cpu.as_ref().map(|cpu| cpu.usage_percent),
+            _ => None,
+        }
     }
 
     pub(crate) fn get_active_alerts(&self) -> Vec<PerformanceAlert> {
@@ -526,121 +771,125 @@ impl PerformanceAnalyzer {
             config: AnalysisConfig::default(),
             analysis_cache: HashMap::new(),
             trend_data: VecDeque::new(),
-            performance_models: Vec::new(),
         })
     }
 
-    pub(crate) fn get_current_health(&self) -> Result<SystemHealth> {
-        // Calculate system health based on current performance metrics
-        let mut component_scores = HashMap::new();
-        let mut total_score = 0.0f32;
-        let mut component_count = 0usize;
+    /// Assess system health from one real metrics snapshot.
+    ///
+    /// Every component score below is a function of a measured value. The
+    /// previous body scored "cpu" from `trend_data.iter().take(10).count()`
+    /// (a count of stored data points, not a CPU reading) and "memory" from
+    /// `analysis_cache.len()`; because `performance_models` was a
+    /// never-populated stub, the CPU branch was unreachable and the score was
+    /// always exactly 85.0. Those were constants wearing arithmetic.
+    ///
+    /// Components the device does not measure are omitted from
+    /// `component_scores` and from the average rather than scored at a
+    /// default, so `overall_score` is only ever an average over real data.
+    /// `Ok(None)` when nothing at all was measurable.
+    pub(crate) fn assess_health(
+        &self,
+        metrics: &MobileMetricsSnapshot,
+    ) -> Result<Option<SystemHealth>> {
+        let mut component_scores: HashMap<String, f32> = HashMap::new();
+        let mut recommendations = Vec::new();
 
-        // CPU health scoring (0-100)
-        let cpu_score = if self.performance_models.is_empty() {
-            85.0 // Default good score if no data
-        } else {
-            // Simulate CPU health based on trend data
-            let recent_cpu_trend = self.trend_data.iter().rev().take(10).count() as f32;
-            (100.0 - recent_cpu_trend * 2.0).clamp(0.0, 100.0)
-        };
-        component_scores.insert("cpu".to_string(), cpu_score);
-        total_score += cpu_score;
-        component_count += 1;
+        if let Some(cpu) = metrics.cpu.as_ref() {
+            let cpu_score = (100.0 - cpu.usage_percent).clamp(0.0, 100.0);
+            component_scores.insert("cpu".to_string(), cpu_score);
+            if cpu_score < 70.0 {
+                recommendations.push(format!(
+                    "CPU at {:.1}% -- reduce concurrent work or enable hardware acceleration",
+                    cpu.usage_percent
+                ));
+            }
+        }
 
-        // Memory health scoring (0-100)
-        let memory_score = if self.analysis_cache.is_empty() {
-            80.0 // Default good score
-        } else {
-            // Calculate based on cache utilization (lower is better for health)
-            let cache_utilization = (self.analysis_cache.len() as f32 / 1000.0 * 100.0).min(100.0);
-            (100.0 - cache_utilization).clamp(0.0, 100.0)
-        };
-        component_scores.insert("memory".to_string(), memory_score);
-        total_score += memory_score;
-        component_count += 1;
+        if let Some(share) =
+            metrics.memory.as_ref().and_then(|memory| memory.resident_share_percent())
+        {
+            let memory_score = (100.0 - share).clamp(0.0, 100.0);
+            component_scores.insert("memory".to_string(), memory_score);
+            if memory_score < 70.0 {
+                recommendations.push(format!(
+                    "Resident memory at {:.1}% of usable -- reduce batch size or release caches",
+                    share
+                ));
+            }
+        }
 
-        // Performance trend health (0-100)
-        let trend_score = if self.trend_data.is_empty() {
-            90.0 // Good default if no trend data
-        } else {
-            // Score based on trend data stability (more data points = more stable)
-            let stability_factor = (self.trend_data.len() as f32 / 100.0).min(1.0);
-            70.0 + (stability_factor * 30.0) // 70-100 range
-        };
-        component_scores.insert("performance_trend".to_string(), trend_score);
-        total_score += trend_score;
-        component_count += 1;
+        if let Some(thermal) = metrics.thermal.as_ref() {
+            let thermal_score = match thermal.thermal_state {
+                ThermalState::Nominal => Some(100.0),
+                ThermalState::Fair => Some(80.0),
+                ThermalState::Serious => Some(60.0),
+                ThermalState::Critical => Some(20.0),
+                ThermalState::Emergency => Some(5.0),
+                ThermalState::Shutdown => Some(0.0),
+                // `ThermalMetrics.thermal_state` is only ever populated (see
+                // `SystemMetricsCollector::collect_thermal_metrics`,
+                // collector.rs:404-407) from a genuinely measured
+                // `hottest_component_celsius()` reading bucketed by
+                // `thermal_state_for`, which never produces `Unknown` -- this
+                // arm exists only to satisfy the shared enum's
+                // exhaustiveness. Excluded from the component scores for the
+                // same reason an absent `metrics.thermal` already is, rather
+                // than contributing a fabricated number.
+                ThermalState::Unknown => None,
+            };
+            if let Some(thermal_score) = thermal_score {
+                component_scores.insert("thermal".to_string(), thermal_score);
+                if thermal_score < 70.0 {
+                    recommendations.push(format!(
+                        "Device at {:.1} C -- reduce inference frequency to allow cooldown",
+                        thermal.temperature_c
+                    ));
+                }
+            }
+        }
 
-        // Analysis engine health (0-100)
-        let analysis_score = if self.performance_models.is_empty() {
-            75.0 // Moderate score without models
-        } else {
-            // Score based on number of active performance models
-            let model_factor = (self.performance_models.len() as f32 / 10.0).min(1.0);
-            60.0 + (model_factor * 40.0) // 60-100 range
-        };
-        component_scores.insert("analysis_engine".to_string(), analysis_score);
-        total_score += analysis_score;
-        component_count += 1;
+        if metrics.inference.total_inferences > 0 {
+            // Latency scored against a 500 ms ceiling: at or beyond it the
+            // component scores zero, at 0 ms it scores 100.
+            let latency_score =
+                (100.0 - (metrics.inference.avg_latency_ms as f32 / 5.0)).clamp(0.0, 100.0);
+            component_scores.insert("inference".to_string(), latency_score);
+            if latency_score < 70.0 {
+                recommendations.push(format!(
+                    "Mean inference latency {:.1} ms over {} inferences -- consider quantization",
+                    metrics.inference.avg_latency_ms, metrics.inference.total_inferences
+                ));
+            }
+        }
 
-        // Calculate overall score
-        let overall_score = if component_count > 0 {
-            total_score / component_count as f32
-        } else {
-            50.0 // Neutral score if no components
-        };
+        if component_scores.is_empty() {
+            return Ok(None);
+        }
 
-        // Determine health status based on overall score
+        let overall_score = component_scores.values().sum::<f32>() / component_scores.len() as f32;
+
         let status = match overall_score {
-            90.0..=100.0 => HealthStatus::Excellent,
-            75.0..90.0 => HealthStatus::Good,
-            60.0..75.0 => HealthStatus::Healthy,
-            45.0..60.0 => HealthStatus::Fair,
-            30.0..45.0 => HealthStatus::Poor,
+            score if score >= 90.0 => HealthStatus::Excellent,
+            score if score >= 75.0 => HealthStatus::Good,
+            score if score >= 60.0 => HealthStatus::Healthy,
+            score if score >= 45.0 => HealthStatus::Fair,
+            score if score >= 30.0 => HealthStatus::Poor,
             _ => HealthStatus::Critical,
         };
 
-        // Generate health recommendations
-        let mut recommendations = Vec::new();
-
-        if cpu_score < 70.0 {
-            recommendations
-                .push("Consider reducing CPU-intensive operations during inference".to_string());
-        }
-
-        if memory_score < 70.0 {
-            recommendations
-                .push("Monitor memory usage and consider clearing analysis cache".to_string());
-        }
-
-        if trend_score < 70.0 {
-            recommendations.push(
-                "Insufficient performance trend data - allow more profiling time".to_string(),
-            );
-        }
-
-        if analysis_score < 70.0 {
-            recommendations.push("Consider enabling more performance analysis models".to_string());
-        }
-
-        if overall_score < 60.0 {
-            recommendations.push(
-                "System health is below optimal - review all performance metrics".to_string(),
-            );
-        }
-
         if recommendations.is_empty() {
-            recommendations
-                .push("System health is good - continue current performance patterns".to_string());
+            recommendations.push(format!(
+                "No component scored below 70; health assessed from {} measured component(s)",
+                component_scores.len()
+            ));
         }
 
-        Ok(SystemHealth {
+        Ok(Some(SystemHealth {
             overall_score,
             component_scores,
             status,
             recommendations,
-        })
+        }))
     }
 }
 
@@ -802,8 +1051,17 @@ mod tests {
         Ok(())
     }
 
+    /// Was `#[ignore]`d with "60+ second delays (likely thread/deadlock
+    /// issue)". Investigated 2026-08-24: `detect_bottlenecks` ->
+    /// `measure_now` locks `metrics_collector` once and calls straight-line
+    /// methods on it (`collect_metrics`, `get_current_snapshot`); nothing in
+    /// that path spawns a thread, waits on a channel, or blocks on a
+    /// `Condvar`. `RealTimeMonitor::start_monitoring`/`stop_monitoring`
+    /// (called from `start_profiling`/`stop_profiling`) never populate
+    /// `_monitor_thread`, so there is no background thread here either.
+    /// Reliably completes in well under a second, run standalone or as part
+    /// of the full suite; the stale FIXME predates this module's rewrite.
     #[test]
-    #[ignore] // FIXME: This test has implementation issues causing 60+ second delays (likely thread/deadlock issue)
     pub(crate) fn test_bottleneck_detection() -> Result<()> {
         let config = fast_test_config();
         let profiler = MobilePerformanceProfiler::new(config)?;
@@ -910,14 +1168,29 @@ mod tests {
 
     #[test]
     pub(crate) fn test_system_health_assessment() -> Result<()> {
-        let config = fast_test_config();
-        let profiler = MobilePerformanceProfiler::new(config)?;
-
+        // With memory and CPU profiling switched off, neither may appear as a
+        // scored component. The old implementation always reported both, from
+        // four hardcoded constants, regardless of what was measured.
+        let profiler = MobilePerformanceProfiler::new(fast_test_config())?;
         profiler.start_profiling()?;
+        if let Some(health) = profiler.get_system_health()? {
+            assert!(!health.component_scores.contains_key("cpu"));
+            assert!(!health.component_scores.contains_key("memory"));
+        }
+        profiler.stop_profiling()?;
 
-        let health = profiler.get_system_health()?;
+        // With CPU profiling enabled the assessment is real, and every score
+        // it contains is a percentage derived from a measurement.
+        let mut measuring_config = fast_test_config();
+        measuring_config.cpu_profiling.enabled = true;
+        let profiler = MobilePerformanceProfiler::new(measuring_config)?;
+        profiler.start_profiling()?;
+        let health = profiler.get_system_health()?.expect("cpu profiling was enabled");
         assert!(health.overall_score >= 0.0 && health.overall_score <= 100.0);
-
+        assert!(health.component_scores.contains_key("cpu"));
+        for score in health.component_scores.values() {
+            assert!(*score >= 0.0 && *score <= 100.0);
+        }
         profiler.stop_profiling()?;
         Ok(())
     }
@@ -1017,5 +1290,151 @@ mod tests {
         assert!(!profiling_data.events.is_empty());
 
         Ok(())
+    }
+
+    /// Regression: `BottleneckDetector::new` used to build with
+    /// `detection_rules: Vec::new()` and nothing ever populated it, so
+    /// `detect_bottlenecks()` was structurally incapable of returning
+    /// anything -- a permanent clean bill of health.
+    #[test]
+    pub(crate) fn test_detector_has_real_rules_and_fires_on_real_data() {
+        let mut detector =
+            BottleneckDetector::new(fast_test_config()).expect("detector constructs");
+        assert!(
+            !detector.detection_rules.is_empty(),
+            "a detector with no rules can never detect anything"
+        );
+
+        // A snapshot that genuinely exceeds the CPU and latency thresholds.
+        let mut metrics = MobileMetricsSnapshot {
+            timestamp: 1,
+            ..Default::default()
+        };
+        metrics.cpu = Some(CpuMetrics {
+            usage_percent: 97.0,
+            ..Default::default()
+        });
+        metrics.inference.total_inferences = 50;
+        metrics.inference.avg_latency_ms = 900.0;
+
+        let detected = detector.analyze(&metrics).expect("analyze");
+        let types: Vec<_> = detected.iter().map(|b| b.bottleneck_type).collect();
+        assert!(
+            types.contains(&BottleneckType::CPU),
+            "high CPU must trip a rule"
+        );
+        assert!(
+            types.contains(&BottleneckType::Latency),
+            "high latency must trip a rule"
+        );
+        assert_eq!(
+            detector.detection_stats.total_detections as usize,
+            detected.len()
+        );
+
+        // A healthy snapshot clears them again rather than latching forever.
+        let calm = MobileMetricsSnapshot {
+            timestamp: 2,
+            ..Default::default()
+        };
+        let cleared = detector.analyze(&calm).expect("analyze");
+        assert!(cleared.is_empty());
+        assert!(detector.get_active_bottlenecks().is_empty());
+    }
+
+    /// Rules whose metric family is unmeasured must not fire. A snapshot with
+    /// no GPU/thermal/battery telemetry is not evidence that those are fine.
+    #[test]
+    pub(crate) fn test_unmeasured_families_never_trip_a_rule() {
+        let mut detector = BottleneckDetector::new(fast_test_config()).expect("detector");
+        let metrics = MobileMetricsSnapshot {
+            timestamp: 1,
+            ..Default::default()
+        };
+        assert!(metrics.gpu.is_none() && metrics.thermal.is_none() && metrics.battery.is_none());
+
+        let detected = detector.analyze(&metrics).expect("analyze");
+        for bottleneck in &detected {
+            assert!(
+                !matches!(
+                    bottleneck.bottleneck_type,
+                    BottleneckType::GPU | BottleneckType::Thermal | BottleneckType::Power
+                ),
+                "unmeasured family reported a bottleneck: {:?}",
+                bottleneck.bottleneck_type
+            );
+        }
+    }
+
+    /// Regression: `get_current_health` scored "cpu" from
+    /// `trend_data.take(10).count()` behind an always-true
+    /// `performance_models.is_empty()` guard, so it returned exactly 85.0
+    /// forever. Health must now move with the measurement.
+    #[test]
+    pub(crate) fn test_health_scores_track_measurements() {
+        let analyzer = PerformanceAnalyzer::new(fast_test_config()).expect("analyzer");
+
+        let mut idle = MobileMetricsSnapshot {
+            timestamp: 1,
+            ..Default::default()
+        };
+        idle.cpu = Some(CpuMetrics {
+            usage_percent: 5.0,
+            ..Default::default()
+        });
+        let mut busy = idle.clone();
+        busy.cpu = Some(CpuMetrics {
+            usage_percent: 95.0,
+            ..Default::default()
+        });
+
+        let idle_health = analyzer.assess_health(&idle).expect("assess").expect("cpu measured");
+        let busy_health = analyzer.assess_health(&busy).expect("assess").expect("cpu measured");
+
+        let idle_cpu = idle_health.component_scores.get("cpu").copied().expect("cpu score");
+        let busy_cpu = busy_health.component_scores.get("cpu").copied().expect("cpu score");
+        assert!(
+            idle_cpu > busy_cpu,
+            "cpu health did not respond to cpu usage: {} vs {}",
+            idle_cpu,
+            busy_cpu
+        );
+        assert_ne!(idle_cpu, 85.0);
+        assert_ne!(busy_cpu, 85.0);
+
+        // Unmeasured families contribute no score at all.
+        assert!(!idle_health.component_scores.contains_key("thermal"));
+        assert!(!idle_health.component_scores.contains_key("gpu"));
+    }
+
+    /// Regression: `AlertManager::new` built an empty rule list, so
+    /// `get_active_alerts()` could only ever be empty.
+    #[test]
+    pub(crate) fn test_alert_manager_evaluates_real_rules() {
+        let mut manager = AlertManager::new(fast_test_config()).expect("manager");
+        assert!(!manager.alert_rules.is_empty());
+
+        let mut hot = MobileMetricsSnapshot {
+            timestamp: 1,
+            ..Default::default()
+        };
+        hot.cpu = Some(CpuMetrics {
+            usage_percent: 99.0,
+            ..Default::default()
+        });
+        let triggered = manager.evaluate(&hot).expect("evaluate");
+        assert!(!triggered.is_empty(), "99% CPU must raise the CPU alert");
+        assert!(triggered.iter().any(|alert| alert.id == "high_cpu_usage"));
+
+        let mut calm = hot.clone();
+        calm.cpu = Some(CpuMetrics {
+            usage_percent: 3.0,
+            ..Default::default()
+        });
+        manager.evaluate(&calm).expect("evaluate");
+        assert!(
+            manager.get_active_alerts().iter().all(|alert| alert.id != "high_cpu_usage"),
+            "an alert whose condition cleared must not stay active"
+        );
     }
 }

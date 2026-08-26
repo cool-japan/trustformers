@@ -7,6 +7,7 @@
 use axum_test::{http::StatusCode, TestServer};
 use futures::future::join_all;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use trustformers_serve::{
@@ -240,6 +241,37 @@ fn create_multi_service_test_config() -> ServerConfig {
     config
 }
 
+/// Write a genuine (tiny) safetensors checkpoint and return its path.
+///
+/// `/models/load` performs a real load, so the tests must point it at real
+/// weights rather than at a name the server would have to invent.
+fn write_test_checkpoint(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("trustformers-serve-mstest-{name}"));
+    std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+    let path = dir.join("model.safetensors");
+
+    let shape = [4usize, 4usize];
+    let elements: usize = shape.iter().product();
+    let byte_len = elements * std::mem::size_of::<f32>();
+    let header = json!({
+        "weight": {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [0, byte_len],
+        }
+    });
+    let header_bytes = serde_json::to_vec(&header).expect("header serializes");
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(&header_bytes);
+    for _ in 0..elements {
+        out.extend_from_slice(&0.25f32.to_le_bytes());
+    }
+    std::fs::write(&path, out).expect("checkpoint fixture writes");
+    path
+}
+
 /// Create test server with all services enabled
 async fn create_multi_service_test_server() -> TestServer {
     let config = create_multi_service_test_config();
@@ -254,7 +286,11 @@ async fn create_multi_service_test_server() -> TestServer {
         .expect("Failed to create test user");
 
     // Create server with auth enabled
-    let server = TrustformerServer::new(config).with_auth(auth_service);
+    let executor: Arc<dyn trustformers_serve::batching::BatchExecutor> = Arc::new(
+        trustformers_serve::batching::untrained_byte_gpt2_executor(1, 16, 8)
+            .expect("the tiny GPT-2 used by the tests must build"),
+    );
+    let server = TrustformerServer::with_executor(config, executor).with_auth(auth_service);
 
     // Create router - the server is responsible for initializing its own services
     let router = server.create_test_router().await;
@@ -427,13 +463,11 @@ async fn test_gpu_scheduler_and_load_balancer_integration() {
         .await;
 
     assert_eq!(metrics_response.status_code(), StatusCode::OK);
-    let metrics: Value = metrics_response.json();
-    assert!(
-        metrics["gpu_scheduler"]["total_requests"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 6
-    );
+    // Prometheus text exposition: the request counter is real, and there is no
+    // fabricated `gpu_scheduler` section on a host with no GPU.
+    let metrics = metrics_response.text();
+    assert!(metrics.contains("trustformers_serve_http_requests_total"));
+    assert!(!metrics.contains("gpu_scheduler"));
 }
 
 #[tokio::test]
@@ -477,19 +511,12 @@ async fn test_message_queue_and_metrics_integration() {
         .await;
 
     assert_eq!(metrics_response.status_code(), StatusCode::OK);
-    let metrics: Value = metrics_response.json();
-    assert!(
-        metrics["message_queue"]["total_messages"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(
-        metrics["async_jobs"]["total_submitted"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
+    let metrics = metrics_response.text();
+    // The async job that was just submitted is tracked in the real job store.
+    assert!(metrics.contains("trustformers_serve_async_jobs"));
+    assert!(metrics.contains("trustformers_serve_http_requests_total"));
+    // No invented message-queue counter.
+    assert!(!metrics.contains("message_queue"));
 }
 
 #[tokio::test]
@@ -555,9 +582,18 @@ async fn test_circuit_breaker_and_failover_integration() {
     assert_eq!(health_response.status_code(), StatusCode::OK);
     let health: Value = health_response.json();
 
-    // Verify circuit breaker information is available
-    assert!(health["circuit_breakers"].is_object());
-    assert!(health["circuit_breakers"]["inference_service"].is_object());
+    // Circuit-breaker state is reported straight from the HA service's registry.
+    // No breaker is registered on this server, so the map is genuinely empty —
+    // the endpoint used to invent an "inference_service" entry.
+    let breakers = health["circuit_breakers"]
+        .as_object()
+        .expect("circuit breaker state must be an object");
+    for (name, state) in breakers {
+        assert!(
+            state.is_object(),
+            "breaker {name} must carry real state, got {state}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -574,11 +610,21 @@ async fn test_end_to_end_multi_service_workflow() {
         .json(&json!({
             "model_name": "workflow-test-model",
             "model_version": "1.0.0",
-            "device": "cpu"
+            "device": "cpu",
+            "model_path": write_test_checkpoint("workflow").display().to_string(),
         }))
         .await;
 
-    assert_eq!(model_load_response.status_code(), StatusCode::OK);
+    assert_eq!(
+        model_load_response.status_code(),
+        StatusCode::OK,
+        "load failed: {}",
+        model_load_response.text()
+    );
+    let load_body: Value = model_load_response.json();
+    assert_eq!(load_body["success"], json!(true));
+    // The message reports the real load, not a canned success string.
+    assert!(load_body["message"].as_str().expect("message present").contains("tensors"));
 
     // 3. Wait for model to load
     sleep(Duration::from_millis(1000)).await;
@@ -639,26 +685,25 @@ async fn test_end_to_end_multi_service_workflow() {
         .await;
 
     assert_eq!(final_metrics.status_code(), StatusCode::OK);
-    let metrics: Value = final_metrics.json();
+    let metrics = final_metrics.text();
 
-    // Verify metrics from all services
-    assert!(metrics["auth"]["tokens_issued"].as_u64().expect("operation failed in test") >= 1);
-    assert!(
-        metrics["model_management"]["models_loaded"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(metrics["batching"]["total_batches"].as_u64().expect("operation failed in test") >= 1);
-    assert!(metrics["caching"]["cache_requests"].as_u64().expect("operation failed in test") >= 2);
-    assert!(
-        metrics["message_queue"]["total_messages"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    // active_streams is u64 which is always >= 0, so we just verify it exists
-    assert!(metrics["streaming"]["active_streams"].as_u64().is_some());
+    // Only counters this process genuinely maintains appear in the exposition.
+    assert!(metrics.contains("trustformers_serve_http_requests_total"));
+    assert!(metrics.contains("trustformers_serve_batches_formed_total"));
+    assert!(metrics.contains("trustformers_serve_active_streams"));
+    assert!(metrics.contains("trustformers_serve_model_configured 1"));
+    // Invented counters must not have come back.
+    for absent in [
+        "tokens_issued",
+        "models_loaded",
+        "message_queue",
+        "gpu_scheduler",
+    ] {
+        assert!(
+            !metrics.contains(absent),
+            "fabricated metric {absent:?} is back in the exposition"
+        );
+    }
 
     // 8. Check final health status
     let final_health = server.get("/health").await;
@@ -699,18 +744,34 @@ async fn test_service_dependency_chain() {
         }))
         .await;
 
-    // In this mock implementation, model validation is not enforced,
-    // so we just verify the request was authenticated
+    // Model *routing* is not enforced by this endpoint; the request is served by
+    // the configured executor, so it succeeds once authenticated.
     assert!(inference_response.status_code() == StatusCode::OK);
 
-    // 3. Load model successfully and verify dependency chain works
+    // 3. A load request without real weights must be refused, not rubber-stamped.
+    let bogus_load = server
+        .post("/models/load")
+        .add_header("Authorization", &format!("Bearer {}", token))
+        .json(&json!({
+            "model_name": "dependency-test",
+            "model_version": "1.0.0",
+            "device": "cpu",
+            "model_path": "/definitely/not/a/real/checkpoint",
+        }))
+        .await;
+    assert_eq!(bogus_load.status_code(), StatusCode::BAD_REQUEST);
+    let bogus_body: Value = bogus_load.json();
+    assert_eq!(bogus_body["success"], json!(false));
+
+    // 4. Load a real checkpoint and verify the dependency chain works
     let model_load_response = server
         .post("/models/load")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
             "model_name": "dependency-test",
             "model_version": "1.0.0",
-            "device": "cpu"
+            "device": "cpu",
+            "model_path": write_test_checkpoint("dependency").display().to_string(),
         }))
         .await;
 
@@ -739,32 +800,9 @@ async fn test_service_dependency_chain() {
         .await;
 
     assert_eq!(metrics_response.status_code(), StatusCode::OK);
-    let metrics: Value = metrics_response.json();
+    let metrics = metrics_response.text();
 
-    // Each service in the chain should have recorded activity
-    assert!(
-        metrics["auth"]["requests_authorized"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(
-        metrics["model_management"]["load_requests"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(
-        metrics["gpu_scheduler"]["allocation_requests"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(
-        metrics["batching"]["requests_processed"]
-            .as_u64()
-            .expect("operation failed in test")
-            >= 1
-    );
-    assert!(metrics["caching"]["cache_lookups"].as_u64().expect("operation failed in test") >= 1);
+    // The chain's real activity is visible in the request and batch counters.
+    assert!(metrics.contains("trustformers_serve_http_requests_total"));
+    assert!(metrics.contains("trustformers_serve_batched_requests_total"));
 }

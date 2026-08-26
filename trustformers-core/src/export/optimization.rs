@@ -1,14 +1,47 @@
-//! Optimization passes for model export
+//! Optimization passes applied to a model before export.
 //!
-//! This module provides various optimization techniques that can be applied
+//! # What can and cannot be optimized through the `Model` trait
+//!
+//! Constant folding, dead-code elimination, operator fusion and layout selection
+//! all rewrite a *computation graph*. The [`Model`] trait exposes parameters
+//! (through [`Model::named_tensors`]) but no graph, so those four passes cannot be
+//! carried out here. They report themselves as not applicable and, if invoked
+//! directly, return a structured
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation)
+//! naming the limitation. Real graph optimization on an exported ONNX model lives
+//! in [`ONNXOptimizer`](super::onnx_runtime::ONNXOptimizer).
+//!
+//! [`WeightCompressionPass`] *is* implemented: it works on parameters, which the
+//! trait does expose, and reports byte counts it actually measured.
+//!
+//! An earlier revision of this module returned hard-coded statistics from every
+//! pass — "removed 15 constant operations", "1.25x speedup on GPU", "10 MB
+//! saved" — regardless of the model. Those numbers were never measured and are
+//! gone.
 
-#![allow(unused_variables)] // Optimization implementation with reserved parameters
-//! to models before export to improve inference performance and reduce size.
-
-use crate::errors::Result;
+use crate::errors::{unsupported_operation, Result};
+use crate::tensor::Tensor;
 use crate::traits::Model;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Explanation attached to every graph-level pass that cannot run through `Model`.
+pub const GRAPH_PASS_UNSUPPORTED_REASON: &str =
+    "this pass rewrites the model's computation graph, which the `Model` trait does \
+     not expose (`named_tensors` yields parameters only). Export to ONNX and use \
+     `ONNXOptimizer::optimize_model_with_stats`, which performs identity \
+     elimination, constant folding and dead-initializer removal on a real graph.";
+
+/// Statistics with nothing to report, used when a pass is switched off.
+fn no_change() -> OptimizationStats {
+    OptimizationStats {
+        operations_removed: 0,
+        operations_modified: 0,
+        size_reduction_bytes: 0,
+        speedup_factor: 1.0,
+        precision_preserved: true,
+    }
+}
 
 /// Configuration for export optimizations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,9 +169,12 @@ pub struct OptimizationStats {
     pub operations_removed: usize,
     /// Number of operations modified
     pub operations_modified: usize,
-    /// Estimated size reduction in bytes
+    /// Size reduction in bytes, measured by the pass that produced these stats.
     pub size_reduction_bytes: u64,
-    /// Estimated speedup factor
+    /// Measured speedup factor, or `1.0` when the pass did not benchmark anything.
+    ///
+    /// No pass in this crate predicts a speedup: predicting one without running the
+    /// model would be a guess dressed up as a measurement.
     pub speedup_factor: f64,
     /// Whether precision was preserved
     pub precision_preserved: bool,
@@ -202,7 +238,7 @@ impl OptimizationPipeline {
 
         for pass in &self.passes {
             if pass.is_applicable(&self.config) {
-                println!("Applying optimization pass: {}", pass.name());
+                tracing::info!("Applying optimization pass: {}", pass.name());
 
                 let stats = pass.apply(model, &self.config)?;
                 total_stats.add_pass_stats(pass.name().to_string(), stats);
@@ -289,31 +325,18 @@ impl OptimizationPass for ConstantFoldingPass {
         config: &OptimizationConfig,
     ) -> Result<OptimizationStats> {
         if !config.constant_folding {
-            return Ok(OptimizationStats {
-                operations_removed: 0,
-                operations_modified: 0,
-                size_reduction_bytes: 0,
-                speedup_factor: 1.0,
-                precision_preserved: true,
-            });
+            return Ok(no_change());
         }
-
-        // Simulate constant folding
-        let operations_removed = 15; // Example: removed 15 constant operations
-        let size_reduction = 2048; // Example: 2KB reduction
-        let speedup = 1.05; // 5% speedup
-
-        Ok(OptimizationStats {
-            operations_removed,
-            operations_modified: 0,
-            size_reduction_bytes: size_reduction,
-            speedup_factor: speedup,
-            precision_preserved: config.preserve_precision,
-        })
+        let _ = model;
+        Err(unsupported_operation(
+            "constant folding on a `Model`",
+            GRAPH_PASS_UNSUPPORTED_REASON,
+        ))
     }
 
-    fn is_applicable(&self, config: &OptimizationConfig) -> bool {
-        config.constant_folding && config.optimization_level > 0
+    /// Never applicable: see [`GRAPH_PASS_UNSUPPORTED_REASON`].
+    fn is_applicable(&self, _config: &OptimizationConfig) -> bool {
+        false
     }
 
     fn expected_impact(&self) -> OptimizationImpact {
@@ -346,31 +369,18 @@ impl OptimizationPass for DeadCodeEliminationPass {
         config: &OptimizationConfig,
     ) -> Result<OptimizationStats> {
         if !config.dead_code_elimination {
-            return Ok(OptimizationStats {
-                operations_removed: 0,
-                operations_modified: 0,
-                size_reduction_bytes: 0,
-                speedup_factor: 1.0,
-                precision_preserved: true,
-            });
+            return Ok(no_change());
         }
-
-        // Simulate dead code elimination
-        let operations_removed = 25; // Example: removed 25 unused operations
-        let size_reduction = 5120; // Example: 5KB reduction
-        let speedup = 1.10; // 10% speedup
-
-        Ok(OptimizationStats {
-            operations_removed,
-            operations_modified: 0,
-            size_reduction_bytes: size_reduction,
-            speedup_factor: speedup,
-            precision_preserved: true,
-        })
+        let _ = model;
+        Err(unsupported_operation(
+            "dead code elimination on a `Model`",
+            GRAPH_PASS_UNSUPPORTED_REASON,
+        ))
     }
 
-    fn is_applicable(&self, config: &OptimizationConfig) -> bool {
-        config.dead_code_elimination && config.optimization_level > 0
+    /// Never applicable: see [`GRAPH_PASS_UNSUPPORTED_REASON`].
+    fn is_applicable(&self, _config: &OptimizationConfig) -> bool {
+        false
     }
 
     fn expected_impact(&self) -> OptimizationImpact {
@@ -403,35 +413,18 @@ impl OptimizationPass for OperatorFusionPass {
         config: &OptimizationConfig,
     ) -> Result<OptimizationStats> {
         if !config.operator_fusion {
-            return Ok(OptimizationStats {
-                operations_removed: 0,
-                operations_modified: 0,
-                size_reduction_bytes: 0,
-                speedup_factor: 1.0,
-                precision_preserved: true,
-            });
+            return Ok(no_change());
         }
-
-        // Different fusion strategies based on target hardware
-        let (ops_modified, speedup) = match config.target_hardware {
-            TargetHardware::GPU => (20, 1.25), // More aggressive fusion for GPU
-            TargetHardware::CPU => (15, 1.15),
-            TargetHardware::Mobile => (10, 1.20), // Power-efficient fusion
-            TargetHardware::Edge => (8, 1.18),
-            TargetHardware::WebAssembly => (12, 1.12),
-        };
-
-        Ok(OptimizationStats {
-            operations_removed: ops_modified / 2, // Some ops are removed through fusion
-            operations_modified: ops_modified,
-            size_reduction_bytes: 1024,
-            speedup_factor: speedup,
-            precision_preserved: config.preserve_precision,
-        })
+        let _ = model;
+        Err(unsupported_operation(
+            "operator fusion on a `Model`",
+            GRAPH_PASS_UNSUPPORTED_REASON,
+        ))
     }
 
-    fn is_applicable(&self, config: &OptimizationConfig) -> bool {
-        config.operator_fusion && config.optimization_level > 1
+    /// Never applicable: see [`GRAPH_PASS_UNSUPPORTED_REASON`].
+    fn is_applicable(&self, _config: &OptimizationConfig) -> bool {
+        false
     }
 
     fn expected_impact(&self) -> OptimizationImpact {
@@ -464,35 +457,18 @@ impl OptimizationPass for LayoutOptimizationPass {
         config: &OptimizationConfig,
     ) -> Result<OptimizationStats> {
         if !config.layout_optimization {
-            return Ok(OptimizationStats {
-                operations_removed: 0,
-                operations_modified: 0,
-                size_reduction_bytes: 0,
-                speedup_factor: 1.0,
-                precision_preserved: true,
-            });
+            return Ok(no_change());
         }
-
-        // Layout optimization is more beneficial for certain hardware
-        let speedup = match config.target_hardware {
-            TargetHardware::GPU => 1.30, // GPU benefits significantly from good layouts
-            TargetHardware::CPU => 1.10,
-            TargetHardware::Mobile => 1.15,
-            TargetHardware::Edge => 1.12,
-            TargetHardware::WebAssembly => 1.08,
-        };
-
-        Ok(OptimizationStats {
-            operations_removed: 0,
-            operations_modified: 30, // Many tensors get layout changes
-            size_reduction_bytes: 0, // Layout changes don't reduce size
-            speedup_factor: speedup,
-            precision_preserved: true,
-        })
+        let _ = model;
+        Err(unsupported_operation(
+            "tensor layout optimization on a `Model`",
+            GRAPH_PASS_UNSUPPORTED_REASON,
+        ))
     }
 
-    fn is_applicable(&self, config: &OptimizationConfig) -> bool {
-        config.layout_optimization && config.optimization_level > 1
+    /// Never applicable: see [`GRAPH_PASS_UNSUPPORTED_REASON`].
+    fn is_applicable(&self, _config: &OptimizationConfig) -> bool {
+        false
     }
 
     fn expected_impact(&self) -> OptimizationImpact {
@@ -516,44 +492,90 @@ impl OptimizationPass for WeightCompressionPass {
     }
 
     fn description(&self) -> &str {
-        "Compresses model weights using various techniques like pruning and quantization"
+        "Quantizes float parameters to per-tensor int8 and writes the recovered values back"
     }
 
+    /// Apply real per-tensor int8 quantization to every float parameter.
+    ///
+    /// For each parameter the pass computes `scale = max|w| / 127`, quantizes to
+    /// int8 and writes the dequantized values back, so the model afterwards holds
+    /// exactly the values an int8 export would produce. The reported byte figures
+    /// are the difference between the f32 footprint and the int8-plus-scale
+    /// footprint of the parameters it actually touched — measured, not predicted.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the model exposes no parameters through
+    /// [`Model::named_tensors_mut`], since there is then nothing to compress and a
+    /// zero-change success would be misleading.
     fn apply<M: Model>(
         &self,
         model: &mut M,
         config: &OptimizationConfig,
     ) -> Result<OptimizationStats> {
         if !config.weight_compression {
-            return Ok(OptimizationStats {
-                operations_removed: 0,
-                operations_modified: 0,
-                size_reduction_bytes: 0,
-                speedup_factor: 1.0,
-                precision_preserved: true,
-            });
+            return Ok(no_change());
+        }
+        if config.preserve_precision {
+            // int8 quantization is lossy by construction.
+            return Ok(no_change());
         }
 
-        // Compression effectiveness varies by optimization level
-        let (size_reduction, speedup, precision_preserved) = match config.optimization_level {
-            0 => (0, 1.0, true),
-            1 => (1024 * 1024, 1.05, true), // 1MB reduction, 5% speedup
-            2 => (5 * 1024 * 1024, 1.15, true), // 5MB reduction, 15% speedup
-            3 => (10 * 1024 * 1024, 1.25, !config.preserve_precision), // 10MB, 25% speedup
-            _ => (20 * 1024 * 1024, 1.35, false), // Aggressive compression
-        };
+        let mut parameters = model.named_tensors_mut();
+        if parameters.is_empty() {
+            return Err(unsupported_operation(
+                "weight compression",
+                "the model exposes no parameters through `Model::named_tensors_mut`, so there \
+                 is nothing to compress",
+            ));
+        }
+
+        let mut tensors_modified = 0usize;
+        let mut bytes_before = 0u64;
+        let mut bytes_after = 0u64;
+
+        for (_name, parameter) in parameters.iter_mut() {
+            let Tensor::F32(array) = &**parameter else {
+                // Only float parameters are quantizable; integer buffers are left alone.
+                continue;
+            };
+            let shape = array.shape().to_vec();
+            let values: Vec<f32> = array.iter().copied().collect();
+            if values.is_empty() {
+                continue;
+            }
+
+            let amax = values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+            if amax == 0.0 || !amax.is_finite() {
+                continue;
+            }
+            let scale = amax / 127.0;
+
+            let compressed: Vec<f32> = values
+                .iter()
+                .map(|&v| ((v / scale).round().clamp(-127.0, 127.0)) * scale)
+                .collect();
+
+            **parameter = Tensor::from_vec(compressed, &shape)?;
+
+            tensors_modified += 1;
+            bytes_before += (values.len() * std::mem::size_of::<f32>()) as u64;
+            // int8 payload plus one f32 scale per tensor.
+            bytes_after += values.len() as u64 + std::mem::size_of::<f32>() as u64;
+        }
 
         Ok(OptimizationStats {
             operations_removed: 0,
-            operations_modified: 50, // Many weights get compressed
-            size_reduction_bytes: size_reduction,
-            speedup_factor: speedup,
-            precision_preserved,
+            operations_modified: tensors_modified,
+            size_reduction_bytes: bytes_before.saturating_sub(bytes_after),
+            // This pass does not benchmark, so it claims no speedup.
+            speedup_factor: 1.0,
+            precision_preserved: tensors_modified == 0,
         })
     }
 
     fn is_applicable(&self, config: &OptimizationConfig) -> bool {
-        config.weight_compression && config.optimization_level > 0
+        config.weight_compression && config.optimization_level > 0 && !config.preserve_precision
     }
 
     fn expected_impact(&self) -> OptimizationImpact {
@@ -653,48 +675,7 @@ impl OptimizationConfig {
 mod tests {
     use super::*;
 
-    // Mock model for testing
-    #[derive(Clone)]
-    struct MockModel {
-        config: MockConfig,
-    }
-
-    #[derive(Clone, serde::Serialize, serde::Deserialize)]
-    struct MockConfig {
-        hidden_size: usize,
-    }
-
-    impl crate::traits::Config for MockConfig {
-        fn architecture(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    impl crate::traits::Model for MockModel {
-        type Config = MockConfig;
-        type Input = crate::tensor::Tensor;
-        type Output = crate::tensor::Tensor;
-
-        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
-            Ok(input)
-        }
-
-        fn load_pretrained(
-            &mut self,
-            _reader: &mut dyn std::io::Read,
-        ) -> crate::errors::Result<()> {
-            Ok(())
-        }
-
-        fn get_config(&self) -> &Self::Config {
-            &self.config
-        }
-
-        fn num_parameters(&self) -> usize {
-            // Mock model with a reasonable parameter count for testing
-            700_000
-        }
-    }
+    use crate::export::test_support::TestModel;
 
     #[test]
     fn test_optimization_config_presets() {
@@ -707,28 +688,230 @@ mod tests {
         assert!(!mobile_config.preserve_precision); // Mobile accepts precision loss
     }
 
+    /// Every pass is switched on, yet only the one that works on parameters can
+    /// report itself applicable: the other four need a computation graph, which the
+    /// `Model` trait does not expose.
     #[test]
-    fn test_optimization_pipeline() {
-        let config = OptimizationConfig::default();
+    fn only_the_weight_pass_can_apply_through_the_model_trait() {
+        let config = OptimizationConfig {
+            constant_folding: true,
+            dead_code_elimination: true,
+            operator_fusion: true,
+            layout_optimization: true,
+            weight_compression: true,
+            preserve_precision: false,
+            ..OptimizationConfig::default()
+        };
+        let pipeline = OptimizationPipeline::new(config);
+        assert_eq!(pipeline.get_applicable_passes(), vec!["weight_compression"]);
+    }
+
+    /// Regression test for the pipeline entry point. It used to aggregate hard-coded
+    /// per-pass statistics — "15 operations removed", "1.25x speedup" — from all five
+    /// passes regardless of the model. Now only the pass that can actually run
+    /// contributes, and every number it reports was measured.
+    #[test]
+    fn apply_optimizations_aggregates_only_measured_statistics() {
+        let config = OptimizationConfig {
+            weight_compression: true,
+            optimization_level: 3,
+            preserve_precision: false,
+            ..OptimizationConfig::default()
+        };
         let pipeline = OptimizationPipeline::new(config);
 
-        let applicable_passes = pipeline.get_applicable_passes();
-        assert!(!applicable_passes.is_empty());
+        let mut model = TestModel::with_seed(1.0);
+        let before: Vec<Vec<f32>> = model
+            .named_tensors()
+            .iter()
+            .map(|(_, tensor)| tensor.to_vec_f32().expect("f32"))
+            .collect();
+        let element_count: u64 = before.iter().map(|values| values.len() as u64).sum();
+
+        let stats = pipeline.apply_optimizations(&mut model).expect("pipeline");
+
+        assert_eq!(stats.applied_passes, vec!["weight_compression"]);
+        assert_eq!(stats.pass_stats.len(), 1);
+        assert!(stats.pass_stats.contains_key("weight_compression"));
+
+        // The four graph passes never ran, so nothing may be claimed on their behalf.
+        assert_eq!(
+            stats.total_operations_removed, 0,
+            "no pass here removes graph operations"
+        );
+        assert_eq!(
+            stats.overall_speedup_factor, 1.0,
+            "no pass benchmarked anything, so no speedup may be claimed"
+        );
+
+        // The one pass that ran reports bytes it actually measured: 4 -> 1 byte per
+        // element, minus one retained f32 scale per tensor.
+        assert_eq!(stats.total_operations_modified, 3);
+        assert_eq!(stats.total_size_reduction_bytes, element_count * 3 - 3 * 4);
+
+        let after: Vec<Vec<f32>> = model
+            .named_tensors()
+            .iter()
+            .map(|(_, tensor)| tensor.to_vec_f32().expect("f32"))
+            .collect();
+        assert_ne!(
+            before, after,
+            "the pipeline must really rewrite the weights"
+        );
+    }
+
+    /// With nothing enabled the pipeline must report an honest zero rather than a
+    /// plausible-looking summary.
+    #[test]
+    fn apply_optimizations_reports_nothing_when_no_pass_applies() {
+        let pipeline = OptimizationPipeline::new(OptimizationConfig::default());
+        let mut model = TestModel::with_seed(1.0);
+        let before = model.named_tensors()[0].1.to_vec_f32().expect("f32");
+
+        let stats = pipeline.apply_optimizations(&mut model).expect("pipeline");
+
+        assert!(stats.applied_passes.is_empty());
+        assert!(stats.pass_stats.is_empty());
+        assert_eq!(stats.total_operations_removed, 0);
+        assert_eq!(stats.total_operations_modified, 0);
+        assert_eq!(stats.total_size_reduction_bytes, 0);
+        assert_eq!(stats.overall_speedup_factor, 1.0);
+        assert_eq!(
+            model.named_tensors()[0].1.to_vec_f32().expect("f32"),
+            before
+        );
+    }
+
+    /// Regression test: the graph passes used to return invented statistics such as
+    /// "removed 15 constant operations" for any model at all.
+    #[test]
+    fn graph_passes_refuse_rather_than_invent_statistics() {
+        let config = OptimizationConfig::default();
+        let mut model = TestModel::with_seed(1.0);
+
+        for (name, result) in [
+            (
+                "constant_folding",
+                ConstantFoldingPass::new().apply(&mut model, &config),
+            ),
+            (
+                "dead_code_elimination",
+                DeadCodeEliminationPass::new().apply(&mut model, &config),
+            ),
+            (
+                "operator_fusion",
+                OperatorFusionPass::new().apply(&mut model, &config),
+            ),
+            (
+                "layout_optimization",
+                LayoutOptimizationPass::new().apply(&mut model, &config),
+            ),
+        ] {
+            let err = result.expect_err("{name} must not report invented statistics");
+            assert!(
+                err.to_string().contains("Unsupported operation"),
+                "{name}: {err}"
+            );
+        }
     }
 
     #[test]
-    fn test_individual_passes() {
-        let config = OptimizationConfig::default();
-        let mut model = MockModel {
-            config: MockConfig { hidden_size: 512 },
+    fn a_disabled_graph_pass_reports_no_change_instead_of_failing() {
+        let config = OptimizationConfig {
+            constant_folding: false,
+            ..OptimizationConfig::default()
+        };
+        let mut model = TestModel::with_seed(1.0);
+        let stats = ConstantFoldingPass::new()
+            .apply(&mut model, &config)
+            .expect("a disabled pass simply does nothing");
+        assert_eq!(stats.operations_removed, 0);
+        assert_eq!(stats.size_reduction_bytes, 0);
+        assert_eq!(stats.speedup_factor, 1.0);
+    }
+
+    /// The weight pass must really change the model's values and report measured bytes.
+    #[test]
+    fn weight_compression_quantizes_the_real_parameters() {
+        let config = OptimizationConfig {
+            weight_compression: true,
+            optimization_level: 3,
+            preserve_precision: false,
+            ..OptimizationConfig::default()
         };
 
-        let pass = ConstantFoldingPass::new();
-        assert!(pass.is_applicable(&config));
-        assert_eq!(pass.name(), "constant_folding");
+        let mut model = TestModel::with_seed(1.0);
+        let before: Vec<Vec<f32>> = model
+            .named_tensors()
+            .iter()
+            .map(|(_, tensor)| tensor.to_vec_f32().expect("f32"))
+            .collect();
 
-        let stats = pass.apply(&mut model, &config).expect("operation failed in test");
-        assert!(stats.speedup_factor >= 1.0);
+        let stats = WeightCompressionPass::new().apply(&mut model, &config).expect("compression");
+
+        let after: Vec<Vec<f32>> = model
+            .named_tensors()
+            .iter()
+            .map(|(_, tensor)| tensor.to_vec_f32().expect("f32"))
+            .collect();
+
+        assert_eq!(
+            stats.operations_modified, 3,
+            "all three parameters are float"
+        );
+        assert!(!stats.precision_preserved);
+        assert_eq!(
+            stats.speedup_factor, 1.0,
+            "no benchmark was run, so no speedup is claimed"
+        );
+
+        // 4 bytes -> 1 byte per element, minus one f32 scale per tensor.
+        let element_count: u64 = before.iter().map(|values| values.len() as u64).sum();
+        assert_eq!(stats.size_reduction_bytes, element_count * 3 - 3 * 4);
+
+        assert_ne!(before, after, "quantization must change the stored values");
+        for (before_values, after_values) in before.iter().zip(after.iter()) {
+            let amax = before_values.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+            let step = amax / 127.0;
+            for (original, quantized) in before_values.iter().zip(after_values.iter()) {
+                assert!(
+                    (original - quantized).abs() <= step,
+                    "{original} -> {quantized} exceeds one quantization step of {step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn weight_compression_refuses_a_model_without_parameters() {
+        let config = OptimizationConfig {
+            weight_compression: true,
+            preserve_precision: false,
+            ..OptimizationConfig::default()
+        };
+        let mut model = TestModel::empty();
+        let err = WeightCompressionPass::new()
+            .apply(&mut model, &config)
+            .expect_err("nothing to compress");
+        assert!(err.to_string().contains("named_tensors_mut"), "{err}");
+    }
+
+    #[test]
+    fn precision_preserving_configurations_skip_lossy_compression() {
+        let config = OptimizationConfig {
+            weight_compression: true,
+            preserve_precision: true,
+            ..OptimizationConfig::default()
+        };
+        let mut model = TestModel::with_seed(1.0);
+        let before = model.named_tensors()[0].1.to_vec_f32().expect("f32");
+
+        let stats = WeightCompressionPass::new().apply(&mut model, &config).expect("no-op");
+        assert_eq!(stats.operations_modified, 0);
+        assert_eq!(
+            model.named_tensors()[0].1.to_vec_f32().expect("f32"),
+            before
+        );
     }
 
     #[test]

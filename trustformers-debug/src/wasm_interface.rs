@@ -355,7 +355,7 @@ impl WasmDebugSession {
         let l1_norm: f32 = data.iter().map(|x| x.abs()).sum();
         let l2_norm: f32 = data.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        // Histogram data (simplified)
+        // Real 20-bucket histogram over the tensor's value range.
         let histogram = self.calculate_histogram(data, 20);
 
         TensorAnalysisResult {

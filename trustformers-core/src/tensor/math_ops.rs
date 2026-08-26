@@ -30,3 +30,7 @@ mod statistical_tests;
 pub mod utilities;
 
 // Re-export essential utilities and SIMD functions
+pub use stability::{
+    is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64, MAX_SAFE_VALUE_F32,
+    MAX_SAFE_VALUE_F64, STABILITY_EPSILON_F32, STABILITY_EPSILON_F64,
+};

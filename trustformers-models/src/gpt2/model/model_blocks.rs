@@ -8,13 +8,52 @@ use trustformers_core::{
     device::Device,
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{LayerNorm, Linear},
-    ops::activations::{gelu as gelu_core, relu, silu},
     tensor::Tensor,
     traits::{Layer, WeightReader},
 };
 
 use super::model_core::{transpose_tensor, LayerCache};
+use super::model_ops::ActivationType;
 use crate::gpt2::config::Gpt2Config;
+
+/// How many times [`Gpt2Attention::forward_with_cache`] has entered its Metal
+/// GPU-resident attention fast path in this process.
+///
+/// The fast path is entered only when the fused QKV projection actually produced a
+/// `Tensor::Metal` — i.e. when `weights_to_gpu` really moved this attention block's
+/// weights onto the GPU. A model merely *constructed* with `Device::Metal` still
+/// computes on the CPU, so "the model says Metal" and "GPU attention ran" are
+/// different claims; this counter is the only way to assert the second one, and the
+/// Metal-named tests use it so they cannot silently pass on CPU arithmetic.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+static METAL_ATTENTION_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times GPT-2's Metal GPU-resident attention fast path has run in this
+/// process (monotonic, process-wide, never reset).
+///
+/// Take a reading before and after a forward pass to check whether the GPU path was
+/// actually taken: a non-zero delta proves the fused QKV projection produced a
+/// GPU-resident tensor, which only happens after a successful
+/// [`Gpt2LMHeadModel::weights_to_gpu`](super::Gpt2LMHeadModel::weights_to_gpu).
+/// Constructing a model with `Device::Metal(0)` alone does *not* move the weights and
+/// leaves every block computing on the CPU, so this counter is the difference between
+/// "configured for Metal" and "ran on Metal".
+///
+/// ```no_run
+/// # #[cfg(all(target_os = "macos", feature = "metal"))]
+/// # fn demo(model: &trustformers_models::gpt2::model::Gpt2LMHeadModel) -> Result<(), Box<dyn std::error::Error>> {
+/// use trustformers_models::gpt2::model::metal_attention_call_count;
+/// let before = metal_attention_call_count();
+/// let _ = model.generate_greedy(vec![1, 2, 3], 4)?;
+/// assert!(metal_attention_call_count() > before, "GPU attention never ran");
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub fn metal_attention_call_count() -> usize {
+    METAL_ATTENTION_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Clone)]
 pub(crate) struct Gpt2Block {
@@ -118,6 +157,44 @@ impl Gpt2Block {
             + self.mlp.parameter_count()
     }
 
+    /// Append this block's parameters under `<prefix>.…` in HuggingFace order.
+    ///
+    /// `prefix` is the block's checkpoint path (`transformer.h.3`, say). The
+    /// names produced here mirror [`Gpt2Block::load_weights`] exactly, so a file
+    /// written from `named_tensors` reloads through `load_pretrained`.
+    ///
+    /// # Weight layout
+    ///
+    /// `attn.c_attn`, `attn.c_proj`, `mlp.c_fc` and `mlp.c_proj` are HuggingFace
+    /// `Conv1D` layers, stored `[in, out]` in the checkpoint and transposed to
+    /// `[out, in]` on load. The trait contract requires *live* references, so
+    /// they are exposed in the model's own `[out, in]` layout — transposing here
+    /// would mean returning references to temporaries, which is impossible, and
+    /// silently copying would break the "live parameters" contract. Consumers
+    /// that need HF's on-disk layout must transpose these four names themselves.
+    pub(crate) fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.ln_1.collect_named_parameters(&format!("{prefix}.ln_1"), into);
+        self.attn.collect_named_parameters(&format!("{prefix}.attn"), into);
+        self.ln_2.collect_named_parameters(&format!("{prefix}.ln_2"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2Block::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.ln_1.collect_named_parameters_mut(&format!("{prefix}.ln_1"), into);
+        self.attn.collect_named_parameters_mut(&format!("{prefix}.attn"), into);
+        self.ln_2.collect_named_parameters_mut(&format!("{prefix}.ln_2"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn forward(
         &self,
@@ -149,6 +226,125 @@ impl Gpt2Block {
 
         Ok(hidden_states)
     }
+}
+
+/// Rewrite a layer's GPU-resident Metal KV cache into the host layout, in place.
+///
+/// The Metal fast path stores K/V heads-major as `[batch, n_head, kv_seq_len,
+/// head_dim]`; the host path stores them as `[batch, kv_seq_len, n_head * head_dim]`
+/// and only merges `Tensor::F32`. Whenever the fast path declines a call it must
+/// convert first, otherwise the host path sees `cache.key = Some(Tensor::Metal(..))`,
+/// fails to match its `Tensor::F32` arm, and silently restarts the sequence from an
+/// empty cache - dropping the whole conversation history with no error at all.
+///
+/// The download goes through `MetalBackend::download_buffer_to_vec`, which flushes the
+/// command queue first. An empty or already-host cache is left untouched.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn resident_cache_to_host(cache: &mut LayerCache, n_head: usize, d_head: usize) -> Result<()> {
+    use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+    for (label, slot) in [("key", &mut cache.key), ("value", &mut cache.value)] {
+        let Some(Tensor::Metal(resident)) = slot.as_ref() else {
+            continue;
+        };
+        let shape = resident.shape.clone();
+        if shape.len() != 4 || shape[1] != n_head || shape[3] != d_head {
+            return Err(TrustformersError::shape_error(format!(
+                "GPU-resident KV cache {label} has shape {shape:?}, which is not the \
+                 [batch, {n_head}, kv_seq_len, {d_head}] layout the Metal attention \
+                 path writes; refusing to reinterpret it"
+            )));
+        }
+        let (batch, kv_seq_len) = (shape[0], shape[2]);
+        let hidden_size = n_head * d_head;
+        let backend = get_metal_backend()?;
+        let resident_values = backend.download_buffer_to_vec(&resident.buffer_id())?;
+        let expected = batch * n_head * kv_seq_len * d_head;
+        if resident_values.len() < expected {
+            return Err(TrustformersError::shape_error(format!(
+                "GPU-resident KV cache {label} holds {} floats but its shape {shape:?} \
+                 declares {expected}",
+                resident_values.len()
+            )));
+        }
+
+        // [batch, n_head, kv_seq_len, head_dim] -> [batch, kv_seq_len, n_head * head_dim]
+        let mut host_values = vec![0.0_f32; batch * kv_seq_len * hidden_size];
+        for b in 0..batch {
+            for head in 0..n_head {
+                for position in 0..kv_seq_len {
+                    let source = ((b * n_head + head) * kv_seq_len + position) * d_head;
+                    let target = (b * kv_seq_len + position) * hidden_size + head * d_head;
+                    host_values[target..target + d_head]
+                        .copy_from_slice(&resident_values[source..source + d_head]);
+                }
+            }
+        }
+
+        let host = ArrayD::from_shape_vec(IxDyn(&[batch, kv_seq_len, hidden_size]), host_values)
+            .map_err(|e| {
+                TrustformersError::shape_error(format!(
+                    "failed to rebuild the host KV cache {label}: {e}"
+                ))
+            })?;
+        *slot = Some(Tensor::F32(host));
+    }
+    Ok(())
+}
+
+/// Widen a `[.., q_seq_len, q_seq_len]` additive attention mask to
+/// `[1, 1, q_seq_len, kv_seq_len]` for a KV-cache continuation.
+///
+/// `Gpt2Model::forward_internal` builds its causal mask from the *new* tokens only
+/// (`create_causal_mask(seq_len)`), so when a cache already holds `kv_seq_len -
+/// q_seq_len` earlier positions the mask covers just the trailing square block of the
+/// score matrix. Every cached column is unconditionally visible to every new row - the
+/// cached positions all precede them - so the widened mask is zero there and copies
+/// the supplied block into the trailing columns. For `q_seq_len == 1` (ordinary
+/// single-token decode) that is a `[1, kv_seq_len]` row of zeros, which is why the
+/// missing widening only ever showed up on multi-token continuations.
+///
+/// Returns a structured error instead of the `ndarray` broadcast panic when the mask
+/// has a shape this rule cannot interpret.
+fn widen_cached_attention_mask(
+    mask: &ArrayD<f32>,
+    q_seq_len: usize,
+    kv_seq_len: usize,
+) -> Result<ArrayD<f32>> {
+    let shape = mask.shape();
+    let rank = shape.len();
+    let describe = || {
+        format!(
+            "attention mask of shape {shape:?} cannot be applied to attention scores \
+             of shape [.., {q_seq_len}, {kv_seq_len}]"
+        )
+    };
+    if rank < 2 || kv_seq_len < q_seq_len {
+        return Err(TrustformersError::shape_error(describe()));
+    }
+    let (mask_rows, mask_cols) = (shape[rank - 2], shape[rank - 1]);
+    // Only the "mask describes the new tokens alone" case is reconstructible.
+    if mask_rows != q_seq_len || mask_cols != q_seq_len {
+        return Err(TrustformersError::shape_error(describe()));
+    }
+    // Leading axes must be broadcastable singletons; a genuinely per-batch or
+    // per-head mask carries information this widening would silently discard.
+    if shape[..rank - 2].iter().any(|axis| *axis != 1) {
+        return Err(TrustformersError::shape_error(format!(
+            "{}; per-batch or per-head masks must already be {kv_seq_len} wide",
+            describe()
+        )));
+    }
+
+    let flat: Vec<f32> = mask.iter().copied().collect();
+    let cached = kv_seq_len - q_seq_len;
+    let mut widened = ArrayD::<f32>::zeros(IxDyn(&[1, 1, q_seq_len, kv_seq_len]));
+    for row in 0..q_seq_len {
+        for col in 0..q_seq_len {
+            widened[[0, 0, row, cached + col]] = flat[row * q_seq_len + col];
+        }
+    }
+    Ok(widened)
 }
 
 /// GPT-2 attention module
@@ -548,14 +744,21 @@ impl Gpt2Attention {
         self.c_proj.forward(merged).map(Some)
     }
 
+    /// Bind the fused QKV and output projections from a checkpoint.
+    ///
+    /// HuggingFace's GPT-2 uses `transformers.pytorch_utils.Conv1D`, not
+    /// `nn.Linear`, and `Conv1D` stores its weight as `[in_features,
+    /// out_features]` — the transpose of the `[out_features, in_features]`
+    /// layout [`trustformers_core::layers::Linear`] expects. Hence the
+    /// transposition on the weights and none on the biases, which are `[out]`
+    /// in both conventions.
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
-        // Load combined QKV weights
-        // PyTorch stores as [out, in], we need [in, out], so transpose
+        // Fused QKV projection: Conv1D [in, 3*in] -> Linear [3*in, in].
         let c_attn_weight = reader.read_tensor(&format!("{}.c_attn.weight", prefix))?;
         self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
         self.c_attn.set_bias(reader.read_tensor(&format!("{}.c_attn.bias", prefix))?)?;
 
-        // Load output projection weights (also needs transpose)
+        // Output projection: Conv1D [in, in] -> Linear [in, in], still transposed.
         let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
@@ -563,18 +766,19 @@ impl Gpt2Attention {
         Ok(())
     }
 
+    /// Same binding as [`Gpt2Attention::load_weights`], driven by a
+    /// [`crate::weight_loading::WeightLoader`] instead of a `WeightReader`.
     fn load_weights_from_loader(
         &mut self,
         loader: &mut dyn crate::weight_loading::WeightLoader,
         prefix: &str,
     ) -> Result<()> {
-        // Load combined QKV weights
-        // PyTorch stores as [out, in], we need [in, out], so transpose
+        // Fused QKV projection: Conv1D [in, 3*in] -> Linear [3*in, in].
         let c_attn_weight = loader.load_tensor(&format!("{}.c_attn.weight", prefix))?;
         self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
         self.c_attn.set_bias(loader.load_tensor(&format!("{}.c_attn.bias", prefix))?)?;
 
-        // Load output projection weights (also needs transpose)
+        // Output projection: Conv1D [in, in] -> Linear [in, in], still transposed.
         let c_proj_weight = loader.load_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(loader.load_tensor(&format!("{}.c_proj.bias", prefix))?)?;
@@ -586,11 +790,46 @@ impl Gpt2Attention {
         self.c_attn.parameter_count() + self.c_proj.parameter_count()
     }
 
+    /// Append the fused QKV and output projections under `<prefix>.…`.
+    ///
+    /// Names mirror [`Gpt2Attention::load_weights`]; see
+    /// [`Gpt2Block::collect_named_parameters`] for the `Conv1D` layout caveat.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.c_attn.collect_named_parameters(&format!("{prefix}.c_attn"), into);
+        self.c_proj.collect_named_parameters(&format!("{prefix}.c_proj"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2Attention::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.c_attn.collect_named_parameters_mut(&format!("{prefix}.c_attn"), into);
+        self.c_proj.collect_named_parameters_mut(&format!("{prefix}.c_proj"), into);
+    }
+
     #[allow(dead_code)]
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         self.forward_with_cache(hidden_states, attention_mask, None)
     }
 
+    /// Multi-head self-attention, optionally extending a KV cache.
+    ///
+    /// # `attention_mask` and the GPU fast paths
+    ///
+    /// The host path adds `attention_mask` to the raw scores and then softmaxes over
+    /// the whole key axis, so masking there is entirely the caller's mask (with no
+    /// mask at all it is bidirectional). The Metal and CUDA resident paths instead
+    /// bake causal masking into their kernels and **ignore `attention_mask`**.
+    ///
+    /// Those agree for the only mask GPT-2's own driver supplies -
+    /// [`Gpt2Model::forward_internal`](super::model_core::Gpt2Model) always passes
+    /// `create_causal_mask(seq_len)` - and that equivalence is what
+    /// `gpt2::metal_tests` pins CPU-against-GPU. They do *not* agree for a padding
+    /// mask, or for `None`; a caller that needs either must stay on the host path
+    /// (a model whose weights were never moved with `weights_to_gpu`). This is the
+    /// same documented limitation the CUDA resident path carries.
     fn forward_with_cache(
         &self,
         hidden_states: Tensor,
@@ -620,140 +859,257 @@ impl Gpt2Attention {
         // Project to Q, K, V using the combined projection
         let qkv = self.c_attn.forward(hidden_states)?;
 
+        // Metal fast-path admission control.
+        //
+        // The GPU-resident chain below is exact for every query shape GPT-2 produces:
+        //
+        //   * full prefill - empty cache, `q_seq_len == kv_seq_len`, served by the
+        //     causal fused kernel;
+        //   * single-token decode - `q_seq_len == 1` against a resident cache, served
+        //     by the generation fused kernel (with one query row there is no future
+        //     position inside the block, so its lack of a mask is harmless); and
+        //   * multi-token continuation against a warm cache
+        //     (`1 < q_seq_len < kv_seq_len`), served by the offset-masked kernel
+        //     `batched_scaled_matmul_softmax_gen_causal`.
+        //
+        // That last shape used to be excluded here. `MetalBackend::attention_with_
+        // cache_gpu_to_gpu` routed it to the *unmasked* generation kernel, so every
+        // query row in the chunk also attended to the later rows of its own chunk:
+        // measured on (q_seq 3, kv_seq 5) as an exact match to a non-causal reference
+        // and ~32% of signal magnitude away from the causal one. The shader library
+        // now carries a causal-with-offset variant and the composition selects it, so
+        // the exclusion is gone; `metal_multi_token_cache_continuation_matches_
+        // uncached_forward` asserts the chunk really runs on the GPU and stays causal.
+        //
+        // The two remaining exclusions are structural, not numeric: `reshape_to_heads_
+        // gpu` and `reshape_from_heads_gpu` address a single batch element, and the
+        // host path can only merge a host-format cache.
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        let mut layer_cache = layer_cache;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        let metal_fast_path = if matches!(&qkv, Tensor::Metal(_)) {
+            let resident_kv_len =
+                layer_cache.as_deref().map_or(0, |cache| match (&cache.key, &cache.value) {
+                    (Some(Tensor::Metal(k)), Some(Tensor::Metal(_))) if k.shape.len() == 4 => {
+                        k.shape[2]
+                    },
+                    _ => 0,
+                });
+            let host_cache_present = layer_cache.as_deref().is_some_and(
+                |cache| matches!(&cache.key, Some(t) if !matches!(t, Tensor::Metal(_))),
+            );
+            let admitted = batch_size == 1 && !host_cache_present;
+            if !admitted {
+                // Hand any GPU-resident cache back to the host in the layout the
+                // fallback path merges, so declining never silently drops history.
+                if let Some(cache) = layer_cache.as_deref_mut() {
+                    resident_cache_to_host(cache, self.n_head, self.d_head)?;
+                }
+                tracing::debug!(
+                    batch_size,
+                    seq_len,
+                    resident_kv_len,
+                    host_cache_present,
+                    "gpt2: metal attention fast path declined, using the host path"
+                );
+            }
+            admitted
+        } else {
+            false
+        };
+
         // GPU attention path with GPU-aware KV-cache (ZERO CPU transfers!)
         #[cfg(all(target_os = "macos", feature = "metal"))]
-        if let Tensor::Metal(qkv_data) = &qkv {
+        if let (true, Tensor::Metal(qkv_data)) = (metal_fast_path, &qkv) {
             use trustformers_core::gpu_ops::metal::get_metal_backend;
             use trustformers_core::tensor::MetalTensorData;
 
+            METAL_ATTENTION_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::trace!(
+                batch_size,
+                seq_len,
+                hidden_size,
+                n_head = self.n_head,
+                d_head = self.d_head,
+                "gpt2: metal GPU-resident attention fast path"
+            );
+
             let backend = get_metal_backend()?;
 
-            // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
-            let (q_id, k_new_id, v_new_id) =
-                backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
+            // Dead intermediates, freed on EVERY exit path (including a mid-pipeline
+            // error). Without this the fast path parked seven `MTLBuffer`s in the
+            // process-global buffer cache per layer per forward, for the life of the
+            // process. An id leaves this list exactly when something adopts it: the
+            // KV cache and the output tensor take reference-counted
+            // `MetalBufferHandle`s, and `release_buffers` is refcount-blind
+            // (`BufferCache::remove`), so releasing an adopted id would free a buffer
+            // a live tensor still points at.
+            let mut scratch: Vec<trustformers_core::gpu_ops::metal::BufferId> =
+                Vec::with_capacity(8);
+            let result = (|| -> Result<Tensor> {
+                // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
+                let (q_id, k_new_id, v_new_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id(),
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
+                scratch.extend_from_slice(&[q_id, k_new_id, v_new_id]);
 
-            // Get cached K/V buffer IDs and sequence length (if cache exists)
-            let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
-                match (&cache.key, &cache.value) {
-                    (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
-                        let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
-                        let cached_seq = cached_shape[2];
-                        #[cfg(debug_assertions)]
-                        eprintln!("🔗 GPU cache found: cached_seq={}", cached_seq);
-                        (
-                            Some(&k_metal.buffer_id),
-                            Some(&v_metal.buffer_id),
-                            cached_seq,
-                        )
-                    },
-                    _ => {
-                        // eprintln!("🚀 GPU attention (first token, no cache)");
-                        (None, None, 0)
-                    },
+                // Get cached K/V buffer IDs and sequence length (if cache exists).
+                // Owned `BufferId`s (not references): they must outlive this
+                // statement to reach `concat_kv_cache` below, and `BufferId` is
+                // `Copy`, so there is no reason to borrow from the cache tensors.
+                let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
+                    match (&cache.key, &cache.value) {
+                        (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
+                            // [batch, num_heads, cached_seq, head_dim]
+                            let cached_shape = &k_metal.shape;
+                            let cached_seq = cached_shape[2];
+                            (
+                                Some(k_metal.buffer_id()),
+                                Some(v_metal.buffer_id()),
+                                cached_seq,
+                            )
+                        },
+                        // First token of a sequence: the cache holds nothing yet.
+                        _ => (None, None, 0),
+                    }
+                } else {
+                    // This layer has no cache slot, so there is nothing to extend.
+                    (None, None, 0)
+                };
+
+                // Reshape Q, K_new, V_new to multi-head format
+                // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
+                let q_heads_id =
+                    backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(q_heads_id);
+                let k_new_heads_id =
+                    backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(k_new_heads_id);
+                let v_new_heads_id =
+                    backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(v_new_heads_id);
+
+                // Concatenate with cached K/V on GPU (stays on GPU!)
+                let k_heads_id = backend.concat_kv_cache(
+                    cached_k_id.as_ref(),
+                    &k_new_heads_id,
+                    batch_size,
+                    self.n_head,
+                    cached_seq_len,
+                    seq_len, // new_seq_len
+                    self.d_head,
+                )?;
+                // With an empty cache `concat_kv_cache` has nothing to concatenate and
+                // hands the *same* id straight back, so guard against queueing it twice.
+                if k_heads_id != k_new_heads_id {
+                    scratch.push(k_heads_id);
                 }
-            } else {
-                // eprintln!("🚀 GPU attention (no cache layer)");
-                (None, None, 0)
-            };
 
-            // Reshape Q, K_new, V_new to multi-head format
-            // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
-            let q_heads_id =
-                backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
-            let k_new_heads_id =
-                backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
-            let v_new_heads_id =
-                backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
-
-            // Concatenate with cached K/V on GPU (stays on GPU!)
-            let k_heads_id = backend.concat_kv_cache(
-                cached_k_id,
-                &k_new_heads_id,
-                batch_size,
-                self.n_head,
-                cached_seq_len,
-                seq_len, // new_seq_len
-                self.d_head,
-            )?;
-
-            let v_heads_id = backend.concat_kv_cache(
-                cached_v_id,
-                &v_new_heads_id,
-                batch_size,
-                self.n_head,
-                cached_seq_len,
-                seq_len,
-                self.d_head,
-            )?;
-
-            let total_seq_len = cached_seq_len + seq_len;
-
-            // Execute GPU attention with cached K/V
-            // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
-            // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
-            // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
-            let attn_heads_output_id = backend.attention_with_cache_gpu_to_gpu(
-                &q_heads_id,
-                &k_heads_id,
-                &v_heads_id,
-                batch_size,
-                seq_len,       // q_seq_len
-                total_seq_len, // kv_seq_len
-                self.n_head,
-                self.d_head,
-            )?;
-
-            // Reshape from [batch, num_heads, seq_len, head_dim] back to [batch, seq_len, hidden_size]
-            let attn_output_id = backend.reshape_from_heads_gpu(
-                &attn_heads_output_id,
-                seq_len,
-                self.n_head,
-                self.d_head,
-            )?;
-
-            // Update cache with full K/V (keep on GPU!)
-            if let Some(cache) = layer_cache {
-                cache.key = Some(Tensor::Metal(MetalTensorData {
-                    buffer_id: k_heads_id,
-                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    dtype: qkv_data.dtype,
-                }));
-                cache.value = Some(Tensor::Metal(MetalTensorData {
-                    buffer_id: v_heads_id,
-                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    dtype: qkv_data.dtype,
-                }));
-                #[cfg(debug_assertions)]
-                eprintln!("✅ GPU cache updated: total_seq={}", total_seq_len);
-            }
-
-            // Wrap in Metal tensor and apply output projection
-            let attn_output = Tensor::Metal(MetalTensorData {
-                buffer_id: attn_output_id,
-                shape: vec![batch_size, seq_len, hidden_size],
-                dtype: qkv_data.dtype,
-            });
-
-            // Apply output projection (stays on GPU)
-            let output = self.c_proj.forward(attn_output)?;
-
-            // Remove batch dimension if it was added
-            return if was_2d {
-                match output {
-                    Tensor::Metal(metal_data) if metal_data.shape[0] == 1 => {
-                        // Reshape [1, seq, hidden] → [seq, hidden]
-                        let new_shape = vec![metal_data.shape[1], metal_data.shape[2]];
-                        Ok(Tensor::Metal(MetalTensorData {
-                            buffer_id: metal_data.buffer_id,
-                            shape: new_shape,
-                            dtype: metal_data.dtype,
-                        }))
-                    },
-                    _ => Ok(output),
+                let v_heads_id = backend.concat_kv_cache(
+                    cached_v_id.as_ref(),
+                    &v_new_heads_id,
+                    batch_size,
+                    self.n_head,
+                    cached_seq_len,
+                    seq_len,
+                    self.d_head,
+                )?;
+                if v_heads_id != v_new_heads_id {
+                    scratch.push(v_heads_id);
                 }
-            } else {
-                Ok(output)
-            };
+
+                let total_seq_len = cached_seq_len + seq_len;
+
+                // Execute GPU attention with cached K/V
+                // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
+                // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+                // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+                let attn_heads_output_id = backend.attention_with_cache_gpu_to_gpu(
+                    &q_heads_id,
+                    &k_heads_id,
+                    &v_heads_id,
+                    batch_size,
+                    seq_len,       // q_seq_len
+                    total_seq_len, // kv_seq_len
+                    self.n_head,
+                    self.d_head,
+                )?;
+                scratch.push(attn_heads_output_id);
+
+                // Reshape from [batch, num_heads, seq_len, head_dim] back to
+                // [batch, seq_len, hidden_size]
+                let attn_output_id = backend.reshape_from_heads_gpu(
+                    &attn_heads_output_id,
+                    seq_len,
+                    self.n_head,
+                    self.d_head,
+                )?;
+                scratch.push(attn_output_id);
+
+                // Update cache with full K/V (keep on GPU!). Neither id has been
+                // wrapped in a handle yet, so `::new` here is the required first (and
+                // only) wrap; each one is dropped from `scratch` the moment the cache
+                // adopts it.
+                if let Some(cache) = layer_cache {
+                    cache.key = Some(Tensor::Metal(MetalTensorData::new(
+                        &backend,
+                        k_heads_id,
+                        vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                        qkv_data.dtype,
+                    )?));
+                    scratch.retain(|id| *id != k_heads_id);
+                    cache.value = Some(Tensor::Metal(MetalTensorData::new(
+                        &backend,
+                        v_heads_id,
+                        vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                        qkv_data.dtype,
+                    )?));
+                    scratch.retain(|id| *id != v_heads_id);
+                }
+
+                // Wrap in Metal tensor and apply output projection. `attn_output_id` is
+                // likewise fresh out of `reshape_from_heads_gpu` above.
+                let attn_output = Tensor::Metal(MetalTensorData::new(
+                    &backend,
+                    attn_output_id,
+                    vec![batch_size, seq_len, hidden_size],
+                    qkv_data.dtype,
+                )?);
+                scratch.retain(|id| *id != attn_output_id);
+
+                // Apply output projection (stays on GPU)
+                let output = self.c_proj.forward(attn_output)?;
+
+                // Remove batch dimension if it was added
+                if was_2d {
+                    match output {
+                        Tensor::Metal(mut metal_data) if metal_data.shape[0] == 1 => {
+                            // Reshape [1, seq, hidden] → [seq, hidden]: same buffer, new
+                            // shape. Move the handle `output` already owns instead of
+                            // minting a second one for an id it already wraps —
+                            // `MetalTensorData::new`'s contract is that each raw id is
+                            // wrapped at most once and all further sharing goes through
+                            // `clone()`, which this is not (it's a single-owner reshape).
+                            metal_data.shape = vec![metal_data.shape[1], metal_data.shape[2]];
+                            Ok(Tensor::Metal(metal_data))
+                        },
+                        _ => Ok(output),
+                    }
+                } else {
+                    Ok(output)
+                }
+            })();
+
+            // Release before propagating: a failed forward must not leak either.
+            backend.release_buffers(&scratch)?;
+            tracing::trace!(
+                released = scratch.len(),
+                "gpt2: metal attention intermediates released"
+            );
+            return result;
         }
 
         // GPU attention path with GPU-resident KV-cache (CUDA / oxicuda).
@@ -763,8 +1119,9 @@ impl Gpt2Attention {
         // fallback below then applies.
         // Rebind mutably only for the CUDA path: `as_deref_mut` needs a
         // mutable binding, and adding `mut` to the parameter itself would
-        // trip `unused_mut` in non-CUDA builds.
-        #[cfg(feature = "cuda")]
+        // trip `unused_mut` in non-CUDA builds. On a macOS Metal build the
+        // admission control above has already taken a mutable binding.
+        #[cfg(all(feature = "cuda", not(all(target_os = "macos", feature = "metal"))))]
         let mut layer_cache = layer_cache;
         #[cfg(feature = "cuda")]
         if matches!(&qkv, Tensor::CUDA(_)) {
@@ -795,13 +1152,15 @@ impl Gpt2Attention {
             Tensor::Metal(qkv_data) => {
                 use trustformers_core::gpu_ops::metal::get_metal_backend;
 
-                eprintln!("⚠️  Attention: CPU path (has cache), downloading Q/K/V");
-
                 let backend = get_metal_backend()?;
 
                 // Split QKV on GPU then download
-                let (q_id, k_id, v_id) =
-                    backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
+                let (q_id, k_id, v_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id(),
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
 
                 let q_data = backend.download_buffer_to_vec(&q_id)?;
                 let k_data = backend.download_buffer_to_vec(&k_id)?;
@@ -1038,11 +1397,28 @@ impl Gpt2Attention {
 
                 scores *= scale;
 
-                // Apply attention mask if provided
+                // Apply attention mask if provided.
+                //
+                // `scores` is [batch, n_heads, q_seq_len, kv_seq_len]. A mask whose
+                // key axis already matches `kv_seq_len` is added straight through
+                // (ndarray broadcasts the leading axes, as before). A mask that is
+                // only `q_seq_len` wide is what the KV-cache path receives - the
+                // caller builds `create_causal_mask(seq_len)` from the *new* tokens
+                // and knows nothing about the cached prefix - so it has to be widened
+                // first. Adding it blind used to abort the process with
+                // `ndarray: could not broadcast array from shape [1, 1, 2, 2] to
+                // [1, 2, 2, 5]` on any multi-token continuation.
                 if let Some(mask) = attention_mask {
                     match mask {
                         Tensor::F32(mask_arr) => {
-                            scores += mask_arr;
+                            let key_axis = mask_arr.shape().last().copied().unwrap_or(0);
+                            if key_axis == kv_seq_len {
+                                scores += mask_arr;
+                            } else {
+                                let widened =
+                                    widen_cached_attention_mask(mask_arr, q_seq_len, kv_seq_len)?;
+                                scores += &widened;
+                            }
                         },
                         _ => {
                             return Err(tensor_op_error(
@@ -1275,8 +1651,12 @@ impl Gpt2MLP {
         Ok(())
     }
 
+    /// Bind the two MLP projections from a checkpoint.
+    ///
+    /// Like the attention block, GPT-2's MLP is built from `Conv1D` layers whose
+    /// weights are stored `[in_features, out_features]`, so both need
+    /// transposing into the `[out_features, in_features]` layout `Linear` uses.
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
-        // Transpose MLP weights too
         let c_fc_weight = reader.read_tensor(&format!("{}.c_fc.weight", prefix))?;
         self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
         self.c_fc.set_bias(reader.read_tensor(&format!("{}.c_fc.bias", prefix))?)?;
@@ -1288,12 +1668,13 @@ impl Gpt2MLP {
         Ok(())
     }
 
+    /// Same binding as [`Gpt2MLP::load_weights`], driven by a
+    /// [`crate::weight_loading::WeightLoader`] instead of a `WeightReader`.
     fn load_weights_from_loader(
         &mut self,
         loader: &mut dyn crate::weight_loading::WeightLoader,
         prefix: &str,
     ) -> Result<()> {
-        // Transpose MLP weights too
         let c_fc_weight = loader.load_tensor(&format!("{}.c_fc.weight", prefix))?;
         self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
         self.c_fc.set_bias(loader.load_tensor(&format!("{}.c_fc.bias", prefix))?)?;
@@ -1307,6 +1688,25 @@ impl Gpt2MLP {
 
     fn parameter_count(&self) -> usize {
         self.c_fc.parameter_count() + self.c_proj.parameter_count()
+    }
+
+    /// Append the two MLP projections under `<prefix>.…`.
+    ///
+    /// Names mirror [`Gpt2MLP::load_weights`]; see
+    /// [`Gpt2Block::collect_named_parameters`] for the `Conv1D` layout caveat.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.c_fc.collect_named_parameters(&format!("{prefix}.c_fc"), into);
+        self.c_proj.collect_named_parameters(&format!("{prefix}.c_proj"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2MLP::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.c_fc.collect_named_parameters_mut(&format!("{prefix}.c_fc"), into);
+        self.c_proj.collect_named_parameters_mut(&format!("{prefix}.c_proj"), into);
     }
 
     /// Fused `matmul + bias + GELU` for the `c_fc` projection on the Metal GPU.
@@ -1423,556 +1823,9 @@ impl Gpt2MLP {
     }
 }
 
-/// Activation function types
-#[derive(Clone)]
-pub(crate) enum ActivationType {
-    Gelu,
-    Relu,
-    Swish,
-}
-
-impl ActivationType {
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "gelu" | "gelu_new" | "gelu_fast" => Ok(Self::Gelu),
-            "relu" => Ok(Self::Relu),
-            "swish" | "silu" => Ok(Self::Swish),
-            _ => Err(invalid_config(
-                "activation",
-                format!("Unknown activation: {}", s),
-            )),
-        }
-    }
-
-    fn apply(&self, x: Tensor) -> Result<Tensor> {
-        match self {
-            Self::Gelu => gelu_core(&x), // Use NaN-safe version from trustformers_core
-            Self::Relu => relu(&x),
-            Self::Swish => silu(&x), // SiLU = Swish
-        }
-    }
-}
-
-/// Create a causal mask for attention
-pub(crate) fn create_causal_mask(seq_len: usize) -> Result<Tensor> {
-    let mut mask = ArrayD::<f32>::zeros(IxDyn(&[1, 1, seq_len, seq_len]));
-
-    for i in 0..seq_len {
-        for j in (i + 1)..seq_len {
-            mask[[0, 0, i, j]] = f32::NEG_INFINITY;
-        }
-    }
-
-    Ok(Tensor::F32(mask))
-}
-
-/// Apply top-k filtering to logits
-pub(crate) fn apply_top_k_filtering(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
-    let mut result = logits.clone();
-    let mut indices_and_values: Vec<(usize, f32)> =
-        logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
-
-    // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Set all values outside top-k to -inf
-    for (idx, _) in indices_and_values.iter().skip(k) {
-        result[*idx] = f32::NEG_INFINITY;
-    }
-
-    Ok(result)
-}
-
-/// Apply top-p (nucleus) filtering to logits
-pub(crate) fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
-    // Convert to probabilities
-    let probs = softmax(logits.clone())?;
-
-    let mut indices_and_probs: Vec<(usize, f32)> =
-        probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
-
-    // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Find the smallest set of tokens with cumulative probability > p
-    let mut cumsum = 0.0;
-    let mut cutoff_idx = indices_and_probs.len();
-
-    for (i, (_, prob)) in indices_and_probs.iter().enumerate() {
-        cumsum += prob;
-        if cumsum > p {
-            cutoff_idx = i + 1;
-            break;
-        }
-    }
-
-    // Create result with -inf for tokens outside the nucleus
-    let mut result = logits;
-    let selected_indices: std::collections::HashSet<_> =
-        indices_and_probs.iter().take(cutoff_idx).map(|(idx, _)| *idx).collect();
-
-    for (idx, val) in result.iter_mut().enumerate() {
-        if !selected_indices.contains(&idx) {
-            *val = f32::NEG_INFINITY;
-        }
-    }
-
-    Ok(result)
-}
-
-/// Sample from logits using multinomial sampling
-pub(crate) fn sample_from_logits(logits: ArrayD<f32>) -> Result<u32> {
-    use scirs2_core::random::*; // SciRS2 Integration Policy (includes WeightedIndex)
-
-    // Convert to probabilities
-    let probs = softmax(logits)?;
-
-    // Create weighted distribution
-    let weights: Vec<f32> = probs.iter().copied().collect();
-    let dist = WeightedIndex::new(weights).map_err(|e| {
-        TrustformersError::model_error(format!("Failed to create distribution: {}", e))
-    })?;
-
-    // Sample
-    let mut rng = thread_rng(); // From scirs2_core::random
-    Ok(rng.sample(&dist) as u32)
-}
-
-/// Compute softmax of logits
-pub(crate) fn softmax(logits: ArrayD<f32>) -> Result<ArrayD<f32>> {
-    // Find max for numerical stability
-    let max_val = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-    // Compute exp(x - max)
-    let exp_vals = logits.mapv(|x| (x - max_val).exp());
-
-    // Sum of exp values
-    let sum: f32 = exp_vals.iter().sum();
-
-    // Normalize
-    Ok(exp_vals / sum)
-}
-
-/// Compute log softmax of logits
-pub(crate) fn log_softmax(logits: ArrayD<f32>) -> Result<ArrayD<f32>> {
-    // Find max for numerical stability
-    let max_val = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-    // Compute log(sum(exp(x - max))) + max
-    let shifted = logits.mapv(|x| x - max_val);
-    let exp_sum = shifted.mapv(|x| x.exp()).sum();
-    let log_sum_exp = exp_sum.ln() + max_val;
-
-    // Return log probabilities
-    Ok(logits.mapv(|x| x - log_sum_exp))
-}
-
-/// Stack a vector of tensors into a batch tensor
-pub(crate) fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
-    if tensors.is_empty() {
-        return Err(tensor_op_error(
-            "tensor_operation",
-            "Cannot stack empty tensor list".to_string(),
-        ));
-    }
-
-    match &tensors[0] {
-        Tensor::F32(first_arr) => {
-            let first_shape = first_arr.shape();
-            let batch_size = tensors.len();
-
-            // Create new shape with batch dimension
-            let mut new_shape = vec![batch_size];
-            new_shape.extend_from_slice(first_shape);
-
-            // Collect all tensor data
-            let mut data = Vec::new();
-            for tensor in tensors {
-                match tensor {
-                    Tensor::F32(arr) => {
-                        if arr.shape() != first_shape {
-                            return Err(TrustformersError::shape_error(
-                                "All tensors must have the same shape for stacking".to_string(),
-                            ));
-                        }
-                        data.extend(arr.iter().cloned());
-                    },
-                    _ => {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "All tensors must be F32 for stacking".to_string(),
-                        ))
-                    },
-                }
-            }
-
-            // Create stacked array
-            let stacked = ArrayD::from_shape_vec(IxDyn(&new_shape), data).map_err(|_| {
-                TrustformersError::shape_error("Failed to create stacked tensor".into())
-            })?;
-
-            Ok(Tensor::F32(stacked))
-        },
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        Tensor::Metal(first_data) => {
-            use trustformers_core::gpu_ops::metal::get_metal_backend;
-            use trustformers_core::tensor::MetalTensorData;
-
-            // Try to use GPU stacking kernel
-            if let Ok(backend) = get_metal_backend() {
-                // All tensors must have the same shape
-                let first_shape = &first_data.shape;
-                if first_shape.len() == 2 {
-                    let seq_len = first_shape[0];
-                    let hidden_size = first_shape[1];
-
-                    // Collect all buffer IDs
-                    let buffer_ids: Vec<_> = tensors
-                        .iter()
-                        .map(|t| match t {
-                            Tensor::Metal(data) => Ok(data.buffer_id),
-                            _ => Err(TrustformersError::tensor_op_error(
-                                "All tensors must be Metal for GPU stacking",
-                                "stack_tensors",
-                            )),
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
-                    // Stack on GPU
-                    let stacked_buffer_id =
-                        backend.stack_gpu_buffers(&buffer_ids, seq_len, hidden_size)?;
-
-                    // Create output shape: [batch_size, seq_len, hidden_size]
-                    let output_shape = vec![tensors.len(), seq_len, hidden_size];
-
-                    return Ok(Tensor::Metal(MetalTensorData {
-                        buffer_id: stacked_buffer_id,
-                        shape: output_shape,
-                        dtype: first_data.dtype,
-                    }));
-                }
-            }
-
-            // Fallback: convert to CPU, stack, then convert back to Metal
-            let cpu_tensors: Vec<Tensor> = tensors
-                .iter()
-                .map(|t| t.to_device_enum(&Device::CPU))
-                .collect::<Result<Vec<_>>>()?;
-
-            let cpu_stacked = stack_tensors(&cpu_tensors)?;
-
-            let metal_device = Device::Metal(0);
-            let metal_stacked = cpu_stacked.to_device_enum(&metal_device)?;
-
-            Ok(metal_stacked)
-        },
-        _ => Err(tensor_op_error(
-            "tensor_operation",
-            "Only F32 tensors supported for stacking".to_string(),
-        )),
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gpt2::config::Gpt2Config;
-    use scirs2_core::ndarray::{ArrayD, IxDyn};
-    use trustformers_core::tensor::Tensor;
-
-    // LCG PRNG: a=6364136223846793005, c=1442695040888963407
-    fn lcg_next(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        *state
-    }
-
-    fn lcg_f32_range(state: &mut u64, lo: f32, hi: f32) -> f32 {
-        let raw = (lcg_next(state) >> 11) as f32 / (1u64 << 53) as f32;
-        lo + raw * (hi - lo)
-    }
-
-    fn make_array(shape: &[usize], seed: u64) -> ArrayD<f32> {
-        let mut state = seed;
-        let n: usize = shape.iter().product();
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
-        ArrayD::from_shape_vec(IxDyn(shape), data).expect("Failed to create array")
-    }
-
-    fn make_tensor(shape: &[usize], seed: u64) -> Tensor {
-        Tensor::F32(make_array(shape, seed))
-    }
-
-    // ---- create_causal_mask tests ----
-
-    #[test]
-    fn test_causal_mask_shape() {
-        let seq_len = 5;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        let shape = mask.shape();
-        assert_eq!(shape, &[1, 1, seq_len, seq_len]);
-    }
-
-    #[test]
-    fn test_causal_mask_diagonal_not_neg_inf() {
-        let seq_len = 4;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                let val = arr[[0, 0, i, i]];
-                assert!(
-                    val.is_finite(),
-                    "Diagonal of causal mask must be finite at ({i},{i})"
-                );
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_future_tokens_are_neg_inf() {
-        let seq_len = 5;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                for j in (i + 1)..seq_len {
-                    let val = arr[[0, 0, i, j]];
-                    assert!(
-                        val.is_infinite() && val < 0.0,
-                        "Future token at ({i},{j}) must be -inf, got {val}"
-                    );
-                }
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_past_tokens_are_zero() {
-        let seq_len = 4;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                for j in 0..=i {
-                    let val = arr[[0, 0, i, j]];
-                    assert!(
-                        val == 0.0,
-                        "Past/current token at ({i},{j}) must be 0, got {val}"
-                    );
-                }
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_length_1() {
-        let mask = create_causal_mask(1).expect("create_causal_mask(1) failed");
-        if let Tensor::F32(arr) = &mask {
-            assert_eq!(arr[[0, 0, 0, 0]], 0.0);
-        }
-    }
-
-    // ---- softmax tests ----
-
-    #[test]
-    fn test_softmax_sums_to_one() {
-        let mut state = 7u64;
-        let n = 10;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = softmax(arr).expect("softmax failed");
-        let sum: f32 = result.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-5,
-            "softmax sum must be ~1.0, got {sum}"
-        );
-    }
-
-    #[test]
-    fn test_softmax_all_positive() {
-        let mut state = 13u64;
-        let n = 8;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -3.0, 3.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = softmax(arr).expect("softmax failed");
-        for val in result.iter() {
-            assert!(*val >= 0.0, "softmax output must be non-negative");
-        }
-    }
-
-    // ---- log_softmax tests ----
-
-    #[test]
-    fn test_log_softmax_non_positive() {
-        let mut state = 17u64;
-        let n = 8;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = log_softmax(arr).expect("log_softmax failed");
-        for val in result.iter() {
-            assert!(
-                *val <= 0.0 + 1e-6,
-                "log_softmax output must be <= 0, got {val}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_log_softmax_exp_sums_to_one() {
-        let mut state = 31u64;
-        let n = 6;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = log_softmax(arr).expect("log_softmax failed");
-        let sum_exp: f32 = result.iter().map(|x| x.exp()).sum();
-        assert!(
-            (sum_exp - 1.0).abs() < 1e-5,
-            "exp(log_softmax) must sum to 1, got {sum_exp}"
-        );
-    }
-
-    // ---- apply_top_k_filtering tests ----
-
-    #[test]
-    fn test_top_k_keeps_k_finite_values() {
-        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array creation failed");
-        let k = 3;
-        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert_eq!(finite_count, k, "top-k should keep exactly k finite values");
-    }
-
-    #[test]
-    fn test_top_k_largest_values_retained() {
-        // data: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
-        let k = 3;
-        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
-        // Top 3 values are 7, 8, 9 at indices 7, 8, 9
-        assert!(result[7].is_finite());
-        assert!(result[8].is_finite());
-        assert!(result[9].is_finite());
-        assert!(result[0].is_infinite());
-    }
-
-    // ---- apply_top_p_filtering tests ----
-
-    #[test]
-    fn test_top_p_at_least_one_finite() {
-        let data: Vec<f32> = (0..10).map(|i| i as f32 + 1.0).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
-        let result = apply_top_p_filtering(arr, 0.5).expect("top_p filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert!(finite_count >= 1, "top-p must keep at least one token");
-    }
-
-    #[test]
-    fn test_top_p_full_probability_keeps_all() {
-        let data: Vec<f32> = (0..5).map(|i| i as f32 + 1.0).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[5]), data).expect("array failed");
-        let result = apply_top_p_filtering(arr, 1.0).expect("top_p filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert_eq!(finite_count, 5, "p=1.0 should keep all tokens");
-    }
-
-    // ---- stack_tensors tests ----
-
-    #[test]
-    fn test_stack_tensors_basic() {
-        let t1 = make_tensor(&[3, 4], 11);
-        let t2 = make_tensor(&[3, 4], 22);
-        let stacked = stack_tensors(&[t1, t2]).expect("stack_tensors failed");
-        let shape = stacked.shape();
-        assert_eq!(shape[0], 2, "Batch dim must be 2");
-        assert_eq!(shape[1], 3);
-        assert_eq!(shape[2], 4);
-    }
-
-    #[test]
-    fn test_stack_tensors_empty_fails() {
-        let result = stack_tensors(&[]);
-        assert!(result.is_err(), "Stacking empty list must fail");
-    }
-
-    #[test]
-    fn test_stack_tensors_shape_mismatch_fails() {
-        let t1 = make_tensor(&[3, 4], 11);
-        let t2 = make_tensor(&[4, 4], 22); // different shape
-        let result = stack_tensors(&[t1, t2]);
-        assert!(
-            result.is_err(),
-            "Stacking tensors with different shapes must fail"
-        );
-    }
-
-    // ---- Gpt2Block creation test ----
-
-    #[test]
-    fn test_gpt2_block_creates_ok() {
-        let cfg = Gpt2Config::default();
-        let block = Gpt2Block::new(&cfg);
-        assert!(
-            block.is_ok(),
-            "Gpt2Block::new should succeed with default config"
-        );
-    }
-
-    #[test]
-    fn test_gpt2_block_parameter_count_nonzero() {
-        let cfg = Gpt2Config::default();
-        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
-        assert!(block.parameter_count() > 0, "Block must have parameters");
-    }
-
-    // ---- MLP inner dim test ----
-
-    #[test]
-    fn test_gpt2_mlp_inner_dim_4x() {
-        // When n_inner is None, inner dim = 4 * n_embd
-        let cfg = Gpt2Config::default();
-        assert!(cfg.n_inner.is_none(), "Default n_inner must be None");
-        // The MLP created with this config should have inner_dim = 4 * 768 = 3072
-        // We verify by checking the block can be created (it uses 4*n_embd internally)
-        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
-        // The parameter count should reflect the 4x expansion
-        let count = block.parameter_count();
-        // rough lower bound: at least n_embd * 4 * n_embd for c_fc weight
-        assert!(
-            count > 768 * 3072,
-            "MLP param count must reflect 4x expansion"
-        );
-    }
-
-    // ---- ActivationType tests ----
-
-    #[test]
-    fn test_gelu_activation_on_zero() {
-        let t = Tensor::from_vec(vec![0.0f32], &[1]).expect("tensor creation failed");
-        let result = trustformers_core::ops::activations::gelu(&t).expect("gelu failed");
-        if let Tensor::F32(arr) = result {
-            assert!(arr[0].abs() < 1e-5, "gelu(0) must be ~0");
-        }
-    }
-
-    #[test]
-    fn test_silu_activation_on_positive() {
-        let t = Tensor::from_vec(vec![2.0f32], &[1]).expect("tensor creation failed");
-        let result = trustformers_core::ops::activations::silu(&t).expect("silu failed");
-        if let Tensor::F32(arr) = result {
-            // SiLU(2) = 2 * sigmoid(2) ≈ 1.762
-            assert!(
-                arr[0] > 1.5 && arr[0] < 2.0,
-                "SiLU(2) should be ~1.76, got {}",
-                arr[0]
-            );
-        }
-    }
-}
+#[path = "model_blocks_tests.rs"]
+mod tests;
 
 /// Parity tests for the fused Metal `matmul + bias + GELU` MLP path.
 ///
@@ -2038,7 +1891,6 @@ mod metal_fused_mlp_tests {
                 "element {i} differs: fused={x} separate={y} (diff={diff} > tol={tol})"
             );
         }
-        println!("fused-vs-separate max abs diff = {max_diff}");
         Ok(())
     }
 

@@ -1,4 +1,18 @@
-//! Model deployment management for production environments
+//! Model deployment *ledger* for production environments.
+//!
+//! [`DeploymentManager`] records which model version is designated active in
+//! which environment, and the history of how it got there. It does **not**
+//! move artifacts, start processes, or route traffic: that belongs to whatever
+//! actually runs the models. Treat it as the book of record, and drive the real
+//! rollout from the events it emits.
+//!
+//! Consequently:
+//!
+//! * "deploying" is a bookkeeping state change, not a copy or a restart;
+//! * [`DeploymentManager::health_check`] reports the recorded status plus any
+//!   metrics a real prober has published through
+//!   [`DeploymentManager::record_health_probe`] — it never invents a latency or
+//!   an error rate of its own.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -18,6 +32,8 @@ pub struct DeploymentManager {
     storage: Arc<dyn ModelStorage>,
     deployments: RwLock<HashMap<String, ActiveDeployment>>,
     deployment_history: RwLock<HashMap<String, Vec<DeploymentEvent>>>,
+    /// Latest health measurement published per deployment, if any.
+    health_probes: RwLock<HashMap<String, HealthProbe>>,
     ab_test_manager: Arc<ABTestManager>,
 }
 
@@ -28,6 +44,7 @@ impl DeploymentManager {
             storage,
             deployments: RwLock::new(HashMap::new()),
             deployment_history: RwLock::new(HashMap::new()),
+            health_probes: RwLock::new(HashMap::new()),
             ab_test_manager: Arc::new(ABTestManager::new()),
         }
     }
@@ -78,8 +95,9 @@ impl DeploymentManager {
             deployments.insert(deployment_id.clone(), deployment);
         }
 
-        // Mark as active after deployment completes
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Simulate deployment time
+        // This ledger has nothing to wait for: recording the designation is
+        // the whole operation. (A sleep here only made the call *look* like it
+        // was doing work.)
         self.mark_deployment_active(&deployment_id).await?;
 
         tracing::info!(
@@ -150,8 +168,7 @@ impl DeploymentManager {
             )
             .await;
 
-            // Simulate rollback process
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // As with deploy: recording the rollback is the operation.
             self.mark_deployment_active(&deployment_id).await?;
 
             tracing::info!(
@@ -226,24 +243,58 @@ impl DeploymentManager {
         }
     }
 
-    /// Health check for a deployment
-    pub async fn health_check(&self, deployment_id: &str) -> Result<HealthStatus> {
+    /// Publish the result of a real health probe against a deployment.
+    ///
+    /// The ledger cannot probe anything itself; whatever runs the model calls
+    /// this so [`Self::health_check`] can report measured numbers.
+    pub async fn record_health_probe(&self, deployment_id: &str, probe: HealthProbe) -> Result<()> {
         let deployments = self.deployments.read().await;
-        if let Some(deployment) = deployments.get(deployment_id) {
-            // Simulate health check
-            let is_healthy = deployment.status == DeploymentStatus::Active;
-
-            Ok(HealthStatus {
-                deployment_id: deployment_id.to_string(),
-                is_healthy,
-                last_check: Utc::now(),
-                response_time_ms: 120,
-                error_rate_percent: if is_healthy { 0.1 } else { 5.0 },
-                metrics: HashMap::new(),
-            })
-        } else {
+        if !deployments.contains_key(deployment_id) {
             anyhow::bail!("Deployment {} not found", deployment_id);
         }
+        drop(deployments);
+
+        let mut probes = self.health_probes.write().await;
+        probes.insert(deployment_id.to_string(), probe);
+        Ok(())
+    }
+
+    /// Report a deployment's health.
+    ///
+    /// `is_healthy` reflects the recorded deployment status. `response_time_ms`
+    /// and `error_rate_percent` are `None` unless a real prober published them
+    /// via [`Self::record_health_probe`] — this manager runs no probe and
+    /// therefore never reports a latency it did not measure.
+    pub async fn health_check(&self, deployment_id: &str) -> Result<HealthStatus> {
+        let deployments = self.deployments.read().await;
+        let Some(deployment) = deployments.get(deployment_id) else {
+            anyhow::bail!("Deployment {} not found", deployment_id);
+        };
+
+        let status_healthy = deployment.status == DeploymentStatus::Active;
+        drop(deployments);
+
+        let probe = self.health_probes.read().await.get(deployment_id).cloned();
+
+        Ok(match probe {
+            Some(probe) => HealthStatus {
+                deployment_id: deployment_id.to_string(),
+                // A published probe overrides the ledger's optimism.
+                is_healthy: status_healthy && probe.is_healthy,
+                last_check: probe.observed_at,
+                response_time_ms: Some(probe.response_time_ms),
+                error_rate_percent: Some(probe.error_rate_percent),
+                metrics: probe.metrics,
+            },
+            None => HealthStatus {
+                deployment_id: deployment_id.to_string(),
+                is_healthy: status_healthy,
+                last_check: Utc::now(),
+                response_time_ms: None,
+                error_rate_percent: None,
+                metrics: HashMap::new(),
+            },
+        })
     }
 
     /// Get deployment statistics
@@ -618,11 +669,36 @@ pub struct DeploymentEvent {
 /// Health check status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
+    /// Deployment this status describes.
     pub deployment_id: String,
+    /// Whether the deployment is recorded as active *and* the latest published
+    /// probe (if any) said it was healthy.
     pub is_healthy: bool,
+    /// When this status was produced, or when the probe observed it.
     pub last_check: DateTime<Utc>,
+    /// Observed response time, when a real prober published one.
+    ///
+    /// `None` means nobody measured it; it is never a default value.
+    pub response_time_ms: Option<u64>,
+    /// Observed error rate, when a real prober published one. `None` means
+    /// nobody measured it.
+    pub error_rate_percent: Option<f64>,
+    /// Any additional metrics the prober published.
+    pub metrics: HashMap<String, f64>,
+}
+
+/// A health measurement taken by whatever actually runs the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthProbe {
+    /// Whether the probe considered the deployment healthy.
+    pub is_healthy: bool,
+    /// Measured response time in milliseconds.
     pub response_time_ms: u64,
+    /// Measured error rate as a percentage.
     pub error_rate_percent: f64,
+    /// When the probe ran.
+    pub observed_at: DateTime<Utc>,
+    /// Any additional measured metrics.
     pub metrics: HashMap<String, f64>,
 }
 
@@ -640,6 +716,87 @@ pub struct DeploymentStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `health_check` returned a hardcoded 120 ms response
+    /// time and a 0.1%/5% error rate for a deployment nothing had probed.
+    #[tokio::test]
+    async fn test_health_check_reports_no_metrics_it_did_not_measure() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let manager = DeploymentManager::new(storage);
+
+        let metadata = ModelMetadata::builder()
+            .description("probe test".to_string())
+            .created_by("test".to_string())
+            .model_type("transformer".to_string())
+            .build();
+        let model = VersionedModel::new(
+            "probe_model".to_string(),
+            "1.0.0".to_string(),
+            metadata,
+            vec![],
+        );
+        let deployment_id =
+            manager.deploy_to_production(model.id(), &model).await.expect("deploy failed");
+
+        let status = manager.health_check(&deployment_id).await.expect("health check failed");
+        assert!(
+            status.is_healthy,
+            "an active deployment is recorded as healthy"
+        );
+        assert!(
+            status.response_time_ms.is_none(),
+            "no probe ran, so no latency may be reported"
+        );
+        assert!(status.error_rate_percent.is_none());
+        assert!(status.metrics.is_empty());
+
+        // A real probe's numbers are reported verbatim.
+        let mut metrics = HashMap::new();
+        metrics.insert("p99_ms".to_string(), 350.0);
+        manager
+            .record_health_probe(
+                &deployment_id,
+                HealthProbe {
+                    is_healthy: false,
+                    response_time_ms: 42,
+                    error_rate_percent: 3.5,
+                    observed_at: Utc::now(),
+                    metrics,
+                },
+            )
+            .await
+            .expect("probe recording failed");
+
+        let status = manager.health_check(&deployment_id).await.expect("health check failed");
+        assert_eq!(status.response_time_ms, Some(42));
+        assert_eq!(status.error_rate_percent, Some(3.5));
+        assert!(
+            !status.is_healthy,
+            "a probe that says unhealthy must override the ledger's status"
+        );
+        assert_eq!(status.metrics.get("p99_ms").copied(), Some(350.0));
+    }
+
+    /// A probe for an unknown deployment is an error.
+    #[tokio::test]
+    async fn test_health_probe_requires_a_known_deployment() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let manager = DeploymentManager::new(storage);
+
+        assert!(manager
+            .record_health_probe(
+                "nope",
+                HealthProbe {
+                    is_healthy: true,
+                    response_time_ms: 1,
+                    error_rate_percent: 0.0,
+                    observed_at: Utc::now(),
+                    metrics: HashMap::new(),
+                }
+            )
+            .await
+            .is_err());
+    }
     use crate::versioning::metadata::ModelMetadata;
     use crate::versioning::storage::InMemoryStorage;
 

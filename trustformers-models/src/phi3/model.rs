@@ -1,5 +1,6 @@
 use crate::common::ActivationType;
 use crate::phi3::config::Phi3Config;
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors, WeightBinder};
 use scirs2_core::ndarray::{Array2, ArrayD, Ix2, IxDyn};
 use std::io::Read;
 use trustformers_core::{
@@ -34,6 +35,21 @@ impl RMSNorm {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Replace the learnable scale (used when loading pretrained weights).
+    ///
+    /// # Errors
+    ///
+    /// Never fails; the shape has already been checked by the caller's binder.
+    pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// Number of learnable parameters (the scale vector).
+    pub fn parameter_count(&self) -> usize {
+        self.weight.len()
     }
 }
 
@@ -284,6 +300,167 @@ impl Phi3MLP {
     pub fn device(&self) -> Device {
         self.device
     }
+
+    /// Number of learnable parameters in the two projections.
+    pub fn parameter_count(&self) -> usize {
+        self.gate_up_proj.parameter_count() + self.down_proj.parameter_count()
+    }
+
+    /// Copy the SwiGLU projections out of a checkpoint.
+    ///
+    /// Phi-3 stores the gate and up projections fused as `mlp.gate_up_proj`
+    /// (`[2 * intermediate, hidden]`, gate first), which is exactly this layer's
+    /// layout. Checkpoints that keep them apart as `mlp.gate_proj` / `mlp.up_proj`
+    /// are accepted too and concatenated in the same order.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        prefix: &str,
+        config: &Phi3Config,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        let fused = format!("{prefix}gate_up_proj.weight");
+        if binder.has(&fused) || !binder.has(&format!("{prefix}gate_proj.weight")) {
+            if let Some(weight) = binder.take_shaped(&fused, &[2 * intermediate, hidden])? {
+                self.gate_up_proj.set_weight(weight)?;
+            }
+        } else {
+            let gate = binder.take_shaped(
+                &format!("{prefix}gate_proj.weight"),
+                &[intermediate, hidden],
+            )?;
+            let up =
+                binder.take_shaped(&format!("{prefix}up_proj.weight"), &[intermediate, hidden])?;
+            if let (Some(gate), Some(up)) = (gate, up) {
+                self.gate_up_proj.set_weight(concat_rows(&[&gate, &up])?)?;
+            }
+        }
+
+        if config.mlp_bias {
+            if let Some(bias) =
+                binder.take_shaped(&format!("{prefix}gate_up_proj.bias"), &[2 * intermediate])?
+            {
+                self.gate_up_proj.set_bias(bias)?;
+            }
+        }
+
+        if let Some(weight) = binder.take_shaped(
+            &format!("{prefix}down_proj.weight"),
+            &[hidden, intermediate],
+        )? {
+            self.down_proj.set_weight(weight)?;
+        }
+        if config.mlp_bias {
+            if let Some(bias) = binder.take_shaped(&format!("{prefix}down_proj.bias"), &[hidden])? {
+                self.down_proj.set_bias(bias)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Concatenate 2-D f32 tensors along their first (row) axis.
+///
+/// Used to fuse separately-stored `q/k/v` or `gate/up` projections into the
+/// single matrix this implementation keeps, and to split them apart again.
+fn concat_rows(parts: &[&Tensor]) -> Result<Tensor> {
+    let mut columns = None;
+    let mut rows = 0usize;
+    let mut values: Vec<f32> = Vec::new();
+    for part in parts {
+        match part {
+            Tensor::F32(arr) => {
+                if arr.ndim() != 2 {
+                    return Err(TrustformersError::shape_error(format!(
+                        "expected a 2-D projection, got {} dimensions",
+                        arr.ndim()
+                    )));
+                }
+                let shape = arr.shape();
+                match columns {
+                    None => columns = Some(shape[1]),
+                    Some(expected) if expected == shape[1] => {},
+                    Some(expected) => {
+                        return Err(TrustformersError::shape_error(format!(
+                            "cannot concatenate projections with {expected} and {} columns",
+                            shape[1]
+                        )))
+                    },
+                }
+                rows += shape[0];
+                values.extend(arr.iter().copied());
+            },
+            _ => {
+                return Err(tensor_op_error(
+                    "tensor_operation",
+                    "projection concatenation requires F32 tensors",
+                ))
+            },
+        }
+    }
+    let columns = columns.ok_or_else(|| {
+        TrustformersError::shape_error("cannot concatenate an empty projection list".to_string())
+    })?;
+    Tensor::from_vec(values, &[rows, columns])
+}
+
+/// Take `count` consecutive elements of a 1-D f32 tensor, starting at `start`.
+fn slice_vector(tensor: &Tensor, start: usize, count: usize) -> Result<Tensor> {
+    match tensor {
+        Tensor::F32(arr) => {
+            let values: Vec<f32> = arr.iter().copied().collect();
+            if start + count > values.len() {
+                return Err(TrustformersError::shape_error(format!(
+                    "cannot take elements {start}..{} from a vector of length {}",
+                    start + count,
+                    values.len()
+                )));
+            }
+            Tensor::from_vec(values[start..start + count].to_vec(), &[count])
+        },
+        _ => Err(tensor_op_error(
+            "tensor_operation",
+            "bias slicing requires F32 tensors",
+        )),
+    }
+}
+
+/// Take `count` consecutive rows of a 2-D f32 tensor, starting at `start`.
+fn slice_rows(tensor: &Tensor, start: usize, count: usize) -> Result<Tensor> {
+    match tensor {
+        Tensor::F32(arr) => {
+            if arr.ndim() != 2 {
+                return Err(TrustformersError::shape_error(format!(
+                    "expected a 2-D projection, got {} dimensions",
+                    arr.ndim()
+                )));
+            }
+            let columns = arr.shape()[1];
+            let rows = arr.shape()[0];
+            if start + count > rows {
+                return Err(TrustformersError::shape_error(format!(
+                    "cannot take rows {start}..{} from a projection with {rows} rows",
+                    start + count
+                )));
+            }
+            let view = arr.clone().into_dimensionality::<Ix2>().map_err(|e| {
+                TrustformersError::shape_error(format!("projection is not 2-D: {e}"))
+            })?;
+            let slice: Array2<f32> =
+                view.slice(scirs2_core::ndarray::s![start..start + count, ..]).to_owned();
+            Tensor::from_vec(slice.into_raw_vec_and_offset().0, &[count, columns])
+        },
+        _ => Err(tensor_op_error(
+            "tensor_operation",
+            "projection slicing requires F32 tensors",
+        )),
+    }
 }
 
 impl Layer for Phi3MLP {
@@ -434,6 +611,98 @@ impl Phi3Attention {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Number of learnable parameters in the four projections.
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.o_proj.parameter_count()
+    }
+
+    /// Copy the attention projections out of a checkpoint.
+    ///
+    /// Phi-3 fuses the three input projections into `self_attn.qkv_proj`
+    /// (`[q_out + k_out + v_out, hidden]`, query rows first, then key, then
+    /// value), which this implementation keeps as three separate matrices, so the
+    /// fused tensor is split by row. Checkpoints that store `q_proj` / `k_proj` /
+    /// `v_proj` separately are bound directly.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        prefix: &str,
+        config: &Phi3Config,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+        let head_dim = config.head_dim();
+        let q_out = config.num_attention_heads * head_dim;
+        let kv_out = config.num_kv_heads() * head_dim;
+
+        let fused = format!("{prefix}qkv_proj.weight");
+        if binder.has(&fused) {
+            if let Some(weight) = binder.take_shaped(&fused, &[q_out + 2 * kv_out, hidden])? {
+                self.q_proj.set_weight(slice_rows(&weight, 0, q_out)?)?;
+                self.k_proj.set_weight(slice_rows(&weight, q_out, kv_out)?)?;
+                self.v_proj.set_weight(slice_rows(&weight, q_out + kv_out, kv_out)?)?;
+            }
+            if config.attention_bias {
+                if let Some(bias) =
+                    binder.take_shaped(&format!("{prefix}qkv_proj.bias"), &[q_out + 2 * kv_out])?
+                {
+                    self.q_proj.set_bias(slice_vector(&bias, 0, q_out)?)?;
+                    self.k_proj.set_bias(slice_vector(&bias, q_out, kv_out)?)?;
+                    self.v_proj.set_bias(slice_vector(&bias, q_out + kv_out, kv_out)?)?;
+                }
+            }
+        } else {
+            if let Some(weight) =
+                binder.take_shaped(&format!("{prefix}q_proj.weight"), &[q_out, hidden])?
+            {
+                self.q_proj.set_weight(weight)?;
+            }
+            if let Some(weight) =
+                binder.take_shaped(&format!("{prefix}k_proj.weight"), &[kv_out, hidden])?
+            {
+                self.k_proj.set_weight(weight)?;
+            }
+            if let Some(weight) =
+                binder.take_shaped(&format!("{prefix}v_proj.weight"), &[kv_out, hidden])?
+            {
+                self.v_proj.set_weight(weight)?;
+            }
+            if config.attention_bias {
+                if let Some(bias) = binder.take_shaped(&format!("{prefix}q_proj.bias"), &[q_out])? {
+                    self.q_proj.set_bias(bias)?;
+                }
+                if let Some(bias) =
+                    binder.take_shaped(&format!("{prefix}k_proj.bias"), &[kv_out])?
+                {
+                    self.k_proj.set_bias(bias)?;
+                }
+                if let Some(bias) =
+                    binder.take_shaped(&format!("{prefix}v_proj.bias"), &[kv_out])?
+                {
+                    self.v_proj.set_bias(bias)?;
+                }
+            }
+        }
+
+        if let Some(weight) =
+            binder.take_shaped(&format!("{prefix}o_proj.weight"), &[hidden, q_out])?
+        {
+            self.o_proj.set_weight(weight)?;
+        }
+        if config.attention_bias {
+            if let Some(bias) = binder.take_shaped(&format!("{prefix}o_proj.bias"), &[hidden])? {
+                self.o_proj.set_bias(bias)?;
+            }
+        }
+        Ok(())
     }
 
     /// Expand grouped key/value heads to match the query heads for GQA.
@@ -606,6 +875,44 @@ impl Phi3DecoderLayer {
     pub fn device(&self) -> Device {
         self.device
     }
+
+    /// Number of learnable parameters in this decoder layer.
+    pub fn parameter_count(&self) -> usize {
+        self.self_attn.parameter_count()
+            + self.mlp.parameter_count()
+            + self.input_layernorm.parameter_count()
+            + self.post_attention_layernorm.parameter_count()
+    }
+
+    /// Copy one decoder layer's parameters out of a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        layer_prefix: &str,
+        config: &Phi3Config,
+    ) -> Result<()> {
+        self.self_attn
+            .load_weights(binder, &format!("{layer_prefix}self_attn."), config)?;
+        self.mlp.load_weights(binder, &format!("{layer_prefix}mlp."), config)?;
+
+        if let Some(weight) = binder.take_shaped(
+            &format!("{layer_prefix}input_layernorm.weight"),
+            &[config.hidden_size],
+        )? {
+            self.input_layernorm.set_weight(weight)?;
+        }
+        if let Some(weight) = binder.take_shaped(
+            &format!("{layer_prefix}post_attention_layernorm.weight"),
+            &[config.hidden_size],
+        )? {
+            self.post_attention_layernorm.set_weight(weight)?;
+        }
+        Ok(())
+    }
 }
 
 impl Layer for Phi3DecoderLayer {
@@ -707,39 +1014,7 @@ impl Model for Phi3Model {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("Failed to read pretrained weights: {}", e))
-        })?;
-
-        if buffer.is_empty() {
-            return Err(TrustformersError::invalid_input_simple(
-                "Pretrained weight data is empty".to_string(),
-            ));
-        }
-
-        // Validate minimum expected weight file size (should contain at least some data)
-        if buffer.len() < 1024 {
-            return Err(TrustformersError::invalid_input_simple(format!(
-                "Weight file too small ({}B), expected at least 1KB",
-                buffer.len()
-            )));
-        }
-
-        // For Phi3ForCausalLM, delegate to the underlying model
-        // For Phi3Model, perform comprehensive weight parsing
-        if let Some(model) = self.get_mut_model() {
-            model.parse_and_load_weights(&buffer)?;
-        } else {
-            self.parse_and_load_weights(&buffer)?;
-        }
-
-        println!(
-            "Successfully loaded pretrained weights for Phi-3 model ({} bytes)",
-            buffer.len()
-        );
-        Ok(())
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -747,306 +1022,113 @@ impl Model for Phi3Model {
     }
 
     fn num_parameters(&self) -> usize {
-        // Calculate total parameters for Phi-3 model
-        let vocab_size = self.config.vocab_size;
-        let hidden_size = self.config.hidden_size;
-        let intermediate_size = self.config.intermediate_size;
-        let num_layers = self.config.num_hidden_layers;
-
-        // Embedding layer: vocab_size * hidden_size
-        let embedding_params = vocab_size * hidden_size;
-
-        // Each transformer layer has:
-        // - Self attention: 4 * hidden_size * hidden_size (q, k, v, o projections)
-        // - MLP: 2 * hidden_size * intermediate_size + intermediate_size (gate, up) + hidden_size * intermediate_size (down)
-        // - Layer norms: 2 * hidden_size (attention norm + mlp norm)
-        let attention_params = 4 * hidden_size * hidden_size;
-        let mlp_params = 2 * hidden_size * intermediate_size + hidden_size * intermediate_size;
-        let norm_params = 2 * hidden_size;
-        let layer_params = attention_params + mlp_params + norm_params;
-
-        // Final layer norm: hidden_size
-        let final_norm_params = hidden_size;
-
-        embedding_params + (num_layers * layer_params) + final_norm_params
+        self.parameter_count()
     }
 }
 
 impl Phi3Model {
-    /// Get mutable reference to underlying model (for Phi3ForCausalLM)
-    fn get_mut_model(&mut self) -> Option<&mut Phi3Model> {
-        // This will be overridden in Phi3ForCausalLM to return Some(&mut self.model)
-        None
+    /// Checkpoint namespaces a base Phi-3 model legitimately leaves unused.
+    ///
+    /// A `Phi3ForCausalLM` export carries the untied LM head next to the
+    /// backbone; loading only the backbone leaves it unconsumed.
+    const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &["lm_head.", "score.", "classifier."];
+
+    /// Per-layer buffers HuggingFace stores alongside Phi-3's weights.
+    ///
+    /// The rotary tables are derived from the configuration, not trained, and
+    /// they repeat under every layer prefix — so they are matched by suffix
+    /// rather than by namespace.
+    const ALLOWED_UNUSED_SUFFIXES: &'static [&'static str] = &[
+        "rotary_emb.inv_freq",
+        "rotary_emb.cos_cached",
+        "rotary_emb.sin_cached",
+        "attn.bias",
+        "attn.masked_bias",
+    ];
+
+    /// The unused-tensor policy for a bare Phi-3 backbone load.
+    fn unused_tensor_policy() -> UnusedTensors<'static> {
+        UnusedTensors::new(Self::ALLOWED_UNUSED_PREFIXES, Self::ALLOWED_UNUSED_SUFFIXES)
     }
 
-    /// Parse and load weights from buffer with automatic format detection
-    fn parse_and_load_weights(&mut self, buffer: &[u8]) -> Result<()> {
-        // Format detection and parsing
-        if self.is_safetensors_format(buffer) {
-            self.load_safetensors_weights(buffer)
-        } else if self.is_pytorch_format(buffer) {
-            self.load_pytorch_weights(buffer)
-        } else if self.is_json_format(buffer) {
-            self.load_json_weights(buffer)
-        } else {
-            // Unknown format - log warning but continue with mock tensor assignment
-            eprintln!("Warning: Unknown weight format, proceeding with basic tensor assignment");
-            self.assign_mock_tensors()
-        }
+    /// Total parameter count, summed from the live layers.
+    pub fn parameter_count(&self) -> usize {
+        self.embed_tokens.parameter_count()
+            + self.layers.iter().map(|layer| layer.parameter_count()).sum::<usize>()
+            + self.norm.parameter_count()
     }
 
-    /// Check if buffer contains SafeTensors format
-    fn is_safetensors_format(&self, buffer: &[u8]) -> bool {
-        // SafeTensors files start with a header length (8 bytes) followed by JSON header
-        if buffer.len() < 8 {
-            return false;
-        }
-
-        // Try to read header length and see if it points to valid JSON
-        let header_len = u64::from_le_bytes([
-            buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7],
-        ]) as usize;
-
-        if header_len >= buffer.len() - 8 {
-            return false;
-        }
-
-        // Check if header contains valid JSON
-        let header_bytes = &buffer[8..8 + header_len];
-        std::str::from_utf8(header_bytes)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .is_some()
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// The stream may hold a safetensors file or a PyTorch archive; both are
+    /// parsed for real by [`Checkpoint::from_reader`].
+    ///
+    /// A previous revision printed `"Assigning mock tensors for demonstration..."`,
+    /// walked the tensor names printing each one, assigned nothing, and returned
+    /// `Ok(())`. Even the safetensors branch never touched the tensor payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed, when the checkpoint is not a
+    /// Phi-3 checkpoint, when a tensor has the wrong shape, or when any parameter
+    /// is missing.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
     }
 
-    /// Check if buffer contains PyTorch pickle format
-    fn is_pytorch_format(&self, buffer: &[u8]) -> bool {
-        // PyTorch pickle files typically start with pickle protocol bytes
-        buffer.starts_with(b"\x80\x02")
-            || buffer.starts_with(b"\x80\x03")
-            || buffer.starts_with(b"\x80\x04")
+    /// Bind an already-parsed checkpoint into this backbone.
+    ///
+    /// # Errors
+    ///
+    /// See [`Phi3Model::load_pretrained_report`].
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        // `Phi3ForCausalLM` nests the backbone under `model.`; a bare backbone
+        // export does not.
+        let prefix = checkpoint.detect_prefix(&["", "model."], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+        self.bind_weights(&mut binder, "")?;
+        binder.finish(Self::unused_tensor_policy())
     }
 
-    /// Check if buffer contains JSON format
-    fn is_json_format(&self, buffer: &[u8]) -> bool {
-        std::str::from_utf8(buffer)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .is_some()
-    }
-
-    /// Load SafeTensors weights
-    fn load_safetensors_weights(&mut self, buffer: &[u8]) -> Result<()> {
-        println!("Loading SafeTensors format weights...");
-
-        // Parse SafeTensors header
-        let header_len = u64::from_le_bytes([
-            buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6], buffer[7],
-        ]) as usize;
-
-        let header_bytes = &buffer[8..8 + header_len];
-        let header_str = std::str::from_utf8(header_bytes).map_err(|e| {
-            TrustformersError::invalid_input_simple(format!(
-                "Invalid SafeTensors header UTF-8: {}",
-                e
-            ))
-        })?;
-
-        let header: serde_json::Value = serde_json::from_str(header_str).map_err(|e| {
-            TrustformersError::invalid_input_simple(format!(
-                "Invalid SafeTensors header JSON: {}",
-                e
-            ))
-        })?;
-
-        // Extract tensor metadata and assign weights intelligently
-        self.assign_tensors_from_safetensors(&header, &buffer[8 + header_len..])
-    }
-
-    /// Load PyTorch weights
-    fn load_pytorch_weights(&mut self, _buffer: &[u8]) -> Result<()> {
-        println!("Loading PyTorch format weights...");
-        // For now, assign mock tensors - full PyTorch pickle parsing would require external crates
-        self.assign_mock_tensors()
-    }
-
-    /// Load JSON weights
-    fn load_json_weights(&mut self, buffer: &[u8]) -> Result<()> {
-        println!("Loading JSON format weights...");
-        let json_str = std::str::from_utf8(buffer).map_err(|e| {
-            TrustformersError::invalid_input_simple(format!("Invalid JSON UTF-8: {}", e))
-        })?;
-
-        let _json: serde_json::Value = serde_json::from_str(json_str)
-            .map_err(|e| TrustformersError::invalid_input_simple(format!("Invalid JSON: {}", e)))?;
-
-        // Assign mock tensors for JSON format
-        self.assign_mock_tensors()
-    }
-
-    /// Assign tensors from SafeTensors metadata
-    fn assign_tensors_from_safetensors(
+    /// Bind the backbone's parameters through an existing binder.
+    ///
+    /// `inner_prefix` is prepended to every logical name, so a causal-LM loader
+    /// can bind `model.` while keeping `lm_head.*` on the same binder.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn bind_weights(
         &mut self,
-        header: &serde_json::Value,
-        _tensor_data: &[u8],
+        binder: &mut WeightBinder<'_>,
+        inner_prefix: &str,
     ) -> Result<()> {
-        if let Some(tensors) = header.as_object() {
-            for (tensor_name, _metadata) in tensors {
-                // Skip metadata entries
-                if tensor_name == "__metadata__" {
-                    continue;
-                }
+        let config = self.config.clone();
 
-                // Assign weights based on tensor name patterns
-                self.assign_weight_by_name(tensor_name)?;
-            }
+        if let Some(weight) = binder.take_shaped(
+            &format!("{inner_prefix}embed_tokens.weight"),
+            &[config.vocab_size, config.hidden_size],
+        )? {
+            self.embed_tokens.set_weight(weight)?;
         }
 
-        Ok(())
-    }
-
-    /// Assign weight to model component based on tensor name
-    fn assign_weight_by_name(&mut self, tensor_name: &str) -> Result<()> {
-        println!("Assigning weight: {}", tensor_name);
-
-        // Parse layer index if present
-        let layer_idx = self.extract_layer_index(tensor_name);
-
-        match tensor_name {
-            name if name.contains("embed_tokens") || name.contains("token_embedding") => {
-                // Assign to token embeddings
-                self.assign_embedding_weights()?;
-            },
-            name if name.contains("norm") && name.contains("weight") => {
-                // Assign to normalization layers
-                self.assign_norm_weights(layer_idx)?;
-            },
-            name if name.contains("attn") && name.contains("weight") => {
-                // Assign to attention weights
-                self.assign_attention_weights(layer_idx)?;
-            },
-            name if name.contains("mlp") && name.contains("weight") => {
-                // Assign to MLP weights
-                self.assign_mlp_weights(layer_idx)?;
-            },
-            name if name.contains("lm_head") && name.contains("weight") => {
-                // Assign to language model head
-                self.assign_lm_head_weights()?;
-            },
-            _ => {
-                // Unknown tensor name - log but continue
-                println!("Warning: Unknown tensor name pattern: {}", tensor_name);
-            },
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            let layer_prefix = format!("{inner_prefix}layers.{index}.");
+            layer.load_weights(binder, &layer_prefix, &config)?;
         }
 
-        Ok(())
-    }
-
-    /// Extract layer index from tensor name
-    fn extract_layer_index(&self, tensor_name: &str) -> Option<usize> {
-        // Look for patterns like "layers.0", "layer.1", etc.
-        if let Some(start) = tensor_name.find("layer") {
-            let after_layer = &tensor_name[start + 5..];
-            if let Some(dot_pos) = after_layer.find('.') {
-                let number_part = &after_layer[1..dot_pos];
-                number_part.parse().ok()
-            } else {
-                None
-            }
-        } else {
-            None
+        if let Some(weight) =
+            binder.take_shaped(&format!("{inner_prefix}norm.weight"), &[config.hidden_size])?
+        {
+            self.norm.set_weight(weight)?;
         }
-    }
-
-    /// Assign mock embedding weights
-    fn assign_embedding_weights(&mut self) -> Result<()> {
-        // Mock implementation - assign appropriate tensor dimensions
-        println!("Assigned embedding weights");
         Ok(())
     }
 
-    /// Assign mock normalization weights
-    fn assign_norm_weights(&mut self, _layer_idx: Option<usize>) -> Result<()> {
-        // Mock implementation - assign appropriate tensor dimensions
-        println!("Assigned normalization weights");
-        Ok(())
-    }
-
-    /// Assign mock attention weights
-    fn assign_attention_weights(&mut self, _layer_idx: Option<usize>) -> Result<()> {
-        // Mock implementation - assign appropriate tensor dimensions
-        println!("Assigned attention weights");
-        Ok(())
-    }
-
-    /// Assign mock MLP weights
-    fn assign_mlp_weights(&mut self, _layer_idx: Option<usize>) -> Result<()> {
-        // Mock implementation - assign appropriate tensor dimensions
-        println!("Assigned MLP weights");
-        Ok(())
-    }
-
-    /// Assign mock language model head weights
-    fn assign_lm_head_weights(&mut self) -> Result<()> {
-        // Mock implementation - assign appropriate tensor dimensions
-        println!("Assigned LM head weights");
-        Ok(())
-    }
-
-    /// Assign mock tensors for unknown formats
-    fn assign_mock_tensors(&mut self) -> Result<()> {
-        println!("Assigning mock tensors for demonstration...");
-
-        // Assign mock weights to all model components
-        self.assign_embedding_weights()?;
-
-        // Assign to all layers
-        for i in 0..self.get_num_layers() {
-            self.assign_norm_weights(Some(i))?;
-            self.assign_attention_weights(Some(i))?;
-            self.assign_mlp_weights(Some(i))?;
-        }
-
-        self.assign_lm_head_weights()?;
-
-        println!("Successfully assigned mock tensors to all model components");
-        Ok(())
-    }
-
-    /// Get number of layers from config
-    fn get_num_layers(&self) -> usize {
-        self.config.num_hidden_layers
-    }
-
-    #[allow(dead_code)]
-    fn get_config(&self) -> &Phi3Config {
-        &self.config
-    }
-
-    #[allow(dead_code)]
-    fn num_parameters(&self) -> usize {
-        // Calculate total parameters for Phi-3 model
-        let vocab_size = self.config.vocab_size;
-        let hidden_size = self.config.hidden_size;
-        let intermediate_size = self.config.intermediate_size;
-        let num_layers = self.config.num_hidden_layers;
-
-        // Embedding layer: vocab_size * hidden_size
-        let embedding_params = vocab_size * hidden_size;
-
-        // Each transformer layer has:
-        // - Self attention: 4 * hidden_size * hidden_size (q, k, v, o projections)
-        // - MLP: 2 * hidden_size * intermediate_size + intermediate_size (gate, up) + hidden_size * intermediate_size (down)
-        // - Layer norms: 2 * hidden_size (attention norm + mlp norm)
-        let attention_params = 4 * hidden_size * hidden_size;
-        let mlp_params = 2 * hidden_size * intermediate_size + hidden_size * intermediate_size;
-        let norm_params = 2 * hidden_size;
-        let layer_params = attention_params + mlp_params + norm_params;
-
-        // Final layer norm: hidden_size
-        let final_norm_params = hidden_size;
-
-        embedding_params + (num_layers * layer_params) + final_norm_params
+    /// Number of decoder layers this model was built with.
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
     }
 }
 
@@ -1083,16 +1165,19 @@ impl Phi3ForCausalLM {
 }
 
 impl Phi3ForCausalLM {
-    /// Get mutable reference to underlying model
-    #[allow(dead_code)]
-    fn get_mut_model(&mut self) -> Option<&mut Phi3Model> {
-        Some(&mut self.model)
+    /// The backbone this head sits on.
+    pub fn model(&self) -> &Phi3Model {
+        &self.model
     }
 
-    /// Get number of layers from config
-    #[allow(dead_code)]
-    fn get_num_layers(&self) -> usize {
-        self.model.config.num_hidden_layers
+    /// Mutable access to the backbone.
+    pub fn model_mut(&mut self) -> &mut Phi3Model {
+        &mut self.model
+    }
+
+    /// Number of decoder layers.
+    pub fn num_layers(&self) -> usize {
+        self.model.num_layers()
     }
 }
 
@@ -1107,34 +1192,7 @@ impl Model for Phi3ForCausalLM {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("Failed to read pretrained weights: {}", e))
-        })?;
-
-        if buffer.is_empty() {
-            return Err(TrustformersError::invalid_input_simple(
-                "Pretrained weight data is empty".to_string(),
-            ));
-        }
-
-        // Validate minimum expected weight file size (should contain at least some data)
-        if buffer.len() < 1024 {
-            return Err(TrustformersError::invalid_input_simple(format!(
-                "Weight file too small ({}B), expected at least 1KB",
-                buffer.len()
-            )));
-        }
-
-        // Delegate to the underlying Phi3Model
-        self.model.parse_and_load_weights(&buffer)?;
-
-        println!(
-            "Successfully loaded pretrained weights for Phi-3 model ({} bytes)",
-            buffer.len()
-        );
-        Ok(())
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1142,28 +1200,78 @@ impl Model for Phi3ForCausalLM {
     }
 
     fn num_parameters(&self) -> usize {
-        // Calculate total parameters for Phi-3 model
-        let vocab_size = self.model.config.vocab_size;
-        let hidden_size = self.model.config.hidden_size;
-        let intermediate_size = self.model.config.intermediate_size;
-        let num_layers = self.model.config.num_hidden_layers;
+        self.model.parameter_count() + self.lm_head.parameter_count()
+    }
+}
 
-        // Embedding layer: vocab_size * hidden_size
-        let embedding_params = vocab_size * hidden_size;
+impl Phi3ForCausalLM {
+    /// Checkpoint namespaces a causal-LM export legitimately leaves unused.
+    const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &["score.", "classifier."];
 
-        // Each transformer layer has:
-        // - Self attention: 4 * hidden_size * hidden_size (q, k, v, o projections)
-        // - MLP: 2 * hidden_size * intermediate_size + intermediate_size (gate, up) + hidden_size * intermediate_size (down)
-        // - Layer norms: 2 * hidden_size (attention norm + mlp norm)
-        let attention_params = 4 * hidden_size * hidden_size;
-        let mlp_params = 2 * hidden_size * intermediate_size + hidden_size * intermediate_size;
-        let norm_params = 2 * hidden_size;
-        let layer_params = attention_params + mlp_params + norm_params;
+    /// The unused-tensor policy for a Phi-3 causal-LM load.
+    fn unused_tensor_policy() -> UnusedTensors<'static> {
+        UnusedTensors::new(
+            Self::ALLOWED_UNUSED_PREFIXES,
+            Phi3Model::ALLOWED_UNUSED_SUFFIXES,
+        )
+    }
 
-        // Final layer norm: hidden_size
-        let final_norm_params = hidden_size;
+    /// Load pretrained weights and report exactly what was bound.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed, when the checkpoint is not a
+    /// Phi-3 checkpoint, when a tensor has the wrong shape, or when any parameter
+    /// is missing.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_from_checkpoint(&checkpoint)
+    }
 
-        embedding_params + (num_layers * layer_params) + final_norm_params
+    /// Bind an already-parsed checkpoint into the backbone and the LM head.
+    ///
+    /// # Errors
+    ///
+    /// See [`Phi3ForCausalLM::load_pretrained_report`].
+    pub fn load_from_checkpoint(&mut self, checkpoint: &Checkpoint) -> Result<LoadReport> {
+        // The backbone sits under `model.` in a HuggingFace causal-LM export and
+        // at the root in a bare backbone export; the LM head is always at the root.
+        let inner_prefix = if checkpoint.contains("model.embed_tokens.weight") {
+            "model."
+        } else if checkpoint.contains("embed_tokens.weight") {
+            ""
+        } else {
+            return Err(TrustformersError::weight_load_error(
+                "checkpoint has neither model.embed_tokens.weight nor embed_tokens.weight, so it \
+                 is not a Phi-3 checkpoint"
+                    .to_string(),
+            ));
+        };
+
+        let config = self.model.config.clone();
+        let mut binder = checkpoint.binder("");
+        self.model.bind_weights(&mut binder, inner_prefix)?;
+
+        // `tie_word_embeddings` models ship no separate head; the embedding table
+        // is reused instead of leaving a randomly-initialised projection in place.
+        if binder.has("lm_head.weight") {
+            if let Some(weight) =
+                binder.take_shaped("lm_head.weight", &[config.vocab_size, config.hidden_size])?
+            {
+                self.lm_head.set_weight(weight)?;
+            }
+        } else {
+            let tied = format!("{inner_prefix}embed_tokens.weight");
+            let embeddings = checkpoint.get(&tied).ok_or_else(|| {
+                TrustformersError::weight_load_error(format!(
+                    "checkpoint has no lm_head.weight and no {tied} to tie it to"
+                ))
+            })?;
+            self.lm_head.set_weight(embeddings.clone())?;
+            binder.mark_consumed(&tied);
+        }
+
+        binder.finish(Self::unused_tensor_policy())
     }
 }
 
@@ -1270,5 +1378,319 @@ mod tests {
             "causal LM output last dim must be vocab_size"
         );
         assert!(all_finite(&logits), "logits must be finite (no NaN/Inf)");
+    }
+    // --- Real weight loading (regression for the mock-tensor "loader") ---
+
+    use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+    /// Every tensor a Phi-3 checkpoint of `config`'s shape must supply.
+    ///
+    /// Built from the same names the binder resolves, with a distinct
+    /// deterministic ramp per tensor.
+    fn phi3_fixture(config: &Phi3Config, prefix: &str, fused: bool) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        let head_dim = config.head_dim();
+        let q_out = config.num_attention_heads * head_dim;
+        let kv_out = config.num_kv_heads() * head_dim;
+
+        let mut seed = 0.0f32;
+        let mut next_seed = || {
+            seed += 1.0;
+            seed
+        };
+
+        let mut tensors = vec![F32Tensor::ramp(
+            &format!("{prefix}embed_tokens.weight"),
+            &[config.vocab_size, hidden],
+            next_seed(),
+        )];
+
+        for layer in 0..config.num_hidden_layers {
+            let p = format!("{prefix}layers.{layer}.");
+            if fused {
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}self_attn.qkv_proj.weight"),
+                    &[q_out + 2 * kv_out, hidden],
+                    next_seed(),
+                ));
+            } else {
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}self_attn.q_proj.weight"),
+                    &[q_out, hidden],
+                    next_seed(),
+                ));
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}self_attn.k_proj.weight"),
+                    &[kv_out, hidden],
+                    next_seed(),
+                ));
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}self_attn.v_proj.weight"),
+                    &[kv_out, hidden],
+                    next_seed(),
+                ));
+            }
+            tensors.push(F32Tensor::ramp(
+                &format!("{p}self_attn.o_proj.weight"),
+                &[hidden, q_out],
+                next_seed(),
+            ));
+            if fused {
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}mlp.gate_up_proj.weight"),
+                    &[2 * intermediate, hidden],
+                    next_seed(),
+                ));
+            } else {
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}mlp.gate_proj.weight"),
+                    &[intermediate, hidden],
+                    next_seed(),
+                ));
+                tensors.push(F32Tensor::ramp(
+                    &format!("{p}mlp.up_proj.weight"),
+                    &[intermediate, hidden],
+                    next_seed(),
+                ));
+            }
+            tensors.push(F32Tensor::ramp(
+                &format!("{p}mlp.down_proj.weight"),
+                &[hidden, intermediate],
+                next_seed(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{p}input_layernorm.weight"),
+                &[hidden],
+                next_seed(),
+            ));
+            tensors.push(F32Tensor::ramp(
+                &format!("{p}post_attention_layernorm.weight"),
+                &[hidden],
+                next_seed(),
+            ));
+        }
+
+        tensors.push(F32Tensor::ramp(
+            &format!("{prefix}norm.weight"),
+            &[hidden],
+            next_seed(),
+        ));
+        tensors
+    }
+
+    fn phi3_hidden(model: &Phi3Model) -> Vec<f32> {
+        let ids = Tensor::from_vec_i64(vec![1, 2, 3], &[3]).expect("input ids");
+        match model.forward(ids).expect("forward must succeed after loading") {
+            Tensor::F32(arr) => arr.iter().copied().collect(),
+            other => panic!("expected an F32 hidden state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phi3_load_pretrained_makes_the_model_determined_by_the_checkpoint() {
+        // The old loader printed tensor names, assigned nothing and reported
+        // success, so the model stayed randomly initialised. Two independently
+        // initialised models must now agree exactly after loading.
+        let config = tiny_config();
+        let bytes = build_safetensors(&phi3_fixture(&config, "", true));
+
+        let mut first = Phi3Model::new(config.clone()).expect("model must build");
+        let mut second = Phi3Model::new(config).expect("model must build");
+        assert_ne!(
+            phi3_hidden(&first),
+            phi3_hidden(&second),
+            "two random initialisations must differ"
+        );
+
+        first.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+        second.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            phi3_hidden(&first),
+            phi3_hidden(&second),
+            "after loading, both models must be the checkpoint's model"
+        );
+    }
+
+    #[test]
+    fn phi3_fused_qkv_is_split_into_the_three_projections() {
+        // The fused Phi-3 `qkv_proj` holds the query rows first, then key, then
+        // value. Loading it and re-reading each projection must reproduce exactly
+        // those row ranges.
+        let config = tiny_config();
+        let tensors = phi3_fixture(&config, "", true);
+        let fused = tensors
+            .iter()
+            .find(|t| t.name == "layers.0.self_attn.qkv_proj.weight")
+            .expect("fixture must hold the fused projection")
+            .clone();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi3Model::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        let hidden = config.hidden_size;
+        let head_dim = config.head_dim();
+        let q_out = config.num_attention_heads * head_dim;
+        let kv_out = config.num_kv_heads() * head_dim;
+
+        let layer = &model.layers[0];
+        let expect_rows = |tensor: &Tensor, start: usize, count: usize, label: &str| {
+            let expected = &fused.values[start * hidden..(start + count) * hidden];
+            match tensor {
+                Tensor::F32(arr) => {
+                    assert_eq!(arr.shape(), &[count, hidden], "{label} has the wrong shape");
+                    assert_eq!(
+                        arr.iter().copied().collect::<Vec<f32>>(),
+                        expected.to_vec(),
+                        "{label} did not receive its rows of the fused projection"
+                    );
+                },
+                other => panic!("expected an F32 tensor for {label}, got {other:?}"),
+            }
+        };
+        expect_rows(layer.self_attn.q_proj.weight(), 0, q_out, "q_proj");
+        expect_rows(layer.self_attn.k_proj.weight(), q_out, kv_out, "k_proj");
+        expect_rows(
+            layer.self_attn.v_proj.weight(),
+            q_out + kv_out,
+            kv_out,
+            "v_proj",
+        );
+    }
+
+    #[test]
+    fn phi3_accepts_unfused_q_k_v_and_gate_up_projections() {
+        let config = tiny_config();
+        let bytes = build_safetensors(&phi3_fixture(&config, "", false));
+        let mut model = Phi3Model::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("an unfused checkpoint must load");
+        assert!(report.is_complete());
+        assert!(report.unexpected.is_empty());
+    }
+
+    #[test]
+    fn phi3_load_pretrained_reports_missing_tensors() {
+        let config = tiny_config();
+        let mut tensors = phi3_fixture(&config, "", true);
+        tensors.retain(|t| t.name != "layers.1.mlp.down_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi3Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.down_proj.weight"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn phi3_load_pretrained_rejects_unknown_tensors() {
+        let config = tiny_config();
+        let mut tensors = phi3_fixture(&config, "", true);
+        tensors.push(F32Tensor::ramp(
+            "layers.0.self_attn.rotary_emb.mystery",
+            &[4],
+            1.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi3Model::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised tensor must fail the load");
+        assert!(
+            err.to_string().contains("rotary_emb.mystery"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn phi3_causal_lm_loads_the_backbone_and_the_head() {
+        let config = tiny_config();
+        let mut tensors = phi3_fixture(&config, "model.", true);
+        let head = F32Tensor::ramp(
+            "lm_head.weight",
+            &[config.vocab_size, config.hidden_size],
+            99.0,
+        );
+        tensors.push(head.clone());
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi3ForCausalLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a causal-LM checkpoint must load");
+        assert!(report.is_complete());
+        assert!(report.unexpected.is_empty());
+
+        match model.lm_head.weight() {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), head.values);
+            },
+            other => panic!("expected an F32 LM head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phi3_causal_lm_ties_the_head_to_the_embeddings_when_absent() {
+        let config = tiny_config();
+        let tensors = phi3_fixture(&config, "model.", true);
+        let embeddings = tensors
+            .iter()
+            .find(|t| t.name == "model.embed_tokens.weight")
+            .expect("fixture must hold the embedding table")
+            .clone();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = Phi3ForCausalLM::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a tied-embedding checkpoint must load");
+
+        match model.lm_head.weight() {
+            Tensor::F32(arr) => {
+                assert_eq!(arr.iter().copied().collect::<Vec<f32>>(), embeddings.values);
+            },
+            other => panic!("expected an F32 LM head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phi3_load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let config = tiny_config();
+        let mut model = Phi3Model::new(config).expect("model must build");
+        let garbage = vec![0x5A_u8; 8192];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn phi3_num_parameters_is_summed_from_the_live_layers() {
+        let config = tiny_config();
+        let model = Phi3Model::new(config.clone()).expect("model must build");
+        let head_dim = config.head_dim();
+        let q_out = config.num_attention_heads * head_dim;
+        let kv_out = config.num_kv_heads() * head_dim;
+        let per_layer = q_out * config.hidden_size
+            + 2 * kv_out * config.hidden_size
+            + config.hidden_size * q_out
+            + 2 * config.intermediate_size * config.hidden_size
+            + config.hidden_size * config.intermediate_size
+            + 2 * config.hidden_size;
+        let expected = config.vocab_size * config.hidden_size
+            + config.num_hidden_layers * per_layer
+            + config.hidden_size;
+        assert_eq!(model.num_parameters(), expected);
     }
 }

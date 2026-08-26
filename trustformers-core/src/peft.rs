@@ -1,4 +1,8 @@
-#![allow(unused_variables)] // PEFT implementation with reserved parameters
+//! Parameter-efficient fine-tuning (PEFT) layers and adapters.
+//!
+//! Provides LoRA / QLoRA, bottleneck adapters, prefix tuning and prompt tuning,
+//! plus [`PeftModel`], which owns a set of named adapters and can fold LoRA
+//! deltas back into the base weights.
 
 use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
@@ -434,7 +438,6 @@ impl PrefixTuningLayer {
         num_heads: usize,
     ) -> Result<Self> {
         let projection_dim = hidden_size * 2; // For both key and value
-        let total_prefix_dim = num_layers * num_heads * prefix_length * 2; // Key + Value
 
         Ok(Self {
             prefix_length,
@@ -449,7 +452,7 @@ impl PrefixTuningLayer {
     pub fn get_prefix_states(&self) -> Result<Vec<(Tensor, Tensor)>> {
         let mut prefix_states = Vec::new();
 
-        for layer_idx in 0..self.num_layers {
+        for _layer_idx in 0..self.num_layers {
             // Project prefix embeddings to get key and value states
             let projected = self.prefix_projection.forward(self.prefix_embeddings.clone())?;
 
@@ -941,13 +944,74 @@ impl PeftModel {
         self.active = false;
     }
 
+    /// Fold every LoRA adapter into its base weights and unload the adapters.
+    ///
+    /// For each LoRA layer this computes `W <- W + (alpha / r) * B @ A` and
+    /// writes the result back into the base `Linear`, so the layer's forward
+    /// pass produces the fine-tuned output from the base weights alone.
+    ///
+    /// Only LoRA/QLoRA deltas are linear in the base weights and can be folded.
+    /// Adapter bottlenecks, prefix tuning and prompt tuning are *not*
+    /// mergeable; if any are present this returns
+    /// [`TrustformersError::not_implemented`] and leaves the model untouched
+    /// (in particular the adapters stay active, so the model never silently
+    /// degrades to the un-fine-tuned base).
     pub fn merge_and_unload(&mut self) -> Result<()> {
-        // Merge all LoRA layers
-        for (name, layer) in &mut self.peft_layers {
-            // This would need to be implemented per layer type
-            // For now, just mark as merged
+        let unmergeable: Vec<String> = self
+            .layer_metadata
+            .iter()
+            .filter(|(_, data)| !matches!(data, SerializableLayerData::LoRA { .. }))
+            .map(|(name, data)| {
+                let kind = match data {
+                    SerializableLayerData::LoRA { .. } => "lora",
+                    SerializableLayerData::Adapter { .. } => "adapter",
+                    SerializableLayerData::PrefixTuning { .. } => "prefix_tuning",
+                    SerializableLayerData::PromptTuning { .. } => "prompt_tuning",
+                };
+                format!("{} ({})", name, kind)
+            })
+            .collect();
+
+        if !unmergeable.is_empty() {
+            return Err(TrustformersError::not_implemented(format!(
+                "merge_and_unload can only fold LoRA deltas into base weights; \
+                 these layers are not linear in the base weights and cannot be merged: {}",
+                unmergeable.join(", ")
+            )));
         }
 
+        // Every layer registered through `add_lora_layer` has LoRA metadata.
+        // Any layer without metadata was inserted without a known weight
+        // representation, so we cannot merge it either.
+        let unknown: Vec<String> = self
+            .peft_layers
+            .keys()
+            .filter(|name| !self.layer_metadata.contains_key(*name))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return Err(TrustformersError::not_implemented(format!(
+                "merge_and_unload has no weight representation for these layers: {}",
+                unknown.join(", ")
+            )));
+        }
+
+        // Build the merged layers first so a failure part-way through leaves
+        // the model unchanged.
+        let mut merged: HashMap<String, (LoRALayer, SerializableLayerData)> = HashMap::new();
+        for (name, data) in &self.layer_metadata {
+            let mut layer = Self::deserialize_lora_layer(data)?;
+            layer.merge_weights()?;
+            let updated = Self::serialize_lora_layer(&layer)?;
+            merged.insert(name.clone(), (layer, updated));
+        }
+
+        for (name, (layer, metadata)) in merged {
+            self.layer_metadata.insert(name.clone(), metadata);
+            self.peft_layers.insert(name, Box::new(layer));
+        }
+
+        // Adapters are now part of the base weights; nothing is trainable.
         self.active = false;
         Ok(())
     }
@@ -1032,6 +1096,112 @@ impl PeftModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: `merge_and_unload` used to have an empty loop body and
+    /// merely set `active = false`, i.e. it discarded the fine-tuning instead of
+    /// folding it in. The base weights must now really change by `B @ A * alpha/r`.
+    #[test]
+    fn test_merge_and_unload_folds_lora_delta_into_base_weights() -> Result<()> {
+        let input_dim = 4usize;
+        let output_dim = 3usize;
+        let rank = 2usize;
+        let alpha = 4.0f32;
+        let scaling = alpha / rank as f32;
+
+        let mut lora = LoRALayer::new(input_dim, output_dim, rank, alpha, 0.0, false)?;
+
+        // Deterministic, non-zero weights so B @ A is not the zero matrix.
+        let base = Tensor::from_vec(
+            (0..output_dim * input_dim).map(|i| (i as f32) * 0.1).collect(),
+            &[output_dim, input_dim],
+        )?;
+        lora.base_layer.set_weight(base.clone())?;
+        let a = Tensor::from_vec(
+            (0..rank * input_dim).map(|i| 0.5 - (i as f32) * 0.05).collect(),
+            &[rank, input_dim],
+        )?;
+        let b = Tensor::from_vec(
+            (0..output_dim * rank).map(|i| 0.2 + (i as f32) * 0.1).collect(),
+            &[output_dim, rank],
+        )?;
+        lora.lora_a.set_weight(a.clone())?;
+        lora.lora_b.set_weight(b.clone())?;
+
+        let expected_delta = b.matmul(&a)?.scalar_mul(scaling)?;
+        let expected_merged = base.add(&expected_delta)?;
+
+        let mut model = PeftModel::new(PeftConfig::default());
+        model.add_lora_layer("q_proj".to_string(), lora);
+
+        model.merge_and_unload()?;
+
+        // The stored weights must now be W + (alpha/r) * B @ A.
+        let merged_metadata =
+            model.layer_metadata.get("q_proj").expect("metadata must be retained");
+        let merged_layer = PeftModel::deserialize_lora_layer(merged_metadata)?;
+        assert!(
+            merged_layer.merged,
+            "the layer must be flagged as merged after merge_and_unload"
+        );
+
+        let merged_weights = merged_layer.base_layer.weight().data()?;
+        let expected_weights = expected_merged.data()?;
+        assert_eq!(merged_weights.len(), expected_weights.len());
+        let mut max_delta_magnitude = 0.0f32;
+        for (got, want) in merged_weights.iter().zip(expected_weights.iter()) {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "merged weight {} != expected {}",
+                got,
+                want
+            );
+        }
+        for (merged_value, original) in merged_weights.iter().zip(base.data()?.iter()) {
+            max_delta_magnitude = max_delta_magnitude.max((merged_value - original).abs());
+        }
+        assert!(
+            max_delta_magnitude > 1e-3,
+            "the base weights must actually change; the delta was {}",
+            max_delta_magnitude
+        );
+
+        // A merged layer's forward pass must equal the un-merged LoRA forward.
+        let input = Tensor::from_vec(vec![1.0, -0.5, 0.25, 2.0], &[1, input_dim])?;
+        let mut reference = LoRALayer::new(input_dim, output_dim, rank, alpha, 0.0, false)?;
+        reference.base_layer.set_weight(base)?;
+        reference.lora_a.set_weight(a)?;
+        reference.lora_b.set_weight(b)?;
+        let reference_output = reference.forward(input.clone())?.data()?;
+        let merged_output = merged_layer.forward(input)?.data()?;
+        for (got, want) in merged_output.iter().zip(reference_output.iter()) {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "merged forward {} != adapted forward {}",
+                got,
+                want
+            );
+        }
+
+        assert!(
+            !model.active,
+            "adapters must be unloaded after a real merge"
+        );
+        Ok(())
+    }
+
+    /// Regression test: non-linear adapters cannot be folded into base weights,
+    /// so `merge_and_unload` must fail loudly instead of disabling them.
+    #[test]
+    fn test_merge_and_unload_rejects_unmergeable_adapters() -> Result<()> {
+        let mut model = PeftModel::new(PeftConfig::default());
+        let adapter = AdapterLayer::new(16, 4, ActivationType::ReLU, 0.0);
+        model.add_adapter_layer("mlp_adapter".to_string(), adapter);
+
+        let result = model.merge_and_unload();
+        assert!(result.is_err(), "adapter layers are not mergeable");
+        assert!(model.active, "a failed merge must not disable the adapters");
+        Ok(())
+    }
 
     #[test]
     fn test_lora_layer_creation() {

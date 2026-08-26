@@ -1,9 +1,21 @@
-//! Kernel fusion automation system for TrustformeRS
+//! Kernel fusion **analysis and code generation** for TrustformeRS.
 //!
-//! This module provides comprehensive kernel fusion capabilities to automatically
-//! identify and fuse compatible operations for optimal performance. The system
-//! includes pattern matching, constraint verification, and multi-backend kernel
-//! generation.
+//! This module finds fusible operation chains in a [`ComputationGraph`],
+//! verifies the fusion constraints, and emits source for a fused kernel. What
+//! it does **not** do is run anything: [`KernelImplementation`] holds source
+//! text, and nothing in this workspace compiles, JITs or dispatches it. Fusing
+//! a graph here therefore changes no execution and produces no speedup by
+//! itself; the output is input to an external toolchain.
+//!
+//! Two consequences worth stating plainly:
+//!
+//! * [`FusedKernel::estimated_speedup`] is a *cost-model estimate* used to rank
+//!   fusion candidates, not a measured or predicted wall-clock ratio. Its
+//!   parameters live in [`performance::PerformanceDatabase`] and default to
+//!   conventional values until you record real measurements into them.
+//! * The generated CPU source is C with OpenMP pragmas. For fusion that
+//!   actually executes inside this crate, use [`crate::fused`], whose kernels
+//!   are Rust and run on `&[f32]` directly.
 //!
 //! # Organization
 //!
@@ -27,11 +39,11 @@
 //! // Analyze graph for fusion opportunities
 //! let opportunities = engine.analyze_graph(&graph)?;
 //!
-//! // Fuse operations
+//! // Generate source for each viable fusion. Nothing is executed here.
 //! for opportunity in opportunities {
 //!     if opportunity.constraints_satisfied {
 //!         let fused_kernel = engine.fuse_operations(&graph, &opportunity)?;
-//!         println!("Generated fused kernel: {}", fused_kernel.name);
+//!         println!("Generated fused kernel source: {}", fused_kernel.name);
 //!     }
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())

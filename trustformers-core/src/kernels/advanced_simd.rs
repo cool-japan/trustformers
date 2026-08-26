@@ -1,8 +1,14 @@
 //! Advanced SIMD-optimized kernels for high-performance CPU tensor operations
 //!
-//! This module provides hand-crafted SIMD implementations using AVX2/AVX-512
-//! for critical operations in transformer models, achieving near-theoretical
-//! peak performance on modern CPUs.
+//! This module provides hand-crafted AVX2 implementations for critical
+//! operations in transformer models. The AVX2 code paths are gated on the
+//! *compile-time* `target_feature = "avx2"` cfg (not a runtime
+//! `is_x86_feature_detected!` check), which is off by default: a stock
+//! `cargo build` (no `-C target-feature=+avx2` / `-C target-cpu=...`) never
+//! enables them, so ordinary builds always take the portable scalar
+//! fallback path in each function below. The fallbacks are numerically
+//! correct; only the "hand-crafted AVX2" performance benefit is
+//! conditional on how the crate was compiled.
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -31,8 +37,11 @@ pub mod optimized_matmul {
     /// Matrix C of shape [M, N]
     ///
     /// # Performance
-    /// On Intel Skylake and newer CPUs, this achieves >90% of theoretical peak FLOPS
-    /// for matrices larger than 512x512.
+    /// The AVX2 micro-kernel below is only compiled in when this crate is
+    /// built with `-C target-feature=+avx2` (e.g. `target-cpu=native` or an
+    /// explicit RUSTFLAGS override) - a stock `cargo build` does not enable
+    /// it, and this function instead runs the portable scalar fallback
+    /// (still numerically correct, just without the AVX2 speedup).
     pub fn matmul_f32(a: &ArrayView2<f32>, b: &ArrayView2<f32>) -> Result<Array2<f32>> {
         let (m, k) = a.dim();
         let (k2, n) = b.dim();
@@ -133,7 +142,6 @@ pub mod optimized_matmul {
     ) {
         use std::arch::x86_64::*;
 
-        let k = a.shape()[1];
         let n = b.shape()[1];
 
         // Process 4x8 blocks with AVX2
@@ -155,12 +163,6 @@ pub mod optimized_matmul {
                     if kk + 4 > k_end {
                         break;
                     }
-
-                    // Load 4 elements from each row of A
-                    let a0 = _mm_loadu_ps(a.as_ptr().add(i * k + kk));
-                    let a1 = _mm_loadu_ps(a.as_ptr().add((i + 1) * k + kk));
-                    let a2 = _mm_loadu_ps(a.as_ptr().add((i + 2) * k + kk));
-                    let a3 = _mm_loadu_ps(a.as_ptr().add((i + 3) * k + kk));
 
                     // Process each K element
                     for offset in 0..4 {
@@ -195,7 +197,6 @@ pub mod optimized_matmul {
                 }
 
                 // Store results back to C
-                let c_base = c.as_mut_ptr();
                 let mut result_row0 = [0.0f32; 8];
                 let mut result_row1 = [0.0f32; 8];
                 let mut result_row2 = [0.0f32; 8];
@@ -434,22 +435,25 @@ pub mod fused_ops {
         // Find max for numerical stability
         let max_val = input.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-        // Compute exp(x - max) and sum
-        let mut sum = 0.0f32;
-
+        // Compute exp(x - max) and sum. Each branch computes `sum` from
+        // scratch (rather than pre-initializing it to 0.0 before an
+        // avx2-enabled build immediately overwrites it, which is dead
+        // initialization the compiler flags once this cfg is actually
+        // built - see the module docs on why it normally isn't).
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        unsafe {
-            sum = softmax_exp_sum_avx2(input.as_ptr(), output.as_mut_ptr(), len, max_val);
-        }
+        let sum =
+            unsafe { softmax_exp_sum_avx2(input.as_ptr(), output.as_mut_ptr(), len, max_val) };
 
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-        {
+        let sum = {
+            let mut sum = 0.0f32;
             for i in 0..len {
                 let exp_val = (input[i] - max_val).exp();
                 output[i] = exp_val;
                 sum += exp_val;
             }
-        }
+            sum
+        };
 
         // Normalize
         let inv_sum = 1.0 / sum;
@@ -479,8 +483,8 @@ pub mod fused_ops {
             let x_shifted = _mm256_sub_ps(x, max_vec);
 
             // Fast exp approximation using AVX2
-            // exp(x) ≈ 2^(x / ln(2))
-            let ln2_recip = _mm256_set1_ps(1.442695041);
+            // exp(x) ≈ 2^(x / ln(2)) = 2^(x * log2(e))
+            let ln2_recip = _mm256_set1_ps(std::f32::consts::LOG2_E);
             let scaled = _mm256_mul_ps(x_shifted, ln2_recip);
 
             // Use polynomial approximation for 2^x in range [-0.5, 0.5]
@@ -510,11 +514,24 @@ pub mod fused_ops {
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline(always)]
-    unsafe fn exp2_approx_avx2(x: __m256) -> __m256 {
+    // `__m256` is fully qualified rather than imported via a function-body
+    // `use` (the pattern used elsewhere in this file, e.g.
+    // `softmax_exp_sum_avx2` above, which calls this): a body-local `use`
+    // does not extend to the enclosing function *signature*, only to the
+    // body, and this is the one function in the file with `__m256` in its
+    // signature rather than only its body. This function was never actually
+    // compiled before (the compile-time `target_feature = "avx2"` cfg
+    // guarding it is off in every default build - see the module docs), so
+    // this went undetected until now.
+    unsafe fn exp2_approx_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+        use std::arch::x86_64::*;
+
         // Polynomial approximation for 2^x
-        // Coefficients for minimax approximation in [-0.5, 0.5]
+        // Coefficients for minimax approximation in [-0.5, 0.5]; c1 is the
+        // first-order Taylor coefficient of 2^x at x=0 (d/dx 2^x = 2^x *
+        // ln(2)), i.e. exactly `ln(2)`.
         let c0 = _mm256_set1_ps(1.0);
-        let c1 = _mm256_set1_ps(0.693147);
+        let c1 = _mm256_set1_ps(std::f32::consts::LN_2);
         let c2 = _mm256_set1_ps(0.240153);
         let c3 = _mm256_set1_ps(0.0558282);
 

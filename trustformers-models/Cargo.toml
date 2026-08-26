@@ -2,6 +2,7 @@
 name = "trustformers-models"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,14 +26,24 @@ anyhow.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 memmap2.workspace = true
-serde_yaml.workspace = true
+# `serde_yaml_ng`, not `serde_yaml`: the original crate was archived by its author
+# in 2024 and receives no further fixes. `serde_yaml_ng` is the maintained hard
+# fork of 0.9.34 with an API-identical surface, so the switch is a rename.
+serde_yaml_ng.workspace = true
 fastrand.workspace = true
 chrono.workspace = true
 half.workspace = true
+safetensors.workspace = true
 tokio.workspace = true
 num_cpus.workspace = true
+# Pure-Rust system telemetry: real process/system memory readings for memory_profiling.
+sysinfo.workspace = true
+# Structured logging facade: libraries must not write to stdout.
+tracing.workspace = true
 regex.workspace = true
-approx.workspace = true
+# Pure-Rust FFT: Hyena's long-convolution operator runs through oxifft's
+# FFT-based `convolve` instead of an O(L*K) scalar loop. (rustfft is banned.)
+oxifft.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
@@ -41,11 +52,33 @@ pretty_assertions.workspace = true
 proptest.workspace = true
 tokio-test.workspace = true
 
+# The end-to-end export proof builds one model of each of the five families, so
+# it needs all five architecture features. Declaring them here makes cargo skip
+# the target when they are off; without it the target still builds (its contents
+# are `#![cfg]`-gated) and reports "0 tests run", which reads like a pass.
+[[test]]
+name = "export_round_trip"
+required-features = ["gpt2", "bert", "llama", "mistral", "t5"]
+
+# Both Metal examples reach for `trustformers_models::gpt2`, which only exists
+# behind the `gpt2` feature. Their bodies are `#[cfg(feature = "metal")]`-gated
+# but a `use` path is not conditional on `gpt2`, so `--features metal` on its own
+# used to fail the build with E0433 before the target was ever run. Declaring the
+# features they need makes cargo skip the target instead.
+[[example]]
+name = "test_gpt2_metal"
+required-features = ["gpt2", "metal"]
+
+[[example]]
+name = "test_gpt2_generation_fixed"
+required-features = ["gpt2", "metal"]
+
 [features]
 default = ["bert"]
 bert = []
 roberta = []
-distilbert = []
+# DistilBERT reuses BertEncoder / BertLayerNames from the BERT implementation.
+distilbert = ["bert"]
 gpt2 = []
 gpt_neo = []
 gpt_j = []
@@ -62,7 +95,7 @@ llama3 = []
 codellama = []
 deepseek = []
 gpt_neox = ["llama"]  # GPT-NeoX reuses RotaryEmbedding from LLaMA
-mistral = []
+mistral = ["llama"]  # Mistral reuses LlamaMLP/RMSNorm from LLaMA
 clip = []
 gemma = []
 qwen = []

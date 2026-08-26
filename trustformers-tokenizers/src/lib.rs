@@ -23,6 +23,7 @@ pub mod bio;
 pub mod bpe;
 pub mod canine;
 pub mod char;
+pub mod chat_template;
 pub mod chemical;
 pub mod chinese;
 pub mod code_tokenizer;
@@ -44,6 +45,7 @@ pub mod mmap_vocab;
 pub mod multimodal;
 pub mod music;
 pub mod normalizer;
+pub mod offsets;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod parallel;
@@ -135,10 +137,9 @@ pub use custom_format::{
 pub use fairseq::{FairseqDictionaryBuilder, FairseqTokenizer};
 #[cfg(feature = "gpu")]
 pub use gpu_tokenization::{
-    BatchProcessingConfig, BenchmarkResult as GpuBenchmarkResult, GpuTokenizationBenchmark,
-    GpuTokenizationResult, GpuTokenizationStats, GpuTokenizer, GpuTokenizerConfig,
-    GpuTokenizerError, KernelOptimization, MemoryOptimization,
-    PaddingStrategy as GpuPaddingStrategy,
+    BatchProcessingConfig, BenchmarkResult as GpuBenchmarkResult, GpuBackend,
+    GpuTokenizationBenchmark, GpuTokenizationResult, GpuTokenizationStats, GpuTokenizer,
+    GpuTokenizerConfig, GpuTokenizerError, PaddingStrategy as GpuPaddingStrategy,
 };
 pub use japanese::{JapaneseMode, JapaneseTokenizer, JapaneseTokenizerConfig};
 #[cfg(feature = "jax")]
@@ -170,13 +171,20 @@ pub use music::{
     MusicAnalysis, MusicToken, MusicTokenMetadata, MusicTokenType, MusicTokenizer,
     MusicTokenizerConfig,
 };
+pub use offsets::{
+    byte_offsets_to_char_offsets, char_offsets_to_byte_offsets, AlignmentBuilder, ByteSpan,
+    OffsetAlignment,
+};
 #[cfg(feature = "onnx")]
 pub use onnx::{
     OnnxAttribute, OnnxDataType, OnnxExportConfig, OnnxModel, OnnxModelMetadata, OnnxNode,
     OnnxOptimizationLevel, OnnxSessionOptions, OnnxTensorData, OnnxTensorInfo,
     OnnxTokenizerExporter, OnnxTokenizerRuntime, OnnxUtils,
 };
-pub use parallel::{BatchTokenizer, BatchedTokenizedInput, ParallelTokenizer};
+pub use parallel::{
+    BatchTokenizer, BatchedTokenizedInput, PaddingSide as BatchPaddingSide, ParallelTokenizer,
+    TruncationStrategy as BatchTruncationStrategy,
+};
 pub use performance_profiler::{
     BenchmarkResult, ExportFormat, MemoryStats as ProfilerMemoryStats, PerformanceProfiler,
     ProfilerConfig, ProfilingReport, ProfilingSummary, ThroughputStats, TimingStats,

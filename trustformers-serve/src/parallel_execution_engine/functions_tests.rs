@@ -287,15 +287,28 @@ mod tests {
                 allocated_at: chrono::Utc::now(),
                 deallocated_at: None,
                 duration: Duration::ZERO,
-                utilization: 0.8,
-                efficiency: 1.0,
+                utilization: Some(0.8),
+                efficiency: Some(1.0),
+            },
+            requirement: ResourceRequirement {
+                resource_type: "CPU".to_string(),
+                min_amount: 1.0,
+                cpu_cores: 1.0,
+                memory_mb: 128,
+                gpu_devices: Vec::new(),
+                network_ports: 0,
+                temp_directories: 0,
+                database_connections: 0,
+                custom_resources: HashMap::new(),
             },
             allocated_at: chrono::Utc::now(),
             expected_deallocation: None,
-            efficiency: 0.95,
+            efficiency: Some(0.95),
             metadata: HashMap::new(),
         };
-        assert!((state.efficiency - 0.95).abs() < f32::EPSILON);
+        let efficiency = state.efficiency.unwrap_or_default();
+        assert!((efficiency - 0.95).abs() < f32::EPSILON);
+        assert_eq!(state.requirement.memory_mb, 128);
     }
 
     #[test]

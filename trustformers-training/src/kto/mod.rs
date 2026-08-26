@@ -80,14 +80,17 @@ impl KlEstimate {
     /// Returns a zero estimate when the batch is empty.
     pub fn from_batch(examples: &[KtoExample]) -> Self {
         if examples.is_empty() {
-            return Self { value: 0.0, num_examples: 0 };
+            return Self {
+                value: 0.0,
+                num_examples: 0,
+            };
         }
-        let sum: f32 = examples
-            .iter()
-            .map(|ex| ex.policy_log_prob - ex.reference_log_prob)
-            .sum();
+        let sum: f32 = examples.iter().map(|ex| ex.policy_log_prob - ex.reference_log_prob).sum();
         let value = sum / (examples.len() as f32);
-        Self { value, num_examples: examples.len() }
+        Self {
+            value,
+            num_examples: examples.len(),
+        }
     }
 }
 
@@ -142,10 +145,8 @@ pub fn compute_kto_loss(
         return Err(KtoError::EmptyBatch);
     }
 
-    let preferred: Vec<&KtoExample> =
-        examples.iter().filter(|ex| ex.is_preferred).collect();
-    let rejected: Vec<&KtoExample> =
-        examples.iter().filter(|ex| !ex.is_preferred).collect();
+    let preferred: Vec<&KtoExample> = examples.iter().filter(|ex| ex.is_preferred).collect();
+    let rejected: Vec<&KtoExample> = examples.iter().filter(|ex| !ex.is_preferred).collect();
 
     if preferred.is_empty() {
         return Err(KtoError::NoPreferredExamples);
@@ -159,10 +160,8 @@ pub fn compute_kto_loss(
     let z_ref = kl_est.value;
 
     // Step 2: Compute preferred losses and mean log-ratio
-    let preferred_log_ratios: Vec<f32> = preferred
-        .iter()
-        .map(|ex| ex.policy_log_prob - ex.reference_log_prob)
-        .collect();
+    let preferred_log_ratios: Vec<f32> =
+        preferred.iter().map(|ex| ex.policy_log_prob - ex.reference_log_prob).collect();
 
     let preferred_losses: Vec<f32> = preferred_log_ratios
         .iter()
@@ -175,10 +174,8 @@ pub fn compute_kto_loss(
         preferred_losses.iter().sum::<f32>() / (preferred_losses.len() as f32);
 
     // Step 3: Compute rejected losses and mean log-ratio
-    let rejected_log_ratios: Vec<f32> = rejected
-        .iter()
-        .map(|ex| ex.policy_log_prob - ex.reference_log_prob)
-        .collect();
+    let rejected_log_ratios: Vec<f32> =
+        rejected.iter().map(|ex| ex.policy_log_prob - ex.reference_log_prob).collect();
 
     let rejected_losses: Vec<f32> = rejected_log_ratios
         .iter()
@@ -187,12 +184,11 @@ pub fn compute_kto_loss(
 
     let mean_rejected_log_ratio =
         rejected_log_ratios.iter().sum::<f32>() / (rejected_log_ratios.len() as f32);
-    let rejected_loss_mean =
-        rejected_losses.iter().sum::<f32>() / (rejected_losses.len() as f32);
+    let rejected_loss_mean = rejected_losses.iter().sum::<f32>() / (rejected_losses.len() as f32);
 
     // Step 4: Combine with weights
-    let total_loss = config.lambda_preferred * preferred_loss_mean
-        + config.lambda_rejected * rejected_loss_mean;
+    let total_loss =
+        config.lambda_preferred * preferred_loss_mean + config.lambda_rejected * rejected_loss_mean;
 
     // Numerical stability check
     if total_loss.is_nan() || total_loss.is_infinite() {
@@ -227,7 +223,10 @@ pub struct KtoTrainer {
 impl KtoTrainer {
     /// Create a new KTO trainer with the given configuration.
     pub fn new(config: KtoConfig) -> Self {
-        Self { config, history: Vec::new() }
+        Self {
+            config,
+            history: Vec::new(),
+        }
     }
 
     /// Compute the KTO loss for a batch of examples and record the result.
@@ -286,13 +285,13 @@ impl fmt::Display for KtoError {
             KtoError::EmptyBatch => write!(f, "KTO error: batch is empty"),
             KtoError::NoPreferredExamples => {
                 write!(f, "KTO error: batch contains no preferred examples")
-            }
+            },
             KtoError::NoRejectedExamples => {
                 write!(f, "KTO error: batch contains no rejected examples")
-            }
+            },
             KtoError::NumericalError(msg) => {
                 write!(f, "KTO numerical error: {msg}")
-            }
+            },
         }
     }
 }
@@ -346,7 +345,11 @@ mod tests {
         }];
         let est = KlEstimate::from_batch(&examples);
         // KL ≈ policy - ref = -1.0 - (-2.0) = 1.0
-        assert!((est.value - 1.0).abs() < 1e-6, "Expected 1.0, got {}", est.value);
+        assert!(
+            (est.value - 1.0).abs() < 1e-6,
+            "Expected 1.0, got {}",
+            est.value
+        );
         assert_eq!(est.num_examples, 1);
     }
 
@@ -359,7 +362,11 @@ mod tests {
         }];
         let est = KlEstimate::from_batch(&examples);
         // KL ≈ policy - ref = -3.0 - (-1.0) = -2.0
-        assert!((est.value - (-2.0)).abs() < 1e-6, "Expected -2.0, got {}", est.value);
+        assert!(
+            (est.value - (-2.0)).abs() < 1e-6,
+            "Expected -2.0, got {}",
+            est.value
+        );
         assert_eq!(est.num_examples, 1);
     }
 
@@ -384,7 +391,11 @@ mod tests {
         ];
         let est = KlEstimate::from_batch(&examples);
         // log_ratios: 1.0, 0.0, 2.0 => mean = 1.0
-        assert!((est.value - 1.0).abs() < 1e-6, "Expected 1.0, got {}", est.value);
+        assert!(
+            (est.value - 1.0).abs() < 1e-6,
+            "Expected 1.0, got {}",
+            est.value
+        );
         assert_eq!(est.num_examples, 3);
     }
 
@@ -507,11 +518,17 @@ mod tests {
                 is_preferred: false,
             },
         ];
-        let config_high_beta = KtoConfig { beta: 5.0, ..KtoConfig::default() };
-        let config_low_beta = KtoConfig { beta: 0.01, ..KtoConfig::default() };
+        let config_high_beta = KtoConfig {
+            beta: 5.0,
+            ..KtoConfig::default()
+        };
+        let config_low_beta = KtoConfig {
+            beta: 0.01,
+            ..KtoConfig::default()
+        };
 
-        let result_high = compute_kto_loss(&examples_high_ratio, &config_high_beta)
-            .expect("should succeed");
+        let result_high =
+            compute_kto_loss(&examples_high_ratio, &config_high_beta).expect("should succeed");
         let result_low =
             compute_kto_loss(&examples_high_ratio, &config_low_beta).expect("should succeed");
 
@@ -582,7 +599,10 @@ mod tests {
                 is_preferred: false,
             },
         ];
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
 
         // z_ref = 0, log_ratio = 0 for both
@@ -657,7 +677,10 @@ mod tests {
         assert_eq!(trainer.history().len(), 3);
         // All losses should be finite
         for result in trainer.history() {
-            assert!(result.total_loss.is_finite(), "all history losses should be finite");
+            assert!(
+                result.total_loss.is_finite(),
+                "all history losses should be finite"
+            );
         }
     }
 
@@ -704,7 +727,10 @@ mod tests {
         let no_rej = KtoError::NoRejectedExamples;
         let numerical = KtoError::NumericalError("NaN detected".to_string());
 
-        assert!(empty.to_string().contains("empty"), "EmptyBatch should mention 'empty'");
+        assert!(
+            empty.to_string().contains("empty"),
+            "EmptyBatch should mention 'empty'"
+        );
         assert!(
             no_pref.to_string().contains("preferred"),
             "NoPreferredExamples should mention 'preferred'"
@@ -724,7 +750,10 @@ mod tests {
     #[test]
     fn test_kto_sigmoid_values() {
         // sigmoid(0) = 0.5
-        assert!((sigmoid(0.0) - 0.5).abs() < 1e-6, "sigmoid(0) should be 0.5");
+        assert!(
+            (sigmoid(0.0) - 0.5).abs() < 1e-6,
+            "sigmoid(0) should be 0.5"
+        );
 
         // sigmoid(large positive) ≈ 1.0
         assert!(
@@ -806,11 +835,19 @@ mod extended_tests {
     use super::*;
 
     fn pref(policy: f32, reference: f32) -> KtoExample {
-        KtoExample { policy_log_prob: policy, reference_log_prob: reference, is_preferred: true }
+        KtoExample {
+            policy_log_prob: policy,
+            reference_log_prob: reference,
+            is_preferred: true,
+        }
     }
 
     fn rej(policy: f32, reference: f32) -> KtoExample {
-        KtoExample { policy_log_prob: policy, reference_log_prob: reference, is_preferred: false }
+        KtoExample {
+            policy_log_prob: policy,
+            reference_log_prob: reference,
+            is_preferred: false,
+        }
     }
 
     // 1. Symmetric: preferred with log_ratio=d and rejected with log_ratio=-d give same loss (z_ref=0)
@@ -819,43 +856,68 @@ mod extended_tests {
         let d = 2.0_f32;
         // z_ref = (d + (-d)) / 2 = 0
         let examples = vec![pref(d, 0.0), rej(-d, 0.0)];
-        let config = KtoConfig { beta: 0.5, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 0.5,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!((result.preferred_loss - result.rejected_loss).abs() < 1e-5,
+        assert!(
+            (result.preferred_loss - result.rejected_loss).abs() < 1e-5,
             "Symmetric inputs should give equal preferred/rejected losses: pref={}, rej={}",
-            result.preferred_loss, result.rejected_loss);
+            result.preferred_loss,
+            result.rejected_loss
+        );
     }
 
     // 2. Higher z_ref increases preferred loss
     #[test]
     fn test_kto_positive_z_ref_increases_preferred_loss() {
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let examples_a = vec![pref(1.0, 0.0), rej(0.0, 0.0)]; // z_ref = 0.5
         let examples_b = vec![pref(1.0, 0.0), rej(2.0, 0.0)]; // z_ref = 1.5
         let r_a = compute_kto_loss(&examples_a, &config).expect("ok");
         let r_b = compute_kto_loss(&examples_b, &config).expect("ok");
-        assert!(r_b.preferred_loss > r_a.preferred_loss,
-            "Higher z_ref should increase preferred loss: a={}, b={}", r_a.preferred_loss, r_b.preferred_loss);
+        assert!(
+            r_b.preferred_loss > r_a.preferred_loss,
+            "Higher z_ref should increase preferred loss: a={}, b={}",
+            r_a.preferred_loss,
+            r_b.preferred_loss
+        );
     }
 
     // 3. Very good preferred output: L_w → 0
     #[test]
     fn test_kto_preferred_loss_near_zero_for_good_output() {
         let examples = vec![pref(20.0, 0.0), rej(-20.0, 0.0)]; // z_ref = 0
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!(result.preferred_loss < 0.01,
-            "Very good preferred output should have loss near 0, got {}", result.preferred_loss);
+        assert!(
+            result.preferred_loss < 0.01,
+            "Very good preferred output should have loss near 0, got {}",
+            result.preferred_loss
+        );
     }
 
     // 4. Policy correctly avoids bad output: L_l → 0
     #[test]
     fn test_kto_rejected_loss_near_zero_when_policy_avoids_bad() {
         let examples = vec![pref(20.0, 0.0), rej(-20.0, 0.0)]; // z_ref = 0
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!(result.rejected_loss < 0.01,
-            "Policy correctly avoiding bad output should have loss near 0, got {}", result.rejected_loss);
+        assert!(
+            result.rejected_loss < 0.01,
+            "Policy correctly avoiding bad output should have loss near 0, got {}",
+            result.rejected_loss
+        );
     }
 
     // 5. Very bad preferred output: L_w → 1
@@ -863,10 +925,16 @@ mod extended_tests {
     fn test_kto_preferred_loss_near_one_for_bad_preferred() {
         // z_ref = (-20 + 0) / 2 = -10; L_w = 1 - sigmoid(1*(-20-(-10))) = 1 - sigmoid(-10) ≈ 1
         let examples = vec![pref(-20.0, 0.0), rej(0.0, 0.0)];
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!(result.preferred_loss > 0.9,
-            "Bad preferred output should have loss near 1, got {}", result.preferred_loss);
+        assert!(
+            result.preferred_loss > 0.9,
+            "Bad preferred output should have loss near 1, got {}",
+            result.preferred_loss
+        );
     }
 
     // 6. High beta makes decision boundary sharper
@@ -874,29 +942,41 @@ mod extended_tests {
     fn test_kto_high_beta_sharp_boundary() {
         // log_ratio = 0.1 > z_ref=0 → preferred should benefit from high beta
         let examples = vec![pref(0.1, 0.0), rej(-0.1, 0.0)];
-        let config_high = KtoConfig { beta: 10.0, ..KtoConfig::default() };
-        let config_low = KtoConfig { beta: 0.1, ..KtoConfig::default() };
+        let config_high = KtoConfig {
+            beta: 10.0,
+            ..KtoConfig::default()
+        };
+        let config_low = KtoConfig {
+            beta: 0.1,
+            ..KtoConfig::default()
+        };
         let r_high = compute_kto_loss(&examples, &config_high).expect("ok");
         let r_low = compute_kto_loss(&examples, &config_low).expect("ok");
-        assert!(r_high.preferred_loss < r_low.preferred_loss,
+        assert!(
+            r_high.preferred_loss < r_low.preferred_loss,
             "High beta should give lower preferred loss for log_ratio > z_ref: high={}, low={}",
-            r_high.preferred_loss, r_low.preferred_loss);
+            r_high.preferred_loss,
+            r_low.preferred_loss
+        );
     }
 
     // 7. z_ref estimation from 4-example minibatch
     #[test]
     fn test_kto_z_ref_estimation_from_minibatch() {
         let examples = vec![
-            pref(1.0, 0.0),   // log_ratio = 1.0
-            pref(3.0, 1.0),   // log_ratio = 2.0
-            rej(-1.0, 0.0),   // log_ratio = -1.0
-            rej(0.0, 1.0),    // log_ratio = -1.0
+            pref(1.0, 0.0), // log_ratio = 1.0
+            pref(3.0, 1.0), // log_ratio = 2.0
+            rej(-1.0, 0.0), // log_ratio = -1.0
+            rej(0.0, 1.0),  // log_ratio = -1.0
         ];
         // z_ref = (1.0 + 2.0 + (-1.0) + (-1.0)) / 4 = 0.25
         let config = KtoConfig::default();
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!((result.kl_estimate - 0.25).abs() < 1e-5,
-            "Expected z_ref=0.25, got {}", result.kl_estimate);
+        assert!(
+            (result.kl_estimate - 0.25).abs() < 1e-5,
+            "Expected z_ref=0.25, got {}",
+            result.kl_estimate
+        );
     }
 
     // 8. Unpaired batch: 3 preferred, 1 rejected
@@ -924,21 +1004,34 @@ mod extended_tests {
             rej(-3.0, -1.0),
             rej(-0.5, -2.0),
         ];
-        let config = KtoConfig { lambda_preferred: 2.0, lambda_rejected: 0.5, ..KtoConfig::default() };
+        let config = KtoConfig {
+            lambda_preferred: 2.0,
+            lambda_rejected: 0.5,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
         let expected = 2.0 * result.preferred_loss + 0.5 * result.rejected_loss;
-        assert!((result.total_loss - expected).abs() < 1e-5,
-            "Expected {expected}, got {}", result.total_loss);
+        assert!(
+            (result.total_loss - expected).abs() < 1e-5,
+            "Expected {expected}, got {}",
+            result.total_loss
+        );
     }
 
     // 10. lambda_preferred=0 → total = lambda_rejected * rejected_loss
     #[test]
     fn test_kto_lambda_preferred_zero() {
         let examples = vec![pref(-1.0, -2.0), rej(-3.0, -1.0)];
-        let config = KtoConfig { lambda_preferred: 0.0, lambda_rejected: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            lambda_preferred: 0.0,
+            lambda_rejected: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!((result.total_loss - result.rejected_loss).abs() < 1e-5,
-            "With lambda_preferred=0, total should equal rejected_loss");
+        assert!(
+            (result.total_loss - result.rejected_loss).abs() < 1e-5,
+            "With lambda_preferred=0, total should equal rejected_loss"
+        );
     }
 
     // 11. Trainer: 4 steps → history has 4 entries
@@ -963,8 +1056,10 @@ mod extended_tests {
         // batch B: z_ref = (2.0 + 0.0)/2 = 1.0
         trainer.step(&[pref(2.0, 0.0), rej(0.0, 0.0)]).expect("step 2");
         let mean_kl = trainer.mean_kl_estimate();
-        assert!((mean_kl - 0.5).abs() < 1e-5,
-            "Expected mean_kl=0.5, got {mean_kl}");
+        assert!(
+            (mean_kl - 0.5).abs() < 1e-5,
+            "Expected mean_kl=0.5, got {mean_kl}"
+        );
     }
 
     // 13. KL estimate uses both preferred and rejected examples
@@ -974,14 +1069,20 @@ mod extended_tests {
         let mixed = vec![pref(2.0, 0.0), rej(-2.0, 0.0)];
         let result = compute_kto_loss(&mixed, &config).expect("ok");
         // z_ref = (2 + (-2)) / 2 = 0
-        assert!((result.kl_estimate - 0.0).abs() < 1e-5,
-            "KL estimate should average all examples: got {}", result.kl_estimate);
+        assert!(
+            (result.kl_estimate - 0.0).abs() < 1e-5,
+            "KL estimate should average all examples: got {}",
+            result.kl_estimate
+        );
     }
 
     // 14. preferred_loss and rejected_loss always in [0, 1]
     #[test]
     fn test_kto_loss_in_zero_one_range() {
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let test_cases: Vec<Vec<KtoExample>> = vec![
             vec![pref(0.0, 0.0), rej(0.0, 0.0)],
             vec![pref(10.0, 0.0), rej(-10.0, 0.0)],
@@ -990,10 +1091,16 @@ mod extended_tests {
         ];
         for examples in test_cases {
             let result = compute_kto_loss(&examples, &config).expect("should succeed");
-            assert!(result.preferred_loss >= 0.0 && result.preferred_loss <= 1.0,
-                "preferred_loss out of [0,1]: {}", result.preferred_loss);
-            assert!(result.rejected_loss >= 0.0 && result.rejected_loss <= 1.0,
-                "rejected_loss out of [0,1]: {}", result.rejected_loss);
+            assert!(
+                result.preferred_loss >= 0.0 && result.preferred_loss <= 1.0,
+                "preferred_loss out of [0,1]: {}",
+                result.preferred_loss
+            );
+            assert!(
+                result.rejected_loss >= 0.0 && result.rejected_loss <= 1.0,
+                "rejected_loss out of [0,1]: {}",
+                result.rejected_loss
+            );
         }
     }
 
@@ -1002,9 +1109,15 @@ mod extended_tests {
     fn test_kto_rejected_loss_near_one_when_policy_prefers_bad() {
         // z_ref = (0 + 20)/2 = 10; L_l = 1 - sigmoid(1*(10-20)) = 1 - sigmoid(-10) ≈ 1
         let examples = vec![pref(0.0, 0.0), rej(20.0, 0.0)];
-        let config = KtoConfig { beta: 1.0, ..KtoConfig::default() };
+        let config = KtoConfig {
+            beta: 1.0,
+            ..KtoConfig::default()
+        };
         let result = compute_kto_loss(&examples, &config).expect("should succeed");
-        assert!(result.rejected_loss > 0.9,
-            "Policy preferring bad output should give high rejected loss, got {}", result.rejected_loss);
+        assert!(
+            result.rejected_loss > 0.9,
+            "Policy preferring bad output should give high rejected loss, got {}",
+            result.rejected_loss
+        );
     }
 }

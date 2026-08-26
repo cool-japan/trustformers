@@ -509,23 +509,26 @@ impl<T: Tokenizer> CoverageAnalyzer<T> {
 
     /// Analyze vocabulary coverage
     fn analyze_vocabulary_coverage(&self) -> Result<VocabularyCoverage> {
-        // Note: We can't easily get the full vocabulary from the generic tokenizer trait
-        // This is a simplified implementation
+        // `Tokenizer::vocab_size()`/`get_vocab()` give us the real denominator and
+        // the full token set, so coverage is computed from actual usage instead of
+        // a constant estimate.
+        let total_vocab_size = self.tokenizer.vocab_size();
         let used_tokens = self.token_frequencies.len();
-        let total_vocab_size = used_tokens * 2; // Rough estimate
         let coverage_percentage = if total_vocab_size > 0 {
             used_tokens as f64 / total_vocab_size as f64 * 100.0
         } else {
             0.0
         };
 
-        // Get most and least frequent tokens
+        // Get most and least frequent tokens. Ties are broken by token text so the
+        // ordering (and therefore the truncated top/bottom-20 lists) is
+        // deterministic across runs, regardless of HashMap iteration order.
         let mut sorted_tokens: Vec<_> = self
             .token_frequencies
             .iter()
             .map(|(token, &freq)| (token.clone(), freq))
             .collect();
-        sorted_tokens.sort_by_key(|item| std::cmp::Reverse(item.1));
+        sorted_tokens.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let most_frequent_tokens = sorted_tokens.iter().take(20).cloned().collect();
 
@@ -543,13 +546,27 @@ impl<T: Tokenizer> CoverageAnalyzer<T> {
             *frequency_distribution.entry(freq).or_insert(0) += 1;
         }
 
+        // Vocabulary entries that never appeared in any analyzed input. Capped so a
+        // large (e.g. 100k+ piece) vocabulary with low utilization does not blow up
+        // the report; the cap only affects how many are *listed*, not the coverage
+        // percentage above, which always uses the true full-vocabulary count.
+        const MAX_UNUSED_TOKENS_LISTED: usize = 200;
+        let mut unused_tokens: Vec<String> = self
+            .tokenizer
+            .get_vocab()
+            .into_keys()
+            .filter(|token| !self.token_frequencies.contains_key(token))
+            .collect();
+        unused_tokens.sort();
+        unused_tokens.truncate(MAX_UNUSED_TOKENS_LISTED);
+
         Ok(VocabularyCoverage {
             total_vocab_size,
             used_tokens,
             coverage_percentage,
             most_frequent_tokens,
             least_frequent_tokens,
-            unused_tokens: Vec::new(), // Can't determine without full vocabulary
+            unused_tokens,
             frequency_distribution,
         })
     }
@@ -853,7 +870,7 @@ impl CoverageReportExporter {
         match format {
             ReportFormat::Json => serde_json::to_string_pretty(report)
                 .map_err(|e| anyhow!("Failed to serialize JSON: {}", e)),
-            ReportFormat::Yaml => serde_yaml::to_string(report)
+            ReportFormat::Yaml => serde_yaml_ng::to_string(report)
                 .map_err(|e| anyhow!("Failed to serialize YAML: {}", e)),
             ReportFormat::Html => Self::export_to_html(report),
             ReportFormat::Markdown => Self::export_to_markdown(report),
@@ -1068,6 +1085,61 @@ mod tests {
         assert!(report.vocabulary_coverage.used_tokens > 0);
     }
 
+    /// Regression test for the fabricated-coverage bug: the old implementation
+    /// computed `used / (used * 2) * 100`, which is *always* exactly 50.0% for
+    /// any non-empty input, regardless of the tokenizer's real vocabulary size.
+    /// `create_test_char_tokenizer` has a fixed 14-token vocabulary; tokenizing
+    /// "hello" only exercises 4 distinct tokens (h, e, l, o), so real coverage
+    /// must be 4/14 ≈ 28.57%, not 50%, and the denominator must be the real
+    /// vocab size (14), not `used_tokens * 2` (8).
+    #[test]
+    fn test_vocabulary_coverage_is_not_hardcoded_fifty_percent() {
+        // Disable the tokenizer's automatic BOS/EOS wrapping: with it left
+        // on, `encode("hello")` would also produce a leading "[CLS]" and
+        // trailing "[SEP]" id, and `CharTokenizer::decode` maps each of
+        // those back to "" (its special-token filter strips them from
+        // decoded text), inflating the "distinct tokens used" count by one
+        // for the shared empty-string entry. Disabling them isolates
+        // exactly the four real character tokens this test cares about.
+        let tokenizer = create_test_char_tokenizer().with_special_tokens(
+            "[UNK]".to_string(),
+            "[PAD]".to_string(),
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(tokenizer.vocab_size(), 14);
+
+        let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
+        analyzer.analyze_input("hello").expect("Operation failed in test");
+
+        let report = analyzer.generate_report().expect("Operation failed in test");
+        let coverage = &report.vocabulary_coverage;
+
+        assert_eq!(
+            coverage.total_vocab_size, 14,
+            "must report the tokenizer's real vocab size"
+        );
+        assert_eq!(
+            coverage.used_tokens, 4,
+            "h, e, l, o are the 4 distinct tokens used"
+        );
+        let expected = 4.0 / 14.0 * 100.0;
+        assert!(
+            (coverage.coverage_percentage - expected).abs() < 1e-9,
+            "expected {:.4}% got {:.4}%",
+            expected,
+            coverage.coverage_percentage
+        );
+        // The old formula (used / (used*2) * 100) always yields exactly 50.0%.
+        assert!((coverage.coverage_percentage - 50.0).abs() > 1e-6);
+
+        // Unused vocabulary entries must be real leftovers from the tokenizer's
+        // vocabulary, not an empty placeholder.
+        assert_eq!(coverage.unused_tokens.len(), 14 - 4);
+        assert!(!coverage.unused_tokens.contains(&"h".to_string()));
+        assert!(coverage.unused_tokens.contains(&"[PAD]".to_string()));
+    }
+
     #[test]
     fn test_report_export_json() {
         let tokenizer = create_test_char_tokenizer();
@@ -1080,6 +1152,37 @@ mod tests {
         assert!(json_result.is_ok());
         let json = json_result.expect("Operation failed in test");
         assert!(json.contains("vocabulary_coverage"));
+    }
+
+    /// The YAML branch of [`CoverageReportExporter::export_to_string`] had no
+    /// test at all, so nothing ever checked that its output is parseable YAML —
+    /// only that the crate compiled. The branch is now served by
+    /// `serde_yaml_ng` (the maintained fork of the archived `serde_yaml`,
+    /// RUSTSEC-2024-0320), so round-trip the report through it and compare the
+    /// fields on the way back.
+    #[test]
+    fn test_report_export_yaml_round_trip() {
+        let tokenizer = create_test_char_tokenizer();
+        let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
+
+        analyzer.analyze_input("test").expect("Operation failed in test");
+        let report = analyzer.generate_report().expect("Operation failed in test");
+
+        let yaml = CoverageReportExporter::export_to_string(&report, &ReportFormat::Yaml)
+            .expect("YAML export must succeed");
+        assert!(yaml.contains("vocabulary_coverage"));
+
+        let parsed: CoverageReport =
+            serde_yaml_ng::from_str(&yaml).expect("exported YAML must parse back into a report");
+        assert_eq!(
+            parsed.vocabulary_coverage.coverage_percentage,
+            report.vocabulary_coverage.coverage_percentage
+        );
+        assert_eq!(
+            parsed.metadata.tokenizer_name,
+            report.metadata.tokenizer_name
+        );
+        assert_eq!(parsed.warnings.len(), report.warnings.len());
     }
 
     #[test]

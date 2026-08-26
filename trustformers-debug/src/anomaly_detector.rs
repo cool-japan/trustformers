@@ -26,7 +26,48 @@ pub struct AnomalyDetector {
     gradient_history: HashMap<String, VecDeque<f64>>,
     loss_history: VecDeque<f64>,
     weight_baseline: HashMap<String, Vec<f32>>,
+    /// Live handle into the training loop that automatic recovery actions
+    /// are dispatched through. `None` (the default) means recovery actions
+    /// are computed and recorded but never actually performed -- see
+    /// [`Self::execute_recovery_action`].
+    training_control: Option<Box<dyn TrainingControl>>,
 }
+
+/// A live handle into the training loop that [`AnomalyDetector`] can drive
+/// automatic recovery actions through.
+///
+/// Implementations perform the real mutation (clip gradients, reduce the
+/// learning rate, restart the optimizer, ...) against whatever optimizer or
+/// model state the caller owns. Without a `TrainingControl` attached via
+/// [`AnomalyDetector::set_training_control`], [`AnomalyDetector`] never
+/// claims a recovery action succeeded: every action honestly reports "not
+/// performed" instead of the old unconditional `Ok(true)`.
+///
+/// Each method returns `Err` (propagated into the recorded
+/// [`RecoveryAttempt::error_message`], never swallowed) if the underlying
+/// mutation could not be carried out.
+pub trait TrainingControl: std::fmt::Debug + Send + Sync {
+    /// Zero out (or otherwise reset) the current gradients.
+    fn reset_gradients(&mut self) -> Result<()>;
+    /// Multiply the optimizer's learning rate by `factor`.
+    fn reduce_learning_rate(&mut self, factor: f64) -> Result<()>;
+    /// Clip gradients to `max_norm` (e.g. global-norm clipping).
+    fn clip_gradients(&mut self, max_norm: f64) -> Result<()>;
+    /// Reset the optimizer's internal state (momentum buffers, etc.).
+    fn restart_optimizer(&mut self) -> Result<()>;
+    /// Skip the batch currently being processed.
+    fn skip_batch(&mut self) -> Result<()>;
+    /// Reset a specific layer's weights to their initialization.
+    fn reset_weights(&mut self, layer_name: &str) -> Result<()>;
+    /// Apply weight decay at `rate` to the current weights.
+    fn apply_weight_decay(&mut self, rate: f64) -> Result<()>;
+    /// Immediately halt training.
+    fn emergency_stop(&mut self) -> Result<()>;
+}
+// `TrainingControl: Debug` being a supertrait means `dyn TrainingControl`
+// (and so `Box<dyn TrainingControl>` / the `Option` around it on
+// `AnomalyDetector`) automatically implements `Debug` -- no manual impl
+// needed here.
 
 /// Configuration for anomaly detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +221,28 @@ impl AnomalyDetector {
             gradient_history: HashMap::new(),
             loss_history: VecDeque::with_capacity(monitoring_window_size),
             weight_baseline: HashMap::new(),
+            training_control: None,
         }
+    }
+
+    /// Attach a live [`TrainingControl`] handle so that automatic recovery
+    /// actions (see [`Self::attempt_recovery`]) are actually performed
+    /// against real training state, instead of only being computed and
+    /// recorded.
+    pub fn set_training_control(&mut self, control: Box<dyn TrainingControl>) {
+        self.training_control = Some(control);
+    }
+
+    /// Detach the [`TrainingControl`] handle, if any. Future recovery
+    /// actions will honestly report "not performed" until a new one is
+    /// attached.
+    pub fn clear_training_control(&mut self) {
+        self.training_control = None;
+    }
+
+    /// Whether a [`TrainingControl`] handle is currently attached.
+    pub fn has_training_control(&self) -> bool {
+        self.training_control.is_some()
     }
 
     /// Start the anomaly detector
@@ -468,9 +530,10 @@ impl AnomalyDetector {
 
     /// Report an anomaly
     fn report_anomaly(&mut self, anomaly: Anomaly) {
-        eprintln!(
+        tracing::warn!(
             "🚨 Anomaly detected: {} at {}",
-            anomaly.description, anomaly.location
+            anomaly.description,
+            anomaly.location
         );
 
         // Update monitoring stats
@@ -701,14 +764,14 @@ impl AnomalyDetector {
             anomaly.timestamp.timestamp()
         );
 
-        let success = self.execute_recovery_action(&action).await?;
+        let (success, error_message) = self.execute_recovery_action(&action).await?;
 
         self.recovery_attempts.push(RecoveryAttempt {
             anomaly_id: anomaly_id.clone(),
             action: action.clone(),
             timestamp: Utc::now(),
             success,
-            error_message: if success { None } else { Some("Recovery failed".to_string()) },
+            error_message,
         });
 
         self.monitoring_stats.recovery_attempts += 1;
@@ -812,48 +875,56 @@ impl AnomalyDetector {
         }
     }
 
-    async fn execute_recovery_action(&self, action: &RecoveryAction) -> Result<bool> {
-        // In a real implementation, this would interface with the training system
-        // For now, we'll simulate the actions
-        match action {
-            RecoveryAction::None => Ok(true),
-            RecoveryAction::ResetGradients => {
-                tracing::info!("Executing recovery: Reset gradients");
-                Ok(true)
+    /// Dispatch `action` through the attached [`TrainingControl`], if any.
+    ///
+    /// Returns `(true, None)` when the handle performed the action for
+    /// real; `(false, Some(reason))` when it was attempted and the handle
+    /// reported an error, or when no handle is attached at all. This used
+    /// to unconditionally return `Ok(true)` for every variant except
+    /// `EmergencyStop` regardless of whether anything was ever done --
+    /// every branch now goes through a real [`TrainingControl`] call.
+    async fn execute_recovery_action(
+        &mut self,
+        action: &RecoveryAction,
+    ) -> Result<(bool, Option<String>)> {
+        let Some(control) = self.training_control.as_mut() else {
+            let reason = format!(
+                "no TrainingControl attached to this AnomalyDetector (see \
+                 AnomalyDetector::set_training_control); recovery action {action:?} was not \
+                 performed"
+            );
+            tracing::warn!("{reason}");
+            return Ok((false, Some(reason)));
+        };
+
+        let outcome = match action {
+            RecoveryAction::None => Ok(()),
+            RecoveryAction::ResetGradients => control.reset_gradients(),
+            RecoveryAction::ReduceLearningRate { factor } => control.reduce_learning_rate(*factor),
+            RecoveryAction::ClipGradients { max_norm } => control.clip_gradients(*max_norm),
+            RecoveryAction::RestartOptimizer => control.restart_optimizer(),
+            RecoveryAction::SkipBatch => control.skip_batch(),
+            RecoveryAction::ResetWeights { layer_name } => control.reset_weights(layer_name),
+            RecoveryAction::ApplyWeightDecay { rate } => control.apply_weight_decay(*rate),
+            RecoveryAction::EmergencyStop => control.emergency_stop(),
+        };
+
+        match (action, outcome) {
+            (RecoveryAction::EmergencyStop, Ok(())) => {
+                // Matches the pre-existing contract: EmergencyStop always
+                // reports `false` here (it halts training rather than
+                // "recovering" it), but it is now a real call, not a no-op.
+                tracing::warn!("Executed recovery: Emergency stop");
+                Ok((false, None))
             },
-            RecoveryAction::ReduceLearningRate { factor } => {
-                tracing::info!(
-                    "Executing recovery: Reduce learning rate by factor {}",
-                    factor
-                );
-                Ok(true)
+            (_, Ok(())) => {
+                tracing::info!("Executed recovery action: {action:?}");
+                Ok((true, None))
             },
-            RecoveryAction::ClipGradients { max_norm } => {
-                tracing::info!(
-                    "Executing recovery: Clip gradients to max norm {}",
-                    max_norm
-                );
-                Ok(true)
-            },
-            RecoveryAction::RestartOptimizer => {
-                tracing::info!("Executing recovery: Restart optimizer");
-                Ok(true)
-            },
-            RecoveryAction::SkipBatch => {
-                tracing::info!("Executing recovery: Skip current batch");
-                Ok(true)
-            },
-            RecoveryAction::ResetWeights { layer_name } => {
-                tracing::info!("Executing recovery: Reset weights for layer {}", layer_name);
-                Ok(true)
-            },
-            RecoveryAction::ApplyWeightDecay { rate } => {
-                tracing::info!("Executing recovery: Apply weight decay with rate {}", rate);
-                Ok(true)
-            },
-            RecoveryAction::EmergencyStop => {
-                tracing::warn!("Executing recovery: Emergency stop");
-                Ok(false) // This would actually stop training
+            (_, Err(e)) => {
+                let reason = e.to_string();
+                tracing::error!("Recovery action {action:?} failed: {reason}");
+                Ok((false, Some(reason)))
             },
         }
     }
@@ -1194,6 +1265,137 @@ mod tests {
         let action = detector.attempt_recovery(&anomaly).await.expect("temp file creation failed");
         assert!(matches!(action, RecoveryAction::ClipGradients { .. }));
         assert_eq!(detector.get_recovery_attempts().len(), 1);
+
+        // Regression: without a `TrainingControl` attached, the old
+        // implementation still reported every recovery attempt (other than
+        // `EmergencyStop`) as a silent, unconditional success. It must now
+        // be honestly recorded as *not performed*.
+        let attempt = &detector.get_recovery_attempts()[0];
+        assert!(
+            !attempt.success,
+            "must not report success when no TrainingControl was ever attached"
+        );
+        assert!(
+            attempt.error_message.is_some(),
+            "must record a real reason, not silently claim success"
+        );
+    }
+
+    /// A [`TrainingControl`] mock that records every call it receives and
+    /// lets a test assert the anomaly detector actually drove it -- rather
+    /// than merely logging and claiming success.
+    #[derive(Debug, Default)]
+    struct RecordingTrainingControl {
+        calls: Vec<String>,
+        fail_next: bool,
+    }
+
+    impl TrainingControl for RecordingTrainingControl {
+        fn reset_gradients(&mut self) -> Result<()> {
+            self.calls.push("reset_gradients".to_string());
+            Ok(())
+        }
+        fn reduce_learning_rate(&mut self, factor: f64) -> Result<()> {
+            self.calls.push(format!("reduce_learning_rate({factor})"));
+            Ok(())
+        }
+        fn clip_gradients(&mut self, max_norm: f64) -> Result<()> {
+            self.calls.push(format!("clip_gradients({max_norm})"));
+            if self.fail_next {
+                anyhow::bail!("simulated clip_gradients failure");
+            }
+            Ok(())
+        }
+        fn restart_optimizer(&mut self) -> Result<()> {
+            self.calls.push("restart_optimizer".to_string());
+            Ok(())
+        }
+        fn skip_batch(&mut self) -> Result<()> {
+            self.calls.push("skip_batch".to_string());
+            Ok(())
+        }
+        fn reset_weights(&mut self, layer_name: &str) -> Result<()> {
+            self.calls.push(format!("reset_weights({layer_name})"));
+            Ok(())
+        }
+        fn apply_weight_decay(&mut self, rate: f64) -> Result<()> {
+            self.calls.push(format!("apply_weight_decay({rate})"));
+            Ok(())
+        }
+        fn emergency_stop(&mut self) -> Result<()> {
+            self.calls.push("emergency_stop".to_string());
+            Ok(())
+        }
+    }
+
+    /// Regression test: with a real `TrainingControl` attached, a recovery
+    /// action must actually be dispatched to it (with the real parameters
+    /// from `determine_recovery_action`), and the attempt must be recorded
+    /// as a real success -- this is the "real work" side of the fix.
+    #[tokio::test]
+    async fn test_auto_recovery_with_training_control_actually_dispatches() {
+        let config = DebugConfig::default();
+        let mut detector = AnomalyDetector::new(&config);
+        detector.config.enable_auto_recovery = true;
+        assert!(!detector.has_training_control());
+        detector.set_training_control(Box::new(RecordingTrainingControl::default()));
+        assert!(detector.has_training_control());
+
+        let anomaly = Anomaly {
+            anomaly_type: AnomalyType::GradientExplosion,
+            timestamp: Utc::now(),
+            location: "test_layer".to_string(),
+            description: "Test gradient explosion".to_string(),
+            severity: AnomalySeverity::High,
+            metadata: HashMap::new(),
+        };
+
+        let action = detector.attempt_recovery(&anomaly).await.expect("recovery should not error");
+        assert!(matches!(action, RecoveryAction::ClipGradients { max_norm } if max_norm == 1.0));
+
+        let attempt = &detector.get_recovery_attempts()[0];
+        assert!(
+            attempt.success,
+            "a real, successful TrainingControl call must report success"
+        );
+        assert!(attempt.error_message.is_none());
+    }
+
+    /// Regression test: when the attached `TrainingControl` itself fails,
+    /// that must surface as a real, non-generic error message on the
+    /// recorded attempt -- not the old hardcoded `"Recovery failed"`
+    /// string, and not a silent `Ok(true)`.
+    #[tokio::test]
+    async fn test_auto_recovery_reports_real_error_from_training_control() {
+        let config = DebugConfig::default();
+        let mut detector = AnomalyDetector::new(&config);
+        detector.config.enable_auto_recovery = true;
+        detector.set_training_control(Box::new(RecordingTrainingControl {
+            calls: Vec::new(),
+            fail_next: true,
+        }));
+
+        let anomaly = Anomaly {
+            anomaly_type: AnomalyType::GradientExplosion,
+            timestamp: Utc::now(),
+            location: "test_layer".to_string(),
+            description: "Test gradient explosion".to_string(),
+            severity: AnomalySeverity::High,
+            metadata: HashMap::new(),
+        };
+
+        detector.attempt_recovery(&anomaly).await.expect("recovery should not error");
+        let attempt = &detector.get_recovery_attempts()[0];
+        assert!(!attempt.success);
+        let message = attempt.error_message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains("simulated clip_gradients failure"),
+            "must surface the real underlying error, not a generic placeholder: {message}"
+        );
+        assert_ne!(
+            message, "Recovery failed",
+            "must not be the old generic placeholder string"
+        );
     }
 
     #[test]

@@ -302,7 +302,9 @@ pub struct PerformanceVisualization {
     /// Thermal visualization
     pub thermal_visualization: ThermalVisualization,
     /// Performance trends
-    pub performance_trends: PerformanceTrends,
+    /// Trend analysis over a series of snapshots, or `None` when the
+    /// visualization was rendered from a single snapshot.
+    pub performance_trends: Option<PerformanceTrends>,
 }
 
 /// Visualization-specific anomaly
@@ -340,16 +342,21 @@ pub enum VisualizationAnomalyType {
 /// Frame metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameMetadata {
-    /// Inference duration
-    pub inference_duration: Duration,
+    /// How long the inference this frame visualises took.
+    ///
+    /// `None` when the visualizer was handed a metrics snapshot rather than a
+    /// timed inference: this type renders a frame, it does not run the model,
+    /// so it can only report a duration the caller measured and passed in.
+    pub inference_duration: Option<Duration>,
     /// Rendering duration
     pub rendering_duration: Duration,
-    /// Memory usage during frame
-    pub memory_usage_mb: f32,
-    /// CPU usage during frame
-    pub cpu_usage_percent: f32,
-    /// GPU usage during frame
-    pub gpu_usage_percent: f32,
+    /// Memory usage during frame, or `None` when memory was not measured.
+    pub memory_usage_mb: Option<f32>,
+    /// CPU usage during frame, or `None` when the CPU was not measured.
+    pub cpu_usage_percent: Option<f32>,
+    /// GPU usage during frame, or `None` when this build measures no GPU
+    /// telemetry.
+    pub gpu_usage_percent: Option<f32>,
     /// Quality metrics
     pub quality_metrics: QualityMetrics,
 }
@@ -634,11 +641,13 @@ impl MobileInferenceVisualizer {
 
         // Create frame metadata
         let metadata = FrameMetadata {
-            inference_duration: Duration::from_millis(50), // Would get actual duration
+            // Not measured here: `capture_frame` renders an already-completed
+            // inference from a metrics snapshot and never times the model.
+            inference_duration: None,
             rendering_duration,
-            memory_usage_mb: performance_metrics.memory.heap_used_mb,
-            cpu_usage_percent: performance_metrics.cpu.usage_percent,
-            gpu_usage_percent: performance_metrics.gpu.usage_percent,
+            memory_usage_mb: performance_metrics.memory.as_ref().map(|m| m.heap_used_mb),
+            cpu_usage_percent: performance_metrics.cpu.as_ref().map(|c| c.usage_percent),
+            gpu_usage_percent: performance_metrics.gpu.as_ref().map(|gpu| gpu.usage_percent),
             quality_metrics: self.analyzer.assess_quality(&tensor_visualizations)?,
         };
 
@@ -1083,10 +1092,14 @@ pub struct MemoryVisualization {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySnapshot {
+    /// Resident memory of the process in MB (always measured).
     pub heap_used: f32,
-    pub heap_free: f32,
-    pub native_used: f32,
-    pub graphics_used: f32,
+    /// Free heap in MB, or `None` when the allocator publishes no such counter.
+    pub heap_free: Option<f32>,
+    /// Native (non-managed) memory in MB, or `None` off a managed runtime.
+    pub native_used: Option<f32>,
+    /// Graphics memory in MB, or `None` without a GPU driver query.
+    pub graphics_used: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1151,7 +1164,9 @@ pub struct ThermalVisualization {
     pub temperature_timeline: Vec<(u64, f32)>,
     pub thermal_zones: Vec<ThermalZone>,
     pub throttling_events: Vec<ThrottlingEvent>,
-    pub thermal_prediction: ThermalPrediction,
+    /// Forecast peak temperature, or `None` when no thermal model has been
+    /// fitted to a temperature history.
+    pub thermal_prediction: Option<ThermalPrediction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1276,7 +1291,9 @@ pub struct AnomalySummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealTimeVisualizationState {
     pub current_frame: Option<VisualizationFrame>,
-    pub frame_rate: f32,
+    /// Frames per second measured over the frames still in the buffer, or
+    /// `None` with fewer than two frames to measure an interval between.
+    pub frame_rate: Option<f32>,
     pub render_performance: RenderPerformance,
     pub buffer_status: BufferStatus,
     pub active_visualizations: Vec<String>,
@@ -1284,10 +1301,18 @@ pub struct RealTimeVisualizationState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderPerformance {
-    pub frames_per_second: f32,
-    pub average_render_time: Duration,
-    pub dropped_frames: usize,
-    pub render_quality: f32,
+    /// Frames per second measured over the buffered frames, or `None` with
+    /// fewer than two frames.
+    pub frames_per_second: Option<f32>,
+    /// Mean of the render durations this monitor actually timed, or `None`
+    /// when the buffer is empty.
+    pub average_render_time: Option<Duration>,
+    /// Frames dropped. `None` -- this monitor is handed completed frames and
+    /// never observes a drop, so it cannot count them.
+    pub dropped_frames: Option<usize>,
+    /// Render quality score. `None` -- no quality model is evaluated over the
+    /// rendered output.
+    pub render_quality: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1376,11 +1401,34 @@ impl VisualizationRenderer {
         let shape = weights.shape();
         let seq_len = if shape.len() >= 2 { shape[shape.len() - 1] } else { 0 };
 
+        // The real attention weights, read out of the tensor the caller
+        // supplied. The previous line emitted a uniform 0.5 matrix, so every
+        // rendered attention map was identical and showed nothing about the
+        // model. The last `seq_len * seq_len` elements are the requested
+        // head's map for tensors shaped [.., seq, seq].
+        let values = weights.to_vec_f32()?;
+        let matrix_data = if seq_len > 0 && values.len() >= seq_len * seq_len {
+            let head_offset = values.len() - seq_len * seq_len;
+            (0..seq_len)
+                .map(|row| {
+                    let start = head_offset + row * seq_len;
+                    values[start..start + seq_len].to_vec()
+                })
+                .collect()
+        } else {
+            return Err(TrustformersError::invalid_input(format!(
+                "attention visualization needs a [.., {seq_len}, {seq_len}] weight tensor; got \
+                 shape {shape:?} with {} elements",
+                values.len()
+            ))
+            .into());
+        };
+
         Ok(AttentionVisualization {
             layer_name: layer_name.to_string(),
             head_index: head_idx,
             attention_matrix: AttentionMatrix {
-                matrix_data: vec![vec![0.5; seq_len]; seq_len], // Simplified
+                matrix_data,
                 sequence_length: seq_len,
                 head_dim: shape.get(shape.len().saturating_sub(2)).copied().unwrap_or(64),
                 attention_type: AttentionType::SelfAttention,
@@ -1431,38 +1479,70 @@ impl VisualizationRenderer {
     ) -> Result<PerformanceVisualization> {
         Ok(PerformanceVisualization {
             real_time_metrics: MetricsVisualization {
-                cpu_timeline: vec![(metrics.timestamp, metrics.cpu.usage_percent)],
-                memory_timeline: vec![(metrics.timestamp, metrics.memory.heap_used_mb)],
-                gpu_timeline: vec![(metrics.timestamp, metrics.gpu.usage_percent)],
+                cpu_timeline: metrics
+                    .cpu
+                    .as_ref()
+                    .map(|cpu| vec![(metrics.timestamp, cpu.usage_percent)])
+                    .unwrap_or_default(),
+                memory_timeline: metrics
+                    .memory
+                    .as_ref()
+                    .map(|memory| vec![(metrics.timestamp, memory.heap_used_mb)])
+                    .unwrap_or_default(),
+                gpu_timeline: metrics
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| vec![(metrics.timestamp, gpu.usage_percent)])
+                    .unwrap_or_default(),
                 inference_timeline: vec![(
                     metrics.timestamp,
                     metrics.inference.avg_latency_ms as f32,
                 )],
                 current_values: {
                     let mut values = HashMap::new();
-                    values.insert("cpu_usage".to_string(), metrics.cpu.usage_percent);
-                    values.insert("memory_usage".to_string(), metrics.memory.heap_used_mb);
-                    values.insert("gpu_usage".to_string(), metrics.gpu.usage_percent);
+                    // Only measured families contribute a key.
+                    if let Some(cpu) = metrics.cpu.as_ref() {
+                        values.insert("cpu_usage".to_string(), cpu.usage_percent);
+                    }
+                    if let Some(memory) = metrics.memory.as_ref() {
+                        values.insert("memory_usage".to_string(), memory.heap_used_mb);
+                    }
+                    if let Some(gpu) = metrics.gpu.as_ref() {
+                        values.insert("gpu_usage".to_string(), gpu.usage_percent);
+                    }
                     values
                 },
             },
             memory_visualization: MemoryVisualization {
                 memory_breakdown: {
+                    // Only the segments that were actually measured appear.
                     let mut breakdown = HashMap::new();
-                    breakdown.insert("heap".to_string(), metrics.memory.heap_used_mb);
-                    breakdown.insert("native".to_string(), metrics.memory.native_used_mb);
-                    breakdown.insert("graphics".to_string(), metrics.memory.graphics_used_mb);
+                    if let Some(memory) = metrics.memory.as_ref() {
+                        breakdown.insert("resident".to_string(), memory.heap_used_mb);
+                        if let Some(native_mb) = memory.native_used_mb {
+                            breakdown.insert("native".to_string(), native_mb);
+                        }
+                        if let Some(graphics_mb) = memory.graphics_used_mb {
+                            breakdown.insert("graphics".to_string(), graphics_mb);
+                        }
+                    }
                     breakdown
                 },
-                memory_timeline: vec![(
-                    metrics.timestamp,
-                    MemorySnapshot {
-                        heap_used: metrics.memory.heap_used_mb,
-                        heap_free: metrics.memory.heap_free_mb,
-                        native_used: metrics.memory.native_used_mb,
-                        graphics_used: metrics.memory.graphics_used_mb,
-                    },
-                )],
+                memory_timeline: metrics
+                    .memory
+                    .as_ref()
+                    .map(|memory| {
+                        vec![(
+                            metrics.timestamp,
+                            MemorySnapshot {
+                                heap_used: memory.heap_used_mb,
+                                heap_free: memory.heap_free_mb,
+                                native_used: memory.native_used_mb,
+                                graphics_used: memory.graphics_used_mb,
+                            },
+                        )]
+                    })
+                    .unwrap_or_default(),
                 allocation_patterns: Vec::new(),
                 leak_indicators: Vec::new(),
             },
@@ -1473,42 +1553,24 @@ impl VisualizationRenderer {
                 optimization_opportunities: Vec::new(),
             },
             thermal_visualization: ThermalVisualization {
-                temperature_timeline: vec![(metrics.timestamp, metrics.thermal.temperature_c)],
+                temperature_timeline: metrics
+                    .thermal
+                    .as_ref()
+                    .map(|thermal| vec![(metrics.timestamp, thermal.temperature_c)])
+                    .unwrap_or_default(),
                 thermal_zones: Vec::new(),
                 throttling_events: Vec::new(),
-                thermal_prediction: ThermalPrediction {
-                    predicted_peak: metrics.thermal.temperature_c + 5.0,
-                    time_to_peak: Duration::from_secs(60),
-                    confidence: 0.7,
-                    recommended_actions: Vec::new(),
-                },
+                // A peak prediction needs a thermal model fitted to a
+                // temperature history; a single sample plus a fixed "+5 C in
+                // 60 s at 0.7 confidence" was an invented forecast, not one.
+                thermal_prediction: None,
             },
-            performance_trends: PerformanceTrends {
-                latency_trend: TrendData {
-                    current_value: metrics.inference.avg_latency_ms as f32,
-                    trend_direction: TrendDirection::Stable,
-                    trend_strength: 0.1,
-                    prediction: None,
-                },
-                throughput_trend: TrendData {
-                    current_value: metrics.inference.throughput_per_sec as f32,
-                    trend_direction: TrendDirection::Stable,
-                    trend_strength: 0.1,
-                    prediction: None,
-                },
-                memory_trend: TrendData {
-                    current_value: metrics.memory.heap_used_mb,
-                    trend_direction: TrendDirection::Stable,
-                    trend_strength: 0.1,
-                    prediction: None,
-                },
-                efficiency_trend: TrendData {
-                    current_value: 0.85,
-                    trend_direction: TrendDirection::Stable,
-                    trend_strength: 0.1,
-                    prediction: None,
-                },
-            },
+            // A trend needs a series. `render_performance` is handed a single
+            // snapshot, so there is no slope, strength or efficiency figure to
+            // report; the previous body emitted four trends with a fixed
+            // `trend_strength: 0.1` and a fixed efficiency `current_value` of
+            // 0.85.
+            performance_trends: None,
         })
     }
 
@@ -1618,8 +1680,10 @@ impl VisualizationSession {
         self.session_statistics.frames_generated += 1;
         self.session_statistics.anomalies_detected += frame.anomalies.len();
 
-        if frame.metadata.memory_usage_mb > self.session_statistics.peak_memory_usage {
-            self.session_statistics.peak_memory_usage = frame.metadata.memory_usage_mb;
+        if let Some(memory_usage_mb) = frame.metadata.memory_usage_mb {
+            if memory_usage_mb > self.session_statistics.peak_memory_usage {
+                self.session_statistics.peak_memory_usage = memory_usage_mb;
+            }
         }
     }
 
@@ -1658,15 +1722,45 @@ impl RealTimeVisualizationMonitor {
         Ok(())
     }
 
+    /// Current monitor state, computed from the buffered frames.
+    ///
+    /// The previous body reported a fixed 30 fps, a fixed 16 ms mean render
+    /// time, zero dropped frames and a 0.9 quality score on every call, none
+    /// of which anything had measured.
     fn get_current_state(&self) -> Result<RealTimeVisualizationState> {
+        // Real mean of the render durations recorded on the buffered frames.
+        let average_render_time = if self.frame_buffer.is_empty() {
+            None
+        } else {
+            let total: Duration =
+                self.frame_buffer.iter().map(|frame| frame.metadata.rendering_duration).sum();
+            Some(total / self.frame_buffer.len() as u32)
+        };
+
+        // Real frame rate from the span between the oldest and newest buffered
+        // frame timestamps (milliseconds since the Unix epoch).
+        let frames_per_second = match (self.frame_buffer.front(), self.frame_buffer.back()) {
+            (Some(oldest), Some(newest)) if self.frame_buffer.len() > 1 => {
+                let span_ms = newest.timestamp.saturating_sub(oldest.timestamp);
+                if span_ms > 0 {
+                    Some((self.frame_buffer.len() - 1) as f32 * 1000.0 / span_ms as f32)
+                } else {
+                    None
+                }
+            },
+            _ => None,
+        };
+
         Ok(RealTimeVisualizationState {
             current_frame: self.frame_buffer.back().cloned(),
-            frame_rate: 30.0,
+            frame_rate: frames_per_second,
             render_performance: RenderPerformance {
-                frames_per_second: 30.0,
-                average_render_time: Duration::from_millis(16),
-                dropped_frames: 0,
-                render_quality: 0.9,
+                frames_per_second,
+                average_render_time,
+                // Frames arrive here already rendered, so a drop is not
+                // observable, and no quality model runs over the output.
+                dropped_frames: None,
+                render_quality: None,
             },
             buffer_status: BufferStatus {
                 current_size: self.frame_buffer.len(),
@@ -1679,7 +1773,11 @@ impl RealTimeVisualizationMonitor {
     }
 }
 
-// Placeholder structs
+// Zero-sized marker fields. Each is held by one of the types above purely to
+// name a responsibility; none carries state and none is dispatched through, so
+// the corresponding rendering/analysis is done inline by the owning type's
+// methods. They produce no data, invented or otherwise -- kept because the
+// field names document the pipeline's stages.
 struct TensorRenderer;
 struct AttentionRenderer;
 struct FlowRenderer;
@@ -1742,11 +1840,11 @@ mod tests {
             performance_visualization: None,
             anomalies: Vec::new(),
             metadata: FrameMetadata {
-                inference_duration: Duration::from_millis(50),
+                inference_duration: Some(Duration::from_millis(50)),
                 rendering_duration: Duration::from_millis(10),
-                memory_usage_mb: 128.0,
-                cpu_usage_percent: 25.0,
-                gpu_usage_percent: 40.0,
+                memory_usage_mb: Some(128.0),
+                cpu_usage_percent: Some(25.0),
+                gpu_usage_percent: Some(40.0),
                 quality_metrics: QualityMetrics {
                     render_quality: 0.9,
                     data_accuracy: 0.95,

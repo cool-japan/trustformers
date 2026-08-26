@@ -21,6 +21,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Assumed compute-cost retention when fusing two instructions, used by
+/// `JitCompiler::create_fused_instruction`.
+///
+/// This is an unvalidated modelling assumption, not a measurement: nothing
+/// in this crate profiles fused kernels against their unfused originals, so
+/// there is no real per-opcode-pair savings data to differentiate this by.
+/// It intentionally stays a single, clearly-labelled constant rather than a
+/// per-pattern table dressed up with invented numbers — see
+/// `kernel_fusion::FusionPattern::expected_speedup` for what a *real*
+/// differentiated table looks like once such data exists.
+const ASSUMED_FUSION_COMPUTE_RETENTION: f64 = 0.7; // i.e. an assumed 30% compute saving
+
+/// Assumed memory-cost retention when fusing two instructions, used by
+/// `JitCompiler::create_fused_instruction`. Same caveat as
+/// `ASSUMED_FUSION_COMPUTE_RETENTION`: an unvalidated modelling assumption,
+/// not a measurement.
+const ASSUMED_FUSION_MEMORY_RETENTION: f64 = 0.8; // i.e. an assumed 20% memory saving
+
 /// JIT compiler for dynamic compilation of computation graphs
 pub struct JitCompiler {
     config: CompilerConfig,
@@ -50,18 +68,23 @@ impl JitCompiler {
     }
 
     /// Create appropriate backend based on configuration
+    /// Create the backend the configuration asks for.
+    ///
+    /// Only the interpreter backend exists. Asking for a native JIT is an
+    /// error rather than a silent downgrade: a caller who requested `llvm` and
+    /// received an interpreter would attribute the interpreter's timings to a
+    /// JIT.
     fn create_backend(config: &CompilerConfig) -> Result<Box<dyn JitBackend>, TrustformersError> {
-        #[cfg(feature = "llvm")]
-        if config.compiler_flags.contains(&"llvm".to_string()) {
-            return Ok(Box::new(LLVMBackend::new(config)?));
+        for requested in ["llvm", "cranelift"] {
+            if config.compiler_flags.iter().any(|flag| flag == requested) {
+                return Err(TrustformersError::not_implemented(format!(
+                    "compiler flag '{}' requests a native JIT backend, which is not implemented; \
+                     only the interpreter backend is available",
+                    requested
+                )));
+            }
         }
 
-        #[cfg(feature = "cranelift")]
-        if config.compiler_flags.contains(&"cranelift".to_string()) {
-            return Ok(Box::new(CraneliftBackend::new(config)?));
-        }
-
-        // Default to interpreter backend
         Ok(Box::new(InterpreterBackend::new(config)?))
     }
 
@@ -672,8 +695,9 @@ impl JitCompiler {
             inputs: inst1.inputs.clone(),
             outputs: inst2.outputs.clone(),
             attributes: fused_attributes,
-            compute_cost: inst1.compute_cost + inst2.compute_cost * 0.7, // Assume 30% savings from fusion
-            memory_cost: (inst1.memory_cost + inst2.memory_cost) * 0.8, // Assume 20% memory savings
+            compute_cost: inst1.compute_cost
+                + inst2.compute_cost * ASSUMED_FUSION_COMPUTE_RETENTION,
+            memory_cost: (inst1.memory_cost + inst2.memory_cost) * ASSUMED_FUSION_MEMORY_RETENTION,
         })
     }
 
@@ -688,10 +712,15 @@ impl JitCompiler {
         }
     }
 
-    /// Evaluate a constant instruction at compile time
+    /// Evaluate a constant instruction at compile time.
+    ///
+    /// Real, not a placeholder: performs the actual `f64` addition/
+    /// multiplication when both operands are present as literal `const_a`/
+    /// `const_b` string attributes. Its scope is intentionally narrow —
+    /// `Add` and `Mul` only, and only when both operands were already folded
+    /// to literal attributes upstream — so it returns `None` (no crash, no
+    /// guess) for every other opcode or missing/unparsable operand.
     fn evaluate_constant_instruction(&self, instruction: &IRInstruction) -> Option<String> {
-        // Simple constant evaluation for demonstration
-        // In a real implementation, this would perform actual computation
         match instruction.opcode {
             IROpcode::Add
                 if instruction.attributes.contains_key("const_a")
@@ -889,79 +918,12 @@ pub trait JitBackend: Send + Sync {
     }
 }
 
-/// LLVM-based JIT backend
-#[cfg(feature = "llvm")]
-pub struct LLVMBackend {
-    #[allow(dead_code)]
-    config: CompilerConfig,
-}
-
-#[cfg(feature = "llvm")]
-impl LLVMBackend {
-    pub fn new(config: &CompilerConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-#[cfg(feature = "llvm")]
-impl JitBackend for LLVMBackend {
-    fn compile_ir(
-        &mut self,
-        _ir: IntermediateRepresentation,
-    ) -> Result<Vec<u8>, TrustformersError> {
-        // Placeholder: would use LLVM to compile IR to machine code
-        Ok(vec![0x90, 0xc3]) // NOP + RET for x86_64
-    }
-
-    fn name(&self) -> &str {
-        "LLVM"
-    }
-
-    fn supported_targets(&self) -> Vec<String> {
-        vec![
-            "x86_64".to_string(),
-            "aarch64".to_string(),
-            "arm".to_string(),
-        ]
-    }
-}
-
-/// Cranelift-based JIT backend
-#[cfg(feature = "cranelift")]
-pub struct CraneliftBackend {
-    #[allow(dead_code)]
-    config: CompilerConfig,
-}
-
-#[cfg(feature = "cranelift")]
-impl CraneliftBackend {
-    pub fn new(config: &CompilerConfig) -> Result<Self, TrustformersError> {
-        Ok(Self {
-            config: config.clone(),
-        })
-    }
-}
-
-#[cfg(feature = "cranelift")]
-impl JitBackend for CraneliftBackend {
-    fn compile_ir(
-        &mut self,
-        _ir: IntermediateRepresentation,
-    ) -> Result<Vec<u8>, TrustformersError> {
-        // Placeholder: would use Cranelift to compile IR to machine code
-        Ok(vec![0x90, 0xc3]) // NOP + RET for x86_64
-    }
-
-    fn name(&self) -> &str {
-        "Cranelift"
-    }
-
-    fn supported_targets(&self) -> Vec<String> {
-        vec!["x86_64".to_string(), "aarch64".to_string()]
-    }
-}
+// The `llvm` and `cranelift` JIT backends were removed: their features pulled
+// in no compiler dependency, and `compile_ir` returned the two bytes
+// `0x90 0xC3` (NOP; RET) for every graph while `supported_targets()` advertised
+// x86_64/aarch64/arm. Executing that as "compiled code" would run nothing at
+// all. Wire `inkwell` / `cranelift-*` in and implement `JitBackend` against
+// them to bring a real JIT back.
 
 /// Interpreter backend (fallback)
 pub struct InterpreterBackend {
@@ -1040,6 +1002,35 @@ impl From<IntermediateRepresentation> for SerializableIR {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: the `llvm` and `cranelift` backends "compiled" every IR
+    /// to `[0x90, 0xC3]` (NOP; RET) while advertising x86_64/aarch64/arm
+    /// support. Requesting one must now fail rather than silently produce a
+    /// two-byte stub — or silently fall back to the interpreter.
+    #[test]
+    fn test_native_jit_backends_are_refused() {
+        for flag in ["llvm", "cranelift"] {
+            let config = CompilerConfig {
+                compiler_flags: vec![flag.to_string()],
+                ..CompilerConfig::default()
+            };
+            let error = JitCompiler::new(&config)
+                .err()
+                .expect("a native JIT backend must not be silently substituted");
+            assert!(
+                error.to_string().contains(flag),
+                "the error must name the requested backend: {error}"
+            );
+        }
+    }
+
+    /// Without a JIT flag the interpreter backend is selected, and it says so.
+    #[test]
+    fn test_interpreter_backend_is_the_default() {
+        let compiler =
+            JitCompiler::new(&CompilerConfig::default()).expect("interpreter is always available");
+        assert_eq!(compiler.backend.name(), "Interpreter");
+    }
     use crate::compiler::{CompilerConfig, ComputationGraph};
 
     #[test]
@@ -1064,6 +1055,122 @@ mod tests {
         assert_eq!(instruction.opcode, IROpcode::MatMul);
         assert_eq!(instruction.inputs.len(), 2);
         assert_eq!(instruction.outputs.len(), 1);
+    }
+
+    /// Locks in the real behavior `evaluate_constant_instruction`'s doc
+    /// comment now documents (it used to describe itself as a "demonstration"
+    /// even though it already performed real arithmetic): computes real
+    /// sums/products from literal operands, and refuses -- `None`, never a
+    /// guess -- for anything outside that narrow, documented scope.
+    #[test]
+    fn test_evaluate_constant_instruction_computes_real_values_and_refuses_the_rest() {
+        let compiler = JitCompiler::new(&CompilerConfig::default()).expect("construction failed");
+
+        let mut attrs = HashMap::new();
+        attrs.insert("const_a".to_string(), "3".to_string());
+        attrs.insert("const_b".to_string(), "4".to_string());
+        let add = IRInstruction {
+            id: 0,
+            opcode: IROpcode::Add,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: attrs,
+            compute_cost: 1.0,
+            memory_cost: 1.0,
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&add),
+            Some("7".to_string())
+        );
+
+        let mul = IRInstruction {
+            opcode: IROpcode::Mul,
+            ..add.clone()
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&mul),
+            Some("12".to_string())
+        );
+
+        // Different literal operands must produce a different real result,
+        // not a value independent of the input.
+        let mut other_attrs = HashMap::new();
+        other_attrs.insert("const_a".to_string(), "10".to_string());
+        other_attrs.insert("const_b".to_string(), "5".to_string());
+        let other_add = IRInstruction {
+            attributes: other_attrs,
+            ..add.clone()
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&other_add),
+            Some("15".to_string())
+        );
+
+        // No literal operands present: refuses rather than guessing.
+        let unresolved = IRInstruction {
+            attributes: HashMap::new(),
+            ..add.clone()
+        };
+        assert_eq!(compiler.evaluate_constant_instruction(&unresolved), None);
+
+        // An opcode this narrow evaluator does not implement: refuses.
+        let sub = IRInstruction {
+            opcode: IROpcode::Sub,
+            ..add
+        };
+        assert_eq!(compiler.evaluate_constant_instruction(&sub), None);
+    }
+
+    /// `create_fused_instruction`'s cost formula is real (it scales with the
+    /// two real input instructions' own costs); only the retention factors
+    /// are an assumption, now named and documented rather than bare magic
+    /// numbers. This pins the documented formula and proves the output still
+    /// varies with input.
+    #[test]
+    fn test_create_fused_instruction_uses_documented_assumed_retention_factors() {
+        let compiler = JitCompiler::new(&CompilerConfig::default()).expect("construction failed");
+
+        let inst1 = IRInstruction {
+            id: 0,
+            opcode: IROpcode::Add,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: HashMap::new(),
+            compute_cost: 10.0,
+            memory_cost: 10.0,
+        };
+        let inst2 = IRInstruction {
+            id: 1,
+            opcode: IROpcode::ReLU,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: HashMap::new(),
+            compute_cost: 20.0,
+            memory_cost: 20.0,
+        };
+
+        let fused = compiler
+            .create_fused_instruction(&inst1, &inst2)
+            .expect("fusion must succeed for a supported opcode pair");
+
+        assert!(
+            (fused.compute_cost - (10.0 + 20.0 * ASSUMED_FUSION_COMPUTE_RETENTION)).abs() < 1e-9
+        );
+        assert!((fused.memory_cost - (10.0 + 20.0) * ASSUMED_FUSION_MEMORY_RETENTION).abs() < 1e-9);
+
+        // Different input costs must produce a different fused cost: the
+        // constants are calibration factors on real per-instruction data,
+        // not a fixed output regardless of input.
+        let inst2_heavier = IRInstruction {
+            compute_cost: 200.0,
+            memory_cost: 200.0,
+            ..inst2
+        };
+        let fused_heavier = compiler
+            .create_fused_instruction(&inst1, &inst2_heavier)
+            .expect("fusion must succeed");
+        assert_ne!(fused.compute_cost, fused_heavier.compute_cost);
+        assert_ne!(fused.memory_cost, fused_heavier.memory_cost);
     }
 
     #[test]

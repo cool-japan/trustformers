@@ -268,4 +268,358 @@ mod tests {
         assert!(data.grouped_data.is_empty());
         assert!(data.intersectional_data.is_empty());
     }
+
+    // ------------------------------------------------------------------
+    // Regression tests: the audit must measure the model, not return 0.02
+    // ------------------------------------------------------------------
+
+    use serde::{Deserialize, Serialize};
+    use std::io::Read;
+    use trustformers_core::tensor::Tensor;
+    use trustformers_core::traits::{Config, Model};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct ScoreConfig;
+
+    impl Config for ScoreConfig {
+        fn architecture(&self) -> &'static str {
+            "score"
+        }
+    }
+
+    /// Deterministic classifier: the input's first value *is* the probability of
+    /// the positive class, so a test can dictate exactly what the model predicts.
+    struct ScoreModel {
+        config: ScoreConfig,
+    }
+
+    impl ScoreModel {
+        fn new() -> Self {
+            Self {
+                config: ScoreConfig,
+            }
+        }
+    }
+
+    impl Model for ScoreModel {
+        type Config = ScoreConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Tensor) -> trustformers_core::Result<Tensor> {
+            let values = input.data()?;
+            let probability = values.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            Tensor::from_slice(&[1.0 - probability, probability], &[2])
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> trustformers_core::Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &ScoreConfig {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            0
+        }
+    }
+
+    fn scored_group(scores: &[f32], labels: &[i32]) -> GroupData {
+        GroupData {
+            inputs: scores
+                .iter()
+                .map(|&score| Tensor::from_slice(&[score], &[1]).expect("input tensor"))
+                .collect(),
+            labels: labels.to_vec(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    fn two_group_data(
+        attribute: &str,
+        a: (&[f32], &[i32]),
+        b: (&[f32], &[i32]),
+    ) -> FairnessTestData {
+        let mut groups = HashMap::new();
+        groups.insert("a".to_string(), scored_group(a.0, a.1));
+        groups.insert("b".to_string(), scored_group(b.0, b.1));
+
+        let mut grouped_data = HashMap::new();
+        grouped_data.insert(attribute.to_string(), groups);
+
+        FairnessTestData {
+            grouped_data,
+            intersectional_data: HashMap::new(),
+        }
+    }
+
+    fn single_attribute_config(metrics: Vec<FairnessMetricType>) -> FairnessConfig {
+        FairnessConfig {
+            protected_attributes: vec!["gender".to_string()],
+            fairness_metrics: metrics,
+            test_intersectional: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_demographic_parity_measures_the_real_gap() {
+        // Group "a" is always accepted, group "b" always rejected.
+        let data = two_group_data("gender", (&[0.9; 20], &[1; 20]), (&[0.1; 20], &[1; 20]));
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+
+        let metric = &result.bias_metrics["gender"][0];
+        assert!(
+            (metric.bias_value - 1.0).abs() < 1e-6,
+            "a total accept/reject split is a parity gap of 1.0, got {}",
+            metric.bias_value
+        );
+        assert!(
+            metric.exceeds_threshold,
+            "a gap of 1.0 must exceed the 5% threshold"
+        );
+        let p_value = metric.p_value.expect("a real p-value");
+        assert!(
+            p_value < 0.001,
+            "a total split must be significant, got {p_value}"
+        );
+        assert!(
+            !result.violations.is_empty(),
+            "the violation must be reported"
+        );
+        assert!(
+            result.overall_fairness_score < 0.5,
+            "the fairness score must collapse, got {}",
+            result.overall_fairness_score
+        );
+    }
+
+    #[test]
+    fn test_demographic_parity_reports_no_gap_for_identical_groups() {
+        let data = two_group_data(
+            "gender",
+            (&[0.9, 0.1, 0.9, 0.1], &[1, 0, 1, 0]),
+            (&[0.9, 0.1, 0.9, 0.1], &[1, 0, 1, 0]),
+        );
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+        let metric = &result.bias_metrics["gender"][0];
+
+        assert!(metric.bias_value.abs() < 1e-6, "got {}", metric.bias_value);
+        assert!(!metric.exceeds_threshold);
+        // Identical groups: the two-proportion test cannot reject anything.
+        assert!(metric.p_value.expect("p-value") > 0.99);
+        assert!(result.violations.is_empty());
+    }
+
+    #[test]
+    fn test_equal_opportunity_conditions_on_the_labels() {
+        // Both groups get the same *predictions*, but only group "b" has its
+        // positives among the rejected examples -> the TPR gap is real.
+        let data = two_group_data(
+            "gender",
+            (&[0.9, 0.9, 0.1, 0.1], &[1, 1, 0, 0]),
+            (&[0.9, 0.9, 0.1, 0.1], &[0, 0, 1, 1]),
+        );
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+            FairnessMetricType::EqualOpportunity,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+
+        let parity = &result.bias_metrics["gender"][0];
+        let opportunity = &result.bias_metrics["gender"][1];
+
+        assert!(
+            parity.bias_value.abs() < 1e-6,
+            "the positive rates are identical, so parity sees no gap"
+        );
+        assert!(
+            (opportunity.bias_value - 1.0).abs() < 1e-6,
+            "TPR is 1.0 for group a and 0.0 for group b, got {}",
+            opportunity.bias_value
+        );
+        assert!(opportunity.exceeds_threshold);
+    }
+
+    #[test]
+    fn test_equalized_odds_takes_the_larger_of_tpr_and_fpr_gaps() {
+        // Identical TPR (1.0 in both groups) but very different FPR.
+        let data = two_group_data(
+            "gender",
+            (&[0.9, 0.9, 0.1, 0.1], &[1, 1, 0, 0]),
+            (&[0.9, 0.9, 0.9, 0.9], &[1, 1, 0, 0]),
+        );
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::EqualizeDOdds,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+        let metric = &result.bias_metrics["gender"][0];
+
+        // TPR gap = 0, FPR gap = 1.0 -> equalized odds reports 1.0.
+        assert!(
+            (metric.bias_value - 1.0).abs() < 1e-6,
+            "got {}",
+            metric.bias_value
+        );
+        assert!(metric.exceeds_threshold);
+    }
+
+    #[test]
+    fn test_calibration_gap_is_measured_not_assumed() {
+        // Group "a" is perfectly calibrated, group "b" is confidently wrong.
+        let data = two_group_data(
+            "gender",
+            (&[1.0, 1.0, 0.0, 0.0], &[1, 1, 0, 0]),
+            (&[1.0, 1.0, 0.0, 0.0], &[0, 0, 1, 1]),
+        );
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::CalibrationMetrics,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+        let metric = &result.bias_metrics["gender"][0];
+
+        assert!(
+            (metric.bias_value - 1.0).abs() < 1e-6,
+            "ECE is 0.0 for group a and 1.0 for group b, got {}",
+            metric.bias_value
+        );
+        // There is no closed-form test for a difference of calibration errors.
+        assert!(metric.p_value.is_none());
+        assert!(metric.confidence_interval.is_none());
+    }
+
+    #[test]
+    fn test_statistical_tests_are_computed_from_the_predictions() {
+        let data = two_group_data("gender", (&[0.9; 30], &[1; 30]), (&[0.1; 30], &[1; 30]));
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+
+        let test = result
+            .statistical_tests
+            .iter()
+            .find(|test| test.test_name.contains("gender"))
+            .expect("a chi-square test for the gender attribute");
+
+        // 30/0 vs 0/30 with equal margins: X^2 = n = 60, df = 1.
+        assert_eq!(test.degrees_of_freedom, Some(1));
+        assert!(
+            (test.statistic - 60.0).abs() < 1e-3,
+            "expected the real chi-square statistic, got {}",
+            test.statistic
+        );
+        assert!(test.p_value < 1e-6, "got {}", test.p_value);
+        assert!(test.is_significant);
+        assert!(
+            (test.critical_value - 3.841).abs() < 1e-2,
+            "the 5% critical value with df=1 is 3.841, got {}",
+            test.critical_value
+        );
+    }
+
+    #[test]
+    fn test_statistical_tests_are_not_significant_without_a_gap() {
+        let data = two_group_data(
+            "gender",
+            (&[0.9, 0.1, 0.9, 0.1], &[1, 0, 1, 0]),
+            (&[0.9, 0.1, 0.9, 0.1], &[1, 0, 1, 0]),
+        );
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+        ]));
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+        let test = result
+            .statistical_tests
+            .first()
+            .expect("a chi-square test for the gender attribute");
+
+        assert!(test.statistic.abs() < 1e-6, "got {}", test.statistic);
+        assert!((test.p_value - 1.0).abs() < 1e-6, "got {}", test.p_value);
+        assert!(!test.is_significant);
+    }
+
+    #[test]
+    fn test_unimplemented_metric_is_an_error_not_a_clean_bill_of_health() {
+        let data = two_group_data("gender", (&[0.9; 4], &[1; 4]), (&[0.1; 4], &[1; 4]));
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::IndividualFairness,
+        ]));
+
+        let error = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect_err("an unimplemented metric must not report 'no bias'");
+        assert!(error.to_string().contains("not implemented"), "{error}");
+    }
+
+    #[test]
+    fn test_missing_groups_are_an_error() {
+        let mut groups = HashMap::new();
+        groups.insert("only".to_string(), scored_group(&[0.9, 0.1], &[1, 0]));
+        let mut grouped_data = HashMap::new();
+        grouped_data.insert("gender".to_string(), groups);
+        let data = FairnessTestData {
+            grouped_data,
+            intersectional_data: HashMap::new(),
+        };
+
+        let mut assessment = FairnessAssessment::with_config(single_attribute_config(vec![
+            FairnessMetricType::DemographicParity,
+        ]));
+        assert!(assessment.evaluate_fairness(&ScoreModel::new(), &data).is_err());
+    }
+
+    #[test]
+    fn test_intersectional_bias_uses_the_supplied_cells() {
+        let mut data = two_group_data("gender", (&[0.9, 0.9], &[1, 1]), (&[0.1, 0.1], &[1, 1]));
+        data.intersectional_data.insert(
+            "gender:a+race:x".to_string(),
+            scored_group(&[0.9, 0.9], &[1, 1]),
+        );
+        data.intersectional_data.insert(
+            "gender:b+race:x".to_string(),
+            scored_group(&[0.1, 0.1], &[1, 1]),
+        );
+
+        let mut config = single_attribute_config(vec![FairnessMetricType::DemographicParity]);
+        config.test_intersectional = true;
+        let mut assessment = FairnessAssessment::with_config(config);
+
+        let result = assessment
+            .evaluate_fairness(&ScoreModel::new(), &data)
+            .expect("fairness evaluation");
+        let intersectional = result.intersectional_bias.expect("intersectional analysis");
+
+        assert_eq!(intersectional.len(), 1);
+        let gap = intersectional["gender+race"];
+        assert!((gap - 1.0).abs() < 1e-6, "got {gap}");
+    }
 }

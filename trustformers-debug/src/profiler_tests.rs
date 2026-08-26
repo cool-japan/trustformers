@@ -2,9 +2,8 @@
 mod tests {
     use crate::profiler::*;
     use crate::DebugConfig;
-    use uuid::Uuid;
-    use std::collections::HashMap;
     use std::time::Duration;
+    use uuid::Uuid;
 
     struct Lcg {
         state: u64,
@@ -282,12 +281,7 @@ mod tests {
         let config = test_debug_config();
         let mut profiler = Profiler::new(&config);
         for i in 0..10 {
-            profiler.record_tensor_operation(
-                "add",
-                &[32, 768],
-                Duration::from_millis(i + 1),
-                1024,
-            );
+            profiler.record_tensor_operation("add", &[32, 768], Duration::from_millis(i + 1), 1024);
         }
         let stats = profiler.get_statistics();
         assert!(stats.contains_key("TensorOperation"));
@@ -330,7 +324,7 @@ mod tests {
     // Test 20: BottleneckType variants
     #[test]
     fn test_bottleneck_type_variants() {
-        let types = vec![
+        let types = [
             BottleneckType::CpuBound,
             BottleneckType::MemoryBound,
             BottleneckType::IoBound,
@@ -346,7 +340,7 @@ mod tests {
     // Test 21: BottleneckSeverity variants
     #[test]
     fn test_bottleneck_severity_variants() {
-        let severities = vec![
+        let severities = [
             BottleneckSeverity::Low,
             BottleneckSeverity::Medium,
             BottleneckSeverity::High,
@@ -358,7 +352,7 @@ mod tests {
     // Test 22: MemoryAllocationType variants
     #[test]
     fn test_memory_allocation_type_variants() {
-        let types = vec![
+        let types = [
             MemoryAllocationType::Host,
             MemoryAllocationType::Device,
             MemoryAllocationType::Unified,
@@ -371,7 +365,7 @@ mod tests {
     // Test 23: IoOperationType variants
     #[test]
     fn test_io_operation_type_variants() {
-        let types = vec![
+        let types = [
             IoOperationType::FileRead,
             IoOperationType::FileWrite,
             IoOperationType::NetworkRead,

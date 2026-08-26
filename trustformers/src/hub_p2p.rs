@@ -173,9 +173,9 @@ pub struct ReputationTracker {
 
 #[derive(Debug, Clone)]
 pub struct ReputationEvent {
-    event_type: ReputationEventType,
-    timestamp: SystemTime,
-    score_delta: f64,
+    pub event_type: ReputationEventType,
+    pub timestamp: SystemTime,
+    pub score_delta: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +205,12 @@ impl ReputationTracker {
 
     pub fn get_reputation(&self, peer_id: &str) -> f64 {
         self.reputation_scores.get(peer_id).copied().unwrap_or(0.5)
+    }
+
+    /// Returns the recorded reputation events for a peer, oldest first.
+    /// Empty for peers with no recorded interactions.
+    pub fn get_interaction_history(&self, peer_id: &str) -> &[ReputationEvent] {
+        self.interaction_history.get(peer_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn update_reputation(&mut self, peer_id: &str, event: ReputationEvent) {
@@ -305,11 +311,23 @@ impl P2PNode {
         // Connect to bootstrap peers
         self.connect_to_bootstrap_peers().await?;
 
-        println!(
+        tracing::info!(
             "P2P node {} started on {}",
-            self.peer_id, self.config.listen_address
+            self.peer_id,
+            self.config.listen_address
         );
         Ok(())
+    }
+
+    /// Subscribe to this node's internal P2P event bus. Every message the
+    /// node sends or receives over TCP/UDP (peer discovery, model/delta
+    /// requests, heartbeats, ...) is also broadcast here, so callers such as
+    /// a UI or monitoring task can observe P2P activity without intercepting
+    /// the sockets directly. The node keeps its own receiver alive
+    /// internally, so publishing never fails for lack of subscribers even
+    /// before this method is first called.
+    pub fn subscribe(&self) -> broadcast::Receiver<P2PMessage> {
+        self.message_receiver.resubscribe()
     }
 
     async fn spawn_tcp_handler(&self, listener: TcpListener) {
@@ -344,12 +362,12 @@ impl P2PNode {
                             )
                             .await
                             {
-                                eprintln!("Error handling peer connection: {}", e);
+                                tracing::warn!("Error handling peer connection: {}", e);
                             }
                         });
                     },
                     Err(e) => {
-                        eprintln!("Failed to accept connection: {}", e);
+                        tracing::warn!("Failed to accept connection: {}", e);
                     },
                 }
             }
@@ -368,6 +386,10 @@ impl P2PNode {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, addr)) => {
                         if let Ok(message) = serde_json::from_slice::<P2PMessage>(&buf[..len]) {
+                            // Publish every inbound discovery message on the
+                            // internal event bus (see `P2PNode::subscribe`).
+                            let _ = message_sender.send(message.clone());
+
                             match message {
                                 P2PMessage::PeerDiscovery => {
                                     // Respond with our peer info
@@ -388,7 +410,7 @@ impl P2PNode {
                         }
                     },
                     Err(e) => {
-                        eprintln!("Discovery error: {}", e);
+                        tracing::warn!("Discovery error: {}", e);
                     },
                 }
             }
@@ -398,8 +420,10 @@ impl P2PNode {
     async fn spawn_heartbeat_task(&self) {
         let peers = self.peers.clone();
         let reputation = self.reputation.clone();
+        let message_sender = self.message_sender.clone();
         let heartbeat_interval = self.config.heartbeat_interval;
         let peer_timeout = self.config.peer_timeout;
+        let reputation_threshold = self.config.reputation_threshold;
         let peer_id = self.peer_id.clone();
 
         tokio::spawn(async move {
@@ -408,28 +432,50 @@ impl P2PNode {
             loop {
                 interval.tick().await;
 
-                // Send heartbeats to all peers
+                // Publish a heartbeat tick on the internal event bus (see
+                // `P2PNode::subscribe`). Pushing it over an actual open
+                // TCP/UDP connection to every peer would additionally
+                // require this node to keep a persistent socket per peer,
+                // which `handle_peer_connection` currently does not retain
+                // past a single request/response.
                 let heartbeat = P2PMessage::Heartbeat {
                     peer_id: peer_id.clone(),
                     timestamp: SystemTime::now(),
                 };
+                let _ = message_sender.send(heartbeat);
 
-                // Clean up timed-out peers
+                // Clean up timed-out peers and peers whose reputation has
+                // decayed below the configured threshold.
                 let mut peers_lock = peers.write().await;
                 let now = SystemTime::now();
+                let reputation_lock = reputation.lock().unwrap_or_else(|p| p.into_inner());
 
-                peers_lock.retain(|_, peer| {
-                    let time_since_seen =
-                        now.duration_since(peer.last_seen).unwrap_or(Duration::from_secs(0));
-                    time_since_seen < peer_timeout
+                peers_lock.retain(|id, peer| {
+                    Self::should_retain_peer(
+                        peer,
+                        now,
+                        peer_timeout,
+                        reputation_lock.get_reputation(id),
+                        reputation_threshold,
+                    )
                 });
-
-                drop(peers_lock);
-
-                // Send heartbeat to remaining peers
-                // (In a real implementation, this would send via TCP/UDP)
             }
         });
+    }
+
+    /// Decides whether a peer survives a heartbeat sweep: it must have been
+    /// seen within `peer_timeout` AND have a reputation at or above
+    /// `reputation_threshold`. Split out from `spawn_heartbeat_task` so the
+    /// eviction rule can be unit-tested without a real timer/socket.
+    fn should_retain_peer(
+        peer: &PeerInfo,
+        now: SystemTime,
+        peer_timeout: Duration,
+        reputation: f64,
+        reputation_threshold: f64,
+    ) -> bool {
+        let time_since_seen = now.duration_since(peer.last_seen).unwrap_or(Duration::from_secs(0));
+        time_since_seen < peer_timeout && reputation >= reputation_threshold
     }
 
     async fn spawn_reputation_decay_task(&self) {
@@ -456,6 +502,7 @@ impl P2PNode {
         active_transfers: Arc<RwLock<HashMap<String, TransferState>>>,
         peer_id: String,
     ) -> Result<()> {
+        tracing::debug!("Accepted P2P connection from {}", addr);
         let mut buffer = [0u8; 4096];
 
         loop {
@@ -477,7 +524,7 @@ impl P2PNode {
                     }
                 },
                 Ok(Err(e)) => {
-                    eprintln!("Read error: {}", e);
+                    tracing::warn!("Read error from peer {}: {}", addr, e);
                     break;
                 },
                 Err(_) => {
@@ -500,6 +547,10 @@ impl P2PNode {
         active_transfers: &Arc<RwLock<HashMap<String, TransferState>>>,
         peer_id: &str,
     ) -> Result<()> {
+        // Publish every inbound message on the internal event bus (see
+        // `P2PNode::subscribe`) before handling it.
+        let _ = message_sender.send(message.clone());
+
         match message {
             P2PMessage::ModelRequest {
                 model_id,
@@ -510,12 +561,42 @@ impl P2PNode {
                 let model_key = format!("{}:{}", model_id, version);
 
                 if let Some(model) = models_lock.get(&model_key) {
+                    let total_chunks = (model.file_size / 1024 / 1024) as u32 + 1; // 1MB chunks
                     let chunk_info = ChunkInfo {
-                        total_chunks: (model.file_size / 1024 / 1024) as u32 + 1, // 1MB chunks
+                        total_chunks,
                         chunk_size: 1024 * 1024,
                         total_size: model.file_size,
                         checksums: vec!["dummy".to_string()], // Would calculate real checksums
                     };
+
+                    // Track this outbound transfer so it shows up alongside
+                    // inbound transfers in `active_transfers`, and log the
+                    // requestor's known reputation for auditability.
+                    active_transfers.write().await.insert(
+                        format!("{}:{}", requestor_id, model_key),
+                        TransferState {
+                            model_id: model_id.clone(),
+                            version: version.clone(),
+                            peer_id: requestor_id.clone(),
+                            progress: 0.0,
+                            start_time: SystemTime::now(),
+                            chunks_received: HashSet::new(),
+                            total_chunks,
+                        },
+                    );
+                    let known_reputation =
+                        peers.read().await.contains_key(&requestor_id).then(|| {
+                            reputation
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .get_reputation(&requestor_id)
+                        });
+                    tracing::debug!(
+                        "Serving model {} to peer {} (known reputation: {:?})",
+                        model_key,
+                        requestor_id,
+                        known_reputation
+                    );
 
                     let response = P2PMessage::ModelResponse {
                         model_id: model_id.clone(),
@@ -560,6 +641,14 @@ impl P2PNode {
 
                 let available =
                     models_lock.contains_key(&from_key) && models_lock.contains_key(&to_key);
+                tracing::debug!(
+                    "Delta {}..{} for {} requested by peer {} (available: {})",
+                    from_version,
+                    to_version,
+                    model_id,
+                    requestor_id,
+                    available
+                );
 
                 let response = P2PMessage::DeltaResponse {
                     model_id,
@@ -591,6 +680,11 @@ impl P2PNode {
                 peer_id: requester_id,
                 timestamp,
             } => {
+                tracing::trace!(
+                    "Ping from peer {} (their timestamp {:?})",
+                    requester_id,
+                    timestamp
+                );
                 let response = P2PMessage::PingResponse {
                     peer_id: peer_id.to_string(),
                     timestamp: SystemTime::now(),
@@ -640,11 +734,11 @@ impl P2PNode {
                     })?;
 
                     if let Err(e) = stream.write_all(&data).await {
-                        eprintln!("Failed to send discovery to {}: {}", peer_addr, e);
+                        tracing::warn!("Failed to send discovery to {}: {}", peer_addr, e);
                     }
                 },
                 Err(e) => {
-                    eprintln!("Failed to connect to bootstrap peer {}: {}", peer_addr, e);
+                    tracing::warn!("Failed to connect to bootstrap peer {}: {}", peer_addr, e);
                 },
             }
         }
@@ -713,7 +807,7 @@ impl P2PNode {
         let mut models_lock = self.models.write().await;
         models_lock.insert(model_version.id.clone(), model_version);
 
-        println!("Model {}:{} is now being shared", model_id, version);
+        tracing::info!("Model {}:{} is now being shared", model_id, version);
         Ok(())
     }
 
@@ -839,6 +933,11 @@ impl P2PNode {
 
         for chunk_id in 0..chunk_info.total_chunks {
             // Request chunk (simplified - would send chunk request message)
+            tracing::trace!(
+                "Downloading chunk {}/{}",
+                chunk_id + 1,
+                chunk_info.total_chunks
+            );
             let mut chunk_buffer = vec![0u8; chunk_info.chunk_size as usize];
             let n =
                 stream.read(&mut chunk_buffer).await.map_err(|e| TrustformersError::Network {
@@ -937,6 +1036,30 @@ mod tests {
         assert!(!node.peer_id.is_empty());
     }
 
+    /// Regression test for `P2PNode::subscribe`: the node's internal event
+    /// bus must actually deliver messages published on `message_sender` to
+    /// subscribers. Before this method existed, `message_receiver` was
+    /// stored on the struct but never read (dead field), so nothing could
+    /// observe P2P traffic at all.
+    #[tokio::test]
+    async fn test_subscribe_receives_broadcast_messages() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let config = P2PConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let node = P2PNode::new(config).await.expect("async operation failed");
+        let mut subscription = node.subscribe();
+
+        node.message_sender
+            .send(P2PMessage::PeerDiscovery)
+            .expect("channel has a live receiver");
+
+        let received = subscription.recv().await.expect("message delivered to subscriber");
+        assert!(matches!(received, P2PMessage::PeerDiscovery));
+    }
+
     #[test]
     fn test_reputation_tracker() {
         let mut tracker = ReputationTracker::new();
@@ -952,6 +1075,53 @@ mod tests {
 
         tracker.decay_reputations();
         assert!(tracker.get_reputation("peer1") < 0.6);
+    }
+
+    /// Regression test for `ReputationTracker::get_interaction_history`: the
+    /// tracker recorded every `ReputationEvent` into `interaction_history`
+    /// but exposed no way to read it back (write-only dead field). The
+    /// events must come back in the order they were recorded, with their
+    /// original type/timestamp/delta intact.
+    #[test]
+    fn test_reputation_tracker_interaction_history() {
+        let mut tracker = ReputationTracker::new();
+        assert!(tracker.get_interaction_history("peer1").is_empty());
+
+        let t1 = SystemTime::now();
+        tracker.update_reputation(
+            "peer1",
+            ReputationEvent {
+                event_type: ReputationEventType::SuccessfulTransfer,
+                timestamp: t1,
+                score_delta: 0.1,
+            },
+        );
+        let t2 = t1 + Duration::from_secs(1);
+        tracker.update_reputation(
+            "peer1",
+            ReputationEvent {
+                event_type: ReputationEventType::SlowResponse,
+                timestamp: t2,
+                score_delta: -0.05,
+            },
+        );
+
+        let history = tracker.get_interaction_history("peer1");
+        assert_eq!(history.len(), 2);
+        assert!(matches!(
+            history[0].event_type,
+            ReputationEventType::SuccessfulTransfer
+        ));
+        assert_eq!(history[0].timestamp, t1);
+        assert_eq!(history[0].score_delta, 0.1);
+        assert!(matches!(
+            history[1].event_type,
+            ReputationEventType::SlowResponse
+        ));
+        assert_eq!(history[1].timestamp, t2);
+
+        // A peer with no recorded interactions still returns an empty slice.
+        assert!(tracker.get_interaction_history("never_seen").is_empty());
     }
 
     #[test]
@@ -1254,6 +1424,70 @@ mod tests {
         };
         assert_eq!(info.peer_id, "peer_test");
         assert!((info.reputation - 0.7).abs() < f64::EPSILON);
+    }
+
+    fn make_peer_last_seen(last_seen: SystemTime) -> PeerInfo {
+        PeerInfo {
+            peer_id: "peer_test".to_string(),
+            address: "192.168.1.100:9090".parse().expect("failed to parse"),
+            public_key: "pubkey_123".to_string(),
+            last_seen,
+            reputation: 0.7,
+            capabilities: PeerCapabilities {
+                can_serve_models: true,
+                can_compute_diffs: true,
+                supported_algorithms: vec![],
+                max_model_size: 1024,
+                storage_capacity: 2048,
+                compute_power: 1.0,
+            },
+            bandwidth: BandwidthInfo {
+                upload_mbps: 10.0,
+                download_mbps: 50.0,
+                latency_ms: 30,
+                measured_at: SystemTime::now(),
+            },
+            models: vec![],
+        }
+    }
+
+    /// Regression test for the heartbeat-sweep eviction rule
+    /// (`P2PNode::should_retain_peer`): before this change the sweep only
+    /// checked `last_seen` against `peer_timeout`, so a stale-but-recently
+    /// seen peer with reputation below the configured threshold was kept
+    /// forever. `reputation` and `reputation_threshold` were captured by
+    /// `spawn_heartbeat_task` but never read (dead-code warning) — this
+    /// exercises the rule those parameters now implement.
+    #[test]
+    fn test_should_retain_peer_timeout_and_reputation() {
+        let now = SystemTime::now();
+        let recently_seen = make_peer_last_seen(now);
+        let stale = make_peer_last_seen(now - Duration::from_secs(600));
+
+        // Seen recently, reputation above threshold: retained.
+        assert!(P2PNode::should_retain_peer(
+            &recently_seen,
+            now,
+            Duration::from_secs(300),
+            0.6,
+            0.5
+        ));
+        // Seen recently, but reputation has decayed below threshold: evicted.
+        assert!(!P2PNode::should_retain_peer(
+            &recently_seen,
+            now,
+            Duration::from_secs(300),
+            0.4,
+            0.5
+        ));
+        // Good reputation, but hasn't been seen within the timeout: evicted.
+        assert!(!P2PNode::should_retain_peer(
+            &stale,
+            now,
+            Duration::from_secs(300),
+            0.9,
+            0.5
+        ));
     }
 
     #[tokio::test]

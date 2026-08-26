@@ -232,10 +232,105 @@ impl HealthCheck for ModelHealthCheck {
     }
 }
 
-/// Database health check
+/// Endpoint extracted from a database connection string, with credentials removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactedEndpoint {
+    /// URL scheme (`postgres`, `mysql`, ...), lowercased.
+    pub scheme: String,
+    /// Host name or address, without any `user:password@` prefix.
+    pub host: String,
+    /// TCP port, defaulted from the scheme when the URL omits it.
+    pub port: u16,
+}
+
+impl RedactedEndpoint {
+    /// Human-readable `scheme://host:port` form. Never contains credentials.
+    pub fn display(&self) -> String {
+        format!("{}://{}:{}", self.scheme, self.host, self.port)
+    }
+}
+
+/// Well-known default port for a database URL scheme.
+fn default_port_for_scheme(scheme: &str) -> Option<u16> {
+    match scheme {
+        "postgres" | "postgresql" => Some(5432),
+        "mysql" | "mariadb" => Some(3306),
+        "redis" | "rediss" => Some(6379),
+        "mongodb" => Some(27017),
+        "clickhouse" => Some(9000),
+        "cockroachdb" => Some(26257),
+        _ => None,
+    }
+}
+
+/// Parse a database connection string into a credential-free endpoint.
+///
+/// The password (and user name) are deliberately dropped here so that they can
+/// never reach a health-check response.
+pub fn redact_connection_string(connection_string: &str) -> Result<RedactedEndpoint, String> {
+    let trimmed = connection_string.trim();
+    if trimmed.is_empty() {
+        return Err("connection string is empty".to_string());
+    }
+
+    let (scheme, remainder) = trimmed
+        .split_once("://")
+        .ok_or_else(|| "connection string has no '<scheme>://' prefix".to_string())?;
+    let scheme = scheme.to_ascii_lowercase();
+
+    // Strip credentials: everything up to and including the last '@' of the authority.
+    let authority = remainder.split(['/', '?']).next().unwrap_or("");
+    let authority = match authority.rsplit_once('@') {
+        Some((_credentials, host_part)) => host_part,
+        None => authority,
+    };
+    if authority.is_empty() {
+        return Err("connection string has no host component".to_string());
+    }
+
+    // IPv6 literal, e.g. [::1]:5432
+    let (host, explicit_port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| "malformed IPv6 host in connection string".to_string())?;
+        let port = tail.strip_prefix(':').map(|p| p.to_string());
+        (host.to_string(), port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host.to_string(), Some(port.to_string())),
+            None => (authority.to_string(), None),
+        }
+    };
+
+    if host.is_empty() {
+        return Err("connection string has no host component".to_string());
+    }
+
+    let port = match explicit_port {
+        Some(text) => text
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port '{}' in connection string", text))?,
+        None => default_port_for_scheme(&scheme).ok_or_else(|| {
+            format!(
+                "connection string omits a port and scheme '{}' has no known default",
+                scheme
+            )
+        })?,
+    };
+
+    Ok(RedactedEndpoint { scheme, host, port })
+}
+
+/// Database health check.
+///
+/// Performs a real, time-bounded TCP connect against the endpoint named by the
+/// connection string. The connection string itself — which conventionally embeds
+/// `user:password` — is never echoed into the result; only the redacted
+/// `scheme://host:port` is reported.
 pub struct DatabaseHealthCheck {
     name: String,
     connection_string: String,
+    connect_timeout: std::time::Duration,
 }
 
 impl DatabaseHealthCheck {
@@ -243,32 +338,86 @@ impl DatabaseHealthCheck {
         Self {
             name,
             connection_string,
+            connect_timeout: std::time::Duration::from_secs(2),
         }
+    }
+
+    /// Override the connect timeout used by the reachability probe.
+    pub fn with_connect_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl HealthCheck for DatabaseHealthCheck {
     async fn check(&self) -> HealthCheckResult {
-        // Simulate database connection check
-        let status = if !self.connection_string.is_empty() {
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Unhealthy
+        let started = std::time::Instant::now();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let endpoint = match redact_connection_string(&self.connection_string) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return HealthCheckResult {
+                    name: self.name.clone(),
+                    status: HealthStatus::Unhealthy,
+                    message: format!("Database endpoint unusable: {}", error),
+                    details: Some(serde_json::json!({ "error": error })),
+                    timestamp,
+                    duration: started.elapsed().as_millis() as u64,
+                };
+            },
+        };
+
+        let address = format!("{}:{}", endpoint.host, endpoint.port);
+        let connect = tokio::time::timeout(
+            self.connect_timeout,
+            tokio::net::TcpStream::connect(address.clone()),
+        )
+        .await;
+
+        let (status, message, error) = match connect {
+            Ok(Ok(stream)) => {
+                drop(stream);
+                (
+                    HealthStatus::Healthy,
+                    format!("Database endpoint {} is reachable", endpoint.display()),
+                    None,
+                )
+            },
+            Ok(Err(e)) => (
+                HealthStatus::Unhealthy,
+                format!("Database endpoint {} is unreachable", endpoint.display()),
+                Some(e.to_string()),
+            ),
+            Err(_) => (
+                HealthStatus::Unhealthy,
+                format!(
+                    "Database endpoint {} did not answer within {:?}",
+                    endpoint.display(),
+                    self.connect_timeout
+                ),
+                Some("connect timed out".to_string()),
+            ),
         };
 
         HealthCheckResult {
             name: self.name.clone(),
             status,
-            message: "Database connection check".to_string(),
+            message,
             details: Some(serde_json::json!({
-                "connection_string": self.connection_string
+                // Credentials are intentionally absent: only the endpoint is reported.
+                "endpoint": endpoint.display(),
+                "scheme": endpoint.scheme,
+                "host": endpoint.host,
+                "port": endpoint.port,
+                "error": error,
             })),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            duration: 5,
+            timestamp,
+            duration: started.elapsed().as_millis() as u64,
         }
     }
 
@@ -291,17 +440,42 @@ impl MemoryHealthCheck {
         }
     }
 
-    fn get_memory_usage(&self) -> f64 {
-        // Simplified memory usage calculation
-        // In practice, you'd use system metrics
-        0.5 // 50% usage
+    /// Measured system memory usage as a fraction in `[0, 1]`.
+    ///
+    /// Reads live totals via `sysinfo`; returns `None` when the platform does
+    /// not report a total, rather than inventing a number.
+    fn measure_memory_usage(&self) -> Option<(f64, u64, u64)> {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let total = system.total_memory();
+        if total == 0 {
+            return None;
+        }
+        let used = system.used_memory();
+        Some((used as f64 / total as f64, used, total))
     }
 }
 
 #[async_trait::async_trait]
 impl HealthCheck for MemoryHealthCheck {
     async fn check(&self) -> HealthCheckResult {
-        let usage = self.get_memory_usage();
+        let started = std::time::Instant::now();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let Some((usage, used_bytes, total_bytes)) = self.measure_memory_usage() else {
+            return HealthCheckResult {
+                name: self.name.clone(),
+                status: HealthStatus::Unhealthy,
+                message: "Memory usage unavailable: the platform reports zero total memory"
+                    .to_string(),
+                details: Some(serde_json::json!({ "available": false })),
+                timestamp,
+                duration: started.elapsed().as_millis() as u64,
+            };
+        };
 
         let status = if usage < self.threshold_percent {
             HealthStatus::Healthy
@@ -319,13 +493,12 @@ impl HealthCheck for MemoryHealthCheck {
             message,
             details: Some(serde_json::json!({
                 "usage_percent": usage * 100.0,
-                "threshold_percent": self.threshold_percent * 100.0
+                "threshold_percent": self.threshold_percent * 100.0,
+                "used_bytes": used_bytes,
+                "total_bytes": total_bytes,
             })),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            duration: 2,
+            timestamp,
+            duration: started.elapsed().as_millis() as u64,
         }
     }
 
@@ -567,12 +740,107 @@ mod tests {
         assert!(!health.components.is_empty());
     }
 
+    /// Regression: the memory check must report measured system memory, not the
+    /// old hardcoded 50%.
     #[tokio::test]
     async fn test_memory_health_check() {
-        let check = MemoryHealthCheck::new("memory".to_string(), 0.8);
+        // Threshold above 1.0 so the assertion is about the measurement, not
+        // about how loaded the machine running the test happens to be.
+        let check = MemoryHealthCheck::new("memory".to_string(), 1.01);
         let result = check.check().await;
 
         assert_eq!(result.name, "memory");
         assert!(matches!(result.status, HealthStatus::Healthy));
+
+        let details = result.details.expect("details must be present");
+        let used = details["used_bytes"].as_u64().expect("used_bytes must be reported");
+        let total = details["total_bytes"].as_u64().expect("total_bytes must be reported");
+        assert!(total > 0, "total memory must be measured");
+        assert!(
+            used <= total,
+            "used ({used}) must not exceed total ({total})"
+        );
+
+        let usage = details["usage_percent"].as_f64().expect("usage_percent reported");
+        let expected = used as f64 / total as f64 * 100.0;
+        assert!(
+            (usage - expected).abs() < 1e-6,
+            "reported usage {usage} must match the measurement {expected}"
+        );
+    }
+
+    /// Regression: a credential-bearing connection string must never appear in
+    /// the health-check response.
+    #[tokio::test]
+    async fn database_health_check_never_echoes_credentials() {
+        // Port 1 on the loopback interface is reserved and never listening.
+        let check = DatabaseHealthCheck::new(
+            "db".to_string(),
+            "postgres://admin:sup3r-s3cret@127.0.0.1:1/production".to_string(),
+        )
+        .with_connect_timeout(std::time::Duration::from_millis(250));
+
+        let result = check.check().await;
+        let serialized = serde_json::to_string(&result.details).expect("details serializable");
+
+        assert!(
+            !serialized.contains("sup3r-s3cret"),
+            "password leaked into health details: {serialized}"
+        );
+        assert!(
+            !serialized.contains("admin"),
+            "user name leaked into health details: {serialized}"
+        );
+        assert!(!result.message.contains("sup3r-s3cret"));
+        assert!(serialized.contains("127.0.0.1"));
+    }
+
+    /// Regression: a non-empty connection string is not by itself "healthy" — the
+    /// endpoint has to actually accept a connection.
+    #[tokio::test]
+    async fn database_health_check_requires_a_real_connection() {
+        let unreachable = DatabaseHealthCheck::new(
+            "db".to_string(),
+            "postgres://user:pw@127.0.0.1:1/db".to_string(),
+        )
+        .with_connect_timeout(std::time::Duration::from_millis(250));
+        assert!(matches!(
+            unreachable.check().await.status,
+            HealthStatus::Unhealthy
+        ));
+
+        // A listener that does accept connections must be reported healthy.
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
+        let addr = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            // Accept a single connection so the probe completes.
+            let _ = listener.accept().await;
+        });
+
+        let reachable = DatabaseHealthCheck::new(
+            "db".to_string(),
+            format!("postgres://user:pw@{}:{}/db", addr.ip(), addr.port()),
+        );
+        assert!(matches!(
+            reachable.check().await.status,
+            HealthStatus::Healthy
+        ));
+    }
+
+    #[test]
+    fn redaction_handles_common_url_shapes() {
+        let endpoint = redact_connection_string("postgres://u:p@db.internal/appdb")
+            .expect("default port applies");
+        assert_eq!(endpoint.display(), "postgres://db.internal:5432");
+
+        let endpoint =
+            redact_connection_string("mysql://root:hunter2@[::1]:3307/x").expect("ipv6 parses");
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.port, 3307);
+
+        assert!(redact_connection_string("").is_err());
+        assert!(redact_connection_string("just-a-host:5432").is_err());
+        assert!(redact_connection_string("weird://host/db").is_err());
     }
 }

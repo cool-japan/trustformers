@@ -1,5 +1,3 @@
-#![allow(unused_variables)] // Backend implementation with reserved parameters
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -562,7 +560,13 @@ impl VulkanImpl {
         Ok(pipeline)
     }
 
-    /// Flash attention using Vulkan compute shaders
+    /// Flash attention using Vulkan compute shaders.
+    ///
+    /// No attention compute shader is wired up yet (unlike `matmul`, which
+    /// has a real GLSL/SPIR-V shader - see `matmul_cs` below). This
+    /// returns a structured "not implemented" error rather than `Ok(())`
+    /// with `output` left untouched, which is what this used to do while
+    /// still reporting success.
     pub fn flash_attention(
         &mut self,
         query: &Tensor,
@@ -580,10 +584,29 @@ impl VulkanImpl {
                     "VulkanImpl::flash_attention",
                 ));
             }
+            for (name, tensor) in [("key", key), ("value", value), ("output", &*output)] {
+                if tensor.shape() != q_shape {
+                    return Err(TrustformersError::tensor_op_error(
+                        &format!(
+                            "{name} shape {:?} must match query shape {q_shape:?}",
+                            tensor.shape()
+                        ),
+                        "VulkanImpl::flash_attention",
+                    ));
+                }
+            }
+            if !scale.is_finite() {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("scale {scale} must be finite"),
+                    "VulkanImpl::flash_attention",
+                ));
+            }
 
-            // Implementation would be similar to matmul but with attention-specific shader
-            // This is a placeholder for the full implementation
-            Ok(())
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::flash_attention: no attention compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -595,7 +618,11 @@ impl VulkanImpl {
         }
     }
 
-    /// Layer normalization using Vulkan compute shaders
+    /// Layer normalization using Vulkan compute shaders.
+    ///
+    /// No layer-norm compute shader is wired up yet; returns a structured
+    /// "not implemented" error instead of `Ok(())` with `output` left
+    /// untouched.
     pub fn layer_norm(
         &mut self,
         input: &Tensor,
@@ -606,8 +633,50 @@ impl VulkanImpl {
     ) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use layer norm compute shader
-            Ok(())
+            if epsilon <= 0.0 || !epsilon.is_finite() {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("epsilon {epsilon} must be a finite positive number"),
+                    "VulkanImpl::layer_norm",
+                ));
+            }
+            let input_shape = input.shape();
+            if output.shape() != input_shape {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "output shape {:?} must match input shape {input_shape:?}",
+                        output.shape()
+                    ),
+                    "VulkanImpl::layer_norm",
+                ));
+            }
+            let Some(&feature_dim) = input_shape.last() else {
+                return Err(TrustformersError::tensor_op_error(
+                    "input must have at least one dimension",
+                    "VulkanImpl::layer_norm",
+                ));
+            };
+            let mut affine_params = vec![("gamma", gamma)];
+            if let Some(beta) = beta {
+                affine_params.push(("beta", beta));
+            }
+            for (name, tensor) in affine_params {
+                if tensor.shape() != [feature_dim] {
+                    return Err(TrustformersError::tensor_op_error(
+                        &format!(
+                            "{name} shape {:?} must be a 1-D tensor of length {feature_dim} \
+                             (input's last dimension)",
+                            tensor.shape()
+                        ),
+                        "VulkanImpl::layer_norm",
+                    ));
+                }
+            }
+
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::layer_norm: no layer-norm compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -619,12 +688,29 @@ impl VulkanImpl {
         }
     }
 
-    /// GELU activation using Vulkan compute shaders
+    /// GELU activation using Vulkan compute shaders.
+    ///
+    /// No GELU compute shader is wired up yet; returns a structured "not
+    /// implemented" error instead of `Ok(())` with `output` left untouched.
     pub fn gelu(&mut self, input: &Tensor, output: &mut Tensor) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use GELU compute shader
-            Ok(())
+            if output.shape() != input.shape() {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "output shape {:?} must match input shape {:?}",
+                        output.shape(),
+                        input.shape()
+                    ),
+                    "VulkanImpl::gelu",
+                ));
+            }
+
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::gelu: no GELU compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -636,12 +722,46 @@ impl VulkanImpl {
         }
     }
 
-    /// Reduce sum using Vulkan compute shaders
+    /// Reduce sum using Vulkan compute shaders.
+    ///
+    /// No reduction compute shader is wired up yet; returns a structured
+    /// "not implemented" error instead of `Ok(())` with `output` left
+    /// untouched.
     pub fn reduce_sum(&mut self, input: &Tensor, output: &mut Tensor, dim: usize) -> Result<()> {
         #[cfg(feature = "vulkan")]
         {
-            // Implementation would use reduction compute shader with subgroup operations
-            Ok(())
+            let input_shape = input.shape();
+            if dim >= input_shape.len() {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "reduction dim {dim} is out of bounds for a {}-D input",
+                        input_shape.len()
+                    ),
+                    "VulkanImpl::reduce_sum",
+                ));
+            }
+            let expected_shape: Vec<usize> = input_shape
+                .iter()
+                .enumerate()
+                .filter(|(axis, _)| *axis != dim)
+                .map(|(_, &size)| size)
+                .collect();
+            if output.shape() != expected_shape {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "output shape {:?} must be {expected_shape:?} (input {input_shape:?} \
+                         with dim {dim} reduced away)",
+                        output.shape()
+                    ),
+                    "VulkanImpl::reduce_sum",
+                ));
+            }
+
+            Err(TrustformersError::not_implemented(
+                "VulkanImpl::reduce_sum: no reduction compute shader is wired up yet (see \
+                 VulkanImpl::matmul's matmul_cs shader for the pattern to follow)"
+                    .to_string(),
+            ))
         }
 
         #[cfg(not(feature = "vulkan"))]
@@ -805,10 +925,133 @@ mod tests {
             let stats = vulkan.get_memory_stats();
             assert!(stats.is_ok());
 
+            // `get_memory_stats` returns hardcoded placeholder zeros (no real
+            // Vulkan memory-heap query is wired up yet). `total`/`peak`/`free`
+            // are `u64`, so the commented-out `>= 0` checks this replaces were
+            // always vacuously true and asserted nothing.
             let (total, peak, free) = stats.expect("operation failed in test");
-            // assert!(total >= 0);
-            // assert!(peak >= 0);
-            // assert!(free >= 0);
+            assert_eq!((total, peak, free), (0, 0, 0));
+        }
+    }
+
+    /// Regression test: before this fix, `flash_attention`/`layer_norm`/
+    /// `gelu`/`reduce_sum` returned `Ok(())` while leaving `output`
+    /// completely untouched - a silent no-op reported as success. This
+    /// asserts the pre-existing (and always correct) `not(feature =
+    /// "vulkan")` behavior, so it runs unconditionally regardless of
+    /// whether this host has a real Vulkan device.
+    #[test]
+    #[cfg(not(feature = "vulkan"))]
+    fn test_unimplemented_ops_error_without_vulkan_feature() {
+        let mut vulkan = VulkanImpl::new().expect("placeholder VulkanImpl always succeeds");
+        let t = Tensor::zeros(&[1, 2, 2]).expect("tensor creation failed");
+        let mut out = Tensor::zeros(&[1, 2, 2]).expect("tensor creation failed");
+        assert!(vulkan.flash_attention(&t, &t, &t, &mut out, 1.0).is_err());
+        assert!(vulkan.layer_norm(&t, &t, None, &mut out, 1e-5).is_err());
+        assert!(vulkan.gelu(&t, &mut out).is_err());
+        assert!(vulkan.reduce_sum(&t, &mut out, 0).is_err());
+    }
+
+    /// Regression test (only meaningfully exercised on a host with a real
+    /// Vulkan device - it silently skips otherwise, matching this file's
+    /// existing hardware-dependent tests): before this fix, these four ops
+    /// returned `Ok(())` under `#[cfg(feature = "vulkan")]` without ever
+    /// writing their output tensor. They must now error instead of
+    /// fabricating a successful result.
+    #[test]
+    #[cfg(feature = "vulkan")]
+    fn test_unimplemented_ops_error_with_real_vulkan_device() {
+        if let Ok(mut vulkan) = VulkanImpl::new() {
+            let q = Tensor::from_vec(vec![1.0; 8], &[1, 2, 4]).expect("tensor creation failed");
+            let mut attn_out = Tensor::zeros(&[1, 2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.flash_attention(&q, &q, &q, &mut attn_out, 1.0).is_err(),
+                "flash_attention has no compute shader yet and must error, not silently no-op"
+            );
+
+            let input = Tensor::ones(&[2, 4]).expect("tensor creation failed");
+            let gamma = Tensor::ones(&[4]).expect("tensor creation failed");
+            let mut ln_out = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.layer_norm(&input, &gamma, None, &mut ln_out, 1e-5).is_err(),
+                "layer_norm has no compute shader yet and must error"
+            );
+
+            let mut gelu_out = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+            assert!(
+                vulkan.gelu(&input, &mut gelu_out).is_err(),
+                "gelu has no compute shader yet and must error"
+            );
+
+            let mut sum_out = Tensor::zeros(&[2]).expect("tensor creation failed");
+            assert!(
+                vulkan.reduce_sum(&input, &mut sum_out, 1).is_err(),
+                "reduce_sum has no compute shader yet and must error"
+            );
+        }
+    }
+
+    /// Regression test (only meaningfully exercised on a host with a real
+    /// Vulkan device, matching the test above): the shape/parameter checks
+    /// added to `flash_attention`/`layer_norm`/`gelu`/`reduce_sum` used to
+    /// be unread parameters under this file's now-removed blanket
+    /// `#![allow(unused_variables)]`. A malformed call must be rejected
+    /// with a message that names the actual problem, not fall through to
+    /// the same generic "not wired up" text a well-formed call also gets -
+    /// otherwise a caller bug (e.g. a mismatched `key` shape) would be
+    /// indistinguishable from "this backend isn't implemented yet".
+    #[test]
+    #[cfg(feature = "vulkan")]
+    fn test_new_validation_errors_are_distinct_from_not_implemented() {
+        if let Ok(mut vulkan) = VulkanImpl::new() {
+            let q = Tensor::from_vec(vec![1.0; 8], &[1, 2, 4]).expect("tensor creation failed");
+            let mismatched_key =
+                Tensor::from_vec(vec![1.0; 12], &[1, 3, 4]).expect("tensor creation failed");
+            let mut attn_out = Tensor::zeros(&[1, 2, 4]).expect("tensor creation failed");
+            let shape_err = vulkan
+                .flash_attention(&q, &mismatched_key, &q, &mut attn_out, 1.0)
+                .expect_err("a mismatched key shape must be rejected");
+            assert!(
+                shape_err.to_string().contains("key shape"),
+                "error should name key's shape as the cause, got: {shape_err}"
+            );
+
+            let non_finite_err = vulkan
+                .flash_attention(&q, &q, &q, &mut attn_out, f32::NAN)
+                .expect_err("a non-finite scale must be rejected");
+            assert!(
+                non_finite_err.to_string().contains("scale"),
+                "error should name scale as the cause, got: {non_finite_err}"
+            );
+
+            let input = Tensor::ones(&[2, 4]).expect("tensor creation failed");
+            let gamma = Tensor::ones(&[4]).expect("tensor creation failed");
+            let mut ln_out = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+            let eps_err = vulkan
+                .layer_norm(&input, &gamma, None, &mut ln_out, -1.0)
+                .expect_err("a negative epsilon must be rejected");
+            assert!(
+                eps_err.to_string().contains("epsilon"),
+                "error should name epsilon as the cause, got: {eps_err}"
+            );
+
+            let mut wrong_gelu_out = Tensor::zeros(&[2, 3]).expect("tensor creation failed");
+            let gelu_err = vulkan
+                .gelu(&input, &mut wrong_gelu_out)
+                .expect_err("a mismatched output shape must be rejected");
+            assert!(
+                gelu_err.to_string().contains("output shape"),
+                "error should name the output shape as the cause, got: {gelu_err}"
+            );
+
+            let mut wrong_sum_out = Tensor::zeros(&[4]).expect("tensor creation failed");
+            let sum_err = vulkan
+                .reduce_sum(&input, &mut wrong_sum_out, 1)
+                .expect_err("a mismatched output shape must be rejected");
+            assert!(
+                sum_err.to_string().contains("output shape"),
+                "error should name the output shape as the cause, got: {sum_err}"
+            );
         }
     }
 }

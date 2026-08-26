@@ -142,17 +142,21 @@ impl EfficiencyAnalyzer {
     ) -> Result<Vec<WasteMeasurement>> {
         let mut waste_measurements = Vec::new();
 
-        // Detect idle GPU waste
-        if energy_measurement.utilization < self.energy_waste_detector.idle_detection_threshold {
-            let idle_waste = WasteMeasurement {
-                timestamp: energy_measurement.timestamp,
-                waste_type: WasteType::IdleResources,
-                wasted_energy_kwh: energy_measurement.energy_kwh * 0.3, // 30% waste when idle
-                wasted_cost_usd: energy_measurement.energy_kwh * 0.3 * 0.12, // Assuming $0.12/kWh
-                efficiency_lost_percentage: (1.0 - energy_measurement.utilization) * 100.0,
-                description: "GPU running below utilization threshold".to_string(),
-            };
-            waste_measurements.push(idle_waste);
+        // Detect idle GPU waste. A measurement with no utilization reading
+        // cannot be judged idle -- previously every session measurement was
+        // scored against a fabricated 0.8.
+        if let Some(utilization) = energy_measurement.utilization {
+            if utilization < self.energy_waste_detector.idle_detection_threshold {
+                let idle_waste = WasteMeasurement {
+                    timestamp: energy_measurement.timestamp,
+                    waste_type: WasteType::IdleResources,
+                    wasted_energy_kwh: energy_measurement.energy_kwh * 0.3, // 30% waste when idle
+                    wasted_cost_usd: energy_measurement.energy_kwh * 0.3 * 0.12, // $0.12/kWh
+                    efficiency_lost_percentage: (1.0 - utilization) * 100.0,
+                    description: "GPU running below utilization threshold".to_string(),
+                };
+                waste_measurements.push(idle_waste);
+            }
         }
 
         // Detect thermal throttling waste
@@ -171,19 +175,20 @@ impl EfficiencyAnalyzer {
         }
 
         // Detect inefficient utilization
-        if energy_measurement.efficiency_ratio < 0.7 {
-            let inefficient_waste = WasteMeasurement {
-                timestamp: energy_measurement.timestamp,
-                waste_type: WasteType::InefficientAlgorithm,
-                wasted_energy_kwh: energy_measurement.energy_kwh
-                    * (1.0 - energy_measurement.efficiency_ratio),
-                wasted_cost_usd: energy_measurement.energy_kwh
-                    * (1.0 - energy_measurement.efficiency_ratio)
-                    * 0.12,
-                efficiency_lost_percentage: (1.0 - energy_measurement.efficiency_ratio) * 100.0,
-                description: "Low computational efficiency detected".to_string(),
-            };
-            waste_measurements.push(inefficient_waste);
+        if let Some(efficiency_ratio) = energy_measurement.efficiency_ratio {
+            if efficiency_ratio < 0.7 {
+                let inefficient_waste = WasteMeasurement {
+                    timestamp: energy_measurement.timestamp,
+                    waste_type: WasteType::InefficientAlgorithm,
+                    wasted_energy_kwh: energy_measurement.energy_kwh * (1.0 - efficiency_ratio),
+                    wasted_cost_usd: energy_measurement.energy_kwh
+                        * (1.0 - efficiency_ratio)
+                        * 0.12,
+                    efficiency_lost_percentage: (1.0 - efficiency_ratio) * 100.0,
+                    description: "Low computational efficiency detected".to_string(),
+                };
+                waste_measurements.push(inefficient_waste);
+            }
         }
 
         self.energy_waste_detector.waste_measurements.extend(waste_measurements.clone());
@@ -204,11 +209,16 @@ impl EfficiencyAnalyzer {
             efficiency_score: efficiency_ratio,
             waste_percentage: (1.0 - efficiency_ratio) * 100.0,
             optimization_opportunities: self.analyze_efficiency_opportunities().await?,
+            // No reference baselines exist to compare this session against;
+            // the crate observes one machine and holds no CPU-only,
+            // previous-generation or cloud measurement, and no population to
+            // rank within. These used to be published as 8.5x / 1.2x / 0.9x /
+            // 75th percentile.
             comparative_analysis: ComparativeEfficiency {
-                vs_cpu_only: 8.5,            // GPU is 8.5x more efficient than CPU
-                vs_previous_generation: 1.2, // 20% improvement over previous gen
-                vs_cloud_baseline: 0.9,      // 10% less efficient than cloud baseline
-                efficiency_percentile: 75.0, // 75th percentile
+                vs_cpu_only: None,
+                vs_previous_generation: None,
+                vs_cloud_baseline: None,
+                efficiency_percentile: None,
             },
         })
     }
@@ -246,7 +256,7 @@ impl EfficiencyAnalyzer {
     ) -> Result<Vec<String>> {
         let mut bottlenecks = Vec::new();
 
-        if energy_measurement.utilization < 0.8 {
+        if energy_measurement.utilization.is_some_and(|u| u < 0.8) {
             bottlenecks.push("GPU underutilization - consider increasing batch size".to_string());
         }
 
@@ -256,7 +266,7 @@ impl EfficiencyAnalyzer {
             }
         }
 
-        if energy_measurement.efficiency_ratio < 0.7 {
+        if energy_measurement.efficiency_ratio.is_some_and(|e| e < 0.7) {
             bottlenecks
                 .push("Low computational efficiency - algorithm optimization needed".to_string());
         }
@@ -347,14 +357,23 @@ impl EfficiencyAnalyzer {
     ) -> Result<()> {
         self.optimization_opportunities.clear();
 
-        // Analyze recent measurements for patterns
-        let avg_utilization: f64 =
-            measurements.iter().map(|m| m.utilization).sum::<f64>() / measurements.len() as f64;
-        let avg_efficiency: f64 = measurements.iter().map(|m| m.efficiency_ratio).sum::<f64>()
-            / measurements.len() as f64;
+        // Analyze recent measurements for patterns. Averages are taken over
+        // the measurements that actually carry the quantity, and are `None`
+        // when none of them does -- a measurement without a utilization
+        // reading must not be folded in as if it were a zero (nor, as before,
+        // as a fabricated 0.8).
+        let mean = |values: Vec<f64>| -> Option<f64> {
+            if values.is_empty() {
+                None
+            } else {
+                Some(values.iter().sum::<f64>() / values.len() as f64)
+            }
+        };
+        let avg_utilization = mean(measurements.iter().filter_map(|m| m.utilization).collect());
+        let avg_efficiency = mean(measurements.iter().filter_map(|m| m.efficiency_ratio).collect());
 
         // Add opportunities based on analysis
-        if avg_utilization < 0.7 {
+        if avg_utilization.is_some_and(|u| u < 0.7) {
             self.optimization_opportunities.push(EfficiencyOpportunity {
                 opportunity_type: EfficiencyType::HardwareUtilization,
                 description: "Improve GPU utilization".to_string(),
@@ -367,7 +386,7 @@ impl EfficiencyAnalyzer {
             });
         }
 
-        if avg_efficiency < 0.8 {
+        if avg_efficiency.is_some_and(|e| e < 0.8) {
             self.optimization_opportunities.push(EfficiencyOpportunity {
                 opportunity_type: EfficiencyType::TrainingOptimization,
                 description: "Optimize training algorithm".to_string(),
@@ -420,9 +439,9 @@ mod tests {
             device_id: "test-gpu".to_string(),
             power_watts: 300.0,
             energy_kwh: 1.0,
-            utilization: 0.05,       // Very low utilization
-            temperature: Some(90.0), // High temperature
-            efficiency_ratio: 0.6,   // Low efficiency
+            utilization: Some(0.05),     // Very low utilization
+            temperature: Some(90.0),     // High temperature
+            efficiency_ratio: Some(0.6), // Low efficiency
         };
 
         let waste = analyzer
@@ -456,9 +475,9 @@ mod tests {
             device_id: "test".to_string(),
             power_watts: 500.0,
             energy_kwh: 2.0,
-            utilization: 0.8,
+            utilization: Some(0.8),
             temperature: Some(75.0),
-            efficiency_ratio: 0.85,
+            efficiency_ratio: Some(0.85),
         };
 
         let analysis = analyzer
@@ -478,9 +497,9 @@ mod tests {
             device_id: "test".to_string(),
             power_watts: 400.0,
             energy_kwh: 1.5,
-            utilization: 0.5,        // Low utilization
-            temperature: Some(85.0), // High temperature
-            efficiency_ratio: 0.6,   // Low efficiency
+            utilization: Some(0.5),      // Low utilization
+            temperature: Some(85.0),     // High temperature
+            efficiency_ratio: Some(0.6), // Low efficiency
         };
 
         let bottlenecks = analyzer

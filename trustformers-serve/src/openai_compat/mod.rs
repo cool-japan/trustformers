@@ -323,6 +323,21 @@ impl OpenAiError {
         }
     }
 
+    /// Construct a service-unavailable error.
+    ///
+    /// Used when the deployment is incomplete (for example no inference backend
+    /// is attached), which is a server-side condition rather than a bad request.
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            error: OpenAiErrorBody {
+                message: message.into(),
+                error_type: "server_error".to_string(),
+                param: None,
+                code: Some("service_unavailable".to_string()),
+            },
+        }
+    }
+
     /// Construct an internal server error.
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self {
@@ -365,6 +380,38 @@ pub enum OpenAiCompatError {
     SerializationError(String),
     #[error("Model not allowed: {0}")]
     ModelNotAllowed(String),
+    /// No inference backend is installed, so no completion can be produced.
+    #[error(
+        "no inference backend is attached to this OpenAI-compatible router: attach one with \
+         `OpenAiApiRouter::with_backend(..)`; the endpoint will not return placeholder text"
+    )]
+    BackendUnavailable,
+    /// The backend was reached but could not serve the request.
+    #[error("inference backend error: {0}")]
+    BackendError(String),
+    /// The backend cannot produce embeddings for this model.
+    #[error("no embedding model is available for `{0}`: a zero vector is never returned instead")]
+    EmbeddingsUnavailable(String),
+}
+
+impl OpenAiCompatError {
+    /// The HTTP status code this error maps to.
+    ///
+    /// Validation problems are `400`, an unknown model is `404`, a missing
+    /// backend is `503` (the deployment is incomplete, not the request), and a
+    /// backend failure is `500`.
+    pub fn status_code(&self) -> u16 {
+        match self {
+            Self::EmptyMessages
+            | Self::EmptyModel
+            | Self::InvalidTemperature(_)
+            | Self::InvalidTopP(_)
+            | Self::InvalidMaxTokens => 400,
+            Self::ModelNotAllowed(_) => 404,
+            Self::BackendUnavailable | Self::EmbeddingsUnavailable(_) => 503,
+            Self::SerializationError(_) | Self::BackendError(_) => 500,
+        }
+    }
 }
 
 // ─── Builder / Handler ────────────────────────────────────────────────────────
@@ -386,15 +433,16 @@ impl OpenAiResponseBuilder {
         format!("{h:016x}")
     }
 
-    /// Derive a stable-ish creation timestamp from model and a seed value.
-    fn created_at(model: &str, seed: u64) -> u64 {
-        let mut h: u64 = 5381;
-        for byte in model.bytes() {
-            h = h.wrapping_mul(33).wrapping_add(u64::from(byte));
-        }
-        h = h.wrapping_mul(33).wrapping_add(seed);
-        // Keep in a reasonable recent range without std::time dependency in tests.
-        1_700_000_000u64.wrapping_add(h % 10_000_000)
+    /// The current Unix timestamp in seconds.
+    ///
+    /// OpenAI's `created` field is a real creation time; clients order
+    /// responses and compute latency from it, so it must never be a hash of the
+    /// model name.
+    fn created_at() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since_epoch| since_epoch.as_secs())
+            .unwrap_or(0)
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
@@ -413,8 +461,7 @@ impl OpenAiResponseBuilder {
         prompt_tokens: u32,
         completion_tokens: u32,
     ) -> ChatCompletionResponse {
-        let seed = prompt_tokens as u64 * 1_000_000 + completion_tokens as u64;
-        let created = Self::created_at(model, seed);
+        let created = Self::created_at();
         let id = format!("chatcmpl-{}", Self::short_hash(model, created));
 
         ChatCompletionResponse {
@@ -451,8 +498,8 @@ impl OpenAiResponseBuilder {
         prompt_tokens: u32,
         completion_tokens: u32,
     ) -> CompletionResponse {
-        let seed = prompt.len() as u64;
-        let created = Self::created_at(model, seed);
+        let _ = prompt;
+        let created = Self::created_at();
         let id = format!("cmpl-{}", Self::short_hash(model, created));
 
         CompletionResponse {
@@ -501,13 +548,13 @@ impl OpenAiResponseBuilder {
 
     /// Build a model-list response from a slice of model ID strings.
     pub fn model_list(models: &[&str]) -> ModelListResponse {
+        let created = Self::created_at();
         let data: Vec<ModelInfo> = models
             .iter()
-            .enumerate()
-            .map(|(i, id)| ModelInfo {
-                id: id.to_string(),
+            .map(|id| ModelInfo {
+                id: (*id).to_string(),
                 object: "model".to_string(),
-                created: 1_700_000_000u64 + i as u64,
+                created,
                 owned_by: "trustformers".to_string(),
             })
             .collect();
@@ -551,7 +598,12 @@ impl OpenAiResponseBuilder {
         Ok(())
     }
 
-    /// Count approximate tokens in text using the word-based approximation `len / 4`.
+    /// Approximate the token count of `text` as `len / 4`.
+    ///
+    /// This is a **fallback only**. [`OpenAiApiRouter`] asks its backend for a
+    /// real tokenizer count first via
+    /// [`OpenAiInferenceBackend::count_tokens`] and falls back to this
+    /// approximation only when the backend exposes no tokenizer for the model.
     pub fn count_tokens(text: &str) -> u32 {
         (text.len() / 4) as u32
     }
@@ -704,136 +756,20 @@ impl StreamChunk {
     }
 }
 
-// ─── OpenAiApiRouter ─────────────────────────────────────────────────────────
+// ─── Router ───────────────────────────────────────────────────────────────────
 
-/// Routes incoming OpenAI-compatible requests to the appropriate handler.
-pub struct OpenAiApiRouter {
-    allowed_models: Vec<String>,
-}
+mod router;
 
-impl OpenAiApiRouter {
-    /// Construct a new router with a list of allowed model identifiers.
-    ///
-    /// An empty `allowed_models` list means all models are permitted.
-    pub fn new(allowed_models: Vec<String>) -> Self {
-        Self { allowed_models }
-    }
+pub use router::{
+    openai_compat_router, BackendGenerationOutput, BackendGenerationRequest, OpenAiApiRouter,
+    OpenAiInferenceBackend,
+};
 
-    /// Check whether a model name is allowed by this router.
-    fn is_model_allowed(&self, model: &str) -> bool {
-        self.allowed_models.is_empty() || self.allowed_models.iter().any(|m| m == model)
-    }
+// ─── Backend ──────────────────────────────────────────────────────────────────
 
-    /// Handle a `POST /v1/chat/completions` request.
-    pub fn route_chat_completion(
-        &self,
-        req: &ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, OpenAiCompatError> {
-        OpenAiResponseBuilder::validate_chat_request(req)?;
-        if !self.is_model_allowed(&req.model) {
-            return Err(OpenAiCompatError::ModelNotAllowed(req.model.clone()));
-        }
-        let prompt_tokens: u32 = req
-            .messages
-            .iter()
-            .filter_map(|m| m.content.as_deref())
-            .map(OpenAiResponseBuilder::count_tokens)
-            .sum();
-        let generated_text = "[stub chat response]";
-        let completion_tokens = OpenAiResponseBuilder::count_tokens(generated_text);
-        Ok(OpenAiResponseBuilder::chat_completion(
-            &req.model,
-            &req.messages,
-            generated_text,
-            prompt_tokens,
-            completion_tokens,
-        ))
-    }
+mod backend;
 
-    /// Handle a `POST /v1/completions` request.
-    pub fn route_completion(
-        &self,
-        req: &CompletionRequest,
-    ) -> Result<CompletionResponse, OpenAiCompatError> {
-        if req.model.trim().is_empty() {
-            return Err(OpenAiCompatError::EmptyModel);
-        }
-        if !self.is_model_allowed(&req.model) {
-            return Err(OpenAiCompatError::ModelNotAllowed(req.model.clone()));
-        }
-        let prompt_text = match &req.prompt {
-            CompletionPrompt::Single(s) => s.clone(),
-            CompletionPrompt::Multiple(v) => v.join(" "),
-        };
-        let prompt_tokens = OpenAiResponseBuilder::count_tokens(&prompt_text);
-        let generated_text = "[stub completion]";
-        let completion_tokens = OpenAiResponseBuilder::count_tokens(generated_text);
-        Ok(OpenAiResponseBuilder::completion(
-            &req.model,
-            &prompt_text,
-            generated_text,
-            prompt_tokens,
-            completion_tokens,
-        ))
-    }
-
-    /// Handle a `POST /v1/embeddings` request.
-    pub fn route_embeddings(
-        &self,
-        req: &EmbeddingRequest,
-    ) -> Result<EmbeddingResponse, OpenAiCompatError> {
-        if req.model.trim().is_empty() {
-            return Err(OpenAiCompatError::EmptyModel);
-        }
-        if !self.is_model_allowed(&req.model) {
-            return Err(OpenAiCompatError::ModelNotAllowed(req.model.clone()));
-        }
-        let texts: Vec<String> = match &req.input {
-            EmbeddingInput::Single(s) => vec![s.clone()],
-            EmbeddingInput::Multiple(v) => v.clone(),
-            EmbeddingInput::Tokens(ids) => {
-                vec![ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(" ")]
-            },
-        };
-        let inputs_ref: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        // Stub embeddings: each input gets a 4-dim zero vector.
-        let embeddings: Vec<Vec<f32>> = inputs_ref.iter().map(|_| vec![0.0f32; 4]).collect();
-        Ok(OpenAiResponseBuilder::embedding(
-            &req.model,
-            &inputs_ref,
-            &embeddings,
-        ))
-    }
-
-    /// Convert an [`OpenAiCompatError`] into an [`OpenAiError`] response body.
-    pub fn format_error_response(err: &OpenAiCompatError) -> OpenAiError {
-        match err {
-            OpenAiCompatError::EmptyMessages => OpenAiError::invalid_request(
-                "messages array must not be empty",
-                Some("messages".to_string()),
-            ),
-            OpenAiCompatError::EmptyModel => {
-                OpenAiError::invalid_request("model must not be empty", Some("model".to_string()))
-            },
-            OpenAiCompatError::InvalidTemperature(t) => OpenAiError::invalid_request(
-                format!("temperature {t} is out of range [0, 2]"),
-                Some("temperature".to_string()),
-            ),
-            OpenAiCompatError::InvalidTopP(p) => OpenAiError::invalid_request(
-                format!("top_p {p} is out of range [0, 1]"),
-                Some("top_p".to_string()),
-            ),
-            OpenAiCompatError::InvalidMaxTokens => OpenAiError::invalid_request(
-                "max_tokens must be > 0",
-                Some("max_tokens".to_string()),
-            ),
-            OpenAiCompatError::SerializationError(msg) => {
-                OpenAiError::internal_error(format!("serialization error: {msg}"))
-            },
-            OpenAiCompatError::ModelNotAllowed(model) => OpenAiError::model_not_found(model),
-        }
-    }
-}
+pub use backend::BatchExecutorBackend;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -1231,91 +1167,6 @@ mod tests {
         let back: StreamChoice = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.index, 2);
         assert!(back.finish_reason.as_ref().is_some_and(|r| *r == FinishReason::Stop));
-    }
-
-    // ── 27. OpenAiApiRouter::new stores allowed models ────────────────────────
-    #[test]
-    fn test_router_new_stores_models() {
-        let router = OpenAiApiRouter::new(vec!["gpt-4".to_string(), "claude".to_string()]);
-        assert!(router.is_model_allowed("gpt-4"));
-        assert!(router.is_model_allowed("claude"));
-        assert!(!router.is_model_allowed("unknown"));
-    }
-
-    // ── 28. OpenAiApiRouter route_chat_completion happy path ─────────────────
-    #[test]
-    fn test_router_route_chat_completion_happy() {
-        let router = OpenAiApiRouter::new(vec!["gpt-4".to_string()]);
-        let req = minimal_chat_req();
-        let resp = router.route_chat_completion(&req).expect("route_chat_completion");
-        assert!(resp.id.starts_with("chatcmpl-"));
-        assert_eq!(resp.model, "gpt-4");
-        assert_eq!(resp.choices.len(), 1);
-    }
-
-    // ── 29. OpenAiApiRouter route_chat_completion disallowed model ────────────
-    #[test]
-    fn test_router_route_chat_completion_disallowed_model() {
-        let router = OpenAiApiRouter::new(vec!["gpt-3".to_string()]);
-        let req = minimal_chat_req(); // uses "gpt-4"
-        let err = router.route_chat_completion(&req).unwrap_err();
-        assert!(matches!(err, OpenAiCompatError::ModelNotAllowed(_)));
-    }
-
-    // ── 30. OpenAiApiRouter route_completion happy path ───────────────────────
-    #[test]
-    fn test_router_route_completion_happy() {
-        let router = OpenAiApiRouter::new(vec!["davinci".to_string()]);
-        let req = CompletionRequest {
-            model: "davinci".to_string(),
-            prompt: CompletionPrompt::Single("Hello".to_string()),
-            max_tokens: Some(50),
-            temperature: None,
-            top_p: None,
-            n: None,
-            stream: None,
-            stop: None,
-            echo: None,
-        };
-        let resp = router.route_completion(&req).expect("route_completion");
-        assert_eq!(resp.model, "davinci");
-        assert_eq!(resp.object, "text_completion");
-    }
-
-    // ── 31. OpenAiApiRouter route_embeddings happy path ───────────────────────
-    #[test]
-    fn test_router_route_embeddings_happy() {
-        let router = OpenAiApiRouter::new(vec!["ada".to_string()]);
-        let req = EmbeddingRequest {
-            model: "ada".to_string(),
-            input: EmbeddingInput::Single("Hello world".to_string()),
-            encoding_format: None,
-            dimensions: None,
-            user: None,
-        };
-        let resp = router.route_embeddings(&req).expect("route_embeddings");
-        assert_eq!(resp.object, "list");
-        assert_eq!(resp.data.len(), 1);
-        assert_eq!(resp.data[0].embedding.len(), 4);
-    }
-
-    // ── 32. format_error_response for each variant ────────────────────────────
-    #[test]
-    fn test_format_error_response_variants() {
-        let cases: Vec<OpenAiCompatError> = vec![
-            OpenAiCompatError::EmptyMessages,
-            OpenAiCompatError::EmptyModel,
-            OpenAiCompatError::InvalidTemperature(2.5),
-            OpenAiCompatError::InvalidTopP(-0.1),
-            OpenAiCompatError::InvalidMaxTokens,
-            OpenAiCompatError::SerializationError("json fail".to_string()),
-            OpenAiCompatError::ModelNotAllowed("unknown".to_string()),
-        ];
-        for err in &cases {
-            let oai_err = OpenAiApiRouter::format_error_response(err);
-            // Every converted error should have a non-empty message.
-            assert!(!oai_err.error.message.is_empty(), "empty message for {err}");
-        }
     }
 
     // ── 33. TokenUsage is same type as UsageStats ─────────────────────────────

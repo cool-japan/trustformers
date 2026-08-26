@@ -198,6 +198,21 @@ impl MLstmConfig {
     }
 }
 
+impl XLSTMConfig {
+    /// Which recurrent cell layer `index` should use.
+    ///
+    /// `block_pattern` is cycled when it is shorter than `num_layers`, which is how
+    /// the paper's "every third block is an sLSTM" schedules are expressed. An
+    /// empty pattern falls back to `block_config.block_type`.
+    pub fn block_type_for_layer(&self, index: usize) -> XLSTMBlockType {
+        let pattern = &self.block_config.block_pattern;
+        if pattern.is_empty() {
+            return self.block_config.block_type.clone();
+        }
+        pattern[index % pattern.len()].clone()
+    }
+}
+
 /// Predefined xLSTM model variants
 impl XLSTMConfig {
     /// Small xLSTM model (similar to BERT-base)

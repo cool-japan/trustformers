@@ -231,9 +231,16 @@ impl HNAdam {
         self.config.adaptation_threshold = threshold.max(0.001); // Minimum threshold
     }
 
-    /// Generate parameter ID for a given parameter
-    fn get_param_id(&self, param: &Tensor) -> String {
-        format!("param_{:p}", param as *const _)
+    /// Resolves the stable state key for a parameter.
+    ///
+    /// See [`crate::param_id`]: the previous implementation formatted the tensor's
+    /// address, which changes between processes and so broke checkpoint resume.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor dtype has no addressable buffer.
+    fn get_param_id(&mut self, param: &Tensor) -> Result<String> {
+        self.state.param_key_for_tensor(param)
     }
 }
 
@@ -374,7 +381,7 @@ impl Optimizer for HNAdam {
         self.step_count += 1;
         let step = self.step_count;
 
-        let param_id = self.get_param_id(parameter);
+        let param_id = self.get_param_id(parameter)?;
 
         match (parameter, grad) {
             (Tensor::F32(param_data), Tensor::F32(grad_data)) => {

@@ -10,6 +10,7 @@
 pub mod config;
 pub mod dpo;
 pub mod feedback;
+pub mod policy_optimizer;
 pub mod ppo;
 pub mod reward_model;
 pub mod trainer;

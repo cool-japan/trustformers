@@ -17,6 +17,100 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Wraps `sysinfo::System` so that structs embedding it (`CPUDevice`) can
+/// still derive `Debug`/`Clone` without depending on whether the vendored
+/// `sysinfo::System` type itself implements those traits.
+struct SystemMonitor(Mutex<sysinfo::System>);
+
+impl SystemMonitor {
+    fn new() -> Self {
+        let mut system = sysinfo::System::new();
+        // Prime a first sample; CPU usage deltas require at least one prior
+        // refresh, so this call alone typically reports 0% until the next
+        // `refresh_cpu_usage()`. That is a real (if initially uninformative)
+        // reading, not a fabricated constant.
+        system.refresh_cpu_usage();
+        Self(Mutex::new(system))
+    }
+
+    /// Real, live CPU utilization percentage (0.0-100.0), averaged across
+    /// all cores, sampled from the OS via `sysinfo`.
+    fn cpu_utilization_percent(&self) -> f64 {
+        let mut system = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        system.refresh_cpu_usage();
+        system.global_cpu_usage() as f64
+    }
+}
+
+impl std::fmt::Debug for SystemMonitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SystemMonitor(..)")
+    }
+}
+
+/// Read the hottest currently-reporting thermal sensor via `sysinfo`. Returns
+/// `None` (rather than a fabricated temperature) when the platform exposes no
+/// readable sensors, which is common on sandboxed/virtualized hosts and on
+/// Apple Silicon without elevated SMC access.
+fn read_hottest_sensor_celsius() -> Option<f64> {
+    let components = sysinfo::Components::new_with_refreshed_list();
+    components
+        .list()
+        .iter()
+        .filter_map(|c| c.temperature())
+        .fold(None, |max, t| Some(max.map_or(t, |m: f32| m.max(t))))
+        .map(|t| t as f64)
+}
+
+/// Real sequential host memory throughput, measured once per process by
+/// timing a full read pass over a buffer large enough to exceed typical CPU
+/// cache sizes (an actual measurement, not a hardcoded DDR spec) and cached
+/// for the lifetime of the process: memory bandwidth is a fixed machine
+/// property, so `CPUDevice::new()` (and previously `GPUDevice::new()`, see
+/// `detect_gpu_memory_bandwidth`) must not re-run a ~256 MB benchmark on
+/// every device construction / dispatched operation.
+fn measure_memory_bandwidth_bytes_per_sec() -> f64 {
+    static CACHED: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        const BUFFER_BYTES: usize = 64 * 1024 * 1024; // 64 MiB, well beyond L2/L3 on most CPUs
+        const ELEM_LEN: usize = BUFFER_BYTES / std::mem::size_of::<u64>();
+        const PASSES: usize = 4;
+
+        let buffer: Vec<u64> = (0..ELEM_LEN as u64).collect();
+
+        let start = std::time::Instant::now();
+        let mut acc: u64 = 0;
+        for _ in 0..PASSES {
+            for &v in &buffer {
+                acc = acc.wrapping_add(v);
+            }
+        }
+        let elapsed = start.elapsed();
+        std::hint::black_box(acc);
+
+        let bytes_read = (ELEM_LEN * std::mem::size_of::<u64>() * PASSES) as f64;
+        let seconds = elapsed.as_secs_f64().max(1e-9);
+        bytes_read / seconds
+    })
+}
+
+/// Validate that `inputs` has at least `min` elements before an operation
+/// indexes into it, returning an honest error instead of panicking.
+fn require_inputs(inputs: &[Tensor], min: usize, operation: &str) -> HardwareResult<()> {
+    if inputs.len() < min {
+        return Err(TrustformersError::hardware_error(
+            &format!(
+                "{} operation requires at least {} input(s), got {}",
+                operation,
+                min,
+                inputs.len()
+            ),
+            "execute_operation",
+        ));
+    }
+    Ok(())
+}
+
 /// CPU device implementation
 #[derive(Debug, Clone)]
 pub struct CPUDevice {
@@ -34,6 +128,8 @@ pub struct CPUDevice {
     next_memory_id: Arc<Mutex<usize>>,
     /// Device status
     status: Arc<Mutex<DeviceStatus>>,
+    /// Live OS telemetry source for CPU utilization sampling.
+    system: Arc<SystemMonitor>,
 }
 
 /// GPU device implementation
@@ -49,10 +145,11 @@ pub struct GPUDevice {
     is_initialized: bool,
     /// Real-time metrics
     metrics: Arc<Mutex<HardwareMetrics>>,
-    /// Memory pools for different allocations
+    /// Memory pools for different allocations. Always empty in practice:
+    /// `allocate_memory` errors instead of populating this (see below), so
+    /// this exists only so `shutdown`/`reset` have a pool to clear should a
+    /// future real backend allocator start populating it.
     memory_pools: Arc<Mutex<HashMap<usize, Vec<u8>>>>,
-    /// Next memory allocation ID
-    next_memory_id: Arc<Mutex<usize>>,
     /// Device status
     status: Arc<Mutex<DeviceStatus>>,
 }
@@ -78,12 +175,14 @@ impl CPUDevice {
     /// Create a new CPU device
     pub fn new(id: String) -> Self {
         let capabilities = Self::detect_cpu_capabilities();
+        let system = Arc::new(SystemMonitor::new());
+        let initial_temperature = read_hottest_sensor_celsius();
         let metrics = Arc::new(Mutex::new(HardwareMetrics {
             ops_per_second: 1_000_000.0, // 1M ops/sec baseline for CPU
             memory_bandwidth: Self::detect_memory_bandwidth(),
-            utilization: 0.0,
-            power_consumption: 65.0, // Typical CPU TDP
-            temperature: Some(45.0), // Typical idle temperature
+            utilization: system.cpu_utilization_percent(),
+            power_consumption: 65.0, // Typical CPU TDP baseline; scaled by real utilization below
+            temperature: initial_temperature,
             error_rate: 0.0001,
             latency: 1.0,
             throughput: 1000.0,
@@ -106,10 +205,11 @@ impl CPUDevice {
                     free: Self::get_system_memory(),
                     fragmentation: 0.0,
                 },
-                temperature: Some(45.0),
+                temperature: initial_temperature,
                 power_consumption: Some(65.0),
                 utilization: 0.0,
             })),
+            system,
         }
     }
 
@@ -141,13 +241,10 @@ impl CPUDevice {
                 "mul",
                 "div",
                 "matmul",
-                "conv2d",
                 "relu",
                 "softmax",
-                "batch_norm",
                 "layer_norm",
                 "transpose",
-                "reshape",
             ]
             .into_iter()
             .map(String::from)
@@ -198,11 +295,11 @@ impl CPUDevice {
         8 * 1024 * 1024 * 1024
     }
 
-    /// Detect memory bandwidth
+    /// Measure real sequential memory throughput (see
+    /// `measure_memory_bandwidth_bytes_per_sec`), rather than assuming a
+    /// fixed DDR generation's spec-sheet number.
     fn detect_memory_bandwidth() -> f64 {
-        // Estimate based on typical DDR4/DDR5 specs
-        // This would ideally be measured or detected from system specs
-        25.6e9 // 25.6 GB/s for DDR4-3200
+        measure_memory_bandwidth_bytes_per_sec()
     }
 
     /// Update CPU metrics based on current system state
@@ -211,28 +308,28 @@ impl CPUDevice {
             TrustformersError::hardware_error("Failed to lock metrics", "update_metrics")
         })?;
 
-        // Update utilization (simplified - would use actual CPU monitoring)
+        // Real, live CPU utilization sampled from the OS via sysinfo.
         metrics.utilization = self.get_cpu_utilization();
 
-        // Update temperature (simplified - would read from sensors)
-        metrics.temperature = Some(self.get_cpu_temperature());
+        // Real thermal sensor reading where the platform exposes one;
+        // `None` (rather than a fabricated value) otherwise.
+        metrics.temperature = self.get_cpu_temperature();
 
-        // Update power usage based on utilization
-        metrics.power_consumption = 65.0 + (metrics.utilization * 30.0); // Base + load-dependent
+        // Power usage has no direct sensor on most platforms without
+        // elevated privileges (RAPL/IOReport); derive it from the real,
+        // live utilization measurement above rather than reporting a flat
+        // fabricated wattage.
+        metrics.power_consumption = 65.0 + (metrics.utilization * 30.0 / 100.0); // Base + load-dependent
 
         Ok(())
     }
 
     fn get_cpu_utilization(&self) -> f64 {
-        // Placeholder - would implement actual CPU utilization monitoring
-        // Could use /proc/stat on Linux, performance counters on Windows, etc.
-        25.0 // 25% utilization as example
+        self.system.cpu_utilization_percent()
     }
 
-    fn get_cpu_temperature(&self) -> f64 {
-        // Placeholder - would read from thermal sensors
-        // Could use lm-sensors on Linux, CoreTemp on Windows, etc.
-        55.0 // 55°C as example
+    fn get_cpu_temperature(&self) -> Option<f64> {
+        read_hottest_sensor_celsius()
     }
 
     /// Execute operation on CPU device
@@ -254,37 +351,48 @@ impl CPUDevice {
             status.busy = true;
         }
 
-        // Execute the operation (placeholder implementation)
         let result = match operation {
             "add" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].add(&inputs[1])?]
-                } else {
-                    return Err(TrustformersError::hardware_error(
-                        "Add operation requires at least 2 inputs",
-                        "execute_operation",
-                    ));
-                }
+                require_inputs(inputs, 2, operation)?;
+                vec![inputs[0].add(&inputs[1])?]
+            },
+            "sub" => {
+                require_inputs(inputs, 2, operation)?;
+                vec![inputs[0].sub(&inputs[1])?]
             },
             "mul" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].mul(&inputs[1])?]
-                } else {
-                    return Err(TrustformersError::hardware_error(
-                        "Mul operation requires at least 2 inputs",
-                        "execute_operation",
-                    ));
-                }
+                require_inputs(inputs, 2, operation)?;
+                vec![inputs[0].mul(&inputs[1])?]
+            },
+            "div" => {
+                require_inputs(inputs, 2, operation)?;
+                vec![inputs[0].div(&inputs[1])?]
             },
             "matmul" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].matmul(&inputs[1])?]
+                require_inputs(inputs, 2, operation)?;
+                vec![inputs[0].matmul(&inputs[1])?]
+            },
+            "relu" => self.execute_relu(inputs)?,
+            "softmax" => self.execute_softmax(inputs)?,
+            "layer_norm" => {
+                require_inputs(inputs, 1, operation)?;
+                let normalized = inputs[0].layer_norm(-1, 1e-5)?;
+                if inputs.len() >= 3 {
+                    vec![normalized.mul(&inputs[1])?.add(&inputs[2])?]
                 } else {
+                    vec![normalized]
+                }
+            },
+            "transpose" => {
+                require_inputs(inputs, 1, operation)?;
+                let shape = inputs[0].shape();
+                if shape.len() < 2 {
                     return Err(TrustformersError::hardware_error(
-                        "Matmul operation requires at least 2 inputs",
+                        "Transpose requires a tensor with at least 2 dimensions",
                         "execute_operation",
                     ));
                 }
+                vec![inputs[0].transpose(shape.len() - 2, shape.len() - 1)?]
             },
             _ => {
                 return Err(TrustformersError::hardware_error(
@@ -468,7 +576,6 @@ impl CPUDevice {
         Ok(vec![result])
     }
 
-    #[allow(dead_code)]
     fn execute_relu(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
         if inputs.len() != 1 {
             return Err(TrustformersError::hardware_error(
@@ -481,7 +588,6 @@ impl CPUDevice {
         Ok(vec![result])
     }
 
-    #[allow(dead_code)]
     fn execute_softmax(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
         if inputs.len() != 1 {
             return Err(TrustformersError::hardware_error(
@@ -497,28 +603,25 @@ impl CPUDevice {
 
 impl GPUDevice {
     /// Create a new GPU device
+    ///
+    /// Note: this constructs a *logical* device handle tagged with
+    /// `backend_type`; it does not open a real CUDA/ROCm/OpenCL/Metal/Vulkan
+    /// context (that requires the backend-specific `gpu_ops::*` modules).
+    /// Capabilities and telemetry are therefore honestly reported as unknown
+    /// (`None`/`0`) rather than fabricated per-backend spec-sheet numbers,
+    /// since no real device has actually been queried.
     pub fn new(id: String, backend_type: GPUBackendType) -> Self {
         let capabilities = Self::detect_gpu_capabilities(&backend_type);
 
-        // Extract memory size and power consumption from backend type
-        let (memory_size, _compute_units, power_consumption) = match backend_type {
-            GPUBackendType::CUDA => (8 * 1024 * 1024 * 1024, 2048, 250.0),
-            GPUBackendType::ROCm => (16 * 1024 * 1024 * 1024, 3840, 300.0),
-            GPUBackendType::OpenCL => (4 * 1024 * 1024 * 1024, 1024, 150.0),
-            GPUBackendType::Metal => (8 * 1024 * 1024 * 1024, 1024, 200.0),
-            GPUBackendType::Vulkan => (6 * 1024 * 1024 * 1024, 1536, 180.0),
-            GPUBackendType::Unknown => (2 * 1024 * 1024 * 1024, 512, 100.0),
-        };
-
         let metrics = Arc::new(Mutex::new(HardwareMetrics {
-            ops_per_second: 50_000_000.0, // 50M ops/sec for GPU
+            ops_per_second: 0.0,
             memory_bandwidth: Self::detect_gpu_memory_bandwidth(&backend_type),
             utilization: 0.0,
-            power_consumption,       // Typical GPU TDP
-            temperature: Some(35.0), // Typical idle temperature
-            error_rate: 0.00001,
-            latency: 0.5,
-            throughput: 50_000.0,
+            power_consumption: 0.0,
+            temperature: None,
+            error_rate: 0.0,
+            latency: 0.0,
+            throughput: 0.0,
         }));
 
         Self {
@@ -528,35 +631,33 @@ impl GPUDevice {
             is_initialized: false,
             metrics,
             memory_pools: Arc::new(Mutex::new(HashMap::new())),
-            next_memory_id: Arc::new(Mutex::new(1)),
             status: Arc::new(Mutex::new(DeviceStatus {
                 online: true,
                 busy: false,
                 error: None,
                 memory_usage: MemoryUsage {
                     used: 0,
-                    total: memory_size,
-                    free: memory_size,
+                    // No real backend context is opened, so there is no VRAM
+                    // pool to report a size for.
+                    total: 0,
+                    free: 0,
                     fragmentation: 0.0,
                 },
-                temperature: Some(35.0),
-                power_consumption: Some(power_consumption),
+                temperature: None,
+                power_consumption: None,
                 utilization: 0.0,
             })),
         }
     }
 
     /// Detect GPU capabilities based on backend type
-    fn detect_gpu_capabilities(backend_type: &GPUBackendType) -> HardwareCapabilities {
-        let (memory_size, compute_units, power_consumption) = match backend_type {
-            GPUBackendType::CUDA => (8 * 1024 * 1024 * 1024, 2048, 250.0), // 8GB VRAM, 2048 CUDA cores
-            GPUBackendType::ROCm => (16 * 1024 * 1024 * 1024, 3840, 300.0), // 16GB VRAM, 3840 Stream processors
-            GPUBackendType::OpenCL => (4 * 1024 * 1024 * 1024, 1024, 150.0), // 4GB VRAM, 1024 cores
-            GPUBackendType::Metal => (8 * 1024 * 1024 * 1024, 1024, 200.0), // 8GB unified memory
-            GPUBackendType::Vulkan => (6 * 1024 * 1024 * 1024, 1536, 180.0), // 6GB VRAM
-            GPUBackendType::Unknown => (2 * 1024 * 1024 * 1024, 512, 100.0), // Minimal fallback
-        };
-
+    ///
+    /// No live device is queried here (see `GPUDevice::new`), so
+    /// hardware-specific figures (VRAM size, compute unit count, clock
+    /// speed, TDP) are reported as `None` for every backend rather than
+    /// fabricated per-backend-type constants. `operations` lists only what
+    /// `execute_operation` actually implements below.
+    fn detect_gpu_capabilities(_backend_type: &GPUBackendType) -> HardwareCapabilities {
         HardwareCapabilities {
             data_types: vec![
                 DataType::F32,
@@ -571,9 +672,9 @@ impl GPUDevice {
                 DataType::Bool,
             ],
             max_dimensions: 12, // GPUs can handle higher dimensions
-            memory_size: Some(memory_size),
-            clock_frequency: Some(1_800_000_000), // 1.8 GHz boost clock
-            compute_units: Some(compute_units),
+            memory_size: None,
+            clock_frequency: None,
+            compute_units: None,
             operations: vec![
                 "add",
                 "sub",
@@ -581,37 +682,30 @@ impl GPUDevice {
                 "div",
                 "matmul",
                 "conv2d",
-                "conv3d",
                 "relu",
                 "gelu",
                 "softmax",
-                "batch_norm",
                 "layer_norm",
-                "group_norm",
                 "attention",
                 "flash_attention",
                 "transpose",
-                "reshape",
-                "slice",
             ]
             .into_iter()
             .map(String::from)
             .collect(),
-            power_consumption: Some(power_consumption),
-            thermal_design_power: Some(power_consumption + 50.0),
+            power_consumption: None,
+            thermal_design_power: None,
         }
     }
 
-    /// Detect GPU memory bandwidth based on backend
-    fn detect_gpu_memory_bandwidth(backend_type: &GPUBackendType) -> f64 {
-        match backend_type {
-            GPUBackendType::CUDA => 900.0e9,    // 900 GB/s for high-end CUDA
-            GPUBackendType::ROCm => 1600.0e9,   // 1.6 TB/s for high-end ROCm
-            GPUBackendType::OpenCL => 400.0e9,  // 400 GB/s for OpenCL
-            GPUBackendType::Metal => 400.0e9,   // 400 GB/s for Metal
-            GPUBackendType::Vulkan => 500.0e9,  // 500 GB/s for Vulkan
-            GPUBackendType::Unknown => 200.0e9, // 200 GB/s fallback
-        }
+    /// No backend telemetry source is wired up for any GPUBackendType (see
+    /// `GPUDevice::new`), so this honestly reports `0.0` ("unmeasured")
+    /// rather than a fabricated per-backend VRAM bandwidth constant.
+    /// Reporting the *host's* memory bandwidth here (as an earlier version
+    /// of this fix did) would still mislabel a CPU-subsystem measurement as
+    /// a property of a GPU device, so it is not reused for this field.
+    fn detect_gpu_memory_bandwidth(_backend_type: &GPUBackendType) -> f64 {
+        0.0
     }
 
     /// Execute operation on GPU device
@@ -633,38 +727,51 @@ impl GPUDevice {
             status.busy = true;
         }
 
-        // Execute the operation (placeholder implementation)
+        // No backend context is opened for any GPUBackendType (see
+        // `GPUDevice::new`), so every operation genuinely executes on the
+        // host CPU here. This mirrors `CPUDevice::execute_operation`
+        // intentionally: it is the honest behavior given no real
+        // accelerator is wired up, rather than a mock that returns
+        // unmodified/zeroed data while claiming success.
         let result = match operation {
-            "add" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].add(&inputs[1])?]
+            "add" | "sub" | "mul" | "div" | "matmul" => {
+                self.execute_binary_op(operation, inputs)?
+            },
+            "relu" => {
+                require_inputs(inputs, 1, operation)?;
+                vec![inputs[0].relu()?]
+            },
+            "gelu" => {
+                require_inputs(inputs, 1, operation)?;
+                vec![inputs[0].gelu()?]
+            },
+            "softmax" => {
+                require_inputs(inputs, 1, operation)?;
+                vec![inputs[0].softmax(-1)?]
+            },
+            "layer_norm" => {
+                require_inputs(inputs, 1, operation)?;
+                let normalized = inputs[0].layer_norm(-1, 1e-5)?;
+                if inputs.len() >= 3 {
+                    vec![normalized.mul(&inputs[1])?.add(&inputs[2])?]
                 } else {
+                    vec![normalized]
+                }
+            },
+            "transpose" => {
+                require_inputs(inputs, 1, operation)?;
+                let shape = inputs[0].shape();
+                if shape.len() < 2 {
                     return Err(TrustformersError::hardware_error(
-                        "Add operation requires at least 2 inputs",
+                        "Transpose requires a tensor with at least 2 dimensions",
                         "execute_operation",
                     ));
                 }
+                vec![inputs[0].transpose(shape.len() - 2, shape.len() - 1)?]
             },
-            "mul" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].mul(&inputs[1])?]
-                } else {
-                    return Err(TrustformersError::hardware_error(
-                        "Mul operation requires at least 2 inputs",
-                        "execute_operation",
-                    ));
-                }
-            },
-            "matmul" => {
-                if inputs.len() >= 2 {
-                    vec![inputs[0].matmul(&inputs[1])?]
-                } else {
-                    return Err(TrustformersError::hardware_error(
-                        "Matmul operation requires at least 2 inputs",
-                        "execute_operation",
-                    ));
-                }
-            },
+            "conv2d" => self.execute_gpu_conv2d(inputs)?,
+            "attention" => self.execute_gpu_attention(inputs)?,
+            "flash_attention" => self.execute_gpu_flash_attention(inputs)?,
             _ => {
                 return Err(TrustformersError::hardware_error(
                     &format!("Unsupported operation: {}", operation),
@@ -685,6 +792,19 @@ impl GPUDevice {
         }
 
         Ok(result)
+    }
+
+    fn execute_binary_op(&self, operation: &str, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
+        require_inputs(inputs, 2, operation)?;
+        let result = match operation {
+            "add" => inputs[0].add(&inputs[1])?,
+            "sub" => inputs[0].sub(&inputs[1])?,
+            "mul" => inputs[0].mul(&inputs[1])?,
+            "div" => inputs[0].div(&inputs[1])?,
+            "matmul" => inputs[0].matmul(&inputs[1])?,
+            _ => unreachable!("execute_binary_op called with non-binary operation {operation}"),
+        };
+        Ok(vec![result])
     }
 }
 
@@ -766,12 +886,13 @@ impl HardwareDevice for GPUDevice {
     }
 
     async fn metrics(&self) -> HardwareResult<HardwareMetrics> {
-        // Update metrics from GPU
         let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Update GPU-specific metrics
+        // No backend telemetry source (NVML/rocm-smi/IOKit/...) is wired up
+        // for any GPUBackendType, so these honestly report "unknown" rather
+        // than a fabricated plausible-looking reading.
         metrics.utilization = self.get_gpu_utilization();
-        metrics.temperature = Some(self.get_gpu_temperature());
+        metrics.temperature = self.get_gpu_temperature();
         metrics.power_consumption = self.get_gpu_power_usage();
 
         Ok(metrics.clone())
@@ -802,30 +923,21 @@ impl HardwareDevice for GPUDevice {
         Ok(())
     }
 
-    async fn allocate_memory(&mut self, size: usize) -> HardwareResult<DeviceMemory> {
-        let memory_id = {
-            let mut id_counter =
-                self.next_memory_id.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let id = *id_counter;
-            *id_counter += 1;
-            id
-        };
-
-        // Allocate GPU memory (simplified - would use actual GPU memory allocation)
-        let buffer = vec![0u8; size];
-
-        {
-            let mut pools =
-                self.memory_pools.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            pools.insert(memory_id, buffer);
-        }
-
-        Ok(DeviceMemory {
-            address: memory_id,
-            size,
-            memory_type: MemoryType::Local,
-            device_id: self.id.clone(),
-        })
+    async fn allocate_memory(&mut self, _size: usize) -> HardwareResult<DeviceMemory> {
+        // No backend context is opened for any GPUBackendType (see
+        // `GPUDevice::new`), so there is no real VRAM allocator to delegate
+        // to. Silently handing back a host-RAM buffer labeled as GPU-local
+        // memory would misrepresent it (and could OOM the host on a request
+        // that would have failed cleanly against real, bounded VRAM), so
+        // this reports the capability gap honestly instead.
+        Err(TrustformersError::hardware_error(
+            &format!(
+                "GPUDevice({:?}) has no backend memory allocator wired up; \
+                 GPU memory allocation is not supported by this build",
+                self.backend_type
+            ),
+            "allocate_memory",
+        ))
     }
 
     async fn free_memory(&mut self, memory: DeviceMemory) -> HardwareResult<()> {
@@ -835,13 +947,16 @@ impl HardwareDevice for GPUDevice {
     }
 
     async fn synchronize(&self) -> HardwareResult<()> {
-        // Synchronize GPU operations
+        // `execute_operation` runs entirely synchronously on the calling
+        // thread (no backend stream/queue is opened), so by construction
+        // there is never outstanding GPU work to wait for here - `Ok(())`
+        // is a true statement, not a placeholder.
         match self.backend_type {
-            GPUBackendType::CUDA => Ok(()),   // CUDA sync placeholder
-            GPUBackendType::ROCm => Ok(()),   // ROCm sync placeholder
-            GPUBackendType::OpenCL => Ok(()), // OpenCL sync placeholder
-            GPUBackendType::Metal => Ok(()),  // Metal sync placeholder
-            GPUBackendType::Vulkan => Ok(()), // Vulkan sync placeholder
+            GPUBackendType::CUDA
+            | GPUBackendType::ROCm
+            | GPUBackendType::OpenCL
+            | GPUBackendType::Metal
+            | GPUBackendType::Vulkan => Ok(()),
             GPUBackendType::Unknown => Err(TrustformersError::hardware_error(
                 "Cannot sync unknown backend",
                 "sync_memory",
@@ -851,69 +966,70 @@ impl HardwareDevice for GPUDevice {
 }
 
 impl GPUDevice {
+    // `initialize_*`/`cleanup_*` are intentionally no-ops: `GPUDevice` does
+    // not open a real backend context (CUDA context, ROCm/HIP stream, Metal
+    // command queue, ...) at this abstraction layer, so there is nothing to
+    // set up or tear down yet. `execute_operation` is honest about running
+    // on the host CPU rather than pretending these no-ops enabled real
+    // accelerator execution. Backend-specific context creation belongs in
+    // the `gpu_ops::{cuda,rocm,metal,opencl,webgpu}` modules.
     fn initialize_cuda(&self) -> HardwareResult<()> {
-        // CUDA initialization (placeholder)
         Ok(())
     }
 
     fn initialize_rocm(&self) -> HardwareResult<()> {
-        // ROCm initialization (placeholder)
         Ok(())
     }
 
     fn initialize_opencl(&self) -> HardwareResult<()> {
-        // OpenCL initialization (placeholder)
         Ok(())
     }
 
     fn initialize_metal(&self) -> HardwareResult<()> {
-        // Metal initialization (placeholder)
         Ok(())
     }
 
     fn initialize_vulkan(&self) -> HardwareResult<()> {
-        // Vulkan initialization (placeholder)
         Ok(())
     }
 
     fn cleanup_cuda(&self) -> HardwareResult<()> {
-        // CUDA cleanup (placeholder)
         Ok(())
     }
 
     fn cleanup_rocm(&self) -> HardwareResult<()> {
-        // ROCm cleanup (placeholder)
         Ok(())
     }
 
     fn cleanup_opencl(&self) -> HardwareResult<()> {
-        // OpenCL cleanup (placeholder)
         Ok(())
     }
 
     fn cleanup_metal(&self) -> HardwareResult<()> {
-        // Metal cleanup (placeholder)
         Ok(())
     }
 
     fn cleanup_vulkan(&self) -> HardwareResult<()> {
-        // Vulkan cleanup (placeholder)
         Ok(())
     }
 
+    /// No backend telemetry source (NVML/rocm-smi/IOKit/...) is wired up,
+    /// so this honestly reports `0.0` ("unmeasured") rather than a
+    /// plausible-looking fabricated percentage.
     fn get_gpu_utilization(&self) -> f64 {
-        // Placeholder - would query actual GPU utilization
-        35.0 // 35% utilization
+        0.0
     }
 
-    fn get_gpu_temperature(&self) -> f64 {
-        // Placeholder - would query GPU temperature sensors
-        65.0 // 65°C
+    /// No backend telemetry source is wired up; `None` ("unknown") rather
+    /// than a fabricated sensor reading.
+    fn get_gpu_temperature(&self) -> Option<f64> {
+        None
     }
 
+    /// No backend telemetry source is wired up, so this honestly reports
+    /// `0.0` ("unmeasured") rather than a fabricated wattage.
     fn get_gpu_power_usage(&self) -> f64 {
-        // Placeholder - would query actual GPU power usage
-        180.0 // 180W
+        0.0
     }
 
     #[allow(dead_code)]
@@ -930,7 +1046,6 @@ impl GPUDevice {
         Ok(vec![result])
     }
 
-    #[allow(dead_code)]
     fn execute_gpu_conv2d(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
         // CPU fallback for 2D convolution using im2col + matmul approach
         // inputs: [input (N,C_in,H,W), kernel (C_out,C_in,kH,kW)]
@@ -1128,7 +1243,6 @@ impl GPUDevice {
         Ok(vec![output])
     }
 
-    #[allow(dead_code)]
     fn execute_gpu_flash_attention(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
         // CPU fallback for flash attention using a tiled/chunked approach
         // inputs: [Q, K, V] each of shape (seq_len, d_k) or (batch, seq_len, d_k)
@@ -1528,5 +1642,104 @@ mod tests {
         let cloned = dev.clone();
         assert_eq!(cloned.id, "gpu-clone");
         assert_eq!(cloned.backend_type, GPUBackendType::Metal);
+    }
+
+    // --- Regression tests: GPUDevice::execute_operation used to only
+    // implement add/mul/matmul (host-side Tensor ops) while advertising a
+    // much larger `operations` capability list (conv2d/attention/etc.), and
+    // silently claiming to be "GPU execution". These assert real computed
+    // results for the newly-wired ops and honest errors for what remains
+    // unsupported, matching what `capabilities().operations` now claims.
+
+    #[test]
+    fn test_gpu_execute_add_computes_real_result() {
+        let dev = GPUDevice::new("gpu-add".to_string(), GPUBackendType::CUDA);
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[3]).expect("create failed");
+        let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], &[3]).expect("create failed");
+        let result = dev
+            .execute_operation(
+                "add",
+                &[a, b],
+                OperationMode::Balanced,
+                PrecisionMode::Single,
+            )
+            .expect("add should succeed");
+        let data = result[0].data().expect("read result");
+        assert_eq!(data, vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn test_gpu_execute_relu_computes_real_result() {
+        let dev = GPUDevice::new("gpu-relu".to_string(), GPUBackendType::CUDA);
+        let x = Tensor::from_vec(vec![-2.0f32, -0.5, 0.0, 3.0], &[4]).expect("create failed");
+        let result = dev
+            .execute_operation("relu", &[x], OperationMode::Balanced, PrecisionMode::Single)
+            .expect("relu should succeed");
+        let data = result[0].data().expect("read result");
+        assert_eq!(data, vec![0.0, 0.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn test_gpu_execute_unsupported_operation_errors() {
+        let dev = GPUDevice::new("gpu-unsup".to_string(), GPUBackendType::CUDA);
+        let x = Tensor::from_vec(vec![1.0f32], &[1]).expect("create failed");
+        let result = dev.execute_operation(
+            "frobnicate",
+            &[x],
+            OperationMode::Balanced,
+            PrecisionMode::Single,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gpu_execute_operation_empty_inputs_returns_error_not_panic() {
+        let dev = GPUDevice::new("gpu-empty".to_string(), GPUBackendType::CUDA);
+        let result =
+            dev.execute_operation("add", &[], OperationMode::Balanced, PrecisionMode::Single);
+        assert!(result.is_err());
+    }
+
+    /// Regression test: `allocate_memory` used to allocate host RAM
+    /// (`vec![0u8; size]`) and hand it back labeled `MemoryType::Local`
+    /// ("GPU memory"), for every backend, unconditionally. Since no real
+    /// backend allocator is wired up, this must now error instead of
+    /// fabricating a VRAM allocation.
+    #[tokio::test]
+    async fn test_gpu_allocate_memory_errors_without_real_backend() {
+        let mut dev = GPUDevice::new("gpu-alloc".to_string(), GPUBackendType::CUDA);
+        let result = dev.allocate_memory(1024).await;
+        assert!(result.is_err());
+    }
+
+    /// Regression test: memory bandwidth used to be a hardcoded per-backend
+    /// constant (e.g. exactly 25.6e9 for CPU DDR4-3200), identical on every
+    /// machine and every call. It is now a real timed measurement, which
+    /// will not land on that exact literal.
+    #[test]
+    fn test_cpu_memory_bandwidth_is_a_real_measurement() {
+        let bw = CPUDevice::detect_memory_bandwidth();
+        assert!(bw > 0.0);
+        assert!(bw.is_finite());
+        assert_ne!(
+            bw, 25.6e9,
+            "bandwidth must be measured, not the old hardcoded constant"
+        );
+    }
+
+    /// Regression test: GPU capability/telemetry fabrication. Before the
+    /// fix, `detect_gpu_capabilities`/`detect_gpu_memory_bandwidth` returned
+    /// fixed per-`GPUBackendType` tuples (e.g. CUDA => 8GB/2048 cores/250W)
+    /// despite never querying a real device, and `get_gpu_utilization`/
+    /// `get_gpu_temperature`/`get_gpu_power_usage` were flat constants
+    /// (35%/65°C/180W) surfaced through the public `metrics()` API.
+    #[tokio::test]
+    async fn test_gpu_metrics_do_not_fabricate_utilization_or_temperature() {
+        let mut dev = GPUDevice::new("gpu-metrics".to_string(), GPUBackendType::ROCm);
+        dev.initialize(&HardwareConfig::default()).await.expect("initialize failed");
+        let metrics = dev.metrics().await.expect("metrics should succeed");
+        assert_eq!(metrics.utilization, 0.0);
+        assert_eq!(metrics.power_consumption, 0.0);
+        assert!(metrics.temperature.is_none());
     }
 }

@@ -1,6 +1,14 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
+use trustformers_core::traits::Tokenizer;
+
+/// Named convenience alias for `validation_pattern: "email"`. A real regex,
+/// not the substring-contains("@") check the old implementation used.
+const EMAIL_VALIDATION_PATTERN: &str = r"^[^\s@]+@[^\s@]+\.[^\s@]+$";
+/// Named convenience alias for `validation_pattern: "url"`.
+const URL_VALIDATION_PATTERN: &str = r"^https?://\S+$";
 
 /// Placeholder types for advanced template processing
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -197,15 +205,27 @@ impl PlaceholderProcessor {
             },
         }
 
-        // Pattern validation
+        // Pattern validation: `validation_pattern` is either one of the
+        // built-in named aliases ("email", "url") or a literal regex the
+        // caller supplies. Either way we compile and require a real match,
+        // so a custom pattern is actually enforced (previously anything
+        // other than the two hardcoded literals validated everything), and a
+        // pattern that fails to compile is reported instead of silently
+        // ignored.
         if let Some(pattern) = &placeholder.validation_pattern {
-            // In a real implementation, you'd use the `regex` crate
-            // For now, we'll do simple pattern matching
-            if pattern == "email" && !value.contains('@') {
-                return Err(TrustformersError::other("Invalid email format".to_string()));
-            }
-            if pattern == "url" && !value.starts_with("http") {
-                return Err(TrustformersError::other("Invalid URL format".to_string()));
+            let regex_source: &str = match pattern.as_str() {
+                "email" => EMAIL_VALIDATION_PATTERN,
+                "url" => URL_VALIDATION_PATTERN,
+                other => other,
+            };
+            let compiled = Regex::new(regex_source).map_err(|e| {
+                TrustformersError::other(format!("Invalid validation pattern '{}': {}", pattern, e))
+            })?;
+            if !compiled.is_match(value) {
+                return Err(TrustformersError::other(format!(
+                    "Value '{}' does not match validation pattern '{}'",
+                    value, pattern
+                )));
             }
         }
 
@@ -474,6 +494,16 @@ impl SpecialTokenManager {
 
     /// Add a dynamic special token
     pub fn add_dynamic_token(&mut self, token: String) -> Result<u32> {
+        if token.is_empty() {
+            // An empty token matches `str::starts_with("")` at every
+            // position, so `tokenize_with_special_tokens` would loop forever
+            // pushing this token's ID without ever advancing. Reject it here
+            // rather than at scan time.
+            return Err(TrustformersError::other(
+                "Dynamic special token must not be empty".to_string(),
+            ));
+        }
+
         if self.config.dynamic_tokens.len() >= self.config.max_dynamic_tokens {
             return Err(TrustformersError::other(
                 "Maximum number of dynamic tokens reached".to_string(),
@@ -577,28 +607,53 @@ impl SpecialTokenManager {
         Ok(result)
     }
 
-    /// Render a template and return token IDs
+    /// Render a template and return token IDs.
+    ///
+    /// `tokenizer` supplies the real vocabulary IDs for the non-special-token
+    /// spans of the rendered template; see
+    /// [`Self::tokenize_with_special_tokens`].
     pub fn render_template_to_ids(
         &mut self,
         template_name: &str,
         params: &HashMap<String, String>,
+        tokenizer: &dyn Tokenizer,
     ) -> Result<Vec<u32>> {
         let rendered = self.render_template(template_name, params)?;
-        Ok(self.tokenize_with_special_tokens(&rendered))
+        self.tokenize_with_special_tokens(&rendered, tokenizer)
     }
 
-    /// Tokenize text while preserving special tokens
-    pub fn tokenize_with_special_tokens(&self, text: &str) -> Vec<u32> {
+    /// Tokenize text while preserving special tokens.
+    ///
+    /// Spans of text that match a registered special token (static or
+    /// dynamic) are emitted as that token's configured ID. Every other span
+    /// is delegated to `tokenizer.encode`, which supplies real vocabulary
+    /// IDs — this function never invents token IDs from Unicode code points.
+    pub fn tokenize_with_special_tokens(
+        &self,
+        text: &str,
+        tokenizer: &dyn Tokenizer,
+    ) -> Result<Vec<u32>> {
         let mut tokens = Vec::new();
         let mut current_pos = 0;
+        // A zero-length token would match `starts_with("")` at every
+        // position and never advance `current_pos`, spinning forever.
+        // `add_dynamic_token` rejects empty tokens at insertion time, but a
+        // `SpecialTokenConfig` can also be built by hand (it is a public
+        // struct) or deserialized from untrusted JSON via `import_config`, so
+        // filter defensively here too.
+        let all_tokens: Vec<(String, u32)> = self
+            .get_all_tokens()
+            .into_iter()
+            .filter(|(token, _)| !token.is_empty())
+            .collect();
 
         while current_pos < text.len() {
             let mut found_special = false;
 
             // Look for special tokens starting at current position
-            for (token, id) in self.get_all_tokens() {
-                if text[current_pos..].starts_with(&token) {
-                    tokens.push(id);
+            for (token, id) in &all_tokens {
+                if text[current_pos..].starts_with(token.as_str()) {
+                    tokens.push(*id);
                     current_pos += token.len();
                     found_special = true;
                     break;
@@ -606,29 +661,25 @@ impl SpecialTokenManager {
             }
 
             if !found_special {
-                // Extract regular text until next special token or end
+                // Extract regular text until the next special token or end of
+                // text. `end_pos` is strictly greater than `current_pos`
+                // here: if a special token started exactly at `current_pos`
+                // the loop above would already have matched it.
                 let mut end_pos = text.len();
-                for (token, _) in self.get_all_tokens() {
-                    if let Some(pos) = text[current_pos..].find(&token) {
+                for (token, _) in &all_tokens {
+                    if let Some(pos) = text[current_pos..].find(token.as_str()) {
                         end_pos = end_pos.min(current_pos + pos);
                     }
                 }
 
                 let regular_text = &text[current_pos..end_pos];
-                if !regular_text.is_empty() {
-                    // For simplicity, we'll encode regular text as character tokens
-                    // In a real implementation, this would use the main tokenizer
-                    for ch in regular_text.chars() {
-                        // This is a placeholder - in practice, you'd use your main tokenizer
-                        tokens.push(ch as u32);
-                    }
-                }
-
+                let encoded = tokenizer.encode(regular_text)?;
+                tokens.extend(encoded.input_ids);
                 current_pos = end_pos;
             }
         }
 
-        tokens
+        Ok(tokens)
     }
 
     /// Format text using a template
@@ -638,7 +689,16 @@ impl SpecialTokenManager {
         self.render_template(template_name, &params)
     }
 
-    /// Format conversation messages
+    /// Format conversation messages using this crate's own generic
+    /// `<|role|>{content}<|end|>` markers (configured via
+    /// [`SpecialTokenConfig::templates`]).
+    ///
+    /// This is **not** a specific checkpoint's chat format: real
+    /// HuggingFace models (Llama, Mistral, Qwen, ChatML, ...) each ship
+    /// their own Jinja2 `chat_template` in `tokenizer_config.json`. To
+    /// render a conversation the way a specific checkpoint expects, use
+    /// [`crate::chat_template::ChatTemplateEngine`] instead, which reads and
+    /// renders that template with a real Jinja2 engine.
     pub fn format_conversation(&mut self, messages: &[ConversationMessage]) -> Result<String> {
         let mut result = String::new();
 
@@ -757,14 +817,19 @@ impl SpecialTokenManager {
         Ok(result)
     }
 
-    /// Render an advanced template and return token IDs
+    /// Render an advanced template and return token IDs.
+    ///
+    /// `tokenizer` supplies the real vocabulary IDs for the non-special-token
+    /// spans of the rendered template; see
+    /// [`Self::tokenize_with_special_tokens`].
     pub fn render_advanced_template_to_ids(
         &mut self,
         template_name: &str,
         params: &HashMap<String, String>,
+        tokenizer: &dyn Tokenizer,
     ) -> Result<Vec<u32>> {
         let rendered = self.render_advanced_template(template_name, params)?;
-        Ok(self.tokenize_with_special_tokens(&rendered))
+        self.tokenize_with_special_tokens(&rendered, tokenizer)
     }
 
     /// Validate placeholder values for a template
@@ -1236,5 +1301,145 @@ mod tests {
         for token in &created_tokens {
             assert!(manager.is_special_token(token));
         }
+    }
+
+    /// Regression test: `tokenize_with_special_tokens` must delegate regular
+    /// text to the real tokenizer's vocabulary instead of emitting Unicode
+    /// code points. Build a `CharTokenizer` whose IDs are deliberately far
+    /// from the characters' code points ('h' is U+0068 = 104, but is mapped
+    /// to ID 900 here), so any code-point leakage is unmistakable.
+    #[test]
+    fn test_tokenize_with_special_tokens_uses_real_vocab_ids() {
+        let mut vocab = HashMap::new();
+        vocab.insert("h".to_string(), 900);
+        vocab.insert("i".to_string(), 901);
+        vocab.insert("[UNK]".to_string(), 1);
+        vocab.insert("[PAD]".to_string(), 0);
+        vocab.insert("[CLS]".to_string(), 2);
+        vocab.insert("[SEP]".to_string(), 3);
+        let char_tokenizer = crate::char::CharTokenizer::new(vocab).with_special_tokens(
+            "[UNK]".to_string(),
+            "[PAD]".to_string(),
+            String::new(), // no BOS/EOS so ids match exactly "h","i"
+            String::new(),
+        );
+
+        let config = SpecialTokenConfig::default();
+        let manager = SpecialTokenManager::new(config);
+
+        let ids = manager
+            .tokenize_with_special_tokens("hi", &char_tokenizer)
+            .expect("Operation failed in test");
+
+        assert_eq!(ids, vec![900, 901]);
+        // The old placeholder pushed `ch as u32`, i.e. [104, 105].
+        assert_ne!(ids, vec!['h' as u32, 'i' as u32]);
+    }
+
+    /// Special-token spans must still short-circuit around the delegated
+    /// tokenizer: only the non-special text either side of `[PAD]` is
+    /// handed to the real tokenizer.
+    #[test]
+    fn test_tokenize_with_special_tokens_splits_around_special_spans() {
+        let mut vocab = HashMap::new();
+        vocab.insert("a".to_string(), 50);
+        vocab.insert("b".to_string(), 51);
+        vocab.insert("[UNK]".to_string(), 1);
+        let char_tokenizer = crate::char::CharTokenizer::new(vocab).with_special_tokens(
+            "[UNK]".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+
+        let config = SpecialTokenConfig::default(); // includes "[PAD]" => 0
+        let manager = SpecialTokenManager::new(config);
+
+        let ids = manager
+            .tokenize_with_special_tokens("a[PAD]b", &char_tokenizer)
+            .expect("Operation failed in test");
+
+        assert_eq!(ids, vec![50, 0, 51]);
+    }
+
+    /// Regression test: an empty dynamic token must be rejected up front
+    /// rather than accepted and later causing `tokenize_with_special_tokens`
+    /// to spin forever (an empty token matches `starts_with("")` at every
+    /// position, so `current_pos` would never advance).
+    #[test]
+    fn test_add_dynamic_token_rejects_empty_string() {
+        let config = SpecialTokenConfig::default();
+        let mut manager = SpecialTokenManager::new(config);
+
+        let result = manager.add_dynamic_token(String::new());
+        assert!(result.is_err());
+        assert_eq!(manager.config.dynamic_tokens.len(), 0);
+    }
+
+    /// Even if a `SpecialTokenConfig` is hand-built (bypassing
+    /// `add_dynamic_token`) with an empty static token, tokenization must
+    /// still terminate instead of looping forever.
+    #[test]
+    fn test_tokenize_with_special_tokens_terminates_with_hand_built_empty_token() {
+        let mut config = SpecialTokenConfig::default();
+        config.static_tokens.insert(String::new(), 999);
+        let manager = SpecialTokenManager::new(config);
+
+        let mut vocab = HashMap::new();
+        vocab.insert("x".to_string(), 42);
+        vocab.insert("[UNK]".to_string(), 1);
+        let char_tokenizer = crate::char::CharTokenizer::new(vocab).with_special_tokens(
+            "[UNK]".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        );
+
+        // Must return promptly (the test harness's own timeout is the
+        // ultimate backstop, but a correct implementation completes this
+        // essentially instantly).
+        let ids = manager
+            .tokenize_with_special_tokens("x", &char_tokenizer)
+            .expect("Operation failed in test");
+        assert_eq!(ids, vec![42]);
+    }
+
+    /// Regression test: an arbitrary custom `validation_pattern` (anything
+    /// other than the two hardcoded literals "email"/"url") used to validate
+    /// every value unconditionally. It must now be compiled as a real regex
+    /// and enforced.
+    #[test]
+    fn test_custom_validation_pattern_is_enforced() {
+        let processor = PlaceholderProcessor::new();
+        let placeholder = PlaceholderToken::new("code".to_string(), PlaceholderType::String)
+            .with_validation(r"^[0-9]{3}-[0-9]{4}$".to_string());
+
+        assert!(processor.validate_value(&placeholder, "555-1234").is_ok());
+        // Old code: any pattern other than "email"/"url" was a no-op, so
+        // this nonsense value would have "validated" successfully.
+        assert!(processor.validate_value(&placeholder, "not-a-code").is_err());
+    }
+
+    /// An uncompilable regex pattern must be reported, not silently ignored.
+    #[test]
+    fn test_invalid_validation_pattern_is_a_structured_error() {
+        let processor = PlaceholderProcessor::new();
+        let placeholder = PlaceholderToken::new("bad".to_string(), PlaceholderType::String)
+            .with_validation("[unterminated".to_string());
+
+        assert!(processor.validate_value(&placeholder, "anything").is_err());
+    }
+
+    /// The "email" alias must reject values that merely contain '@' but are
+    /// not shaped like an email address (the old check was `contains('@')`).
+    #[test]
+    fn test_email_alias_uses_a_real_pattern_not_a_contains_check() {
+        let processor = PlaceholderProcessor::new();
+        let placeholder = PlaceholderToken::new("email".to_string(), PlaceholderType::String)
+            .with_validation("email".to_string());
+
+        assert!(processor.validate_value(&placeholder, "user@example.com").is_ok());
+        assert!(processor.validate_value(&placeholder, "@").is_err());
+        assert!(processor.validate_value(&placeholder, "not_an_email").is_err());
     }
 }

@@ -1,76 +1,97 @@
+# `trustformers-client` is deliberately NOT a member of the repository workspace
+# (see the `exclude` list in the root `Cargo.toml`): it is a standalone client
+# crate that downstream users depend on from crates.io without the rest of the
+# TrustformeRS tree. It therefore declares its own empty `[workspace]` table and
+# spells every version out literally instead of inheriting `*.workspace = true`
+# keys, which only resolve inside the repository workspace and made the crate
+# impossible to build in place.
+[workspace]
+
 [package]
 name = "trustformers-client"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.89"
+authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
+license = "Apache-2.0"
 description = "Rust client library for TrustformeRS serving infrastructure"
-homepage.workspace = true
-repository.workspace = true
+homepage = "https://github.com/cool-japan/trustformers"
+repository = "https://github.com/cool-japan/trustformers"
 documentation = "https://docs.rs/trustformers-client"
 readme = "README.md"
 keywords = ["machine-learning", "transformers", "ai", "client", "trustformers"]
 categories = ["api-bindings", "web-programming"]
 
 [dependencies]
-# HTTP Client
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+# HTTP Client.
+# `rustls` is the 0.13 spelling of what 0.12 called `rustls-tls`; the old name
+# does not exist any more, so the manifest could not resolve. `form` is needed
+# for the OAuth2 client-credentials POST in `src/lib.rs`.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json",
+    "stream",
+    "form",
+    "rustls",
+    "http2",
+    "charset",
+] }
 
 # Async Runtime
-tokio = { version = "1.0", features = ["full"] }
-tokio-stream = "0.1"
+tokio = { version = "1.53.1", features = ["rt", "sync", "time", "macros"] }
+tokio-stream = "0.1.19"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 # Time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 # Error Handling
-thiserror = "1.0"
-anyhow = "1.0"
+thiserror = "2.0.20"
 
 # Logging
-log = "0.4"
+log = "0.4.33"
 
 # URL manipulation
-url = "2.5"
+url = "2.5.8"
 
-# Authentication
-oauth2 = { version = "4.4", optional = true }
-base64 = "0.22"
+# Authentication: no `oauth2` crate.
+#
+# Only the client-credentials grant (RFC 6749 section 4.4) was ever used, and it
+# is a single form POST. `oauth2` 5.0 pins `reqwest` 0.12, so depending on it
+# would pull a second HTTP + TLS stack into a client library whose entire point
+# is to be a light dependency, and would leave this crate's public API split
+# across two incompatible `reqwest` majors. The grant is issued directly through
+# this crate's own `reqwest` instead — see `OAuth2Auth` in `src/lib.rs`.
 
 # Async traits
-async-trait = "0.1"
-
-# TLS
-rustls = "0.23"
+async-trait = "0.1.92"
 
 # Futures utilities
-futures = "0.3"
-futures-util = "0.3"
-
-# UUID for request IDs
-uuid = { version = "1.8", features = ["v4", "serde"] }
+futures-util = "0.3.34"
 
 [dev-dependencies]
-tokio-test = "0.4"
-mockito = "1.4"
-env_logger = "0.11"
+# `net` + `io-util` back the loopback token endpoint the OAuth2 tests talk to,
+# so no test needs the network.
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+] }
+env_logger = "0.11.11"
 
 [features]
 default = ["oauth2"]
-oauth2 = ["dep:oauth2"]
+# Gates `OAuth2Auth`, which is implemented in this crate rather than pulled from
+# the `oauth2` crate; see the authentication note in `[dependencies]`.
+oauth2 = []
 
+# Only `basic_client.rs` exists, and it already exercises the streaming and batch
+# paths end to end. The manifest previously also declared `streaming_client` and
+# `batch_client` targets whose files were never written, so `cargo build
+# --examples` could not succeed.
 [[example]]
 name = "basic_client"
 path = "examples/basic_client.rs"
-
-[[example]]
-name = "streaming_client"
-path = "examples/streaming_client.rs"
-
-[[example]]
-name = "batch_client"
-path = "examples/batch_client.rs"

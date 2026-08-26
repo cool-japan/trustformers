@@ -3,7 +3,7 @@
 //! This module implements higher-precision quantization formats that offer
 //! better quality than Q4 variants while maintaining good compression ratios.
 
-use crate::errors::Result;
+use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -95,50 +95,20 @@ pub struct BlockQ6K {
 /// Helper type for f16 (using u16 storage)
 type F16 = u16;
 
-/// Convert f32 to f16
+/// Convert f32 to IEEE-754 binary16 (round-to-nearest-even, denormals preserved).
+///
+/// Delegates to `half::f16`; the previous hand-rolled version truncated the
+/// mantissa (`mant >> 13`) instead of rounding and flushed every denormal to
+/// zero, so the stored block scales were systematically biased low.
+#[inline]
 fn f32_to_f16(val: f32) -> F16 {
-    // Simplified conversion - in production use half crate
-    let bits = val.to_bits();
-    let sign = (bits >> 31) & 0x1;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let frac = bits & 0x7FFFFF;
-
-    if exp == 0xFF {
-        // Inf or NaN
-        ((sign << 15) | (0x1F << 10) | (frac >> 13)) as u16
-    } else if exp == 0 {
-        // Zero or denormal
-        (sign << 15) as u16
-    } else {
-        let new_exp = exp - 127 + 15;
-        if new_exp >= 0x1F {
-            // Overflow to inf
-            ((sign << 15) | (0x1F << 10)) as u16
-        } else if new_exp <= 0 {
-            // Underflow to zero
-            (sign << 15) as u16
-        } else {
-            ((sign << 15) | ((new_exp as u32) << 10) | (frac >> 13)) as u16
-        }
-    }
+    half::f16::from_f32(val).to_bits()
 }
 
-/// Convert f16 to f32
+/// Convert IEEE-754 binary16 to f32 (exact; every binary16 value fits in f32).
+#[inline]
 fn f16_to_f32(val: F16) -> f32 {
-    let sign = (val >> 15) & 0x1;
-    let exp = (val >> 10) & 0x1F;
-    let frac = val & 0x3FF;
-
-    if exp == 0x1F {
-        // Inf or NaN
-        f32::from_bits(((sign as u32) << 31) | (0xFF << 23) | ((frac as u32) << 13))
-    } else if exp == 0 {
-        // Zero or denormal
-        f32::from_bits((sign as u32) << 31)
-    } else {
-        let new_exp = (exp as i32) - 15 + 127;
-        f32::from_bits(((sign as u32) << 31) | ((new_exp as u32) << 23) | ((frac as u32) << 13))
-    }
+    half::f16::from_bits(val).to_f32()
 }
 
 /// Quantize tensor to Q5_0 format
@@ -188,8 +158,6 @@ pub fn quantize_q5_0(tensor: &Tensor) -> Result<Vec<BlockQ5_0>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())
@@ -317,8 +285,6 @@ pub fn quantize_q5_1(tensor: &Tensor) -> Result<Vec<BlockQ5_1>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())
@@ -425,8 +391,6 @@ pub fn quantize_q6_k(tensor: &Tensor) -> Result<Vec<BlockQ6K>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())
@@ -521,10 +485,18 @@ impl AdvancedGGMLQuantizer {
                 GGMLQuantData::Q5_1(blocks)
             },
             GGMLQuantType::Q5K => {
-                // For now, fall back to Q5_0 for Q5K
-                // Full Q5K implementation would be more complex
-                let blocks = quantize_q5_0(tensor)?;
-                GGMLQuantData::Q5_0(blocks)
+                // Q5_K uses 256-weight super-blocks with 6-bit packed per-sub-block
+                // scales and mins; this module has neither an encoder nor a
+                // decoder for that layout. Emitting Q5_0 blocks under a `Q5K`
+                // type tag (what this arm used to do) makes the payload and the
+                // tag disagree, so every consumer dispatching on `quant_type` --
+                // including the GGUF writer -- would read 22-byte Q5_0 blocks as
+                // 176-byte Q5_K super-blocks.
+                return Err(TrustformersError::not_implemented(
+                    "GGML Q5_K quantization: no Q5_K encoder/decoder is implemented. \
+                     Use Q5_0, Q5_1 or Q6_K, or the K-quant path in `gguf_k_quants`."
+                        .to_string(),
+                ));
             },
             GGMLQuantType::Q6K => {
                 let blocks = quantize_q6_k(tensor)?;

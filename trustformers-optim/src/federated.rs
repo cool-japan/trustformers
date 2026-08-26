@@ -20,7 +20,9 @@ use anyhow::{anyhow, Result};
 use scirs2_core::random::StdRng; // Explicit import for type clarity
 use scirs2_core::random::*; // SciRS2 Integration Policy - Replaces rand
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use trustformers_core::tensor::Tensor;
 
 /// Configuration for federated averaging (FedAvg).
@@ -467,52 +469,119 @@ impl SecureAggregation {
         })
     }
 
-    /// Generate random masks for secure aggregation.
-    /// In practice, this would use cryptographic protocols.
-    pub fn generate_masks(&self, client_id: &str, round: usize) -> Result<Vec<Tensor>> {
-        // This is a simplified implementation
-        // Real secure aggregation uses secret sharing and cryptographic techniques
-        let mut rng = StdRng::from_seed({
-            let mut seed = [0u8; 32];
-            let client_hash = format!("{}-{}", client_id, round);
-            let bytes = client_hash.as_bytes();
-            for (i, &byte) in bytes.iter().enumerate().take(32) {
-                seed[i] = byte;
-            }
-            seed
-        });
+    /// Deterministically derive the pairwise PRG seed two clients share for
+    /// masking round `round`. Symmetric in `client_a`/`client_b`, so both
+    /// clients independently derive the *same* seed without communicating
+    /// (each already knows both its own id and the id it's pairing with).
+    ///
+    /// Uses [`DefaultHasher`], whose algorithm the standard library does not
+    /// guarantee to be stable across Rust compiler versions -- only within a
+    /// single build. This is fine for this deterministic in-process
+    /// primitive (see [`Self::generate_masks`]'s doc comment) as long as
+    /// every participating client is running the same build; it would need
+    /// a cross-version-stable hash (e.g. a fixed-algorithm one) before
+    /// clients could be deployed from independently-built binaries.
+    fn pairwise_seed(client_a: &str, client_b: &str, round: usize) -> u64 {
+        let (lower, upper) =
+            if client_a <= client_b { (client_a, client_b) } else { (client_b, client_a) };
+        let mut hasher = DefaultHasher::new();
+        lower.hash(&mut hasher);
+        upper.hash(&mut hasher);
+        round.hash(&mut hasher);
+        hasher.finish()
+    }
 
-        // Generate cryptographic masks for secure aggregation
-        // Each mask is a random tensor that will be used to blind the client's update
-        let mut masks = Vec::new();
-
-        // Generate masks based on client's expected parameter shapes
-        // In practice, these shapes would be communicated during federated setup
-        let parameter_shapes = vec![
-            vec![100, 50], // Example: First layer weights
-            vec![50],      // Example: First layer bias
-            vec![50, 20],  // Example: Second layer weights
-            vec![20],      // Example: Second layer bias
-        ];
-
-        for shape in parameter_shapes {
-            // Generate random mask with same shape as parameter
-            let mask_size = shape.iter().product::<usize>();
-            let mut mask_data: Vec<f32> = Vec::with_capacity(mask_size);
-
-            for _ in 0..mask_size {
-                // Generate random float in range [-1.0, 1.0] for better numerical stability
-                mask_data.push(rng.random_range(-1.0..1.0));
-            }
-
-            let mask = Tensor::from_data(mask_data, &shape)?;
-            masks.push(mask);
+    /// Generate `client_id`'s pairwise-cancelling masks for `parameter_shapes`
+    /// (the caller's real model parameter shapes, in the fixed order every
+    /// client and the server agree on for this round).
+    ///
+    /// Uses the standard pairwise-masking construction for secure
+    /// aggregation (Bonawitz et al.): for every OTHER id in
+    /// `all_client_ids`, `client_id` and that client derive the same seed
+    /// (via `Self::pairwise_seed`) and therefore the same pseudorandom
+    /// values -- `client_id` adds them to its mask if it sorts before the
+    /// other id, subtracts them otherwise. Summing every participant's mask
+    /// together then cancels exactly (up to floating-point rounding): each
+    /// pairwise contribution appears once with each sign. See
+    /// [`Self::secure_aggregate`] for the aggregation side and what this
+    /// construction does and does not protect against.
+    ///
+    /// `all_client_ids` must be the exact same participant set (including
+    /// `client_id` itself) on every client's call for a given `round`, and
+    /// `parameter_shapes` must be given in the same order everywhere, or the
+    /// masks will not cancel. This does not implement dropout recovery (a
+    /// full Bonawitz-style scheme additionally secret-shares each pairwise
+    /// seed so surviving clients can reconstruct a dropped client's
+    /// contribution): if any client whose id appears in `all_client_ids`
+    /// does not actually submit a masked update to
+    /// [`Self::secure_aggregate`], the missing client's pairwise terms are
+    /// never cancelled and the aggregate is biased by exactly that client's
+    /// unpaired contribution.
+    pub fn generate_masks(
+        &self,
+        client_id: &str,
+        all_client_ids: &[String],
+        round: usize,
+        parameter_shapes: &[Vec<usize>],
+    ) -> Result<Vec<Tensor>> {
+        if !all_client_ids.iter().any(|id| id == client_id) {
+            return Err(anyhow!(
+                "client_id {client_id} is not present in all_client_ids; this client's masks \
+                 would not have matching pairwise partners to cancel against"
+            ));
         }
 
+        let mut accumulators: Vec<Vec<f32>> = parameter_shapes
+            .iter()
+            .map(|shape| vec![0.0f32; shape.iter().product::<usize>()])
+            .collect();
+
+        for other_id in all_client_ids {
+            if other_id == client_id {
+                continue;
+            }
+            // `client_id`/`other_id` agree on the seed regardless of which
+            // one calls `generate_masks`; the sign is what makes the two
+            // sides' contributions cancel rather than duplicate.
+            let sign: f32 = if client_id < other_id.as_str() { 1.0 } else { -1.0 };
+            let mut pair_rng =
+                StdRng::seed_from_u64(Self::pairwise_seed(client_id, other_id, round));
+
+            // One RNG stream per pair, drawn across all parameters in the
+            // caller-fixed order: both sides advance it identically, so the
+            // values -- and therefore the cancellation -- line up parameter
+            // by parameter.
+            for (accumulator, shape) in accumulators.iter_mut().zip(parameter_shapes.iter()) {
+                let mask_size = shape.iter().product::<usize>();
+                for slot in accumulator.iter_mut().take(mask_size) {
+                    let value: f32 = pair_rng.random_range(-1.0..1.0);
+                    *slot += sign * value;
+                }
+            }
+        }
+
+        let mut masks = Vec::with_capacity(accumulators.len());
+        for (data, shape) in accumulators.into_iter().zip(parameter_shapes.iter()) {
+            masks.push(Tensor::from_data(data, shape)?);
+        }
         Ok(masks)
     }
 
-    /// Aggregate masked updates securely.
+    /// Sum (and average) masked client updates without the server ever
+    /// seeing an individual client's true update.
+    ///
+    /// This assumes every masked update in `masked_updates` was produced by
+    /// [`Self::generate_masks`] with the same `all_client_ids`/`round`
+    /// (i.e. `masked_updates.keys()` matches `all_client_ids` exactly): the
+    /// pairwise masks then cancel exactly when summed (up to
+    /// floating-point rounding), leaving the true sum. If any participant
+    /// named in that `all_client_ids` set is missing from `masked_updates`
+    /// (a dropout), its pairwise terms are NOT cancelled and the result is
+    /// biased by that client's unpaired mask contribution -- this
+    /// implementation has no secret-sharing-based dropout recovery (see
+    /// [`Self::generate_masks`]'s doc comment). `threshold` only checks a
+    /// minimum client *count*; it does not verify the update set actually
+    /// matches a `generate_masks` call.
     pub fn secure_aggregate(
         &self,
         masked_updates: HashMap<String, Vec<Tensor>>,
@@ -520,12 +589,6 @@ impl SecureAggregation {
         if masked_updates.len() < self.threshold {
             return Err(anyhow!("Not enough clients for secure aggregation"));
         }
-
-        // In a real implementation, this would:
-        // 1. Collect masked updates from clients
-        // 2. Aggregate the masks
-        // 3. Remove the aggregate mask to reveal the sum
-        // 4. Compute the average
 
         // Enhanced secure aggregation with validation and error handling
         let mut result = Vec::new();
@@ -581,9 +644,11 @@ impl SecureAggregation {
                 aggregated_param = aggregated_param.add(param_update)?;
             }
 
-            // Average the aggregated parameter
-            // In secure aggregation, masks cancel out during summation
-            // so we get the true average without revealing individual updates
+            // Average the aggregated parameter. With pairwise masks from
+            // `generate_masks` and no dropouts, the mask terms cancelled out
+            // during the summation above (see this function's doc comment),
+            // so this recovers the true average without the server ever
+            // seeing an individual client's true update.
             result.push(aggregated_param.div_scalar(client_count)?);
         }
 
@@ -660,5 +725,161 @@ mod tests {
 
         // Should fail if threshold > total clients
         assert!(SecureAggregation::new(6, 5).is_err());
+    }
+
+    /// Regression: masks used to always be built for the hardcoded shapes
+    /// `[100,50]`/`[50]`/`[50,20]`/`[20]`, unrelated to any caller's model.
+    #[test]
+    fn test_generate_masks_uses_the_callers_shapes_not_hardcoded_ones() {
+        let secure_agg = SecureAggregation::new(2, 2).expect("Construction failed");
+        let all_clients = vec!["alice".to_string(), "bob".to_string()];
+        // Deliberately NOT the old hardcoded [100,50]/[50]/[50,20]/[20].
+        let shapes = vec![vec![3], vec![2, 2], vec![5, 1, 2]];
+
+        let masks = secure_agg
+            .generate_masks("alice", &all_clients, 0, &shapes)
+            .expect("generate_masks failed");
+
+        assert_eq!(masks.len(), shapes.len());
+        for (mask, expected_shape) in masks.iter().zip(shapes.iter()) {
+            assert_eq!(&mask.shape(), expected_shape);
+        }
+    }
+
+    #[test]
+    fn test_generate_masks_is_deterministic_for_the_same_inputs() {
+        let secure_agg = SecureAggregation::new(2, 3).expect("Construction failed");
+        let all_clients = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+        let shapes = vec![vec![4], vec![3, 2]];
+
+        let first = secure_agg
+            .generate_masks("bob", &all_clients, 7, &shapes)
+            .expect("generate_masks failed");
+        let second = secure_agg
+            .generate_masks("bob", &all_clients, 7, &shapes)
+            .expect("generate_masks failed");
+
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(
+                a.to_vec_f32().expect("read"),
+                b.to_vec_f32().expect("read"),
+                "the same client/round/shapes must derive the same masks every time"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_masks_rejects_a_client_id_missing_from_all_client_ids() {
+        let secure_agg = SecureAggregation::new(2, 2).expect("Construction failed");
+        let all_clients = vec!["alice".to_string(), "bob".to_string()];
+        let shapes = vec![vec![2]];
+
+        assert!(secure_agg.generate_masks("carol", &all_clients, 0, &shapes).is_err());
+    }
+
+    /// With exactly two clients, each client has exactly one pairwise
+    /// partner, so its mask IS that single pairwise term (no summation
+    /// across multiple pairs) -- the two clients' masks must be exact
+    /// (bit-for-bit) negatives of each other.
+    #[test]
+    fn test_masks_cancel_exactly_between_two_clients() {
+        let secure_agg = SecureAggregation::new(2, 2).expect("Construction failed");
+        let all_clients = vec!["alice".to_string(), "bob".to_string()];
+        let shapes = vec![vec![6], vec![3, 2]];
+
+        let alice_masks = secure_agg
+            .generate_masks("alice", &all_clients, 3, &shapes)
+            .expect("generate_masks failed");
+        let bob_masks = secure_agg
+            .generate_masks("bob", &all_clients, 3, &shapes)
+            .expect("generate_masks failed");
+
+        for (alice_mask, bob_mask) in alice_masks.iter().zip(bob_masks.iter()) {
+            let a = alice_mask.to_vec_f32().expect("read");
+            let b = bob_mask.to_vec_f32().expect("read");
+            assert_eq!(a.len(), b.len());
+            for (av, bv) in a.iter().zip(b.iter()) {
+                assert_eq!(
+                    *av, -*bv,
+                    "alice's and bob's pairwise mask values must be exact negatives"
+                );
+            }
+        }
+    }
+
+    /// Regression: independently-seeded (non-pairwise) masks did not cancel
+    /// -- their sum carried the masks' own mean as bias despite the doc
+    /// comment's claim. Pairwise masks must make `secure_aggregate` recover
+    /// the true average of the clients' real updates, to within
+    /// floating-point rounding.
+    #[test]
+    fn test_secure_aggregate_of_pairwise_masked_updates_recovers_true_average() {
+        let secure_agg = SecureAggregation::new(2, 4).expect("Construction failed");
+        let client_ids: Vec<String> = ["client-0", "client-1", "client-2", "client-3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let shapes = vec![vec![4], vec![2, 3]];
+        let round = 11;
+
+        // Real per-client "true" updates: distinct values per client and
+        // per parameter so a broken aggregation could not accidentally
+        // match by symmetry.
+        let true_updates: HashMap<String, Vec<Tensor>> = client_ids
+            .iter()
+            .enumerate()
+            .map(|(client_index, id)| {
+                let updates = shapes
+                    .iter()
+                    .map(|shape| {
+                        let size = shape.iter().product::<usize>();
+                        let data: Vec<f32> =
+                            (0..size).map(|i| (client_index * 10 + i) as f32 * 0.1).collect();
+                        Tensor::from_data(data, shape).expect("tensor must build in test")
+                    })
+                    .collect();
+                (id.clone(), updates)
+            })
+            .collect();
+
+        let masked_updates: HashMap<String, Vec<Tensor>> = client_ids
+            .iter()
+            .map(|id| {
+                let masks = secure_agg
+                    .generate_masks(id, &client_ids, round, &shapes)
+                    .expect("generate_masks failed");
+                let true_update = &true_updates[id];
+                let masked: Vec<Tensor> = true_update
+                    .iter()
+                    .zip(masks.iter())
+                    .map(|(update, mask)| update.add(mask).expect("tensor add failed in test"))
+                    .collect();
+                (id.clone(), masked)
+            })
+            .collect();
+
+        let aggregated =
+            secure_agg.secure_aggregate(masked_updates).expect("secure_aggregate failed");
+
+        for (param_idx, shape) in shapes.iter().enumerate() {
+            let size = shape.iter().product::<usize>();
+            let mut expected_sum = vec![0.0f32; size];
+            for (client_index, _) in client_ids.iter().enumerate() {
+                for (slot, value) in expected_sum.iter_mut().enumerate() {
+                    *value += (client_index * 10 + slot) as f32 * 0.1;
+                }
+            }
+            let expected_average: Vec<f32> =
+                expected_sum.iter().map(|v| v / client_ids.len() as f32).collect();
+
+            let actual = aggregated[param_idx].to_vec_f32().expect("read");
+            for (actual_value, expected_value) in actual.iter().zip(expected_average.iter()) {
+                assert!(
+                    (actual_value - expected_value).abs() < 1e-3,
+                    "pairwise masks must cancel to within floating-point rounding: expected \
+                     {expected_value}, got {actual_value}"
+                );
+            }
+        }
     }
 }

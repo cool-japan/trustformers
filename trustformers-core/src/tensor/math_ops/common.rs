@@ -2,57 +2,15 @@
 
 use super::super::Tensor;
 
-/// Numerical stability constants for mathematical operations
-// Public API utility constant
-pub const STABILITY_EPSILON_F32: f32 = 1e-7;
-// Public API utility constant
-pub const STABILITY_EPSILON_F64: f64 = 1e-15;
-// Public API utility constant
-pub const MAX_SAFE_VALUE_F32: f32 = 1e30;
-// Public API utility constant
-pub const MAX_SAFE_VALUE_F64: f64 = 1e300;
-
-/// Check if a float value is numerically stable
-#[allow(dead_code)] // Public API utility function
-pub fn is_stable_f32(x: f32) -> bool {
-    x.is_finite() && x.abs() < MAX_SAFE_VALUE_F32 && (x.abs() > STABILITY_EPSILON_F32 || x == 0.0)
-}
-
-/// Check if a float value is numerically stable (64-bit)
-#[allow(dead_code)] // Public API utility function
-pub fn is_stable_f64(x: f64) -> bool {
-    x.is_finite() && x.abs() < MAX_SAFE_VALUE_F64 && (x.abs() > STABILITY_EPSILON_F64 || x == 0.0)
-}
-
-/// Stabilize a float value by clamping to safe ranges
-#[allow(dead_code)] // Public API utility function
-pub fn stabilize_f32(x: f32) -> f32 {
-    if !x.is_finite() {
-        return 0.0;
-    }
-    if x.abs() > MAX_SAFE_VALUE_F32 {
-        x.signum() * MAX_SAFE_VALUE_F32
-    } else if x.abs() < STABILITY_EPSILON_F32 && x != 0.0 {
-        x.signum() * STABILITY_EPSILON_F32
-    } else {
-        x
-    }
-}
-
-/// Stabilize a float value by clamping to safe ranges (64-bit)
-#[allow(dead_code)] // Public API utility function
-pub fn stabilize_f64(x: f64) -> f64 {
-    if !x.is_finite() {
-        return 0.0;
-    }
-    if x.abs() > MAX_SAFE_VALUE_F64 {
-        x.signum() * MAX_SAFE_VALUE_F64
-    } else if x.abs() < STABILITY_EPSILON_F64 && x != 0.0 {
-        x.signum() * STABILITY_EPSILON_F64
-    } else {
-        x
-    }
-}
+// Numerical stability constants and predicates live in `super::stability`.
+// They used to be duplicated verbatim here, which allowed the two copies to
+// drift apart; this module now re-exports the single source of truth so the
+// legacy `math_ops::common::*` paths keep working.
+#[allow(unused_imports)]
+pub use super::stability::{
+    is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64, MAX_SAFE_VALUE_F32,
+    MAX_SAFE_VALUE_F64, STABILITY_EPSILON_F32, STABILITY_EPSILON_F64,
+};
 
 impl Tensor {
     /// Check if two shapes are broadcastable according to numpy-style broadcasting rules

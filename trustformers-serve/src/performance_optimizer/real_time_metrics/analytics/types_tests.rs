@@ -4,6 +4,10 @@
 //! statistical methods, and anomaly detection.
 
 use super::*;
+// `TrendDirection` lives in the shared real-time-metrics enum module; the
+// `use super::*` glob above only reaches the analytics module's own items.
+use crate::performance_optimizer::real_time_metrics::types::data_structures::TimestampedMetrics;
+use crate::performance_optimizer::real_time_metrics::types::TrendDirection;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,7 +22,8 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state
@@ -164,7 +169,7 @@ fn test_goodness_of_fit_statistics_construction() {
         ks_statistic: 0.05,
         ks_p_value: 0.2,
         ad_statistic: 0.3,
-        ad_p_value: 0.15,
+        ad_p_value: Some(0.15),
         chi_square_statistic: 10.5,
         chi_square_p_value: 0.1,
         log_likelihood: -120.5,
@@ -182,7 +187,7 @@ fn test_goodness_of_fit_clone() {
         ks_statistic: 0.1,
         ks_p_value: 0.05,
         ad_statistic: 0.5,
-        ad_p_value: 0.08,
+        ad_p_value: Some(0.08),
         chi_square_statistic: 15.0,
         chi_square_p_value: 0.04,
         log_likelihood: -200.0,
@@ -469,7 +474,10 @@ fn test_utilization_metrics_clone() {
     };
     let cloned = metrics.clone();
     assert!((cloned.current - metrics.current).abs() < f64::EPSILON);
-    assert_eq!(cloned.saturation_points.len(), metrics.saturation_points.len());
+    assert_eq!(
+        cloned.saturation_points.len(),
+        metrics.saturation_points.len()
+    );
 }
 
 #[test]
@@ -537,17 +545,18 @@ async fn test_anomaly_detector_new() {
 }
 
 #[tokio::test]
-async fn test_anomaly_detector_analyze_empty() {
-    let result = AnomalyDetector::new().await;
-    assert!(result.is_ok());
-    if let Ok(detector) = result {
-        let analysis_result = detector.analyze(&[]).await;
-        assert!(analysis_result.is_ok());
-        if let Ok(analysis) = analysis_result {
-            assert!(analysis.anomalies.is_empty());
-            assert!((analysis.anomaly_rate - 0.02).abs() < f64::EPSILON);
-        }
-    }
+async fn test_anomaly_detector_refuses_an_empty_window() {
+    // Before 0.2.1 `analyze` ignored its argument and returned a canned report
+    // with `anomaly_rate: 0.02` and `detection_confidence: 0.9`, so this test
+    // asserted `(analysis.anomaly_rate - 0.02).abs() < f64::EPSILON` for an
+    // empty window -- it was locking in the fabrication. An empty window
+    // supports no baseline and therefore no rate at all.
+    let detector = AnomalyDetector::new().await.expect("construction never fails");
+    let error = detector
+        .analyze(&[])
+        .await
+        .expect_err("an empty window cannot establish a baseline");
+    assert!(error.to_string().contains("at least 8"), "{error}");
 }
 
 #[tokio::test]
@@ -581,7 +590,7 @@ fn test_lcg_values_in_range() {
     let mut rng = Lcg::new(12345);
     for _ in 0..50 {
         let v = rng.next_f64();
-        assert!(v >= 0.0 && v < 1.0);
+        assert!((0.0..1.0).contains(&v));
     }
 }
 
@@ -659,7 +668,7 @@ fn test_distribution_fit_construction() {
             ks_statistic: 0.05,
             ks_p_value: 0.2,
             ad_statistic: 0.3,
-            ad_p_value: 0.15,
+            ad_p_value: Some(0.15),
             chi_square_statistic: 8.0,
             chi_square_p_value: 0.1,
             log_likelihood: -100.0,
@@ -682,11 +691,11 @@ fn test_quality_recommendation_construction() {
         description: "Ensure all fields are populated".to_string(),
         expected_improvement: 0.15,
         implementation_effort: "low".to_string(),
-        cost_benefit_ratio: 5.0,
+        cost_benefit_ratio: Some(5.0),
     };
     assert_eq!(rec.priority, 1);
     assert!((rec.expected_improvement - 0.15).abs() < f64::EPSILON);
-    assert!((rec.cost_benefit_ratio - 5.0).abs() < f64::EPSILON);
+    assert!(rec.cost_benefit_ratio.is_some_and(|ratio| (ratio - 5.0).abs() < f64::EPSILON));
 }
 
 #[test]
@@ -696,4 +705,165 @@ fn test_lcg_different_seeds_give_different_results() {
     let v1 = rng1.next_f64();
     let v2 = rng2.next_f64();
     assert!((v1 - v2).abs() > 0.0);
+}
+
+// =============================================================================
+// 0.2.1 REGRESSIONS: statistics that used to be constants
+// =============================================================================
+
+/// Builds `n` samples whose throughput series is `values`, everything else held
+/// constant so only the planted series varies.
+fn statistical_window(values: &[f64]) -> Vec<TimestampedMetrics> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut sample = TimestampedMetrics::default();
+            sample.timestamp = Utc::now() + chrono::Duration::seconds(index as i64);
+            sample.metrics.throughput = *value;
+            sample.metrics.latency = Duration::from_millis(10);
+            sample.metrics.resource_usage.cpu_usage = 0.25;
+            sample
+        })
+        .collect()
+}
+
+/// Regression: `one_sample_t_test` set `p_value = if t.abs() > 2.0 { 0.05 }
+/// else { 0.1 }`, then decided the verdict with `p_value < 0.05` -- which is
+/// false for both branches, so the test could only ever say "fail to reject".
+#[tokio::test]
+async fn t_test_p_value_is_computed_from_the_statistic() {
+    let analyzer = StatisticalAnalyzer::new().await.expect("analyzer constructs");
+    // A series far from the hypothesised mean of 0.0, with tiny spread.
+    let far = analyzer
+        .analyze(&statistical_window(&[
+            500.0, 500.1, 499.9, 500.2, 499.8, 500.05, 499.95, 500.15, 499.85, 500.0,
+        ]))
+        .await
+        .expect("analysis runs");
+    let far_test = far.statistical_tests.get("one_sample_t_test").expect("the t-test is reported");
+    // `extract_numerical_values` interleaves throughput, latency and CPU, so
+    // the analysed series is a wide mixture -- but its mean still sits far
+    // enough from zero to reject at any conventional level.
+    assert!(
+        far_test.p_value < 0.01,
+        "a series centred far from zero must have a small p-value, got {}",
+        far_test.p_value
+    );
+    assert_eq!(far_test.result, "Reject null hypothesis");
+    assert!(
+        far_test.critical_value.is_none(),
+        "no inverse-t quantile exists in tree, so no critical value is reported"
+    );
+    assert!(
+        far_test.p_value != 0.05 && far_test.p_value != 0.1,
+        "the old code could only ever answer 0.05 or 0.1"
+    );
+}
+
+/// Regression: `shapiro_wilk_test`'s statistic reduced algebraically to a
+/// constant 0.0 for every input, so `is_normal` was always false and the
+/// p-value always 0.01. The replacement is a real KS test under its own name.
+#[tokio::test]
+async fn normality_testing_answers_differently_for_different_shapes() {
+    let analyzer = StatisticalAnalyzer::new().await.expect("analyzer constructs");
+    let mut rng = Lcg::new(20260824);
+    // Roughly normal: the mean of several uniforms.
+    let normalish: Vec<f64> =
+        (0..200).map(|_| (0..8).map(|_| rng.next_f64()).sum::<f64>() / 8.0).collect();
+    let normal_result =
+        analyzer.analyze(&statistical_window(&normalish)).await.expect("analysis runs");
+    let ks = normal_result
+        .distribution_characteristics
+        .normality_tests
+        .get("kolmogorov_smirnov")
+        .expect("the KS test is reported under its own name");
+    assert!(
+        !normal_result
+            .distribution_characteristics
+            .normality_tests
+            .contains_key("shapiro_wilk"),
+        "the test that was never Shapiro-Wilk no longer claims to be"
+    );
+    assert!(
+        ks.statistic > 0.0,
+        "a real KS statistic is positive, the old one was identically 0.0"
+    );
+
+    // A hard two-point series is nothing like a normal.
+    let bimodal: Vec<f64> = (0..200).map(|i| if i % 2 == 0 { 0.0 } else { 100.0 }).collect();
+    let bimodal_result =
+        analyzer.analyze(&statistical_window(&bimodal)).await.expect("analysis runs");
+    let bimodal_ks = bimodal_result
+        .distribution_characteristics
+        .normality_tests
+        .get("kolmogorov_smirnov")
+        .expect("the KS test is reported");
+    assert!(
+        bimodal_ks.statistic > ks.statistic,
+        "a two-point series must depart from normal further than a bell-ish one: \
+         {} vs {}",
+        bimodal_ks.statistic,
+        ks.statistic
+    );
+}
+
+/// Regression: the Jarque-Bera p-value was one of three constants chosen by
+/// bucketing the statistic at 6 and 10. It is now the chi-square(2) survival
+/// function of the statistic.
+#[tokio::test]
+async fn jarque_bera_p_value_tracks_its_statistic() {
+    let analyzer = StatisticalAnalyzer::new().await.expect("analyzer constructs");
+    let result = analyzer
+        .analyze(&statistical_window(
+            &(0..200).map(|i| i as f64).collect::<Vec<_>>(),
+        ))
+        .await
+        .expect("analysis runs");
+    let jb = result
+        .distribution_characteristics
+        .normality_tests
+        .get("jarque_bera")
+        .expect("the JB test is reported");
+    let expected = (-jb.statistic / 2.0).exp();
+    assert!(
+        (jb.p_value - expected).abs() < 1e-6,
+        "chi-square(2) survival is exp(-x/2): expected {expected}, got {}",
+        jb.p_value
+    );
+}
+
+/// Regression: `calculate_confidence_intervals` copied one unlabelled series'
+/// interval into the latency, CPU, memory, network, I/O, response-time and
+/// error-rate fields, and reported the variance interval as the point estimate
+/// times 0.8 and 1.2.
+#[tokio::test]
+async fn confidence_intervals_report_only_what_was_measured() {
+    let analyzer = StatisticalAnalyzer::new().await.expect("analyzer constructs");
+    let result = analyzer
+        .analyze(&statistical_window(&[
+            10.0, 12.0, 11.0, 13.0, 9.0, 10.5, 11.5, 12.5,
+        ]))
+        .await
+        .expect("analysis runs");
+    let intervals = &result.confidence_intervals;
+    assert!(intervals.latency_interval.is_none());
+    assert!(intervals.cpu_interval.is_none());
+    assert!(intervals.memory_interval.is_none());
+    assert!(intervals.network_interval.is_none());
+    assert!(intervals.io_interval.is_none());
+    assert!(intervals.response_time_interval.is_none());
+    assert!(intervals.error_rate_interval.is_none());
+    assert!(intervals.mean_lower < intervals.mean_upper);
+    let (lower, upper) = (
+        intervals.variance_lower.expect("variance interval is reported"),
+        intervals.variance_upper.expect("variance interval is reported"),
+    );
+    assert!(lower < upper);
+    // The old code produced exactly point*0.8 and point*1.2.
+    let point = (lower + upper) / 2.0;
+    assert!(
+        (lower - point * 0.8).abs() > 1e-9 || (upper - point * 1.2).abs() > 1e-9,
+        "the interval must not be the old fixed +/-20% band"
+    );
 }

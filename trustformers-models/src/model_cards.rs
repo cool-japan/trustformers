@@ -526,8 +526,8 @@ impl ModelCard {
     }
 
     /// Export model card to YAML
-    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
-        serde_yaml::to_string(self)
+    pub fn to_yaml(&self) -> Result<String, serde_yaml_ng::Error> {
+        serde_yaml_ng::to_string(self)
     }
 
     /// Import model card from JSON
@@ -536,8 +536,8 @@ impl ModelCard {
     }
 
     /// Import model card from YAML
-    pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(yaml)
+    pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml_ng::Error> {
+        serde_yaml_ng::from_str(yaml)
     }
 
     /// Generate HTML representation

@@ -116,9 +116,6 @@ pub struct AdaptationRecord {
 pub struct PatternDetector {
     /// Detected patterns
     patterns: HashMap<String, DetectedPattern>,
-
-    /// Pattern history
-    pattern_history: VecDeque<PatternEvent>,
 }
 
 /// Detected pattern information
@@ -181,9 +178,6 @@ pub struct PatternEvent {
 /// Seasonal analyzer for time-based adaptations
 #[derive(Debug)]
 pub struct SeasonalAnalyzer {
-    /// Seasonal models
-    models: HashMap<String, SeasonalModel>,
-
     /// Seasonal factors
     factors: HashMap<String, f32>,
 }
@@ -407,27 +401,16 @@ impl AdaptiveThresholdEvaluator {
         // Check evaluation confidence
         evaluation.confidence > 0.8
     }
-
-    /// Calculate threshold adjustment
-    fn calculate_adjustment(
-        &self,
-        adaptation: &AdaptiveThreshold,
-        evaluation: &ThresholdEvaluation,
-    ) -> f64 {
-        let effectiveness_factor = (0.5 - adaptation.effectiveness) as f64;
-        let confidence_factor = evaluation.confidence as f64;
-        let learning_factor = self.config.learning_rate as f64;
-
-        effectiveness_factor * confidence_factor * learning_factor
-    }
 }
 
 impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
     fn evaluate(&self, config: &ThresholdConfig, value: f64) -> Result<ThresholdEvaluation> {
         let start_time = Instant::now();
 
-        // This is a blocking wrapper around the async function
-        // In a real implementation, you might want to use a runtime handle
+        // `ThresholdEvaluator::evaluate` is synchronous by contract, so the
+        // async threshold calculation runs through `block_in_place`, which
+        // hands the worker's tasks to another thread for the duration. This
+        // requires a multi-threaded runtime.
         let adaptive_threshold = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(async { self.calculate_adaptive_threshold(config, value).await })
@@ -511,8 +494,9 @@ impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
             SeverityLevel::Info
         };
 
-        // Calculate confidence based on adaptation history and effectiveness
-        let confidence = self.calculate_adaptation_confidence();
+        // Confidence in this evaluation, from the adaptation state that
+        // actually produced `adaptive_threshold`.
+        let confidence = self.adaptation_confidence(&config.metric);
 
         // Update statistics
         let mut stats = self
@@ -552,7 +536,14 @@ impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
         let config_clone = config.clone();
         let evaluation_clone = evaluation.clone();
         tokio::spawn(async move {
-            let effectiveness_score = if violated { 0.8 } else { 0.6 }; // Simplified scoring
+            // The only outcome signal available at evaluation time is how
+            // confidently the threshold separated this sample; whether the
+            // alert it produced turns out to be correct is not known here and
+            // never reaches this evaluator. Until 0.2.1 this fed the adaptation
+            // engine one of two constants (0.8 when violated, 0.6 otherwise),
+            // so the exponential moving average it drives tracked nothing but
+            // the violation ratio.
+            let effectiveness_score = evaluation_clone.confidence;
             if let Err(e) = evaluator
                 .update_adaptation(&config_clone, &evaluation_clone, effectiveness_score)
                 .await
@@ -584,12 +575,35 @@ impl Clone for AdaptiveThresholdEvaluator {
 }
 
 impl AdaptiveThresholdEvaluator {
-    /// Calculate confidence in adaptation
-    fn calculate_adaptation_confidence(&self) -> f32 {
-        // Simplified confidence calculation
-        // In a real implementation, this would consider adaptation history,
-        // effectiveness scores, and pattern detection confidence
-        0.85
+    /// Confidence in the adaptive threshold currently in force for `metric`.
+    ///
+    /// Before 0.2.1 this returned a constant `0.85` for every metric, including
+    /// one the engine had never adapted, and that constant was written into
+    /// every `ThresholdEvaluation.confidence`.
+    ///
+    /// The figure now comes from the adaptation state itself: a metric the
+    /// engine has never adapted scores 0.0 (its threshold is the configured
+    /// default, so adaptation contributes no confidence), and an adapted metric
+    /// scores the detected pattern's own confidence where pattern recognition
+    /// supplied the adjustment, or a history-depth term otherwise.
+    fn adaptation_confidence(&self, metric: &str) -> f32 {
+        let Ok(engine) = self.adaptation_engine.try_lock() else {
+            // The engine is mid-adaptation; nothing can be asserted about the
+            // threshold that is being replaced.
+            return 0.0;
+        };
+        if !engine.adaptations.contains_key(metric) {
+            return 0.0;
+        }
+        if self.config.enable_pattern_recognition {
+            if let Some(pattern) = engine.pattern_detector.patterns.get(metric) {
+                return pattern.confidence.clamp(0.0, 1.0);
+            }
+        }
+        // Otherwise: how much adaptation history this metric has, saturating at
+        // ten records.
+        let records = engine.history.iter().filter(|record| record.metric == metric).count();
+        (records as f32 / 10.0).clamp(0.0, 1.0)
     }
 }
 
@@ -622,7 +636,6 @@ impl PatternDetector {
     pub fn new() -> Self {
         Self {
             patterns: HashMap::new(),
-            pattern_history: VecDeque::new(),
         }
     }
 }
@@ -637,7 +650,6 @@ impl SeasonalAnalyzer {
     /// Create a new seasonal analyzer
     pub fn new() -> Self {
         Self {
-            models: HashMap::new(),
             factors: HashMap::new(),
         }
     }

@@ -268,6 +268,14 @@ impl DefaultDataCollator {
             "collator_type".to_string(),
             serde_json::Value::String("default".to_string()),
         );
+        metadata.insert(
+            "batch_size".to_string(),
+            serde_json::Value::from(batch_size),
+        );
+        metadata.insert(
+            "padded_sequence_length".to_string(),
+            serde_json::Value::from(sequence_length),
+        );
 
         // Check if token type IDs are present
         let has_token_types = examples.iter().any(|ex| ex.token_type_ids.is_some());

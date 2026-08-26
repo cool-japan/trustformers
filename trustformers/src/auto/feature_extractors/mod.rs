@@ -555,9 +555,7 @@ pub trait FeatureExtractorConfig: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auto::types::{
-        AudioMetadata, DocumentFormat, DocumentMetadata, FeatureInput, ImageFormat, ImageMetadata,
-    };
+    use crate::auto::types::{AudioMetadata, FeatureInput, ImageFormat, ImageMetadata};
     use crate::error::TrustformersError;
 
     #[test]
@@ -604,12 +602,17 @@ mod tests {
             }),
         };
 
-        let result = extractor.extract_features(&input);
-        assert!(result.is_ok());
-
-        let output = result.expect("Feature extraction should succeed");
-        assert_eq!(output.features.len(), 768);
-        assert_eq!(output.shape, vec![768]);
+        // The vision extractor owns no encoder, so it reports the request as
+        // unserviceable rather than returning an all-zero 768-d embedding —
+        // which would make every image identical under cosine similarity.
+        let err = extractor.extract_features(&input).expect_err("no vision encoder is attached");
+        assert!(
+            matches!(
+                err,
+                crate::error::TrustformersError::FeatureUnavailable { .. }
+            ) || matches!(err, crate::error::TrustformersError::InvalidInput { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

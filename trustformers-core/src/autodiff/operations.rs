@@ -567,7 +567,12 @@ pub mod grad_fn {
         }
     }
 
-    /// Transpose gradient function
+    /// Transpose (axis permutation) gradient function.
+    ///
+    /// The forward operation reorders the axes of its input by `permutation`
+    /// (an empty permutation means "reverse every axis", matching
+    /// `OperationType::Transpose` in [`crate::autodiff::variable`]). The
+    /// gradient therefore applies the *inverse* permutation to `grad_output`.
     pub struct TransposeGradFn {
         permutation: Vec<usize>,
     }
@@ -587,16 +592,27 @@ pub mod grad_fn {
                 ));
             }
 
-            // Gradient of transpose: apply inverse permutation
-            let inverse_permutation = self.compute_inverse_permutation()?;
-            // For now, handle simple 2D transpose case
-            let grad_input = if inverse_permutation.len() >= 2 {
-                grad_output.transpose(inverse_permutation[0], inverse_permutation[1])?
+            // Gradient of an axis permutation is the inverse permutation applied
+            // to the incoming gradient. This is a general N-d permutation: the
+            // previous code applied only `inverse[0]`/`inverse[1]` as a single
+            // axis swap, which produced a silently wrong gradient layout for any
+            // rank > 2 permutation that was not a plain 2-axis swap.
+            let ndim = grad_output.shape().len();
+            let inverse_permutation = if self.permutation.is_empty() {
+                // Empty permutation == reverse every axis; it is its own inverse.
+                (0..ndim).rev().collect::<Vec<usize>>()
             } else {
-                grad_output.transpose(0, 1)?
+                if self.permutation.len() != ndim {
+                    return Err(TrustformersError::shape_error(format!(
+                        "TransposeGradFn: permutation of length {} does not match the {}-D gradient",
+                        self.permutation.len(),
+                        ndim
+                    )));
+                }
+                self.compute_inverse_permutation()?
             };
 
-            Ok(vec![grad_input])
+            Ok(vec![grad_output.permute(&inverse_permutation)?])
         }
 
         fn operation_type(&self) -> OperationType {
@@ -606,11 +622,20 @@ pub mod grad_fn {
 
     impl TransposeGradFn {
         fn compute_inverse_permutation(&self) -> Result<Vec<usize>> {
-            let mut inverse = vec![0; self.permutation.len()];
+            let ndim = self.permutation.len();
+            let mut inverse = vec![usize::MAX; ndim];
             for (i, &p) in self.permutation.iter().enumerate() {
-                if p >= self.permutation.len() {
+                if p >= ndim {
                     return Err(TrustformersError::tensor_op_error(
                         &format!("Invalid permutation index: {}", p),
+                        "TransposeGradFn::compute_inverse_permutation",
+                    ));
+                }
+                // A permutation must be a bijection; a repeated index would
+                // silently overwrite a slot and leave `usize::MAX` elsewhere.
+                if inverse[p] != usize::MAX {
+                    return Err(TrustformersError::tensor_op_error(
+                        &format!("Duplicate permutation index: {}", p),
                         "TransposeGradFn::compute_inverse_permutation",
                     ));
                 }
@@ -620,7 +645,29 @@ pub mod grad_fn {
         }
     }
 
-    /// Layer normalization gradient function
+    /// Layer normalization gradient function.
+    ///
+    /// Forward pass (per normalized group of `n` elements):
+    ///
+    /// ```text
+    /// mu     = mean(x)
+    /// sigma2 = mean((x - mu)^2)
+    /// rstd   = 1 / sqrt(sigma2 + eps)
+    /// xhat   = (x - mu) * rstd
+    /// y      = gamma * xhat + beta
+    /// ```
+    ///
+    /// Backward pass, with `g = dL/dy * gamma`:
+    ///
+    /// ```text
+    /// dL/dx     = rstd * (g - mean(g) - xhat * mean(g * xhat))
+    /// dL/dgamma = sum_over_batch(dL/dy * xhat)
+    /// dL/dbeta  = sum_over_batch(dL/dy)
+    /// ```
+    ///
+    /// The normalized axes are the trailing axes of `input` matched by the shape
+    /// of `weight`, which is the convention used by `LayerNorm` layers: `weight`
+    /// and `bias` are broadcast over every leading (batch) axis.
     pub struct LayerNormGradFn {
         epsilon: f32,
     }
@@ -640,22 +687,119 @@ pub mod grad_fn {
                 ));
             }
 
-            let input = inputs[0];
-            let weight = inputs[1];
-            let bias = inputs[2];
-
-            // This is a simplified implementation
-            // In practice, you would compute the exact gradients for layer normalization
-            let grad_input = grad_output.mul(weight)?;
-            let grad_weight = grad_output.mul(input)?;
-            let grad_bias = grad_output.clone();
-
-            Ok(vec![grad_input, grad_weight, grad_bias])
+            layer_norm_backward(grad_output, inputs[0], inputs[1], inputs[2], self.epsilon)
         }
 
         fn operation_type(&self) -> OperationType {
             OperationType::LayerNorm(self.epsilon)
         }
+    }
+
+    /// Exact LayerNorm backward pass over the trailing `weight.ndim()` axes.
+    ///
+    /// Returns `[dL/dinput, dL/dweight, dL/dbias]`.
+    pub(crate) fn layer_norm_backward(
+        grad_output: &Tensor,
+        input: &Tensor,
+        weight: &Tensor,
+        bias: &Tensor,
+        epsilon: f32,
+    ) -> Result<Vec<Tensor>> {
+        let input_shape = input.shape();
+        let weight_shape = weight.shape();
+        let bias_shape = bias.shape();
+        let grad_shape = grad_output.shape();
+
+        if grad_shape != input_shape {
+            return Err(TrustformersError::shape_error(format!(
+                "LayerNorm backward: gradient shape {:?} does not match input shape {:?}",
+                grad_shape, input_shape
+            )));
+        }
+        if weight_shape != bias_shape {
+            return Err(TrustformersError::shape_error(format!(
+                "LayerNorm backward: weight shape {:?} does not match bias shape {:?}",
+                weight_shape, bias_shape
+            )));
+        }
+        if weight_shape.is_empty() || weight_shape.len() > input_shape.len() {
+            return Err(TrustformersError::shape_error(format!(
+                "LayerNorm backward: weight shape {:?} is not a suffix of input shape {:?}",
+                weight_shape, input_shape
+            )));
+        }
+        let split = input_shape.len() - weight_shape.len();
+        if input_shape[split..] != weight_shape[..] {
+            return Err(TrustformersError::shape_error(format!(
+                "LayerNorm backward: weight shape {:?} is not a suffix of input shape {:?}",
+                weight_shape, input_shape
+            )));
+        }
+
+        let normalized_len: usize = weight_shape.iter().product();
+        if normalized_len == 0 {
+            return Err(TrustformersError::shape_error(
+                "LayerNorm backward: normalized axes must not be empty".to_string(),
+            ));
+        }
+
+        let x = input.to_vec_f32()?;
+        let g_out = grad_output.to_vec_f32()?;
+        let gamma = weight.to_vec_f32()?;
+        if gamma.len() != normalized_len {
+            return Err(TrustformersError::shape_error(format!(
+                "LayerNorm backward: weight holds {} values but the normalized axes cover {}",
+                gamma.len(),
+                normalized_len
+            )));
+        }
+
+        let rows = x.len() / normalized_len;
+        let n = normalized_len as f32;
+
+        let mut grad_input = vec![0.0f32; x.len()];
+        let mut grad_weight = vec![0.0f32; normalized_len];
+        let mut grad_bias = vec![0.0f32; normalized_len];
+
+        for row in 0..rows {
+            let offset = row * normalized_len;
+            let x_row = &x[offset..offset + normalized_len];
+            let g_row = &g_out[offset..offset + normalized_len];
+
+            // Forward statistics (recomputed; the GradientFunction trait carries
+            // no forward cache, and one extra streaming pass is cheap next to a
+            // wrong gradient).
+            let mean = x_row.iter().sum::<f32>() / n;
+            let variance = x_row.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / n;
+            let rstd = 1.0 / (variance + epsilon).sqrt();
+
+            // Accumulate the two reduction terms in one pass.
+            let mut sum_g = 0.0f32;
+            let mut sum_g_xhat = 0.0f32;
+            for i in 0..normalized_len {
+                let x_hat = (x_row[i] - mean) * rstd;
+                let g = g_row[i] * gamma[i];
+                sum_g += g;
+                sum_g_xhat += g * x_hat;
+
+                grad_weight[i] += g_row[i] * x_hat;
+                grad_bias[i] += g_row[i];
+            }
+            let mean_g = sum_g / n;
+            let mean_g_xhat = sum_g_xhat / n;
+
+            for i in 0..normalized_len {
+                let x_hat = (x_row[i] - mean) * rstd;
+                let g = g_row[i] * gamma[i];
+                grad_input[offset + i] = rstd * (g - mean_g - x_hat * mean_g_xhat);
+            }
+        }
+
+        Ok(vec![
+            Tensor::from_vec(grad_input, input_shape.as_slice())?,
+            Tensor::from_vec(grad_weight, weight_shape.as_slice())?,
+            Tensor::from_vec(grad_bias, bias_shape.as_slice())?,
+        ])
     }
 
     /// MSE Loss gradient function
@@ -988,5 +1132,238 @@ mod tests {
 
         assert_eq!(gradients.len(), 1);
         assert_eq!(gradients[0].shape(), vec![2, 3]);
+    }
+
+    /// Regression test for the rank > 2 transpose gradient.
+    ///
+    /// The previous implementation applied only `inverse[0]`/`inverse[1]` as a
+    /// single axis swap, so a 3-cycle permutation produced a gradient with the
+    /// wrong *shape* (here `[2,4,3]` instead of `[2,3,4]`) and, whenever the
+    /// shapes happened to coincide, silently wrong values.
+    #[test]
+    fn transpose_gradient_handles_a_general_nd_permutation() {
+        // Forward permutation [1, 2, 0]: input [2,3,4] -> output [3,4,2].
+        let grad_fn = grad_fn::TransposeGradFn::new(vec![1, 2, 0]);
+        // Give every element a distinct value so a wrong permutation is visible.
+        let values: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let grad_output = Tensor::from_vec(values.clone(), &[3, 4, 2]).expect("build grad_output");
+        let input = Tensor::zeros(&[2, 3, 4]).expect("build input");
+
+        let gradients = grad_fn.backward(&grad_output, &[&input]).expect("transpose backward");
+        assert_eq!(gradients.len(), 1);
+        assert_eq!(gradients[0].shape(), vec![2, 3, 4]);
+
+        // Inverse of [1,2,0] is [2,0,1]: grad_input[i,j,k] == grad_output[j,k,i].
+        let actual = gradients[0].to_vec_f32().expect("grad values");
+        let mut expected = vec![0.0f32; 24];
+        for i in 0..2 {
+            for j in 0..3 {
+                for k in 0..4 {
+                    // grad_output is [3,4,2] row-major.
+                    expected[i * 12 + j * 4 + k] = values[j * 8 + k * 2 + i];
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    /// An empty permutation means "reverse every axis" and is its own inverse.
+    #[test]
+    fn transpose_gradient_reverses_all_axes_for_an_empty_permutation() {
+        let grad_fn = grad_fn::TransposeGradFn::new(Vec::new());
+        let values: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let grad_output = Tensor::from_vec(values.clone(), &[4, 3, 2]).expect("grad_output");
+        let input = Tensor::zeros(&[2, 3, 4]).expect("input");
+
+        let gradients = grad_fn.backward(&grad_output, &[&input]).expect("backward");
+        assert_eq!(gradients[0].shape(), vec![2, 3, 4]);
+
+        let actual = gradients[0].to_vec_f32().expect("grad values");
+        let mut expected = vec![0.0f32; 24];
+        for i in 0..2 {
+            for j in 0..3 {
+                for k in 0..4 {
+                    // grad_output is [4,3,2] row-major, reversed indexing.
+                    expected[i * 12 + j * 4 + k] = values[k * 6 + j * 2 + i];
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    /// A permutation whose length disagrees with the gradient rank is a caller
+    /// error, not something to silently apply to the first two axes.
+    #[test]
+    fn transpose_gradient_rejects_a_mismatched_permutation_rank() {
+        let grad_fn = grad_fn::TransposeGradFn::new(vec![1, 0]);
+        let grad_output = Tensor::zeros(&[3, 4, 2]).expect("grad_output");
+        let input = Tensor::zeros(&[2, 3, 4]).expect("input");
+        assert!(grad_fn.backward(&grad_output, &[&input]).is_err());
+    }
+
+    /// A repeated index is not a permutation; it used to leave an uninitialised
+    /// slot in the inverse and silently produce a wrong axis order.
+    #[test]
+    fn transpose_gradient_rejects_a_duplicated_permutation_index() {
+        let grad_fn = grad_fn::TransposeGradFn::new(vec![1, 1, 0]);
+        let grad_output = Tensor::zeros(&[3, 4, 2]).expect("grad_output");
+        let input = Tensor::zeros(&[2, 3, 4]).expect("input");
+        assert!(grad_fn.backward(&grad_output, &[&input]).is_err());
+    }
+
+    /// Reference LayerNorm forward used by the finite-difference check.
+    ///
+    /// `x` is `[rows, n]` flattened row-major; `gamma`/`beta` have `n` entries.
+    fn reference_layer_norm(x: &[f32], gamma: &[f32], beta: &[f32], eps: f32) -> Vec<f32> {
+        let n = gamma.len();
+        let rows = x.len() / n;
+        let mut out = vec![0.0f32; x.len()];
+        for row in 0..rows {
+            let offset = row * n;
+            let slice = &x[offset..offset + n];
+            let mean = slice.iter().sum::<f32>() / n as f32;
+            let var = slice.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / n as f32;
+            let rstd = 1.0 / (var + eps).sqrt();
+            for i in 0..n {
+                out[offset + i] = gamma[i] * (slice[i] - mean) * rstd + beta[i];
+            }
+        }
+        out
+    }
+
+    /// Scalar loss used by the finite-difference check: `sum(w_i * y_i)`.
+    ///
+    /// Its gradient with respect to `y` is exactly `w`, which is what we feed in
+    /// as `grad_output`, so the analytic and numerical gradients are comparable.
+    fn weighted_loss(y: &[f32], weights: &[f32]) -> f64 {
+        y.iter().zip(weights.iter()).map(|(&a, &b)| a as f64 * b as f64).sum()
+    }
+
+    /// Finite-difference gradient check for the LayerNorm backward pass.
+    ///
+    /// The previous implementation returned `grad_output * weight` for the input
+    /// gradient (no 1/sigma factor, no mean-subtraction terms), `grad_output *
+    /// input` for the weight gradient and an unreduced `grad_output` for the bias
+    /// gradient. All three disagree with the numerical gradient below.
+    #[test]
+    fn test_layer_norm_gradient_matches_finite_differences() {
+        let eps = 1e-5f32;
+        let shape = [2usize, 3usize];
+        let n = shape[1];
+        let x = vec![0.5f32, -1.25, 2.0, 0.75, 0.1, -0.6];
+        let gamma = vec![1.3f32, 0.7, -0.4];
+        let beta = vec![0.05f32, -0.2, 0.4];
+        // Upstream gradient (also the weights of the scalar loss).
+        let g_out = vec![0.9f32, -0.3, 0.6, 0.2, 1.1, -0.8];
+
+        let input = Tensor::from_vec(x.clone(), &shape).expect("input tensor");
+        let weight = Tensor::from_vec(gamma.clone(), &[n]).expect("weight tensor");
+        let bias = Tensor::from_vec(beta.clone(), &[n]).expect("bias tensor");
+        let grad_output = Tensor::from_vec(g_out.clone(), &shape).expect("grad tensor");
+
+        let grads = grad_fn::LayerNormGradFn::new(eps)
+            .backward(&grad_output, &[&input, &weight, &bias])
+            .expect("layer norm backward");
+        assert_eq!(grads.len(), 3);
+        assert_eq!(grads[0].shape(), shape.to_vec());
+        assert_eq!(grads[1].shape(), vec![n]);
+        assert_eq!(grads[2].shape(), vec![n]);
+
+        let grad_input = grads[0].to_vec_f32().expect("grad input values");
+        let grad_weight = grads[1].to_vec_f32().expect("grad weight values");
+        let grad_bias = grads[2].to_vec_f32().expect("grad bias values");
+
+        // Central differences in f64 accumulation; h = 1e-3 keeps the f32 forward
+        // pass well above its rounding floor while staying inside the quadratic
+        // truncation regime.
+        let h = 1e-3f32;
+        let tol = 2e-2f64;
+
+        for i in 0..x.len() {
+            let mut x_plus = x.clone();
+            let mut x_minus = x.clone();
+            x_plus[i] += h;
+            x_minus[i] -= h;
+            let loss_plus =
+                weighted_loss(&reference_layer_norm(&x_plus, &gamma, &beta, eps), &g_out);
+            let loss_minus =
+                weighted_loss(&reference_layer_norm(&x_minus, &gamma, &beta, eps), &g_out);
+            let numeric = (loss_plus - loss_minus) / (2.0 * h as f64);
+            let analytic = grad_input[i] as f64;
+            assert!(
+                (numeric - analytic).abs() <= tol * (1.0 + numeric.abs()),
+                "grad_input[{i}]: analytic {analytic}, numeric {numeric}"
+            );
+        }
+
+        for i in 0..n {
+            let mut gamma_plus = gamma.clone();
+            let mut gamma_minus = gamma.clone();
+            gamma_plus[i] += h;
+            gamma_minus[i] -= h;
+            let numeric =
+                (weighted_loss(&reference_layer_norm(&x, &gamma_plus, &beta, eps), &g_out)
+                    - weighted_loss(&reference_layer_norm(&x, &gamma_minus, &beta, eps), &g_out))
+                    / (2.0 * h as f64);
+            assert!(
+                (numeric - grad_weight[i] as f64).abs() <= tol * (1.0 + numeric.abs()),
+                "grad_weight[{i}]: analytic {}, numeric {numeric}",
+                grad_weight[i]
+            );
+
+            let mut beta_plus = beta.clone();
+            let mut beta_minus = beta.clone();
+            beta_plus[i] += h;
+            beta_minus[i] -= h;
+            let numeric_bias =
+                (weighted_loss(&reference_layer_norm(&x, &gamma, &beta_plus, eps), &g_out)
+                    - weighted_loss(&reference_layer_norm(&x, &gamma, &beta_minus, eps), &g_out))
+                    / (2.0 * h as f64);
+            assert!(
+                (numeric_bias - grad_bias[i] as f64).abs() <= tol * (1.0 + numeric_bias.abs()),
+                "grad_bias[{i}]: analytic {}, numeric {numeric_bias}",
+                grad_bias[i]
+            );
+        }
+    }
+
+    /// The input gradient of LayerNorm is orthogonal to both `1` and `xhat`
+    /// within each normalized group -- a property the old implementation
+    /// (`grad_output * weight`) violated for any non-zero upstream gradient.
+    #[test]
+    fn test_layer_norm_grad_input_is_mean_free() {
+        let eps = 1e-5f32;
+        let input = Tensor::from_vec(vec![0.5f32, -1.25, 2.0, 0.75, 0.1, -0.6], &[2, 3])
+            .expect("input tensor");
+        let weight = Tensor::from_vec(vec![1.3f32, 0.7, -0.4], &[3]).expect("weight tensor");
+        let bias = Tensor::from_vec(vec![0.05f32, -0.2, 0.4], &[3]).expect("bias tensor");
+        let grad_output = Tensor::from_vec(vec![0.9f32, -0.3, 0.6, 0.2, 1.1, -0.8], &[2, 3])
+            .expect("grad tensor");
+
+        let grads = grad_fn::LayerNormGradFn::new(eps)
+            .backward(&grad_output, &[&input, &weight, &bias])
+            .expect("layer norm backward");
+        let grad_input = grads[0].to_vec_f32().expect("grad input values");
+
+        for row in grad_input.chunks(3) {
+            let sum: f32 = row.iter().sum();
+            assert!(sum.abs() < 1e-5, "row gradient must sum to ~0, got {sum}");
+        }
+    }
+
+    /// Shape mismatches must be reported, not silently broadcast.
+    #[test]
+    fn test_layer_norm_backward_rejects_shape_mismatch() {
+        let input = Tensor::ones(&[2, 3]).expect("input tensor");
+        let weight = Tensor::ones(&[4]).expect("weight tensor");
+        let bias = Tensor::ones(&[4]).expect("bias tensor");
+        let grad_output = Tensor::ones(&[2, 3]).expect("grad tensor");
+
+        let result =
+            grad_fn::LayerNormGradFn::new(1e-5).backward(&grad_output, &[&input, &weight, &bias]);
+        assert!(
+            result.is_err(),
+            "weight shape must be a suffix of the input shape"
+        );
     }
 }

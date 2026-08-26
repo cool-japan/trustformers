@@ -1,7 +1,43 @@
+use anyhow::{anyhow, Result};
 use scirs2_core::ndarray::Array1; // SciRS2 Integration Policy
 use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+
+/// Squared Euclidean distance between two feature vectors.
+///
+/// Vectors of unequal length are compared as if the shorter one were zero-padded, so a buffer
+/// holding heterogeneous inputs still yields a well-defined metric.
+fn squared_distance(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().max(b.len());
+    let mut total = 0.0f32;
+    for i in 0..len {
+        let x = a.get(i).copied().unwrap_or(0.0);
+        let y = b.get(i).copied().unwrap_or(0.0);
+        let d = x - y;
+        total += d * d;
+    }
+    total
+}
+
+/// Component-wise mean of a set of feature vectors, zero-padded to the longest.
+fn mean_vector(vectors: &[Vec<f32>]) -> Vec<f32> {
+    let len = vectors.iter().map(|v| v.len()).max().unwrap_or(0);
+    if vectors.is_empty() || len == 0 {
+        return vec![0.0; len];
+    }
+    let mut acc = vec![0.0f32; len];
+    for vector in vectors {
+        for (i, slot) in acc.iter_mut().enumerate() {
+            *slot += vector.get(i).copied().unwrap_or(0.0);
+        }
+    }
+    let n = vectors.len() as f32;
+    for slot in acc.iter_mut() {
+        *slot /= n;
+    }
+    acc
+}
 
 /// Configuration for memory replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +99,13 @@ pub struct ExperienceSample {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Number of times this sample has been replayed
     pub replay_count: usize,
+    /// Gradient norm ‖∇L(x)‖ most recently measured for this sample, when one was recorded.
+    ///
+    /// This is the quantity [`SamplingStrategy::GradientBased`] builds its importance
+    /// distribution from. `None` means "never measured" — deliberately distinct from a
+    /// measured `0.0`, so the sampler can refuse to invent an importance it was never given.
+    #[serde(default)]
+    pub gradient_norm: Option<f32>,
 }
 
 impl ExperienceSample {
@@ -74,7 +117,23 @@ impl ExperienceSample {
             importance: 1.0,
             timestamp: chrono::Utc::now(),
             replay_count: 0,
+            gradient_norm: None,
         }
+    }
+
+    /// Record the gradient norm measured for this sample during a backward pass.
+    ///
+    /// # Errors
+    ///
+    /// `norm` is negative or not finite — neither is a valid magnitude.
+    pub fn set_gradient_norm(&mut self, norm: f32) -> Result<()> {
+        if !norm.is_finite() || norm < 0.0 {
+            return Err(anyhow!(
+                "gradient norm must be finite and non-negative, got {norm}"
+            ));
+        }
+        self.gradient_norm = Some(norm);
+        Ok(())
     }
 
     /// Update importance score based on replay performance
@@ -264,6 +323,74 @@ impl ExperienceBuffer {
     pub fn get_task_samples(&self, task_id: &str) -> Option<&VecDeque<ExperienceSample>> {
         self.tasks.get(task_id)
     }
+
+    /// Stable `(task_id, index)` keys for every buffered sample.
+    ///
+    /// Sorted by task id so that selection algorithms built on top of it are reproducible —
+    /// `self.tasks` is a `HashMap` and its iteration order changes between runs.
+    pub fn sample_keys(&self) -> Vec<(String, usize)> {
+        let mut task_ids: Vec<&String> = self.tasks.keys().collect();
+        task_ids.sort();
+        let mut keys = Vec::with_capacity(self.total_samples);
+        for task_id in task_ids {
+            if let Some(buffer) = self.tasks.get(task_id) {
+                for idx in 0..buffer.len() {
+                    keys.push((task_id.clone(), idx));
+                }
+            }
+        }
+        keys
+    }
+
+    /// Borrow one buffered sample by its [`ExperienceBuffer::sample_keys`] key.
+    pub fn sample_at(&self, task_id: &str, index: usize) -> Option<&ExperienceSample> {
+        self.tasks.get(task_id).and_then(|buffer| buffer.get(index))
+    }
+
+    /// Clone out the samples named by `keys`, incrementing each one's replay counter.
+    ///
+    /// Keys that no longer resolve are skipped rather than producing a placeholder sample.
+    pub fn take_by_keys(
+        &mut self,
+        keys: impl Iterator<Item = (String, usize)>,
+    ) -> Vec<ExperienceSample> {
+        let mut samples = Vec::new();
+        for (task_id, index) in keys {
+            if let Some(buffer) = self.tasks.get_mut(&task_id) {
+                if let Some(sample) = buffer.get_mut(index) {
+                    sample.increment_replay();
+                    samples.push(sample.clone());
+                }
+            }
+        }
+        samples
+    }
+
+    /// Attach a measured gradient norm to one buffered sample.
+    ///
+    /// # Errors
+    ///
+    /// `task_id` is unknown, `index` is out of range for that task, or `norm` is negative or
+    /// not finite.
+    pub fn record_gradient_norm(&mut self, task_id: &str, index: usize, norm: f32) -> Result<()> {
+        let buffer = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("no replay buffer for task '{task_id}'"))?;
+        let len = buffer.len();
+        let sample = buffer.get_mut(index).ok_or_else(|| {
+            anyhow!("sample index {index} is out of range for task '{task_id}' ({len} samples)")
+        })?;
+        sample.set_gradient_norm(norm)
+    }
+
+    /// Draw the next uniform variate in `[0, 1)` from the buffer's seeded generator.
+    ///
+    /// Exposed so selection algorithms living on [`MemoryReplay`] stay on the same
+    /// reproducible stream as the buffer's own samplers.
+    pub fn next_uniform(&mut self) -> f32 {
+        self.rng.random()
+    }
 }
 
 /// Buffer statistics
@@ -299,31 +426,236 @@ impl MemoryReplay {
         self.buffer.add_sample(sample);
     }
 
-    /// Sample replay batch according to configured strategy
-    pub fn sample_replay_batch(&mut self) -> Vec<ExperienceSample> {
+    /// Sample a replay batch with the configured [`SamplingStrategy`].
+    ///
+    /// Each strategy runs its own algorithm — `Diverse` and `GradientBased` used to silently
+    /// delegate to uniform and weighted sampling respectively, so selecting them changed
+    /// nothing about the batch.
+    ///
+    /// # Errors
+    ///
+    /// Only the strategies that can be *undefined* for the current buffer state fail:
+    /// [`SamplingStrategy::GradientBased`] returns an error when no sample carries a recorded
+    /// gradient norm (see [`MemoryReplay::record_gradient_norm`]), because an importance
+    /// distribution proportional to a quantity that was never measured does not exist. The
+    /// other strategies return an empty batch for an empty buffer, as before.
+    pub fn sample_replay_batch(&mut self) -> Result<Vec<ExperienceSample>> {
         let num_samples = self.config.replay_batch_size;
 
         match self.config.sampling_strategy {
-            SamplingStrategy::Random => self.buffer.sample_random(num_samples),
-            SamplingStrategy::Uniform => self.buffer.sample_uniform(num_samples),
-            SamplingStrategy::Weighted => self.buffer.sample_weighted(num_samples),
-            SamplingStrategy::Diverse => self.sample_diverse(num_samples),
+            SamplingStrategy::Random => Ok(self.buffer.sample_random(num_samples)),
+            SamplingStrategy::Uniform => Ok(self.buffer.sample_uniform(num_samples)),
+            SamplingStrategy::Weighted => Ok(self.buffer.sample_weighted(num_samples)),
+            SamplingStrategy::Diverse => Ok(self.sample_diverse(num_samples)),
             SamplingStrategy::GradientBased => self.sample_gradient_based(num_samples),
         }
     }
 
-    /// Diverse sampling using clustering (simplified implementation)
-    fn sample_diverse(&mut self, num_samples: usize) -> Vec<ExperienceSample> {
-        // For now, use uniform sampling as a placeholder
-        // In practice, this would use clustering algorithms
-        self.buffer.sample_uniform(num_samples)
+    /// Record the gradient norm ‖∇L(xᵢ)‖ measured for one buffered sample.
+    ///
+    /// [`SamplingStrategy::GradientBased`] draws its distribution from exactly these values,
+    /// so a training loop that wants gradient-based replay must call this after each backward
+    /// pass over a replayed (or newly buffered) example.
+    ///
+    /// # Errors
+    ///
+    /// The task is unknown, `index` is past the end of that task's buffer, or `norm` is
+    /// negative or not finite.
+    pub fn record_gradient_norm(&mut self, task_id: &str, index: usize, norm: f32) -> Result<()> {
+        self.buffer.record_gradient_norm(task_id, index, norm)
     }
 
-    /// Gradient-based importance sampling
-    fn sample_gradient_based(&mut self, num_samples: usize) -> Vec<ExperienceSample> {
-        // For now, use weighted sampling as a placeholder
-        // In practice, this would use gradient magnitude as importance
-        self.buffer.sample_weighted(num_samples)
+    /// Diverse replay selection by farthest-point clustering over the stored inputs.
+    ///
+    /// The algorithm is k-center greedy (farthest-point traversal), the standard 2-approximation
+    /// for the k-center objective:
+    ///
+    /// 1. `k = min(config.num_clusters, |buffer|)` centers are chosen greedily — the first is
+    ///    the sample farthest from the pool centroid, and each subsequent center is the sample
+    ///    whose distance to the nearest existing center is largest.
+    /// 2. Every sample is assigned to its nearest center, forming `k` clusters.
+    /// 3. The batch is drawn round-robin across clusters, taking from each the still-unpicked
+    ///    sample closest to that cluster's center.
+    ///
+    /// Round-robin over maximally-separated clusters is what makes the batch cover the input
+    /// space rather than over-represent whichever region happens to hold the most samples.
+    ///
+    /// Distances are squared Euclidean, with shorter feature vectors zero-padded to the longer
+    /// length so heterogeneous inputs are still comparable.
+    fn sample_diverse(&mut self, num_samples: usize) -> Vec<ExperienceSample> {
+        if num_samples == 0 {
+            return Vec::new();
+        }
+        let pool = self.buffer.sample_keys();
+        if pool.is_empty() {
+            return Vec::new();
+        }
+
+        let inputs: Vec<Vec<f32>> = pool
+            .iter()
+            .map(|(task_id, idx)| {
+                self.buffer
+                    .sample_at(task_id, *idx)
+                    .map(|s| s.input.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let k = self.config.num_clusters.clamp(1, pool.len());
+
+        // ── 1. k-center greedy ───────────────────────────────────────────────
+        // Seed deterministically with the point farthest from the centroid, so the same
+        // buffer always yields the same batch.
+        let centroid = mean_vector(&inputs);
+        let mut centers: Vec<usize> = Vec::with_capacity(k);
+        let seed = (0..inputs.len())
+            .max_by(|&a, &b| {
+                squared_distance(&inputs[a], &centroid)
+                    .partial_cmp(&squared_distance(&inputs[b], &centroid))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(0);
+        centers.push(seed);
+
+        // Distance from each point to its nearest chosen center.
+        let mut nearest: Vec<f32> =
+            inputs.iter().map(|v| squared_distance(v, &inputs[seed])).collect();
+        let mut assignment: Vec<usize> = vec![0; inputs.len()];
+
+        while centers.len() < k {
+            let next = (0..inputs.len())
+                .max_by(|&a, &b| {
+                    nearest[a].partial_cmp(&nearest[b]).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0);
+            if nearest[next] <= 0.0 {
+                // Every remaining point coincides with an existing center: more clusters
+                // would be empty, so stop early rather than emit duplicates.
+                break;
+            }
+            let center_slot = centers.len();
+            centers.push(next);
+            for i in 0..inputs.len() {
+                let d = squared_distance(&inputs[i], &inputs[next]);
+                if d < nearest[i] {
+                    nearest[i] = d;
+                    assignment[i] = center_slot;
+                }
+            }
+        }
+
+        // ── 2. cluster membership, each ordered by distance to its center ─────
+        let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); centers.len()];
+        for (i, &slot) in assignment.iter().enumerate() {
+            clusters[slot.min(centers.len() - 1)].push(i);
+        }
+        for (slot, members) in clusters.iter_mut().enumerate() {
+            let center = &inputs[centers[slot]];
+            members.sort_by(|&a, &b| {
+                squared_distance(&inputs[a], center)
+                    .partial_cmp(&squared_distance(&inputs[b], center))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            });
+        }
+
+        // ── 3. round-robin draw ──────────────────────────────────────────────
+        let mut chosen: Vec<usize> = Vec::with_capacity(num_samples.min(pool.len()));
+        let mut cursors = vec![0usize; clusters.len()];
+        while chosen.len() < num_samples.min(pool.len()) {
+            let mut progressed = false;
+            for (slot, members) in clusters.iter().enumerate() {
+                if chosen.len() >= num_samples.min(pool.len()) {
+                    break;
+                }
+                if let Some(&point) = members.get(cursors[slot]) {
+                    cursors[slot] += 1;
+                    chosen.push(point);
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+
+        self.buffer.take_by_keys(chosen.into_iter().map(|i| pool[i].clone()))
+    }
+
+    /// GraNd-style gradient-norm importance sampling.
+    ///
+    /// Samples are drawn **without replacement** with probability proportional to the gradient
+    /// norm recorded by [`MemoryReplay::record_gradient_norm`], which is the textbook
+    /// importance distribution for variance-reduced replay: the examples the model is still
+    /// getting wrong are the ones worth replaying.
+    ///
+    /// Samples with no recorded gradient norm are not eligible — they have no measured
+    /// importance, so including them would mean inventing one.
+    ///
+    /// # Errors
+    ///
+    /// No buffered sample carries a recorded gradient norm, or every recorded norm is zero
+    /// (a degenerate distribution). Both mean the caller has not fed gradient magnitudes back
+    /// into the buffer, which is a usage error rather than an empty batch.
+    fn sample_gradient_based(&mut self, num_samples: usize) -> Result<Vec<ExperienceSample>> {
+        let pool = self.buffer.sample_keys();
+        if pool.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut eligible: Vec<(usize, f32)> = Vec::new();
+        let mut any_recorded = false;
+        for (i, (task_id, idx)) in pool.iter().enumerate() {
+            if let Some(sample) = self.buffer.sample_at(task_id, *idx) {
+                if let Some(norm) = sample.gradient_norm {
+                    any_recorded = true;
+                    if norm > 0.0 {
+                        eligible.push((i, norm));
+                    }
+                }
+            }
+        }
+
+        if !any_recorded {
+            return Err(anyhow!(
+                "SamplingStrategy::GradientBased needs per-sample gradient norms, but none of \
+                 the {} buffered samples has one; call MemoryReplay::record_gradient_norm \
+                 after the backward pass (or choose SamplingStrategy::Weighted, which uses the \
+                 `importance` field instead)",
+                pool.len()
+            ));
+        }
+        if eligible.is_empty() {
+            return Err(anyhow!(
+                "SamplingStrategy::GradientBased: every recorded gradient norm is zero, so the \
+                 importance distribution is degenerate"
+            ));
+        }
+
+        // Sequential draw without replacement: pick proportionally, then remove the winner and
+        // renormalise. `num_samples` larger than the eligible set simply returns the whole set.
+        let take = num_samples.min(eligible.len());
+        let mut chosen = Vec::with_capacity(take);
+        for _ in 0..take {
+            let total: f32 = eligible.iter().map(|(_, w)| *w).sum();
+            if total <= 0.0 {
+                break;
+            }
+            let target: f32 = self.buffer.next_uniform() * total;
+            let mut acc = 0.0;
+            let mut winner = eligible.len() - 1;
+            for (slot, (_, weight)) in eligible.iter().enumerate() {
+                acc += *weight;
+                if acc >= target {
+                    winner = slot;
+                    break;
+                }
+            }
+            let (point, _) = eligible.remove(winner);
+            chosen.push(pool[point].clone());
+        }
+
+        Ok(self.buffer.take_by_keys(chosen.into_iter()))
     }
 
     /// Update task difficulty score
@@ -464,7 +796,7 @@ mod tests {
             }
         }
 
-        let samples = replay.sample_replay_batch();
+        let samples = replay.sample_replay_batch().expect("replay sampling failed");
         assert!(samples.len() <= 3);
         assert!(replay.has_samples());
     }
@@ -610,7 +942,7 @@ mod tests {
                 replay.add_experience(sample);
             }
         }
-        let samples = replay.sample_replay_batch();
+        let samples = replay.sample_replay_batch().expect("replay sampling failed");
         assert!(samples.len() <= 4);
     }
 
@@ -670,7 +1002,200 @@ mod tests {
             let sample = ExperienceSample::new("task1".to_string(), vec![i as f32], vec![0.0]);
             replay.add_experience(sample);
         }
-        let samples = replay.sample_replay_batch();
+        let samples = replay.sample_replay_batch().expect("replay sampling failed");
         assert!(samples.len() <= 3);
+    }
+
+    // ── Diverse sampling really clusters ─────────────────────────────────────
+
+    /// Six samples of one task in three well-separated 1-D clusters:
+    /// `{0.0, 0.1, 0.2}`, `{10.0, 10.1}`, `{20.0}`.
+    fn clustered_replay(strategy: SamplingStrategy, batch: usize) -> MemoryReplay {
+        let config = MemoryReplayConfig {
+            buffer_size_per_task: 16,
+            sampling_strategy: strategy,
+            replay_batch_size: batch,
+            num_clusters: 3,
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(42));
+        for x in [0.0f32, 0.1, 0.2, 10.0, 10.1, 20.0] {
+            replay.add_experience(ExperienceSample::new("t".to_string(), vec![x], vec![0.0]));
+        }
+        replay
+    }
+
+    /// Cluster id of a 1-D input under the fixture's `{~0, ~10, ~20}` layout.
+    fn cluster_of(x: f32) -> usize {
+        if x < 5.0 {
+            0
+        } else if x < 15.0 {
+            1
+        } else {
+            2
+        }
+    }
+
+    #[test]
+    fn test_diverse_sampling_covers_every_cluster() {
+        // Regression: `sample_diverse` delegated to `sample_uniform`, which shuffles within a
+        // task and therefore has no reason to touch all three clusters.
+        let mut replay = clustered_replay(SamplingStrategy::Diverse, 3);
+        let samples = replay.sample_replay_batch().expect("diverse sampling failed");
+        assert_eq!(samples.len(), 3, "expected a full batch of 3");
+
+        let mut clusters: Vec<usize> = samples.iter().map(|s| cluster_of(s.input[0])).collect();
+        clusters.sort_unstable();
+        clusters.dedup();
+        assert_eq!(
+            clusters.len(),
+            3,
+            "farthest-point selection must pick one sample per cluster, got inputs {:?}",
+            samples.iter().map(|s| s.input[0]).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_diverse_sampling_is_deterministic_for_a_fixed_buffer() {
+        // k-center greedy is seeded from the centroid, not the RNG, so the same buffer must
+        // always produce the same batch — uniform sampling could not promise this.
+        let first: Vec<f32> = clustered_replay(SamplingStrategy::Diverse, 3)
+            .sample_replay_batch()
+            .expect("diverse sampling failed")
+            .iter()
+            .map(|s| s.input[0])
+            .collect();
+        let second: Vec<f32> = clustered_replay(SamplingStrategy::Diverse, 3)
+            .sample_replay_batch()
+            .expect("diverse sampling failed")
+            .iter()
+            .map(|s| s.input[0])
+            .collect();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_diverse_sampling_differs_from_uniform_on_clustered_data() {
+        let diverse: Vec<f32> = clustered_replay(SamplingStrategy::Diverse, 3)
+            .sample_replay_batch()
+            .expect("diverse sampling failed")
+            .iter()
+            .map(|s| s.input[0])
+            .collect();
+        let uniform: Vec<f32> = clustered_replay(SamplingStrategy::Uniform, 3)
+            .sample_replay_batch()
+            .expect("uniform sampling failed")
+            .iter()
+            .map(|s| s.input[0])
+            .collect();
+        // Under the old placeholder these two calls were literally the same code path.
+        assert_ne!(
+            diverse, uniform,
+            "diverse and uniform sampling must not be the same algorithm"
+        );
+    }
+
+    // ── Gradient-based sampling uses recorded gradient norms ─────────────────
+
+    #[test]
+    fn test_gradient_based_errors_without_recorded_norms() {
+        // Regression: this used to silently return `sample_weighted`'s result.
+        let mut replay = clustered_replay(SamplingStrategy::GradientBased, 2);
+        let err = replay
+            .sample_replay_batch()
+            .expect_err("gradient-based replay without gradient norms must be an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("record_gradient_norm"),
+            "the error should name the missing step, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_gradient_based_follows_gradient_norm_not_importance() {
+        let config = MemoryReplayConfig {
+            buffer_size_per_task: 8,
+            sampling_strategy: SamplingStrategy::GradientBased,
+            replay_batch_size: 1,
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(7));
+        for x in [0.0f32, 1.0, 2.0] {
+            let mut sample = ExperienceSample::new("t".to_string(), vec![x], vec![0.0]);
+            // Make `importance` point the opposite way: the weighted sampler would strongly
+            // prefer the first two samples.
+            sample.importance = if x < 2.0 { 100.0 } else { 0.01 };
+            replay.add_experience(sample);
+        }
+        // Only the third sample has any gradient signal.
+        replay.record_gradient_norm("t", 0, 0.0).expect("record 0");
+        replay.record_gradient_norm("t", 1, 0.0).expect("record 1");
+        replay.record_gradient_norm("t", 2, 5.0).expect("record 2");
+
+        let samples = replay.sample_replay_batch().expect("gradient sampling failed");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            samples[0].input[0], 2.0,
+            "the only sample with a non-zero gradient norm must be drawn, \
+             regardless of the `importance` field"
+        );
+    }
+
+    #[test]
+    fn test_gradient_based_errors_when_all_norms_are_zero() {
+        let config = MemoryReplayConfig {
+            sampling_strategy: SamplingStrategy::GradientBased,
+            replay_batch_size: 1,
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(1));
+        replay.add_experience(ExperienceSample::new("t".to_string(), vec![0.0], vec![0.0]));
+        replay.record_gradient_norm("t", 0, 0.0).expect("record");
+        assert!(
+            replay.sample_replay_batch().is_err(),
+            "an all-zero gradient distribution is degenerate and must be reported"
+        );
+    }
+
+    #[test]
+    fn test_record_gradient_norm_validates_its_arguments() {
+        let mut replay = clustered_replay(SamplingStrategy::GradientBased, 1);
+        assert!(replay.record_gradient_norm("missing", 0, 1.0).is_err());
+        assert!(replay.record_gradient_norm("t", 999, 1.0).is_err());
+        assert!(replay.record_gradient_norm("t", 0, -1.0).is_err());
+        assert!(replay.record_gradient_norm("t", 0, f32::NAN).is_err());
+        assert!(replay.record_gradient_norm("t", 0, 2.5).is_ok());
+    }
+
+    #[test]
+    fn test_gradient_based_draws_without_replacement() {
+        let config = MemoryReplayConfig {
+            sampling_strategy: SamplingStrategy::GradientBased,
+            replay_batch_size: 3,
+            ..Default::default()
+        };
+        let mut replay = MemoryReplay::new(config, Some(11));
+        for x in [0.0f32, 1.0, 2.0] {
+            replay.add_experience(ExperienceSample::new("t".to_string(), vec![x], vec![0.0]));
+        }
+        for idx in 0..3 {
+            replay.record_gradient_norm("t", idx, 1.0 + idx as f32).expect("record");
+        }
+        let samples = replay.sample_replay_batch().expect("gradient sampling failed");
+        assert_eq!(samples.len(), 3);
+        let mut inputs: Vec<f32> = samples.iter().map(|s| s.input[0]).collect();
+        inputs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(
+            inputs,
+            vec![0.0, 1.0, 2.0],
+            "sampling without replacement must return each eligible sample once"
+        );
+    }
+
+    #[test]
+    fn test_squared_distance_zero_pads_shorter_vectors() {
+        // 3² + 4² = 25 whether or not the second vector spells out its trailing zero.
+        assert!((squared_distance(&[3.0, 4.0], &[0.0]) - 25.0).abs() < 1e-6);
+        assert!((squared_distance(&[3.0, 4.0], &[0.0, 0.0]) - 25.0).abs() < 1e-6);
     }
 }

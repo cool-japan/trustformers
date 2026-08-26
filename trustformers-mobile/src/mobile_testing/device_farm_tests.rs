@@ -202,7 +202,10 @@ mod tests {
         let p95 = StatisticalMethod::Percentile(95);
         let p99 = StatisticalMethod::Percentile(99);
         assert_ne!(p95, p99);
-        assert_eq!(StatisticalMethod::Percentile(95), StatisticalMethod::Percentile(95));
+        assert_eq!(
+            StatisticalMethod::Percentile(95),
+            StatisticalMethod::Percentile(95)
+        );
     }
 
     #[test]
@@ -307,10 +310,7 @@ mod tests {
             std_deviation: 10.0,
             min: 30.0,
             max: 80.0,
-            percentiles: HashMap::from([
-                ("P95".to_string(), 70.0),
-                ("P99".to_string(), 75.0),
-            ]),
+            percentiles: HashMap::from([("P95".to_string(), 70.0), ("P99".to_string(), 75.0)]),
         };
         assert!((summary.mean - 50.0).abs() < 1e-5);
         assert!(summary.min < summary.max);
@@ -352,5 +352,92 @@ mod tests {
         let _ = DeviceType::Phone;
         let _ = DeviceType::Tablet;
         let _ = DeviceType::Generic;
+    }
+
+    // --- Honesty regressions ---
+
+    /// Regression: `initialize_aws_devices` used to populate the pool with
+    /// three invented devices (`aws-iphone-14`, `aws-galaxy-s23`,
+    /// `aws-pixel-7`) that no AWS query produced, so every later operation
+    /// ran against a fictional fleet.
+    #[tokio::test]
+    async fn test_remote_provider_initialization_reports_honest_error() {
+        for provider in [
+            DeviceFarmProvider::AWS {
+                region: "us-east-1".to_string(),
+                project_name: "p".to_string(),
+            },
+            DeviceFarmProvider::Firebase {
+                project_id: "p".to_string(),
+                test_lab_id: "t".to_string(),
+            },
+        ] {
+            let mut manager = crate::mobile_testing::create_device_farm_manager(provider)
+                .expect("manager constructs");
+            let error = manager.initialize().await.expect_err("no farm client exists");
+            let message = error.to_string();
+            assert!(
+                message.contains("no AWS Device Farm client")
+                    || message.contains("no Firebase Test Lab client"),
+                "expected an honest capability error, got: {message}"
+            );
+            assert!(
+                manager.get_available_devices().is_empty(),
+                "a failed discovery must leave no invented devices in the pool"
+            );
+        }
+    }
+
+    /// A local farm slot describes the real host, not a fixed
+    /// 8 GB / 256 GB / 1080x2340 phone.
+    #[tokio::test]
+    async fn test_local_devices_describe_the_real_host() {
+        let mut manager =
+            crate::mobile_testing::create_device_farm_manager(DeviceFarmProvider::Local {
+                device_pool_size: 2,
+                devices: vec!["slot-a".to_string(), "slot-b".to_string()],
+            })
+            .expect("manager constructs");
+        manager.initialize().await.expect("local initialization succeeds");
+
+        let devices = manager.get_available_devices();
+        assert_eq!(devices.len(), 2);
+        for device in devices {
+            assert_eq!(device.os_name, std::env::consts::OS);
+            assert_eq!(device.cpu_architecture, std::env::consts::ARCH);
+            assert!(device.ram_mb > 0, "host RAM must be a real measurement");
+            assert_ne!(device.ram_mb, 8192, "8192 was the old fixed value");
+            // No portable screen query on a host: reported as absent.
+            assert_eq!(device.screen_resolution, (0, 0));
+        }
+    }
+
+    /// Regression: `get_session_results` used to synthesise a full
+    /// cross-device report -- `success_rate: 0.95`, `avg_latency_ms: 50.0`,
+    /// a P95 of 70.0 and `best_device: "aws-iphone-14"` -- for tests that
+    /// never ran. With no recorded result it must refuse to aggregate.
+    #[tokio::test]
+    async fn test_session_results_do_not_invent_a_fleet_report() {
+        let mut manager =
+            crate::mobile_testing::create_device_farm_manager(DeviceFarmProvider::Local {
+                device_pool_size: 1,
+                devices: vec!["slot-a".to_string()],
+            })
+            .expect("manager constructs");
+        manager.initialize().await.expect("local initialization succeeds");
+
+        let session_id = manager.start_session(vec![]).await.expect("session creation succeeds");
+
+        match manager.get_session_results(&session_id) {
+            Err(error) => assert!(
+                error.to_string().contains("No device results to aggregate"),
+                "expected an honest empty-aggregation error, got: {error}"
+            ),
+            Ok(Some(result)) => {
+                assert!(result.device_results.is_empty());
+                assert_ne!(result.aggregated_results.overall_success_rate, 0.95);
+            },
+            Ok(None) => panic!("the session was just created and must be found"),
+        }
     }
 }

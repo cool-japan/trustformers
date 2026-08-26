@@ -447,8 +447,9 @@ impl Default for MicroAdam {
 
 impl Optimizer for MicroAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
-        // Generate parameter ID from memory address
-        let param_id = format!("{:p}", parameter as *const Tensor);
+        // Stable parameter identity (see `crate::param_id`); a raw address would
+        // change between processes and break checkpoint resume.
+        let param_id = self.state.param_key_for_tensor(parameter)?;
 
         // Extract gradient data
         let grad_data = grad.data()?;

@@ -1,12 +1,43 @@
 use crate::claude::config::ClaudeConfig;
+use crate::weight_loading::binding::{
+    bind_embedding, bind_linear, take_norm_weight, DECODER_BUFFER_SUFFIXES,
+};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors, WeightBinder};
 use std::collections::HashMap;
 use trustformers_core::{
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::silu,
     tensor::Tensor,
     traits::{Layer, Model},
 };
+
+/// Bind a `[dim]` LayerNorm scale, and its `[dim]` shift when the checkpoint
+/// carries one.
+///
+/// A Claude-family export produced from an RMSNorm holds only `<name>.weight`;
+/// one produced from a full LayerNorm holds `<name>.bias` as well. The bias is
+/// therefore bound when present and otherwise left at its constructor value,
+/// which is exactly zero — the identity shift — rather than an invented vector.
+/// The scale is always requested, so a checkpoint that omits it is reported as
+/// a missing parameter by [`WeightBinder::finish`] instead of passing silently.
+fn bind_layer_norm(
+    binder: &mut WeightBinder<'_>,
+    name: &str,
+    dim: usize,
+    norm: &mut LayerNorm,
+) -> Result<()> {
+    if let Some(weight) = take_norm_weight(binder, name, dim)? {
+        norm.set_weight(weight)?;
+    }
+    let bias_name = format!("{name}.bias");
+    if binder.has(&bias_name) {
+        if let Some(bias) = binder.take_shaped(&bias_name, &[dim])? {
+            norm.set_bias(bias)?;
+        }
+    }
+    Ok(())
+}
 
 /// Claude-specific attention mechanism with Constitutional AI principles
 pub struct ClaudeAttention {
@@ -321,6 +352,141 @@ impl ClaudeModel {
     }
 }
 
+impl ClaudeModel {
+    /// Checkpoint namespaces the backbone legitimately does not consume.
+    ///
+    /// The language-model head lives on [`ClaudeForCausalLM`], not here, so a
+    /// causal-LM export carries an `lm_head.` entry the backbone must be allowed
+    /// to leave behind. Everything else the checkpoint holds must be recognised.
+    pub const ALLOWED_UNUSED_PREFIXES: &'static [&'static str] = &["lm_head."];
+
+    /// Bind an already-parsed checkpoint into this backbone.
+    ///
+    /// Claude's decoder is laid out like the HuggingFace LLaMA export it is
+    /// modelled on: the backbone nests under `model.` (the bare layout is
+    /// accepted too), attention projections are `self_attn.{q,k,v,o}_proj`,
+    /// the gated feed-forward is `mlp.{gate,up,down}_proj`, and the two
+    /// per-layer norms are `input_layernorm` / `post_attention_layernorm`.
+    /// Grouped-query attention narrows `k_proj`/`v_proj` to
+    /// `num_kv_heads * head_dim`, which is checked rather than assumed.
+    ///
+    /// A parameter the checkpoint does not carry is *recorded* and reported by
+    /// [`WeightBinder::finish`], never substituted, so a mismatched checkpoint
+    /// cannot leave constructor-initialised tensors in place while the load
+    /// returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the stream is not a checkpoint container, when the checkpoint
+    /// does not look like a Claude checkpoint, when any tensor has the wrong
+    /// shape, when a parameter is missing, or when the checkpoint carries
+    /// weights this architecture does not recognise.
+    pub fn load_checkpoint(
+        &mut self,
+        checkpoint: &Checkpoint,
+        allowed_unused_prefixes: &[&str],
+    ) -> Result<LoadReport> {
+        let prefix = checkpoint.detect_prefix(&["model.", ""], "embed_tokens.weight")?;
+        let mut binder = checkpoint.binder(&prefix);
+
+        let hidden = self.config.hidden_size;
+        let head_dim = self.config.head_dim();
+        let q_width = self.config.num_attention_heads * head_dim;
+        let kv_width = self.config.num_kv_heads() * head_dim;
+        let intermediate = self.config.intermediate_size;
+
+        bind_embedding(
+            &mut binder,
+            "embed_tokens",
+            self.config.vocab_size,
+            hidden,
+            &mut self.embed_tokens,
+        )?;
+
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let attn = format!("layers.{i}.self_attn");
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.q_proj"),
+                q_width,
+                hidden,
+                false,
+                &mut layer.self_attn.q_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.k_proj"),
+                kv_width,
+                hidden,
+                false,
+                &mut layer.self_attn.k_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.v_proj"),
+                kv_width,
+                hidden,
+                false,
+                &mut layer.self_attn.v_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{attn}.o_proj"),
+                hidden,
+                q_width,
+                false,
+                &mut layer.self_attn.o_proj,
+            )?;
+
+            let mlp = format!("layers.{i}.mlp");
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.gate_proj"),
+                intermediate,
+                hidden,
+                false,
+                &mut layer.mlp.gate_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.up_proj"),
+                intermediate,
+                hidden,
+                false,
+                &mut layer.mlp.up_proj,
+            )?;
+            bind_linear(
+                &mut binder,
+                &format!("{mlp}.down_proj"),
+                hidden,
+                intermediate,
+                false,
+                &mut layer.mlp.down_proj,
+            )?;
+
+            bind_layer_norm(
+                &mut binder,
+                &format!("layers.{i}.input_layernorm"),
+                hidden,
+                &mut layer.input_layernorm,
+            )?;
+            bind_layer_norm(
+                &mut binder,
+                &format!("layers.{i}.post_attention_layernorm"),
+                hidden,
+                &mut layer.post_attention_layernorm,
+            )?;
+        }
+
+        bind_layer_norm(&mut binder, "norm", hidden, &mut self.norm)?;
+
+        binder.finish(UnusedTensors::new(
+            allowed_unused_prefixes,
+            DECODER_BUFFER_SUFFIXES,
+        ))
+    }
+}
+
 impl Model for ClaudeModel {
     type Config = ClaudeConfig;
     type Input = Tensor;
@@ -345,61 +511,23 @@ impl Model for ClaudeModel {
 
         Ok(hidden_states)
     }
+    /// Load a Claude-family checkpoint (safetensors or `torch.save`) into the
+    /// backbone.
+    ///
+    /// A previous revision read the stream into a buffer, compared its *length*
+    /// against a set of size estimates and returned `Ok(())` under the comment
+    /// "Success: weights are loaded and validated" — while binding nothing at
+    /// all. Every load left the model at its constructor initialisation and
+    /// reported success. That is gone: the container is parsed for real and
+    /// every parameter is either filled from the checkpoint or named in the
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClaudeModel::load_checkpoint`].
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use trustformers_core::errors::invalid_input;
-
-        // Read weight data
-        let mut buffer = Vec::new();
-        reader
-            .read_to_end(&mut buffer)
-            .map_err(|e| invalid_input(format!("Failed to read Claude weights: {}", e)))?;
-
-        if buffer.is_empty() {
-            return Err(invalid_input("Claude weight file is empty"));
-        }
-
-        // Implement comprehensive weight loading for Claude model
-        if buffer.len() < 1000 {
-            return Err(invalid_input(
-                "Weight file appears to be too small or corrupted",
-            ));
-        }
-
-        // Validate model architecture compatibility
-        let expected_layers = self.config.num_hidden_layers;
-        let expected_hidden_size = self.config.hidden_size;
-
-        // Simulate weight loading process for each component:
-
-        // 1. Load embeddings
-        let vocab_size = self.config.vocab_size;
-        let embed_weight_size = vocab_size * expected_hidden_size * 4; // 4 bytes per f32
-        if buffer.len() < embed_weight_size {
-            return Err(invalid_input(format!(
-                "Insufficient weights for embeddings. Expected: {}, Available: {}",
-                embed_weight_size,
-                buffer.len()
-            )));
-        }
-
-        // 2. Load transformer layers
-        let layer_weight_size_estimate = expected_hidden_size * expected_hidden_size * 4 * 4; // Rough estimate
-        let total_layer_weights = expected_layers * layer_weight_size_estimate;
-
-        // 3. Load normalization and output layers
-        let norm_weight_size = expected_hidden_size * 4;
-
-        let total_required = embed_weight_size + total_layer_weights + norm_weight_size;
-        if buffer.len() < total_required / 10 {
-            // Allow for compression/different formats
-            return Err(invalid_input(format!(
-                "Weight file appears incomplete. Expected roughly: {}, Got: {}",
-                total_required / 10,
-                buffer.len()
-            )));
-        }
-
-        // Success: weights are loaded and validated
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.load_checkpoint(&checkpoint, Self::ALLOWED_UNUSED_PREFIXES)?;
         Ok(())
     }
 
@@ -476,61 +604,45 @@ impl Model for ClaudeForCausalLM {
         let logits = self.lm_head.forward(hidden_states)?;
         Ok(logits)
     }
+    /// Load a Claude-family causal-LM checkpoint (safetensors or `torch.save`).
+    ///
+    /// The backbone is bound first, then the LM head. A checkpoint exported with
+    /// tied word embeddings carries no `lm_head.weight`; the input embedding
+    /// matrix is reused in that case, which is what the tied configuration
+    /// means — not a fallback to something invented.
+    ///
+    /// Like [`ClaudeModel`]'s loader, this replaces a revision that inspected
+    /// the byte length of the stream and returned `Ok(())` without binding a
+    /// single tensor.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClaudeModel::load_checkpoint`]; additionally fails when the
+    /// checkpoint holds neither an LM head nor an embedding matrix to tie it to,
+    /// or when the head has the wrong shape.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use trustformers_core::errors::invalid_input;
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        self.model.load_checkpoint(&checkpoint, &["lm_head."])?;
 
-        // Read weight data
-        let mut buffer = Vec::new();
-        reader
-            .read_to_end(&mut buffer)
-            .map_err(|e| invalid_input(format!("Failed to read Claude weights: {}", e)))?;
-
-        if buffer.is_empty() {
-            return Err(invalid_input("Claude weight file is empty"));
-        }
-
-        // Implement comprehensive weight loading for Claude model
-        if buffer.len() < 1000 {
-            return Err(invalid_input(
-                "Weight file appears to be too small or corrupted",
-            ));
-        }
-
-        // Validate model architecture compatibility
-        let expected_layers = self.config.num_hidden_layers;
-        let expected_hidden_size = self.config.hidden_size;
-
-        // Simulate weight loading process for each component:
-
-        // 1. Load embeddings
-        let vocab_size = self.config.vocab_size;
-        let embed_weight_size = vocab_size * expected_hidden_size * 4; // 4 bytes per f32
-        if buffer.len() < embed_weight_size {
-            return Err(invalid_input(format!(
-                "Insufficient weights for embeddings. Expected: {}, Available: {}",
-                embed_weight_size,
-                buffer.len()
-            )));
-        }
-
-        // 2. Load transformer layers
-        let layer_weight_size_estimate = expected_hidden_size * expected_hidden_size * 4 * 4; // Rough estimate
-        let total_layer_weights = expected_layers * layer_weight_size_estimate;
-
-        // 3. Load normalization and output layers
-        let norm_weight_size = expected_hidden_size * 4;
-
-        let total_required = embed_weight_size + total_layer_weights + norm_weight_size;
-        if buffer.len() < total_required / 10 {
-            // Allow for compression/different formats
-            return Err(invalid_input(format!(
-                "Weight file appears incomplete. Expected roughly: {}, Got: {}",
-                total_required / 10,
-                buffer.len()
-            )));
-        }
-
-        // Success: weights are loaded and validated
+        let expected = [self.config.vocab_size, self.config.hidden_size];
+        let head = match checkpoint.take_shaped("lm_head.weight", &expected)? {
+            Some(weight) => weight,
+            None => {
+                let embed_name = if checkpoint.contains("model.embed_tokens.weight") {
+                    "model.embed_tokens.weight"
+                } else {
+                    "embed_tokens.weight"
+                };
+                checkpoint.take_shaped(embed_name, &expected)?.ok_or_else(|| {
+                    TrustformersError::weight_load_error(
+                        "checkpoint holds neither lm_head.weight nor an embedding matrix to \
+                             tie it to"
+                            .to_string(),
+                    )
+                })?
+            },
+        };
+        self.lm_head.set_weight(head)?;
         Ok(())
     }
 
@@ -776,5 +888,288 @@ mod tests {
     fn test_from_pretrained_name_unknown_returns_none() {
         let cfg = ClaudeConfig::from_pretrained_name("unknown-model-xyz");
         assert!(cfg.is_none(), "unknown model name should return None");
+    }
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+    use crate::weight_loading::test_support::{build_safetensors, DecoderFixtureSpec, F32Tensor};
+
+    /// A deliberately tiny Claude configuration: two layers, grouped-query
+    /// attention (2 query heads over 1 KV head) so a loader that assumed square
+    /// projections cannot pass.
+    fn loading_config() -> ClaudeConfig {
+        ClaudeConfig {
+            vocab_size: 12,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: Some(1),
+            constitutional_ai: false,
+            ..ClaudeConfig::default()
+        }
+    }
+
+    /// The checkpoint a Claude backbone of `config`'s shape would be exported as.
+    ///
+    /// `norm_bias` is on because this implementation's per-layer and final norms
+    /// are full [`LayerNorm`]s, so a real export of it carries `<norm>.bias`.
+    fn loading_fixture(config: &ClaudeConfig) -> DecoderFixtureSpec {
+        let head_dim = config.head_dim();
+        let mut spec = DecoderFixtureSpec::llama_style(
+            "model.",
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_hidden_layers,
+            config.num_attention_heads * head_dim,
+            config.num_kv_heads() * head_dim,
+        );
+        spec.norm_bias = true;
+        spec
+    }
+
+    fn fixture_values(tensors: &[F32Tensor], name: &str) -> Vec<f32> {
+        tensors
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("fixture must carry {name}"))
+            .values
+            .clone()
+    }
+
+    /// Regression: `load_pretrained` read the stream into a buffer, compared its
+    /// *length* against a handful of size estimates and returned `Ok(())` under
+    /// the comment "Success: weights are loaded and validated" — without binding
+    /// a single tensor. The proof that it now loads for real is that the
+    /// checkpoint's exact values arrive in the layers.
+    #[test]
+    fn load_pretrained_binds_every_parameter_from_the_checkpoint() {
+        let config = loading_config();
+        let tensors = loading_fixture(&config).tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeModel::new(config).expect("model must build");
+        let before = model.embed_tokens.weight().data().expect("readable");
+
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        let embed = model.embed_tokens.weight().data().expect("readable");
+        assert_ne!(
+            embed, before,
+            "the embedding matrix must actually change when a checkpoint is loaded"
+        );
+        assert_eq!(
+            embed,
+            fixture_values(&tensors, "model.embed_tokens.weight"),
+            "the embedding matrix must hold the checkpoint's values"
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().data().expect("readable"),
+            fixture_values(&tensors, "model.layers.0.self_attn.q_proj.weight")
+        );
+        assert_eq!(
+            model.layers[1].mlp.down_proj.weight().data().expect("readable"),
+            fixture_values(&tensors, "model.layers.1.mlp.down_proj.weight")
+        );
+        assert_eq!(
+            model.norm.weight().data().expect("readable"),
+            fixture_values(&tensors, "model.norm.weight")
+        );
+        assert_eq!(
+            model.norm.bias().data().expect("readable"),
+            fixture_values(&tensors, "model.norm.bias"),
+            "the LayerNorm shift must be bound too, not left at zero"
+        );
+    }
+
+    /// An export produced from an RMS norm carries no `<norm>.bias`. That is a
+    /// legitimate checkpoint, not a gap: the zero-initialised shift is the
+    /// identity, so nothing is invented by leaving it alone.
+    #[test]
+    fn load_pretrained_accepts_a_checkpoint_whose_norms_carry_no_bias() {
+        let config = loading_config();
+        let mut spec = loading_fixture(&config);
+        spec.norm_bias = false;
+        let bytes = spec.safetensors();
+
+        let mut model = ClaudeModel::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("an RMS-norm-shaped export must load");
+        assert_eq!(
+            model.norm.bias().data().expect("readable"),
+            vec![0.0f32; 8],
+            "an absent shift must stay at the identity rather than being invented"
+        );
+    }
+
+    /// Grouped-query attention: `k_proj`/`v_proj` are narrower than `q_proj`.
+    #[test]
+    fn load_pretrained_respects_grouped_query_attention_widths() {
+        let config = loading_config();
+        let head_dim = config.head_dim();
+        let bytes = loading_fixture(&config).safetensors();
+
+        let mut model = ClaudeModel::new(config.clone()).expect("model must build");
+        model.load_pretrained(&mut bytes.as_slice()).expect("checkpoint must load");
+
+        assert_eq!(
+            model.layers[0].self_attn.k_proj.weight().shape(),
+            vec![config.num_kv_heads() * head_dim, config.hidden_size]
+        );
+        assert_eq!(
+            model.layers[0].self_attn.q_proj.weight().shape(),
+            vec![config.num_attention_heads * head_dim, config.hidden_size]
+        );
+    }
+
+    #[test]
+    fn load_pretrained_reports_a_missing_parameter_instead_of_inventing_it() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.retain(|t| t.name != "model.layers.1.mlp.up_proj.weight");
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeModel::new(config).expect("model must build");
+        let before = model.layers[1].mlp.up_proj.weight().data().expect("readable");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an incomplete checkpoint must not load silently");
+        assert!(
+            err.to_string().contains("layers.1.mlp.up_proj.weight"),
+            "the error must name the gap: {err}"
+        );
+        assert_eq!(
+            model.layers[1].mlp.up_proj.weight().data().expect("readable"),
+            before,
+            "an absent tensor must leave the parameter untouched"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_foreign_tensor() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.push(F32Tensor::ramp(
+            "model.layers.9.mystery.weight",
+            &[4, 4],
+            99.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unrecognised weight must fail the load");
+        assert!(
+            err.to_string().contains("mystery.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Regression: the old loader accepted *any* buffer that cleared its size
+    /// thresholds. 4 KiB of `0xAB` cleared every one of them for this config and
+    /// produced `Ok(())`; it is not a checkpoint container at all.
+    #[test]
+    fn load_pretrained_rejects_bytes_that_are_not_a_checkpoint() {
+        let mut model = ClaudeModel::new(loading_config()).expect("model must build");
+        let garbage = vec![0xABu8; 4096];
+        let err = model
+            .load_pretrained(&mut garbage.as_slice())
+            .expect_err("garbage must not be accepted as weights");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn load_pretrained_rejects_a_checkpoint_for_a_different_configuration() {
+        let config = loading_config();
+        let wider = ClaudeConfig {
+            hidden_size: config.hidden_size * 2,
+            intermediate_size: config.intermediate_size * 2,
+            ..config.clone()
+        };
+        let bytes = loading_fixture(&wider).safetensors();
+
+        let mut model = ClaudeModel::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a mismatched checkpoint must not be reshaped into place");
+        assert!(err.to_string().contains("expects"), "unexpected: {err}");
+    }
+
+    /// Regression: `ClaudeForCausalLM::load_pretrained` carried the same
+    /// size-heuristic stub, so the LM head was never filled either.
+    #[test]
+    fn causal_lm_load_pretrained_binds_the_language_model_head() {
+        let config = loading_config();
+        let mut spec = loading_fixture(&config);
+        spec.include_lm_head = true;
+        let tensors = spec.tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeForCausalLM::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert_eq!(
+            model.lm_head.weight().data().expect("readable"),
+            fixture_values(&tensors, "lm_head.weight"),
+            "the LM head must hold the checkpoint's values"
+        );
+        assert_eq!(
+            model.model.embed_tokens.weight().data().expect("readable"),
+            fixture_values(&tensors, "model.embed_tokens.weight"),
+            "the backbone must be bound as well as the head"
+        );
+    }
+
+    /// A tied-embedding export carries no `lm_head.weight`; reusing the input
+    /// embedding matrix is what "tied" means, not a fallback to an invention.
+    #[test]
+    fn causal_lm_ties_the_head_to_the_embeddings_when_the_checkpoint_omits_it() {
+        let config = loading_config();
+        let tensors = loading_fixture(&config).tensors();
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeForCausalLM::new(config).expect("model must build");
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect("a tied-embedding checkpoint must load");
+
+        assert_eq!(
+            model.lm_head.weight().data().expect("readable"),
+            fixture_values(&tensors, "model.embed_tokens.weight"),
+            "a tied head must reuse the embedding matrix"
+        );
+    }
+
+    #[test]
+    fn causal_lm_load_pretrained_rejects_a_head_of_the_wrong_width() {
+        let config = loading_config();
+        let mut tensors = loading_fixture(&config).tensors();
+        tensors.push(F32Tensor::ramp(
+            "lm_head.weight",
+            &[config.vocab_size + 1, config.hidden_size],
+            7.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = ClaudeForCausalLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a head of the wrong width must not be reshaped into place");
+        assert!(
+            err.to_string().contains("lm_head.weight"),
+            "unexpected: {err}"
+        );
     }
 }

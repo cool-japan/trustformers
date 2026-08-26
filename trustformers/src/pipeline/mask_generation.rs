@@ -1,10 +1,26 @@
 //! # Mask Generation Pipeline
 //!
-//! SAM-compatible segmentation mask generation from image prompts.
+//! ## What is real here
 //!
-//! Supports point prompts, box prompts, and text prompts, returning binary
-//! masks with quality scores. Also provides morphological post-processing
-//! utilities via `MaskRefiner`.
+//! Prompt geometry ([`PointPrompt`], `BoxPrompt`, [`MaskPrompt`] validation),
+//! the [`GeneratedMask`] container with real area/IoU computation, the
+//! morphological post-processing in `MaskRefiner` (erode/dilate/open/close,
+//! small-component removal), and
+//! [`MaskGenerationPipeline::rasterize_prompt`] — a genuine rasterisation of
+//! the prompt geometry, useful as a model *prompt encoding* or as a
+//! deterministic baseline.
+//!
+//! ## Model support
+//!
+//! No promptable segmentation backbone (SAM, …) is implemented in
+//! `trustformers-models`, so [`MaskGenerationPipeline::run`] returns
+//! [`MaskGenerationError::UnsupportedModel`] instead of the rasterised prompt
+//! it used to return as a predicted mask — complete with `iou_score` and
+//! `stability_score` values derived from the mask's own pixel coverage rather
+//! than from any model.
+//!
+//! Feed real masks to [`MaskGenerationPipeline::postprocess`] to use the
+//! scoring and selection logic.
 
 use std::fmt;
 
@@ -531,7 +547,21 @@ pub enum MaskGenerationError {
     InvalidImageDimensions { width: usize, height: usize },
     /// A box prompt was geometrically invalid
     InvalidBoxPrompt(String),
+    /// The requested checkpoint has no real implementation in this workspace.
+    UnsupportedModel {
+        /// The checkpoint or architecture the caller asked for.
+        requested: String,
+        /// Comma-separated list of architectures that *are* supported.
+        supported: String,
+    },
+    /// A supplied mask does not match the declared image dimensions.
+    MaskSizeMismatch { expected: usize, got: usize },
 }
+
+/// Promptable-segmentation architectures with a real backbone in this workspace.
+///
+/// Deliberately empty — the pipeline says so rather than pretending.
+const SUPPORTED_ARCHITECTURES: &[&str] = &[];
 
 impl fmt::Display for MaskGenerationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -541,6 +571,19 @@ impl fmt::Display for MaskGenerationError {
                 f,
                 "mask generation error: invalid image dimensions {}x{}",
                 width, height
+            ),
+            MaskGenerationError::UnsupportedModel {
+                requested,
+                supported,
+            } => write!(
+                f,
+                "mask generation error: no real model is implemented for `{requested}`; \
+                 supported: {supported}. This pipeline never returns a rasterised prompt as a \
+                 predicted mask — use `postprocess` with your own model's output."
+            ),
+            MaskGenerationError::MaskSizeMismatch { expected, got } => write!(
+                f,
+                "mask generation error: mask has {got} pixels but {expected} were expected"
             ),
             MaskGenerationError::InvalidBoxPrompt(msg) => {
                 write!(f, "mask generation error: invalid box prompt — {}", msg)
@@ -604,31 +647,84 @@ impl MaskGenerationPipeline {
             }
         }
 
-        let mut masks = Vec::with_capacity(self.num_multimask_outputs);
+        Err(MaskGenerationError::UnsupportedModel {
+            requested: self.model.clone(),
+            supported: if SUPPORTED_ARCHITECTURES.is_empty() {
+                "none (no promptable segmentation backbone is implemented yet)".to_string()
+            } else {
+                SUPPORTED_ARCHITECTURES.join(", ")
+            },
+        })
+    }
 
-        for mask_idx in 0..self.num_multimask_outputs {
-            let mask_data = self.generate_single_mask(image, width, height, prompt, mask_idx);
+    /// Rasterise the prompt geometry into a binary mask.
+    ///
+    /// Box prompts fill their interior (eroded by `candidate_index` pixels),
+    /// foreground points paint a disc of radius `2 + candidate_index`, and
+    /// background points erase a disc of radius 2. This is real geometry over
+    /// the prompt — it is a *prompt encoding*, **not** a model prediction, and
+    /// the pipeline never reports it as one.
+    ///
+    /// # Errors
+    ///
+    /// [`MaskGenerationError::InvalidImageDimensions`] for zero dimensions.
+    pub fn rasterize_prompt(
+        &self,
+        width: usize,
+        height: usize,
+        prompt: &MaskPrompt,
+        candidate_index: usize,
+    ) -> Result<Vec<bool>, MaskGenerationError> {
+        if width == 0 || height == 0 {
+            return Err(MaskGenerationError::InvalidImageDimensions { width, height });
+        }
+        Ok(self.generate_single_mask(&[], width, height, prompt, candidate_index))
+    }
 
-            // Deterministic quality scores derived from mask coverage
-            let foreground_count = mask_data.iter().filter(|&&v| v).count();
-            let coverage = foreground_count as f32 / (width * height) as f32;
+    /// Score and rank masks produced by a real model.
+    ///
+    /// `masks` holds one boolean buffer of `width * height` entries per
+    /// candidate, paired with the model's own `(iou_score, stability_score)`.
+    /// The best mask is the one with the highest reported IoU.
+    ///
+    /// # Errors
+    ///
+    /// [`MaskGenerationError::InvalidImageDimensions`] for zero dimensions,
+    /// [`MaskGenerationError::MaskSizeMismatch`] when a buffer is the wrong
+    /// length, and [`MaskGenerationError::EmptyPrompt`] when `masks` is empty.
+    pub fn postprocess(
+        &self,
+        masks: Vec<(Vec<bool>, f32, f32)>,
+        width: usize,
+        height: usize,
+    ) -> Result<MaskGenerationResult, MaskGenerationError> {
+        if width == 0 || height == 0 {
+            return Err(MaskGenerationError::InvalidImageDimensions { width, height });
+        }
+        if masks.is_empty() {
+            return Err(MaskGenerationError::EmptyPrompt);
+        }
 
-            let iou_score = (0.95_f32 - coverage * 0.3 - mask_idx as f32 * 0.05).clamp(0.0, 1.0);
-            let stability_score =
-                (0.98_f32 - coverage * 0.2 - mask_idx as f32 * 0.02).clamp(0.0, 1.0);
-
-            masks.push(GeneratedMask::new(
-                mask_data,
+        let expected = width * height;
+        let mut built = Vec::with_capacity(masks.len());
+        for (idx, (data, iou_score, stability_score)) in masks.into_iter().enumerate() {
+            if data.len() != expected {
+                return Err(MaskGenerationError::MaskSizeMismatch {
+                    expected,
+                    got: data.len(),
+                });
+            }
+            built.push(GeneratedMask::new(
+                data,
                 width,
                 height,
                 iou_score,
                 stability_score,
-                mask_idx,
+                idx,
             ));
         }
 
-        // Find best mask by iou_score
-        let best_mask_index = masks
+        let best_mask_index = built
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
@@ -638,7 +734,7 @@ impl MaskGenerationPipeline {
             .unwrap_or(0);
 
         Ok(MaskGenerationResult {
-            masks,
+            masks: built,
             best_mask_index,
         })
     }
@@ -661,7 +757,7 @@ impl MaskGenerationPipeline {
         Ok(seg_masks)
     }
 
-    /// Generate a single candidate mask from the prompt geometry.
+    /// Rasterise the prompt geometry into a single candidate mask.
     fn generate_single_mask(
         &self,
         _image: &[f32],
@@ -962,39 +1058,113 @@ mod tests {
         assert_eq!(filtered.len(), 2);
     }
 
+    fn assert_unsupported(err: &MaskGenerationError) {
+        match err {
+            MaskGenerationError::UnsupportedModel { supported, .. } => {
+                assert!(supported.contains("none"), "supported: {supported}");
+            },
+            other => panic!("expected UnsupportedModel, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn test_mask_generation_pipeline_with_box() {
+    fn test_run_reports_unsupported_model() {
+        // Regression: `run` used to return the rasterised prompt geometry as a
+        // predicted mask, with iou/stability scores computed from that mask's
+        // own pixel coverage.
         let pipeline = MaskGenerationPipeline::new("sam-vit-b");
         let image = make_image(8, 8);
         let prompt = MaskPrompt::new().with_box(1.0, 1.0, 6.0, 6.0);
-        let result = pipeline.run(&image, 8, 8, &prompt).expect("run should succeed");
-        assert_eq!(result.masks.len(), 3);
-        // Best mask should have some foreground pixels from the box region
-        assert!(result.best_mask().num_foreground_pixels() > 0);
+        assert_unsupported(&pipeline.run(&image, 8, 8, &prompt).expect_err("no backbone"));
     }
 
     #[test]
-    fn test_mask_generation_pipeline_with_point() {
+    fn test_run_validates_prompts_before_reporting_unsupported() {
         let pipeline = MaskGenerationPipeline::new("sam-vit-b");
         let image = make_image(8, 8);
-        let prompt = MaskPrompt::new().with_point(4.0, 4.0, PointLabel::Foreground);
-        let result = pipeline.run(&image, 8, 8, &prompt).expect("run should succeed");
-        assert_eq!(result.masks.len(), 3);
-        assert!(result.best_mask().num_foreground_pixels() > 0);
+        assert!(matches!(
+            pipeline.run(&image, 8, 8, &MaskPrompt::new()),
+            Err(MaskGenerationError::EmptyPrompt)
+        ));
+        assert!(matches!(
+            pipeline.run(
+                &image,
+                0,
+                8,
+                &MaskPrompt::new().with_point(1.0, 1.0, PointLabel::Foreground)
+            ),
+            Err(MaskGenerationError::InvalidImageDimensions { .. })
+        ));
     }
 
     #[test]
-    fn test_mask_generation_automatic() {
+    fn test_generate_reports_unsupported_model() {
         let pipeline = MaskGenerationPipeline::new("sam-vit-b");
         let image = make_image(8, 8);
-        let results = pipeline
-            .automatic_mask_generation(&image, 8, 8, 2)
-            .expect("automatic should succeed");
-        // 2x2 grid = 4 results
-        assert_eq!(results.len(), 4);
-        for r in &results {
-            assert_eq!(r.masks.len(), 3);
-        }
+        let prompt = MaskPrompt::new().with_box(1.0, 1.0, 6.0, 6.0);
+        assert_unsupported(&pipeline.generate(&image, 8, 8, &prompt).expect_err("no backbone"));
+    }
+
+    #[test]
+    fn test_automatic_mask_generation_reports_unsupported_model() {
+        let pipeline = MaskGenerationPipeline::new("sam-vit-b");
+        let image = make_image(8, 8);
+        assert_unsupported(
+            &pipeline.automatic_mask_generation(&image, 8, 8, 2).expect_err("no backbone"),
+        );
+        assert!(pipeline
+            .automatic_mask_generation(&image, 8, 8, 0)
+            .expect("zero points is a no-op")
+            .is_empty());
+    }
+
+    #[test]
+    fn test_rasterize_prompt_covers_the_box() {
+        // The prompt rasteriser is real geometry and stays available.
+        let pipeline = MaskGenerationPipeline::new("sam-vit-b");
+        let prompt = MaskPrompt::new().with_box(1.0, 1.0, 6.0, 6.0);
+        let mask = pipeline.rasterize_prompt(8, 8, &prompt, 0).expect("rasterize");
+        assert_eq!(mask.len(), 64);
+        assert!(mask[3 * 8 + 3], "the box interior must be filled");
+        assert!(!mask[0], "pixels outside the box must stay unset");
+        assert!(matches!(
+            pipeline.rasterize_prompt(0, 8, &prompt, 0),
+            Err(MaskGenerationError::InvalidImageDimensions { .. })
+        ));
+    }
+
+    #[test]
+    fn test_postprocess_ranks_model_masks_by_reported_iou() {
+        let pipeline = MaskGenerationPipeline::new("sam-vit-b");
+        let mut a = vec![false; 16];
+        a[0] = true;
+        let mut b = vec![false; 16];
+        b[1] = true;
+        b[2] = true;
+        let result = pipeline
+            .postprocess(vec![(a, 0.4, 0.9), (b, 0.8, 0.7)], 4, 4)
+            .expect("postprocess");
+        assert_eq!(result.masks.len(), 2);
+        assert_eq!(result.best_mask_index, 1, "highest reported IoU wins");
+        assert_eq!(result.best_mask().num_foreground_pixels(), 2);
+        assert!((result.masks[0].iou_score - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_postprocess_rejects_bad_input() {
+        let pipeline = MaskGenerationPipeline::new("sam-vit-b");
+        assert!(matches!(
+            pipeline.postprocess(vec![(vec![false; 3], 0.5, 0.5)], 4, 4),
+            Err(MaskGenerationError::MaskSizeMismatch { .. })
+        ));
+        assert!(matches!(
+            pipeline.postprocess(Vec::new(), 4, 4),
+            Err(MaskGenerationError::EmptyPrompt)
+        ));
+        assert!(matches!(
+            pipeline.postprocess(vec![(vec![false; 16], 0.5, 0.5)], 0, 4),
+            Err(MaskGenerationError::InvalidImageDimensions { .. })
+        ));
     }
 
     #[test]
@@ -1130,20 +1300,15 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_returns_segmentation_masks() {
-        let pipeline = MaskGenerationPipeline::new("sam-vit-b");
-        let image = make_image(8, 8);
-        let prompt = MaskPrompt::new().with_box(1.0, 1.0, 6.0, 6.0);
-        let masks = pipeline.generate(&image, 8, 8, &prompt).expect("generate ok");
-        assert_eq!(
-            masks.len(),
-            3,
-            "should return 3 candidate SegmentationMasks"
-        );
-        for seg in &masks {
-            assert_eq!(seg.height(), 8, "mask height should be 8");
-            assert_eq!(seg.width(), 8, "mask width should be 8");
-        }
+    fn test_generated_mask_converts_to_segmentation_mask() {
+        let mut data = vec![false; 64];
+        data[9] = true;
+        data[10] = true;
+        let gm = GeneratedMask::new(data, 8, 8, 0.9, 0.95, 0);
+        let seg = gm.to_segmentation_mask("mask_0", gm.iou_score);
+        assert_eq!(seg.height(), 8, "mask height should be 8");
+        assert_eq!(seg.width(), 8, "mask width should be 8");
+        assert_eq!(seg.area, 2);
     }
 
     #[test]

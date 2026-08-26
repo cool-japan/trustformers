@@ -6,6 +6,7 @@
 use crate::{MemoryOptimization, MobileConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use trustformers_core::autodiff::{AutodiffEngine, Variable};
 use trustformers_core::error::{CoreError, Result};
 use trustformers_core::Tensor;
 use trustformers_core::TrustformersError;
@@ -133,11 +134,21 @@ impl OnDeviceTrainer {
 
     /// Perform one training step
     pub fn training_step(&mut self, input: &Tensor, target: &Tensor) -> Result<f32> {
-        // Forward pass with gradient computation
-        let (output, loss) = self.forward_with_loss(input, target)?;
+        // Fresh engine (and so a fresh, empty computation graph) per step:
+        // `forward_with_loss` builds a new graph from `self.trainable_params`
+        // every call anyway (each `down`/`up` pair is re-wrapped in a new
+        // `Variable` from its current tensor value), so reusing an engine
+        // across steps would only accumulate dead nodes from every previous
+        // step's graph with no benefit -- `AutodiffEngine::clear_graph`
+        // exists for exactly this reason, and creating fresh is simpler
+        // than remembering to call it.
+        let engine = AutodiffEngine::default();
 
-        // Backward pass (compute gradients)
-        let gradients = self.backward_pass(&output, &loss)?;
+        // Forward pass with gradient computation
+        let (loss_var, loss, param_vars) = self.forward_with_loss(&engine, input, target)?;
+
+        // Backward pass (compute real gradients via autodiff)
+        let gradients = self.backward_pass(&engine, &loss_var, &param_vars)?;
 
         // Update trainable parameters
         self.update_parameters(&gradients)?;
@@ -283,8 +294,18 @@ impl OnDeviceTrainer {
             if self.should_apply_lora(name) {
                 let shape = param.shape();
                 if shape.len() == 2 {
-                    // For linear layers, create A and B matrices
-                    let lora_a = Tensor::randn(&[shape[0], rank])?;
+                    // For linear layers, create A and B matrices.
+                    //
+                    // A is drawn from a standard normal and then scaled by
+                    // `1 / sqrt(fan_in)` -- the Kaiming-style scaling the LoRA
+                    // paper's reference implementation uses. Without it A
+                    // starts at unit variance regardless of layer width, which
+                    // makes the first optimizer steps overshoot badly enough
+                    // that a run can end with a higher loss than it started
+                    // with, purely as a function of the draw.
+                    let fan_in = shape[0].max(1) as f32;
+                    let lora_a =
+                        Tensor::randn(&[shape[0], rank])?.mul_scalar(1.0 / fan_in.sqrt())?;
                     let lora_b = Tensor::zeros(&[rank, shape[1]])?; // Initialize B to zero
 
                     self.trainable_params.insert(format!("{}.lora_A", name), lora_a);
@@ -391,35 +412,320 @@ impl OnDeviceTrainer {
         Ok(total_memory / (1024 * 1024))
     }
 
-    fn forward_with_loss(&self, input: &Tensor, target: &Tensor) -> Result<(Tensor, f32)> {
-        // Simplified forward pass with loss computation
-        // In practice, this would call the actual model forward pass
-        let output = input.clone(); // Placeholder
-        let loss = 0.5; // Placeholder loss
-        Ok((output, loss))
+    /// Real forward pass and loss, driven by `trustformers_core`'s autodiff
+    /// engine ([`AutodiffEngine`]) rather than a placeholder identity/MSE
+    /// stand-in. Returns the loss `Variable` (for [`Self::backward_pass`] to
+    /// call `.backward()` on), the scalar loss value, and every trainable
+    /// parameter's own `Variable` node in that same graph -- needed because
+    /// [`AutodiffEngine::get_grad`] looks a gradient up by a `Variable`'s
+    /// `node_id`; only the exact `Variable` object created *during this
+    /// forward pass* has a `node_id` the backward pass actually populated a
+    /// gradient for. A fresh `engine.variable(param.clone(), true)` built
+    /// later (e.g. inside `backward_pass`, from `self.trainable_params`
+    /// alone) would be a distinct, ungraphed leaf node -- always gradient
+    /// `None` -- so the parameter `Variable`s must be threaded through
+    /// rather than re-derived.
+    ///
+    /// # What this can and cannot compute
+    ///
+    /// `OnDeviceTrainer` has no base-model forward pass -- `model_params`
+    /// exists only for the memory-estimation and (for `Full` fine-tuning)
+    /// clone-through-as-trainable paths, never as an executable graph this
+    /// trainer can run. Only [`FineTuningMethod::LoRA`] and
+    /// [`FineTuningMethod::Adapter`] have a forward computation this
+    /// function can perform *without* a base model: both are defined as a
+    /// **standalone additive correction** to a frozen base layer's output,
+    /// `delta = input @ down @ up` (LoRA: `down=A [in,r]`, `up=B [r,out]`;
+    /// Adapter: `down=adapter_down [in,bottleneck]`,
+    /// `up=adapter_up [bottleneck,in]`) -- so training these parameters
+    /// against `(input, target)` pairs where `target` is the *desired
+    /// total* correction is a real, self-contained supervised regression
+    /// problem this function can and does execute end to end, with real
+    /// gradients.
+    ///
+    /// [`FineTuningMethod::PrefixTuning`] (a prefix embedding has no
+    /// `input @ prefix` composition -- it is prepended to a sequence,
+    /// which requires the base model's attention mechanism to have any
+    /// effect) and [`FineTuningMethod::Full`] (training "all parameters"
+    /// requires the full base-model forward pass, which this trainer does
+    /// not have) return a structured error instead of a fabricated
+    /// forward pass. A previous revision returned `input.clone()` as the
+    /// "output" and a constant `0.5` as the "loss" for every method,
+    /// including these two -- which looked identical to a real, converged
+    /// steady-state loss and gave no indication training had not actually
+    /// happened.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no trainable parameters are loaded, the method
+    /// is `PrefixTuning`/`Full`, no LoRA/Adapter pair has a shape
+    /// compatible with `input`, or any tensor operation fails (e.g. a
+    /// shape mismatch between `input` and every loaded pair).
+    fn forward_with_loss(
+        &self,
+        engine: &AutodiffEngine,
+        input: &Tensor,
+        target: &Tensor,
+    ) -> Result<(Variable, f32, HashMap<String, Variable>)> {
+        if self.trainable_params.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "no trainable parameters are loaded; call initialize_training first".to_string(),
+            )
+            .into());
+        }
+
+        match self.config.method {
+            FineTuningMethod::LoRA { .. } => {
+                self.forward_low_rank_loss(engine, input, target, "lora_A", "lora_B")
+            },
+            FineTuningMethod::Adapter { .. } => {
+                self.forward_low_rank_loss(engine, input, target, "adapter_down", "adapter_up")
+            },
+            FineTuningMethod::PrefixTuning { .. } => Err(TrustformersError::runtime_error(
+                "on-device training for PrefixTuning is not supported: a prefix embedding has \
+                 no `input @ prefix` composition on its own -- it must be prepended to a \
+                 sequence and run through the base model's attention layers, which this \
+                 trainer does not have access to. Returning a fabricated forward pass here \
+                 (as a previous revision did, via `input.clone()`) would silently corrupt the \
+                 prefix embeddings with meaningless gradients."
+                    .to_string(),
+            )
+            .into()),
+            FineTuningMethod::Full => Err(TrustformersError::runtime_error(
+                "on-device training for FineTuningMethod::Full is not supported: computing \
+                 gradients for the full parameter set requires running the actual base-model \
+                 forward pass, which this trainer does not have (only the parameter tensors \
+                 themselves are held, not an executable model graph)."
+                    .to_string(),
+            )
+            .into()),
+        }
     }
 
-    fn backward_pass(&self, _output: &Tensor, _loss: &f32) -> Result<HashMap<String, Tensor>> {
-        // Simplified backward pass to compute gradients
-        // In practice, this would compute actual gradients
-        let mut gradients = HashMap::new();
+    /// The shared forward computation for LoRA and Adapter fine-tuning:
+    /// both are a pair of low-rank matrices named `<base>.{down_suffix}`
+    /// and `<base>.{up_suffix}` computing `input @ down @ up`, trained by
+    /// real backprop against `target` via mean-squared-error, using
+    /// `trustformers_core`'s autodiff engine.
+    ///
+    /// When more than one `(down, up)` pair is loaded (multiple base
+    /// layers each got their own LoRA/Adapter pair), every pair is applied
+    /// to the *same* `input` and their outputs are summed before the loss
+    /// -- consistent with each pair being an independent additive
+    /// correction to a different point in the (unavailable) base model,
+    /// collapsed here into the only signal this standalone trainer has.
+    fn forward_low_rank_loss(
+        &self,
+        engine: &AutodiffEngine,
+        input: &Tensor,
+        target: &Tensor,
+        down_suffix: &str,
+        up_suffix: &str,
+    ) -> Result<(Variable, f32, HashMap<String, Variable>)> {
+        let pairs = self.find_low_rank_pairs(input.shape().as_slice(), down_suffix, up_suffix)?;
 
-        for (name, param) in &self.trainable_params {
-            let grad = Tensor::randn(&param.shape())?; // Placeholder gradient
-            gradients.insert(name.clone(), grad);
+        let input_var = engine.variable(input.clone(), false);
+        let target_var = engine.variable(target.clone(), false);
+
+        let mut param_vars: HashMap<String, Variable> = HashMap::new();
+        let mut output_var: Option<Variable> = None;
+        for (down_name, up_name) in &pairs {
+            let down = self.trainable_params.get(down_name).ok_or_else(|| {
+                TrustformersError::runtime_error(format!(
+                    "internal error: '{down_name}' was found during pairing but is missing from \
+                     trainable_params"
+                ))
+            })?;
+            let up = self.trainable_params.get(up_name).ok_or_else(|| {
+                TrustformersError::runtime_error(format!(
+                    "internal error: '{up_name}' was found during pairing but is missing from \
+                     trainable_params"
+                ))
+            })?;
+
+            let down_var = engine.variable(down.clone(), true);
+            let up_var = engine.variable(up.clone(), true);
+            let contribution = input_var.matmul(&down_var)?.matmul(&up_var)?;
+
+            output_var = Some(match output_var {
+                Some(acc) => acc.add(&contribution)?,
+                None => contribution,
+            });
+
+            param_vars.insert(down_name.clone(), down_var);
+            param_vars.insert(up_name.clone(), up_var);
+        }
+
+        // `pairs` is non-empty (checked inside `find_low_rank_pairs`), so
+        // this always executes the loop body at least once.
+        let output_var = output_var.ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "internal error: find_low_rank_pairs returned an empty list without erroring"
+                    .to_string(),
+            )
+        })?;
+
+        // Mean squared error: mean((output - target)^2). Both `sub` and
+        // `square`/`mean` are real autodiff operations with real gradient
+        // functions (see `trustformers_core::autodiff::graph`), so
+        // `.backward()` on this loss propagates real gradients back to
+        // every `down_var`/`up_var` created above.
+        let diff = output_var.sub(&target_var)?;
+        let squared = diff.square()?;
+        let loss_var = squared.mean(None)?;
+        let loss_value = loss_var.item()?;
+
+        Ok((loss_var, loss_value, param_vars))
+    }
+
+    /// Find every loaded `(<base>.{down_suffix}, <base>.{up_suffix})` pair
+    /// whose composed shape (`input @ down @ up`) is valid for `input_shape`
+    /// -- i.e. `down`'s first dimension matches `input_shape`'s last
+    /// dimension, and `up`'s first dimension matches `down`'s second
+    /// dimension. Pairs missing their other half (a `down` with no matching
+    /// `up`, or vice versa -- which should not happen given how
+    /// `initialize_lora_params`/`initialize_adapter_params` construct them,
+    /// but a checkpoint loaded from disk could be malformed) are skipped
+    /// with a warning rather than causing a panic or a fabricated shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no compatible pair is found.
+    fn find_low_rank_pairs(
+        &self,
+        input_shape: &[usize],
+        down_suffix: &str,
+        up_suffix: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let Some(&last_dim) = input_shape.last() else {
+            return Err(TrustformersError::shape_error(
+                "input tensor has no dimensions".to_string(),
+            )
+            .into());
+        };
+
+        let mut pairs = Vec::new();
+        let mut base_names: Vec<&str> = self
+            .trainable_params
+            .keys()
+            .filter_map(|name| name.strip_suffix(&format!(".{down_suffix}")))
+            .filter(|base| self.trainable_params.contains_key(&format!("{base}.{up_suffix}")))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        // Deterministic order: `add`ing contributions in a different order
+        // each run would make a real (if numerically tiny) difference to
+        // floating-point rounding, and an arbitrary HashMap-derived order
+        // is exactly the nondeterminism `inference.rs`'s
+        // `ordered_weight_names` was introduced to eliminate elsewhere in
+        // this crate.
+        base_names.sort();
+
+        for base in base_names {
+            let down_name = format!("{base}.{down_suffix}");
+            let up_name = format!("{base}.{up_suffix}");
+            let down_shape = self.trainable_params[&down_name].shape();
+            let up_shape = self.trainable_params[&up_name].shape();
+
+            if down_shape.len() != 2 || up_shape.len() != 2 {
+                tracing::warn!(
+                    "skipping '{base}': expected 2D {down_suffix}/{up_suffix} matrices, got \
+                     {down_shape:?}/{up_shape:?}"
+                );
+                continue;
+            }
+            if down_shape[0] != last_dim {
+                continue;
+            }
+            if down_shape[1] != up_shape[0] {
+                tracing::warn!(
+                    "skipping '{base}': {down_suffix} output width {} does not match \
+                     {up_suffix} input width {}",
+                    down_shape[1],
+                    up_shape[0]
+                );
+                continue;
+            }
+            pairs.push((down_name, up_name));
+        }
+
+        if pairs.is_empty() {
+            return Err(TrustformersError::shape_error(format!(
+                "no loaded {down_suffix}/{up_suffix} pair has an input dimension matching the \
+                 given input's last dimension ({last_dim})"
+            ))
+            .into());
+        }
+
+        Ok(pairs)
+    }
+
+    /// Real backward pass: calls `loss.backward()` on the autodiff engine
+    /// (reverse-mode automatic differentiation, computing a real gradient
+    /// for every `Variable` node that fed into `loss_var`) and reads each
+    /// trainable parameter's gradient back out via `param_vars` -- the
+    /// *exact* `Variable` objects [`Self::forward_low_rank_loss`] created
+    /// for each parameter during the forward pass, whose `node_id`s the
+    /// backward pass just populated a gradient for.
+    ///
+    /// A parameter with `requires_grad == false` (none currently -- every
+    /// `down`/`up` pair is created with `requires_grad: true` -- but this
+    /// stays robust to that changing) or one the loss's computation never
+    /// actually used has `AutodiffEngine::get_grad` return `Ok(None)`,
+    /// which this function silently skips rather than treating as an
+    /// error: `update_parameters` only updates parameters it has a
+    /// gradient for, so an unused parameter is correctly left unchanged
+    /// (not corrupted with a fabricated update).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the backward pass itself (e.g. a
+    /// numerical issue the autodiff engine's anomaly detection flags).
+    fn backward_pass(
+        &self,
+        engine: &AutodiffEngine,
+        loss_var: &Variable,
+        param_vars: &HashMap<String, Variable>,
+    ) -> Result<HashMap<String, Tensor>> {
+        engine.backward(loss_var, None)?;
+
+        let mut gradients = HashMap::new();
+        for (name, param_var) in param_vars {
+            if let Some(grad) = engine.get_grad(param_var)? {
+                gradients.insert(name.clone(), grad);
+            }
         }
 
         Ok(gradients)
     }
 
     fn update_parameters(&mut self, gradients: &HashMap<String, Tensor>) -> Result<()> {
-        // Simple SGD update (in practice, would use Adam or other optimizers)
+        // Adam-style update with momentum (first moment) and a fixed
+        // second-moment-free step -- a real, stateful optimizer using
+        // `OptimizerState.momentum`, which the previous implementation
+        // declared but never read from or wrote to (a plain, memoryless
+        // SGD step disguised as a struct with momentum state). This keeps
+        // the field honest: it now actually accumulates and decays.
+        const BETA: f32 = 0.9;
+        self.optimizer_state.step_count += 1;
+
         for (name, grad) in gradients {
-            if let Some(param) = self.trainable_params.get_mut(name) {
-                // param = param - learning_rate * grad
-                let scaled_grad = grad.scalar_mul(self.config.learning_rate)?;
-                *param = param.sub(&scaled_grad)?;
-            }
+            let Some(param) = self.trainable_params.get_mut(name) else {
+                continue;
+            };
+
+            let velocity = match self.optimizer_state.momentum.get(name) {
+                Some(prev) => {
+                    let decayed_prev = prev.scalar_mul(BETA)?;
+                    let scaled_grad = grad.scalar_mul(1.0 - BETA)?;
+                    decayed_prev.add(&scaled_grad)?
+                },
+                None => grad.clone(),
+            };
+
+            let step = velocity.scalar_mul(self.config.learning_rate)?;
+            *param = param.sub(&step)?;
+            self.optimizer_state.momentum.insert(name.clone(), velocity);
         }
 
         Ok(())
@@ -673,5 +979,234 @@ mod tests {
         stats.update_epoch(0, 0.8);
         assert_eq!(stats.epoch_losses.len(), 1);
         assert_eq!(stats.epoch_losses[0], 0.8);
+    }
+
+    // -- Regression tests: real forward/backward/update, not random
+    // -- gradients against a constant fake loss.
+
+    /// The direct regression test for the P0 finding: real training on a
+    /// tiny, hand-solvable LoRA regression task must actually reduce the
+    /// loss over repeated `training_step` calls. Against the previous
+    /// implementation (`forward_with_loss` returning a constant `0.5` and
+    /// `backward_pass` returning `Tensor::randn` gradients regardless of
+    /// the actual loss), the loss trace would be flat noise around 0.5 --
+    /// not a real, mostly-monotonic decrease -- and `update_parameters`
+    /// applying those random "gradients" would actively degrade the LoRA
+    /// weights step by step rather than fit them to `target`.
+    #[test]
+    fn test_training_step_reduces_loss_on_tiny_lora_task() {
+        let training_config = OnDeviceTrainingConfig {
+            learning_rate: 0.1,
+            method: FineTuningMethod::LoRA {
+                rank: 2,
+                alpha: 4.0,
+            },
+            ..OnDeviceTrainingConfig::default()
+        };
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let mut base_params = HashMap::new();
+        // "linear" makes `should_apply_lora` select this parameter; its
+        // shape ([4, 4]) is otherwise irrelevant to LoRA init (only the
+        // input dimension, 4, is used to size lora_A).
+        base_params.insert(
+            "block.linear".to_string(),
+            Tensor::zeros(&[4, 4]).expect("param"),
+        );
+        trainer.initialize_training(base_params).expect("initialize_training");
+
+        // A fixed, tiny supervised task: drive the LoRA delta toward a
+        // known target vector for a fixed input. `lora_B` is
+        // zero-initialized (see `initialize_lora_params`), so the initial
+        // output is exactly zero and the initial loss is
+        // `mean(target^2)` -- deterministic, so this is a real, not
+        // cherry-picked, check.
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![2.0, -1.0, 0.5, 1.5], &[1, 4]).expect("target");
+
+        let first_loss = trainer.training_step(&input, &target).expect("training_step 1");
+        assert!(first_loss.is_finite());
+        assert!(
+            first_loss > 0.0,
+            "the target is nonzero and the initial output is zero, so the \
+            initial MSE loss must be positive, got {first_loss}"
+        );
+
+        let mut last_loss = first_loss;
+        for step in 2..=20 {
+            let loss = trainer
+                .training_step(&input, &target)
+                .unwrap_or_else(|e| panic!("training_step {step} failed: {e}"));
+            assert!(
+                loss.is_finite(),
+                "loss became non-finite at step {step}: {loss}"
+            );
+            last_loss = loss;
+        }
+
+        assert!(
+            last_loss < first_loss * 0.5,
+            "20 real gradient-descent steps at lr=0.1 on a fixed tiny target must substantially \
+             reduce the loss (from {first_loss} to well under half that); got {last_loss}, which \
+             is what a constant-loss/random-gradient implementation would produce instead"
+        );
+    }
+
+    /// `OptimizerState.momentum` must actually be populated by training --
+    /// the previous implementation declared the field but never wrote to
+    /// it (plain memoryless SGD masquerading as a stateful optimizer).
+    #[test]
+    fn test_training_step_populates_optimizer_momentum() {
+        let training_config = OnDeviceTrainingConfig {
+            method: FineTuningMethod::LoRA {
+                rank: 2,
+                alpha: 4.0,
+            },
+            ..OnDeviceTrainingConfig::default()
+        };
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let mut base_params = HashMap::new();
+        base_params.insert(
+            "block.linear".to_string(),
+            Tensor::zeros(&[4, 4]).expect("param"),
+        );
+        trainer.initialize_training(base_params).expect("initialize_training");
+
+        assert!(
+            trainer.optimizer_state.momentum.is_empty(),
+            "precondition: no steps taken yet"
+        );
+
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![2.0, -1.0, 0.5, 1.5], &[1, 4]).expect("target");
+        trainer.training_step(&input, &target).expect("training_step");
+
+        assert!(
+            !trainer.optimizer_state.momentum.is_empty(),
+            "a real optimizer step must record per-parameter momentum state"
+        );
+        assert_eq!(trainer.optimizer_state.step_count, 1);
+    }
+
+    /// `PrefixTuning` has no `input @ prefix` forward composition available
+    /// to this standalone trainer and must be a structured error, not a
+    /// silent `input.clone()` identity pass reporting a fake loss.
+    #[test]
+    fn test_training_step_rejects_prefix_tuning() {
+        let training_config = OnDeviceTrainingConfig {
+            method: FineTuningMethod::PrefixTuning { prefix_length: 4 },
+            ..OnDeviceTrainingConfig::default()
+        };
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let mut base_params = HashMap::new();
+        base_params.insert(
+            "token.embed".to_string(),
+            Tensor::zeros(&[8, 4]).expect("param"),
+        );
+        trainer.initialize_training(base_params).expect("initialize_training");
+
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[1, 4]).expect("target");
+        let result = trainer.training_step(&input, &target);
+
+        assert!(
+            result.is_err(),
+            "PrefixTuning must refuse rather than fabricate a forward pass"
+        );
+    }
+
+    /// `Full` fine-tuning has no base-model forward pass available to this
+    /// standalone trainer and must be a structured error.
+    #[test]
+    fn test_training_step_rejects_full_fine_tuning() {
+        let training_config = OnDeviceTrainingConfig {
+            method: FineTuningMethod::Full,
+            ..OnDeviceTrainingConfig::default()
+        };
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let mut base_params = HashMap::new();
+        base_params.insert(
+            "any.weight".to_string(),
+            Tensor::zeros(&[4, 4]).expect("param"),
+        );
+        trainer.initialize_training(base_params).expect("initialize_training");
+
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[1, 4]).expect("target");
+        let result = trainer.training_step(&input, &target);
+
+        assert!(
+            result.is_err(),
+            "Full fine-tuning must refuse rather than fabricate a forward pass"
+        );
+    }
+
+    /// `training_step` on a trainer with no initialized parameters must
+    /// error, not silently report a fake loss.
+    #[test]
+    fn test_training_step_errors_without_initialization() {
+        let training_config = OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[1, 4]).expect("target");
+        let result = trainer.training_step(&input, &target);
+
+        assert!(
+            result.is_err(),
+            "training with no initialized parameters must error"
+        );
+    }
+
+    /// The full `train()` loop (multiple epochs, gradient accumulation)
+    /// over a tiny fixed dataset must also show real loss reduction from
+    /// the first epoch to the last -- an end-to-end check that `train()`'s
+    /// batching/accumulation wiring around `training_step` does not lose
+    /// the real gradient signal.
+    #[test]
+    fn test_train_reduces_loss_across_epochs() {
+        let training_config = OnDeviceTrainingConfig {
+            learning_rate: 0.1,
+            epochs: 5,
+            batch_size: 1,
+            gradient_accumulation_steps: 1,
+            method: FineTuningMethod::LoRA {
+                rank: 2,
+                alpha: 4.0,
+            },
+            ..OnDeviceTrainingConfig::default()
+        };
+        let mobile_config = crate::MobileConfig::default();
+        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).expect("trainer");
+
+        let mut base_params = HashMap::new();
+        base_params.insert(
+            "block.linear".to_string(),
+            Tensor::zeros(&[4, 4]).expect("param"),
+        );
+        trainer.initialize_training(base_params).expect("initialize_training");
+
+        let input = Tensor::from_vec(vec![1.0, 0.5, -0.5, 1.0], &[1, 4]).expect("input");
+        let target = Tensor::from_vec(vec![2.0, -1.0, 0.5, 1.5], &[1, 4]).expect("target");
+        let dataset = vec![(input, target)];
+
+        let stats = trainer.train(&dataset).expect("train");
+
+        assert_eq!(stats.epoch_losses.len(), 5);
+        let first_epoch_loss = stats.epoch_losses[0];
+        let last_epoch_loss = stats.epoch_losses[4];
+        assert!(
+            last_epoch_loss < first_epoch_loss,
+            "5 epochs of real training on a fixed tiny task must reduce the average epoch loss: \
+             first={first_epoch_loss}, last={last_epoch_loss}"
+        );
     }
 }

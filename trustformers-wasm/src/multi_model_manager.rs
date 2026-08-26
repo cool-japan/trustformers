@@ -104,7 +104,12 @@ pub struct LoadedModel {
     pub session: Option<crate::InferenceSession>,
     pub load_time: f64,
     pub memory_usage: usize,
-    pub gpu_memory_usage: usize,
+    /// GPU memory used by this model's weights/activations, if known.
+    /// `None` rather than a fabricated `0`: browsers expose no API to
+    /// query GPU memory usage (WebGPU deliberately omits one, to resist
+    /// fingerprinting), so this crate has no way to measure it for a
+    /// model run on the GPU path.
+    pub gpu_memory_usage: Option<usize>,
     pub warmup_completed: bool,
     pub performance_stats: ModelPerformanceStats,
 }
@@ -418,7 +423,7 @@ impl MultiModelManager {
             session: Some(session),
             load_time,
             memory_usage: metadata.size_bytes,
-            gpu_memory_usage: 0, // Would be calculated
+            gpu_memory_usage: None, // not measurable - see field doc comment
             warmup_completed: false,
             performance_stats: ModelPerformanceStats {
                 inference_count: 0,
@@ -443,7 +448,7 @@ impl MultiModelManager {
 
         // Perform warmup if enabled
         if self.config.enable_model_warming {
-            self.warmup_model(model_id).await?;
+            self.warmup_model(model_id).await.map_err(|e| JsValue::from_str(&e))?;
         }
 
         Ok(())
@@ -669,25 +674,107 @@ impl MultiModelManager {
 
     // Private helper methods
 
-    async fn warmup_model(&mut self, model_id: &str) -> Result<(), JsValue> {
-        if let Some(model) = self.models.iter_mut().find(|m| m.metadata.id == model_id) {
-            model.status = ModelStatus::WarmingUp;
-
-            // Perform a dummy inference to warm up the model
-            // This would use actual inference in a real implementation
-
-            model.status = ModelStatus::Ready;
-            model.warmup_completed = true;
-
-            if let Some(ref mut logger) = self.debug_logger {
-                logger.info(
-                    &format!("Model warmed up: {}", model.metadata.name),
-                    "multi_model",
-                );
-            }
-        }
-
+    /// Run the real warmup forward pass for `model`: a single token id 0
+    /// in a `[1, 1]` tensor through its actual loaded weights. Token id 0
+    /// is in-range for every non-empty vocabulary, so this succeeds for
+    /// any architecture with a loaded model — see
+    /// `core::model::wasm_model::tests::test_forward_single_token_input_produces_finite_output`.
+    /// A structured `Err` (never a panic or a silent no-op) when the
+    /// model's session has no loaded weights to run.
+    ///
+    /// Pure (`String` error, no `JsValue`) for the same native-testability
+    /// reason as `resolve_model_architecture`/`require_loaded_model` in
+    /// `lib.rs`: constructing a `JsValue` — even a bare
+    /// `JsValue::from_str` — unconditionally panics on non-wasm32 targets
+    /// (there is no JS engine backing it there), which previously made
+    /// this function's own honesty regression tests abort the whole test
+    /// process (SIGABRT) instead of asserting anything. `JsValue`
+    /// conversion happens once, at the `#[wasm_bindgen]` boundary in
+    /// `load_model`, this function's only caller.
+    fn run_warmup_forward_pass(model: &LoadedModel) -> Result<(), String> {
+        let wasm_model = model
+            .session
+            .as_ref()
+            .and_then(crate::InferenceSession::loaded_model)
+            .ok_or_else(|| {
+                format!(
+                    "warmup_model: model '{}' has no loaded weights to warm up \
+                     (its session has not finished loading a model)",
+                    model.metadata.id
+                )
+            })?;
+        // `WasmTensor::zeros`/`WasmModel::forward` are `JsValue`-erroring
+        // `#[wasm_bindgen]` APIs; their failure content cannot be
+        // inspected (even via `Debug`) without panicking off wasm32, so
+        // only a fixed, honest description is kept — never a fabricated
+        // or guessed message. Unreached by any current test (there is no
+        // way to construct a real loaded model without a JS/wasm32
+        // environment), unlike the "no loaded model" branch above.
+        let warmup_input = crate::tensor::WasmTensor::zeros(vec![1, 1])
+            .map_err(|_| "warmup_model: failed to allocate the warmup input tensor".to_string())?;
+        wasm_model
+            .forward(&warmup_input)
+            .map_err(|_| "warmup_model: the warmup forward pass failed".to_string())?;
         Ok(())
+    }
+
+    /// Warm up a loaded model by running one real, minimal inference
+    /// through it. A previous version transitioned
+    /// `WarmingUp -> Ready` / set `warmup_completed = true`
+    /// unconditionally, with no code — and therefore no actual
+    /// inference — between the two status writes. Now
+    /// `warmup_completed` is only ever `true` after a genuine forward
+    /// pass has succeeded; on failure the model is left `Error` and
+    /// `warmup_completed` stays `false`, and the error propagates to
+    /// the caller (see the `?` at this method's call site in
+    /// `load_model`) instead of being swallowed. `model_id` not being
+    /// found is likewise a structured error rather than a silent `Ok`
+    /// (the same "reports success for work never done" pattern this
+    /// pass is removing elsewhere) — this is private and `load_model`
+    /// is its only caller, always with the id it just registered, so
+    /// this branch is unreachable in practice; it exists so that
+    /// invariant is enforced, not assumed.
+    ///
+    /// Pure (`String` error, no `JsValue`) — see
+    /// [`Self::run_warmup_forward_pass`] for why; `load_model` converts
+    /// to `JsValue` at its own `?` call site below.
+    async fn warmup_model(&mut self, model_id: &str) -> Result<(), String> {
+        let Some(model) = self.models.iter_mut().find(|m| m.metadata.id == model_id) else {
+            return Err(format!(
+                "warmup_model: no loaded model with id '{model_id}'"
+            ));
+        };
+
+        model.status = ModelStatus::WarmingUp;
+
+        match Self::run_warmup_forward_pass(model) {
+            Ok(()) => {
+                model.status = ModelStatus::Ready;
+                model.warmup_completed = true;
+
+                if let Some(ref mut logger) = self.debug_logger {
+                    logger.info(
+                        &format!("Model warmed up: {}", model.metadata.name),
+                        "multi_model",
+                    );
+                }
+
+                Ok(())
+            },
+            Err(e) => {
+                model.status = ModelStatus::Error;
+                model.warmup_completed = false;
+
+                if let Some(ref mut logger) = self.debug_logger {
+                    logger.warn(
+                        &format!("Warmup failed for model '{}': {e}", model.metadata.name),
+                        "multi_model",
+                    );
+                }
+
+                Err(e)
+            },
+        }
     }
 
     fn ensure_resources_available(&self, metadata: &ModelMetadata) -> Result<(), JsValue> {
@@ -918,5 +1005,107 @@ mod tests {
             .matches_routing_condition(&condition, &context_too_small)
             .expect("matching should succeed in test");
         assert!(!matches_small);
+    }
+
+    // -----------------------------------------------------------------
+    // `warmup_model`: real forward pass, not an unconditional no-op.
+    // -----------------------------------------------------------------
+
+    fn test_model_metadata(id: &str) -> ModelMetadata {
+        ModelMetadata {
+            id: id.to_string(),
+            name: "Test Model".to_string(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            model_type: "transformer".to_string(),
+            architecture: "bert".to_string(),
+            size_bytes: 1024,
+            priority: ModelPriority::Normal,
+            tags: Vec::new(),
+            environment: DeploymentEnvironment::Development,
+            created_at: 0.0,
+            last_used: 0.0,
+            usage_count: 0,
+            capabilities: Vec::new(),
+            requirements: ModelRequirements {
+                min_memory_mb: 0,
+                min_gpu_memory_mb: 0,
+                requires_gpu: false,
+                requires_webgpu: false,
+                min_cpu_cores: 1,
+                recommended_batch_size: 1,
+            },
+            download_url: None,
+        }
+    }
+
+    fn test_loaded_model(id: &str, session: Option<crate::InferenceSession>) -> LoadedModel {
+        LoadedModel {
+            metadata: test_model_metadata(id),
+            status: ModelStatus::Ready,
+            session,
+            load_time: 0.0,
+            memory_usage: 0,
+            gpu_memory_usage: None,
+            warmup_completed: false,
+            performance_stats: ModelPerformanceStats {
+                inference_count: 0,
+                total_inference_time_ms: 0.0,
+                average_inference_time_ms: 0.0,
+                last_inference_time_ms: 0.0,
+                errors: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_run_warmup_forward_pass_errors_without_a_loaded_model() {
+        // Regression test: a previous version of `warmup_model` set
+        // `warmup_completed = true` unconditionally, with no code (and
+        // therefore no actual inference) between its `WarmingUp` and
+        // `Ready` status writes. A model whose session never finished
+        // loading a model must not be reported as warmed up.
+        let model = test_loaded_model("m1", None);
+
+        let err = MultiModelManager::run_warmup_forward_pass(&model)
+            .expect_err("warmup must fail when there is no loaded model to warm up");
+
+        assert!(format!("{err:?}").contains("m1"));
+    }
+
+    #[test]
+    fn test_warmup_model_marks_error_and_leaves_warmup_incomplete_on_failure() {
+        let config = MultiModelConfig::new();
+        let mut manager = MultiModelManager::new(config);
+        manager.models.push(test_loaded_model("m1", None));
+
+        let result = futures::executor::block_on(manager.warmup_model("m1"));
+
+        assert!(
+            result.is_err(),
+            "warmup_model must propagate the failure, not swallow it"
+        );
+        let model = &manager.models[0];
+        assert_eq!(model.status, ModelStatus::Error);
+        assert!(!model.warmup_completed);
+    }
+
+    #[test]
+    fn test_warmup_model_errors_for_unknown_model_id_instead_of_reporting_success() {
+        // `warmup_model` is private and `load_model` is its only caller,
+        // always passing the id it just registered - so this path is
+        // unreachable in real use. It must still be a structured error
+        // rather than a silent `Ok`: "warm up model X" succeeding when X
+        // does not exist is exactly the "reports success for nothing
+        // done" pattern this pass removes elsewhere.
+        let config = MultiModelConfig::new();
+        let mut manager = MultiModelManager::new(config);
+
+        let err = futures::executor::block_on(manager.warmup_model("does-not-exist"))
+            .expect_err("warmup_model must not report success for a model it never found");
+
+        assert!(format!("{err:?}").contains("does-not-exist"));
     }
 }

@@ -51,7 +51,7 @@ impl fmt::Display for OnlineDpoError {
                     f,
                     "Online DPO batch is empty; at least one preference pair is required"
                 )
-            }
+            },
             OnlineDpoError::LengthMismatch {
                 field,
                 expected,
@@ -61,13 +61,13 @@ impl fmt::Display for OnlineDpoError {
                     f,
                     "Online DPO length mismatch in {field}: expected {expected}, got {got}"
                 )
-            }
+            },
             OnlineDpoError::NumericalError(msg) => {
                 write!(f, "Numerical error in Online DPO computation: {msg}")
-            }
+            },
             OnlineDpoError::InvalidConfig(msg) => {
                 write!(f, "Invalid Online DPO configuration: {msg}")
-            }
+            },
         }
     }
 }
@@ -265,9 +265,7 @@ impl OnlineDpoSelector {
 
         // Sort descending by reward_gap
         pairs.sort_by(|a, b| {
-            b.reward_gap
-                .partial_cmp(&a.reward_gap)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.reward_gap.partial_cmp(&a.reward_gap).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Truncate to max_pairs_per_batch
@@ -363,7 +361,7 @@ impl OnlineDpoLoss {
                 // label_smoothing = 0.1
                 let ls = 0.1_f32;
                 -log_sigmoid(beta * margin) * (1.0 - ls) + ls * 2.0_f32.ln()
-            }
+            },
         }
     }
 
@@ -433,8 +431,8 @@ impl OnlineDpoLoss {
         let mut margin_positive_count = 0usize;
 
         for i in 0..n {
-            let margin = (chosen_lps[i] - ref_chosen_lps[i])
-                - (rejected_lps[i] - ref_rejected_lps[i]);
+            let margin =
+                (chosen_lps[i] - ref_chosen_lps[i]) - (rejected_lps[i] - ref_rejected_lps[i]);
 
             let loss_i = Self::compute_loss(
                 chosen_lps[i],
@@ -536,10 +534,8 @@ impl OnlineDpoTrainer {
         )?;
 
         // Update EMA running mean from all rewards in this batch
-        let all_rewards: Vec<f32> = pairs
-            .iter()
-            .flat_map(|p| [p.chosen_reward, p.rejected_reward])
-            .collect();
+        let all_rewards: Vec<f32> =
+            pairs.iter().flat_map(|p| [p.chosen_reward, p.rejected_reward]).collect();
         self.selector.update_running_mean(&all_rewards);
 
         self.step += 1;
@@ -581,10 +577,7 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    fn make_pair(
-        chosen_reward: f32,
-        rejected_reward: f32,
-    ) -> OnlineResponsePair {
+    fn make_pair(chosen_reward: f32, rejected_reward: f32) -> OnlineResponsePair {
         OnlineResponsePair {
             prompt: vec![1, 2, 3],
             chosen: vec![10, 11],
@@ -618,8 +611,8 @@ mod tests {
     fn test_sigmoid_loss_perfect_margin() {
         // Very large positive margin → loss near 0
         let loss = OnlineDpoLoss::compute_loss(
-            0.0,  // chosen_lp
-            0.0,  // rejected_lp
+            0.0,   // chosen_lp
+            0.0,   // rejected_lp
             -10.0, // ref_chosen_lp  → chosen_ratio = +10
             10.0,  // ref_rejected_lp → rejected_ratio = -10
             0.1,
@@ -633,29 +626,19 @@ mod tests {
     #[test]
     fn test_hinge_loss_no_violation() {
         // margin = 20, beta*margin = 2 > 1 → max(0, 1-2) = 0
-        let loss = OnlineDpoLoss::compute_loss(
-            0.0,
-            0.0,
-            -10.0,
-            10.0,
-            0.1,
-            OnlineDpoLossType::Hinge,
-        );
+        let loss =
+            OnlineDpoLoss::compute_loss(0.0, 0.0, -10.0, 10.0, 0.1, OnlineDpoLossType::Hinge);
         assert!((loss).abs() < 1e-5, "expected 0 hinge loss, got {loss}");
     }
 
     #[test]
     fn test_hinge_loss_with_violation() {
         // margin = 0, beta*margin = 0 → max(0, 1-0) = 1
-        let loss = OnlineDpoLoss::compute_loss(
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.1,
-            OnlineDpoLossType::Hinge,
+        let loss = OnlineDpoLoss::compute_loss(0.0, 0.0, 0.0, 0.0, 0.1, OnlineDpoLossType::Hinge);
+        assert!(
+            (loss - 1.0).abs() < 1e-5,
+            "expected 1.0 hinge loss, got {loss}"
         );
-        assert!((loss - 1.0).abs() < 1e-5, "expected 1.0 hinge loss, got {loss}");
     }
 
     #[test]
@@ -705,8 +688,14 @@ mod tests {
     fn test_batch_loss_length_mismatch() {
         let cfg = OnlineDpoConfig::default();
         let pairs = vec![make_pair(1.0, 0.5)];
-        let result =
-            OnlineDpoLoss::compute_batch_loss(&pairs, &[-1.0, -2.0], &[-1.0], &[-1.0], &[-1.0], &cfg);
+        let result = OnlineDpoLoss::compute_batch_loss(
+            &pairs,
+            &[-1.0, -2.0],
+            &[-1.0],
+            &[-1.0],
+            &[-1.0],
+            &cfg,
+        );
         assert!(matches!(result, Err(OnlineDpoError::LengthMismatch { .. })));
     }
 
@@ -753,8 +742,10 @@ mod tests {
 
     #[test]
     fn test_create_pairs_gap_too_small() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 0.5;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 0.5,
+            ..OnlineDpoConfig::default()
+        };
         let prompts = vec![vec![1u32, 2]];
         let responses = vec![vec![vec![10u32], vec![20u32]]];
         let rewards = vec![vec![0.8_f32, 0.7]]; // gap = 0.1 < threshold 0.5
@@ -765,16 +756,16 @@ mod tests {
 
     #[test]
     fn test_create_pairs_max_pairs() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.max_pairs_per_batch = 2;
+        let cfg = OnlineDpoConfig {
+            max_pairs_per_batch: 2,
+            ..OnlineDpoConfig::default()
+        };
 
         let prompts: Vec<Vec<u32>> = (0..5).map(|i| vec![i as u32]).collect();
-        let responses: Vec<Vec<Vec<u32>>> = (0..5)
-            .map(|i| vec![vec![i as u32 * 10], vec![i as u32 * 10 + 1]])
-            .collect();
-        let rewards: Vec<Vec<f32>> = (0..5)
-            .map(|i| vec![(i as f32 + 1.0) * 0.3, (i as f32) * 0.1])
-            .collect();
+        let responses: Vec<Vec<Vec<u32>>> =
+            (0..5).map(|i| vec![vec![i as u32 * 10], vec![i as u32 * 10 + 1]]).collect();
+        let rewards: Vec<Vec<f32>> =
+            (0..5).map(|i| vec![(i as f32 + 1.0) * 0.3, (i as f32) * 0.1]).collect();
 
         let pairs = OnlineDpoSelector::create_pairs(&prompts, &responses, &rewards, &cfg);
         assert!(pairs.len() <= 2);
@@ -789,7 +780,7 @@ mod tests {
         assert!((sel.running_mean_reward).abs() < 1e-8);
 
         sel.update_running_mean(&[1.0, 1.0]); // mean = 1.0
-        // new_running = 0.99 * 0 + 0.01 * 1.0 = 0.01
+                                              // new_running = 0.99 * 0 + 0.01 * 1.0 = 0.01
         assert!((sel.running_mean_reward - 0.01).abs() < 1e-6);
     }
 
@@ -803,9 +794,11 @@ mod tests {
 
     #[test]
     fn test_apply_baseline_fixed() {
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.use_running_mean_baseline = false;
-        cfg.reward_baseline = 0.3;
+        let cfg = OnlineDpoConfig {
+            use_running_mean_baseline: false,
+            reward_baseline: 0.3,
+            ..OnlineDpoConfig::default()
+        };
         let sel = OnlineDpoSelector::new(cfg);
         assert!((sel.apply_baseline(1.0) - 0.7).abs() < 1e-6);
     }
@@ -818,13 +811,7 @@ mod tests {
         let mut trainer = OnlineDpoTrainer::new(cfg);
 
         let pairs = vec![make_pair(1.5, 0.5)];
-        let result = trainer.process_batch(
-            pairs,
-            vec![-0.5],
-            vec![-1.5],
-            vec![-1.0],
-            vec![-0.8],
-        );
+        let result = trainer.process_batch(pairs, vec![-0.5], vec![-1.5], vec![-1.0], vec![-0.8]);
         assert!(result.is_ok());
         assert_eq!(trainer.step, 1);
         assert_eq!(trainer.history().len(), 1);
@@ -860,13 +847,20 @@ mod tests {
     #[test]
     fn test_reference_model_update_ema_schedule() {
         // EMA running mean converges toward the true mean over multiple updates
-        let cfg = OnlineDpoConfig { ema_decay: 0.9, ..Default::default() };
+        let cfg = OnlineDpoConfig {
+            ema_decay: 0.9,
+            ..Default::default()
+        };
         let mut sel = OnlineDpoSelector::new(cfg);
         // All rewards = 5.0; after enough updates, running mean → 5.0
         for _ in 0..200 {
             sel.update_running_mean(&[5.0]);
         }
-        assert!((sel.running_mean_reward - 5.0).abs() < 0.01, "running_mean={}", sel.running_mean_reward);
+        assert!(
+            (sel.running_mean_reward - 5.0).abs() < 0.01,
+            "running_mean={}",
+            sel.running_mean_reward
+        );
     }
 
     #[test]
@@ -892,17 +886,18 @@ mod tests {
     #[test]
     fn test_rejection_sampling_gap_threshold_filtering() {
         // Only pairs with reward_gap >= hard_pair_threshold should be kept
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 0.5;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 0.5,
+            ..OnlineDpoConfig::default()
+        };
         let prompts: Vec<Vec<u32>> = (0..4).map(|i| vec![i as u32]).collect();
-        let responses: Vec<Vec<Vec<u32>>> = (0..4)
-            .map(|i| vec![vec![i as u32 * 10], vec![i as u32 * 10 + 1]])
-            .collect();
+        let responses: Vec<Vec<Vec<u32>>> =
+            (0..4).map(|i| vec![vec![i as u32 * 10], vec![i as u32 * 10 + 1]]).collect();
         let rewards: Vec<Vec<f32>> = vec![
-            vec![1.0, 0.4],  // gap=0.6 >= 0.5 ✓
-            vec![0.8, 0.4],  // gap=0.4 < 0.5  ✗
-            vec![1.0, 0.0],  // gap=1.0 >= 0.5 ✓
-            vec![0.6, 0.2],  // gap=0.4 < 0.5  ✗
+            vec![1.0, 0.4], // gap=0.6 >= 0.5 ✓
+            vec![0.8, 0.4], // gap=0.4 < 0.5  ✗
+            vec![1.0, 0.0], // gap=1.0 >= 0.5 ✓
+            vec![0.6, 0.2], // gap=0.4 < 0.5  ✗
         ];
         let pairs = OnlineDpoSelector::create_pairs(&prompts, &responses, &rewards, &cfg);
         assert_eq!(pairs.len(), 2, "only 2 pairs should pass the threshold");
@@ -914,23 +909,24 @@ mod tests {
     #[test]
     fn test_pairs_sorted_by_reward_gap_descending() {
         // Pairs should be sorted descending by reward_gap
-        let cfg = OnlineDpoConfig { max_pairs_per_batch: 10, ..Default::default() };
+        let cfg = OnlineDpoConfig {
+            max_pairs_per_batch: 10,
+            ..Default::default()
+        };
         let prompts: Vec<Vec<u32>> = (0..3).map(|i| vec![i as u32]).collect();
-        let responses: Vec<Vec<Vec<u32>>> = (0..3)
-            .map(|i| vec![vec![i as u32 * 2], vec![i as u32 * 2 + 1]])
-            .collect();
+        let responses: Vec<Vec<Vec<u32>>> =
+            (0..3).map(|i| vec![vec![i as u32 * 2], vec![i as u32 * 2 + 1]]).collect();
         // gaps: 0.9, 0.3, 0.6
-        let rewards: Vec<Vec<f32>> = vec![
-            vec![1.0, 0.1],
-            vec![0.8, 0.5],
-            vec![0.9, 0.3],
-        ];
+        let rewards: Vec<Vec<f32>> = vec![vec![1.0, 0.1], vec![0.8, 0.5], vec![0.9, 0.3]];
         let pairs = OnlineDpoSelector::create_pairs(&prompts, &responses, &rewards, &cfg);
         for i in 0..pairs.len().saturating_sub(1) {
             assert!(
                 pairs[i].reward_gap >= pairs[i + 1].reward_gap,
                 "pairs not sorted: {}[{}] < {}[{}]",
-                pairs[i].reward_gap, i, pairs[i + 1].reward_gap, i + 1
+                pairs[i].reward_gap,
+                i,
+                pairs[i + 1].reward_gap,
+                i + 1
             );
         }
     }
@@ -939,17 +935,28 @@ mod tests {
     fn test_moving_average_of_reference_model_with_single_value() {
         // EMA update: new = decay * old + (1-decay) * batch_mean
         // Starting from 0: new = 0.99 * 0.0 + 0.01 * 7.0 = 0.07
-        let cfg = OnlineDpoConfig { ema_decay: 0.99, ..Default::default() };
+        let cfg = OnlineDpoConfig {
+            ema_decay: 0.99,
+            ..Default::default()
+        };
         let mut sel = OnlineDpoSelector::new(cfg);
         sel.update_running_mean(&[7.0]);
         let expected = 0.01 * 7.0; // (1-0.99) * 7.0 = 0.07
-        assert!((sel.running_mean_reward - expected).abs() < 1e-5, "first update={} expected={}", sel.running_mean_reward, expected);
+        assert!(
+            (sel.running_mean_reward - expected).abs() < 1e-5,
+            "first update={} expected={}",
+            sel.running_mean_reward,
+            expected
+        );
     }
 
     #[test]
     fn test_online_accuracy_high_when_model_converging() {
         // High accuracy means chosen logit >> rejected logit, loss is small
-        let cfg = OnlineDpoConfig { beta: 0.1, ..Default::default() };
+        let cfg = OnlineDpoConfig {
+            beta: 0.1,
+            ..Default::default()
+        };
         let pairs = vec![make_pair(2.0, 0.5)];
         // policy: chosen much more likely than rejected, reference equal
         let chosen_lps = vec![-0.1_f32];
@@ -957,26 +964,37 @@ mod tests {
         let ref_chosen_lps = vec![-1.0_f32];
         let ref_rejected_lps = vec![-1.0_f32];
         let out = OnlineDpoLoss::compute_batch_loss(
-            &pairs, &chosen_lps, &rejected_lps, &ref_chosen_lps, &ref_rejected_lps, &cfg
-        ).expect("ok");
+            &pairs,
+            &chosen_lps,
+            &rejected_lps,
+            &ref_chosen_lps,
+            &ref_rejected_lps,
+            &cfg,
+        )
+        .expect("ok");
         // margin = (-0.1 - (-1.0)) - (-5.0 - (-1.0)) = 0.9 - (-4.0) = 4.9 > 0
-        assert_eq!(out.accuracy, 1.0, "accuracy should be 1.0 when chosen >> rejected");
-        assert!(out.total_loss < (2.0_f32).ln(), "loss should be less than log(2) for positive margin");
+        assert_eq!(
+            out.accuracy, 1.0,
+            "accuracy should be 1.0 when chosen >> rejected"
+        );
+        assert!(
+            out.total_loss < (2.0_f32).ln(),
+            "loss should be less than log(2) for positive margin"
+        );
     }
 
     #[test]
     fn test_reward_model_threshold_filtering_multiple_prompts() {
         // With a high threshold, very close reward responses are filtered out
-        let mut cfg = OnlineDpoConfig::default();
-        cfg.hard_pair_threshold = 1.0;
+        let cfg = OnlineDpoConfig {
+            hard_pair_threshold: 1.0,
+            ..OnlineDpoConfig::default()
+        };
         let prompts = vec![vec![1u32], vec![2u32]];
-        let responses = vec![
-            vec![vec![1u32], vec![2u32]],
-            vec![vec![3u32], vec![4u32]],
-        ];
+        let responses = vec![vec![vec![1u32], vec![2u32]], vec![vec![3u32], vec![4u32]]];
         let rewards = vec![
-            vec![0.6_f32, 0.1],   // gap=0.5 < 1.0 → filtered
-            vec![2.0_f32, 0.0],   // gap=2.0 >= 1.0 → kept
+            vec![0.6_f32, 0.1], // gap=0.5 < 1.0 → filtered
+            vec![2.0_f32, 0.0], // gap=2.0 >= 1.0 → kept
         ];
         let pairs = OnlineDpoSelector::create_pairs(&prompts, &responses, &rewards, &cfg);
         assert_eq!(pairs.len(), 1);
@@ -986,11 +1004,14 @@ mod tests {
     #[test]
     fn test_sigmoid_loss_zero_margin_gives_log_two() {
         // margin=0 → -log_sigmoid(0) = log(2)
-        let loss = OnlineDpoLoss::compute_loss(
-            0.0, 0.0, 0.0, 0.0, 0.1, OnlineDpoLossType::Sigmoid
-        );
+        let loss = OnlineDpoLoss::compute_loss(0.0, 0.0, 0.0, 0.0, 0.1, OnlineDpoLossType::Sigmoid);
         let expected = (2.0_f32).ln();
-        assert!((loss - expected).abs() < 1e-5, "loss={} expected log(2)={}", loss, expected);
+        assert!(
+            (loss - expected).abs() < 1e-5,
+            "loss={} expected log(2)={}",
+            loss,
+            expected
+        );
     }
 
     #[test]
@@ -998,15 +1019,19 @@ mod tests {
         // When beta*margin = 1.0: hinge = max(0, 1-1) = 0
         // margin = 1/beta = 10.0 when beta=0.1
         let loss = OnlineDpoLoss::compute_loss(
-            0.0,   // chosen_lp
-            0.0,   // rejected_lp
-            -5.0,  // ref_chosen_lp → chosen_ratio = 5.0
-            5.0,   // ref_rejected_lp → rejected_ratio = -5.0
-            0.1,   // beta
+            0.0,  // chosen_lp
+            0.0,  // rejected_lp
+            -5.0, // ref_chosen_lp → chosen_ratio = 5.0
+            5.0,  // ref_rejected_lp → rejected_ratio = -5.0
+            0.1,  // beta
             OnlineDpoLossType::Hinge,
         );
         // margin = 5.0 - (-5.0) = 10.0; beta*margin = 0.1*10 = 1.0; max(0, 0) = 0
-        assert!((loss).abs() < 1e-5, "hinge at boundary should be 0, got {}", loss);
+        assert!(
+            (loss).abs() < 1e-5,
+            "hinge at boundary should be 0, got {}",
+            loss
+        );
     }
 
     #[test]
@@ -1025,27 +1050,40 @@ mod tests {
         let log_sig = -(1.0_f32 + (-scaled_margin).exp()).ln();
         let expected_robust = -(1.0 - ls) * log_sig + ls * (2.0_f32).ln();
         let actual_robust = OnlineDpoLoss::compute_loss(
-            chosen_lp, rejected_lp, ref_chosen, ref_rejected, beta, OnlineDpoLossType::Robust
+            chosen_lp,
+            rejected_lp,
+            ref_chosen,
+            ref_rejected,
+            beta,
+            OnlineDpoLossType::Robust,
         );
-        assert!((actual_robust - expected_robust).abs() < 1e-5, "robust={} expected={}", actual_robust, expected_robust);
+        assert!(
+            (actual_robust - expected_robust).abs() < 1e-5,
+            "robust={} expected={}",
+            actual_robust,
+            expected_robust
+        );
     }
 
     #[test]
     fn test_batch_loss_all_correct_margin_accuracy_one() {
         // All pairs have positive margin → accuracy = 1.0
         let cfg = OnlineDpoConfig::default();
-        let pairs = vec![
-            make_pair(2.0, 0.5),
-            make_pair(3.0, 1.0),
-        ];
+        let pairs = vec![make_pair(2.0, 0.5), make_pair(3.0, 1.0)];
         // chosen is much more likely than rejected compared to reference
         let chosen_lps = vec![-0.1_f32, -0.2];
         let rejected_lps = vec![-5.0_f32, -4.0];
         let ref_chosen = vec![-1.0_f32, -1.0];
         let ref_rejected = vec![-1.0_f32, -1.0];
         let out = OnlineDpoLoss::compute_batch_loss(
-            &pairs, &chosen_lps, &rejected_lps, &ref_chosen, &ref_rejected, &cfg
-        ).expect("ok");
+            &pairs,
+            &chosen_lps,
+            &rejected_lps,
+            &ref_chosen,
+            &ref_rejected,
+            &cfg,
+        )
+        .expect("ok");
         assert_eq!(out.accuracy, 1.0, "accuracy={}", out.accuracy);
     }
 
@@ -1055,17 +1093,26 @@ mod tests {
         let mut trainer = OnlineDpoTrainer::new(cfg);
         let pairs = vec![make_pair(1.5, 0.5)];
 
-        let r1 = trainer.process_batch(
-            pairs.clone(), vec![-0.5], vec![-1.5], vec![-1.0], vec![-0.8]
-        ).expect("batch 1");
-        let r2 = trainer.process_batch(
-            pairs, vec![-0.3], vec![-1.2], vec![-0.8], vec![-0.6]
-        ).expect("batch 2");
+        let r1 = trainer
+            .process_batch(
+                pairs.clone(),
+                vec![-0.5],
+                vec![-1.5],
+                vec![-1.0],
+                vec![-0.8],
+            )
+            .expect("batch 1");
+        let r2 = trainer
+            .process_batch(pairs, vec![-0.3], vec![-1.2], vec![-0.8], vec![-0.6])
+            .expect("batch 2");
 
         assert_eq!(trainer.history().len(), 2);
         assert_eq!(trainer.step, 2);
         let expected_mean = (r1.total_loss + r2.total_loss) / 2.0;
-        assert!((trainer.mean_loss() - expected_mean).abs() < 1e-5, "mean_loss mismatch");
+        assert!(
+            (trainer.mean_loss() - expected_mean).abs() < 1e-5,
+            "mean_loss mismatch"
+        );
     }
 
     #[test]
@@ -1086,13 +1133,25 @@ mod tests {
 
         let pairs = vec![make_pair(1.0, 0.0)];
         // Step 1: all correct (accuracy=1.0)
-        trainer.process_batch(
-            pairs.clone(), vec![-0.1], vec![-5.0], vec![-1.0], vec![-1.0]
-        ).expect("batch 1");
+        trainer
+            .process_batch(
+                pairs.clone(),
+                vec![-0.1],
+                vec![-5.0],
+                vec![-1.0],
+                vec![-1.0],
+            )
+            .expect("batch 1");
         // Step 2: all wrong (negative margin)
-        trainer.process_batch(
-            pairs.clone(), vec![-5.0], vec![-0.1], vec![-1.0], vec![-1.0]
-        ).expect("batch 2");
+        trainer
+            .process_batch(
+                pairs.clone(),
+                vec![-5.0],
+                vec![-0.1],
+                vec![-1.0],
+                vec![-1.0],
+            )
+            .expect("batch 2");
 
         let mean_acc = trainer.mean_accuracy();
         assert!((mean_acc - 0.5).abs() < 1e-5, "mean_acc={}", mean_acc);
@@ -1103,13 +1162,10 @@ mod tests {
         let cfg = OnlineDpoConfig::default();
         let prompts = vec![vec![1u32], vec![2u32]];
         let responses = vec![
-            vec![],          // empty → skipped
+            vec![],                         // empty → skipped
             vec![vec![10u32], vec![20u32]], // gap=0.5 ≥ 0.1 → kept
         ];
-        let rewards = vec![
-            vec![],
-            vec![0.8_f32, 0.3],
-        ];
+        let rewards = vec![vec![], vec![0.8_f32, 0.3]];
         let pairs = OnlineDpoSelector::create_pairs(&prompts, &responses, &rewards, &cfg);
         assert_eq!(pairs.len(), 1, "empty response list should be skipped");
     }

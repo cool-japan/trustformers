@@ -10,7 +10,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::advanced_gpu_profiler::{
@@ -23,6 +23,13 @@ use crate::advanced_gpu_profiler::{
 /// CPU-side analytical computations backing the analyzers in this module
 /// (occupancy estimation, roofline classification, fusion detection).
 mod analysis;
+
+/// Performance-regression detection (baseline establishment + Welch's
+/// t-test comparison) backing [`PerformanceRegressionDetector`]. Types are
+/// re-exported here so existing `crate::kernel_optimizer::{Foo, ...}`
+/// paths keep working after the split.
+mod regression;
+pub use regression::*;
 
 /// Comprehensive kernel optimization analyzer
 #[derive(Debug)]
@@ -499,95 +506,6 @@ pub struct EnergyModel {
     pub power_efficiency_improvement: f64,
 }
 
-/// Performance regression detection
-#[derive(Debug)]
-pub struct PerformanceRegressionDetector {
-    baseline_profiles: HashMap<String, BaselineProfile>,
-    regression_alerts: Vec<RegressionAlert>,
-    statistical_analyzer: StatisticalAnalyzer,
-    alert_thresholds: RegressionThresholds,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BaselineProfile {
-    pub kernel_name: String,
-    pub baseline_performance: Duration,
-    pub performance_distribution: PerformanceDistribution,
-    pub established_date: SystemTime,
-    pub confidence_interval: (Duration, Duration),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceDistribution {
-    pub mean: Duration,
-    pub std_dev: Duration,
-    pub percentiles: HashMap<u8, Duration>, // 50th, 90th, 95th, 99th percentiles
-    pub outlier_threshold: Duration,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegressionAlert {
-    pub alert_id: Uuid,
-    pub kernel_name: String,
-    pub alert_type: RegressionType,
-    pub severity: RegressionSeverity,
-    pub current_performance: Duration,
-    pub baseline_performance: Duration,
-    pub regression_magnitude: f64,
-    pub detection_timestamp: SystemTime,
-    pub potential_causes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegressionType {
-    PerformanceDegradation,
-    MemoryUsageIncrease,
-    OccupancyDecrease,
-    BandwidthUtilizationDrop,
-    EnergyEfficiencyLoss,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RegressionSeverity {
-    Minor,    // < 5% regression
-    Moderate, // 5-15% regression
-    Major,    // 15-30% regression
-    Critical, // > 30% regression
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegressionThresholds {
-    pub minor_threshold: f64,
-    pub moderate_threshold: f64,
-    pub major_threshold: f64,
-    pub critical_threshold: f64,
-    pub detection_window: Duration,
-    pub confidence_level: f64,
-}
-
-#[derive(Debug)]
-pub struct StatisticalAnalyzer {
-    sample_size_requirements: HashMap<String, usize>,
-    statistical_tests: Vec<StatisticalTest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatisticalTest {
-    pub test_name: String,
-    pub test_type: TestType,
-    pub significance_level: f64,
-    pub power: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TestType {
-    TTest,
-    MannWhitneyU,
-    KolmogorovSmirnov,
-    ChangePointDetection,
-    AnomalyDetection,
-}
-
 // Implementation of the main analyzer
 
 impl KernelOptimizationAnalyzer {
@@ -603,17 +521,34 @@ impl KernelOptimizationAnalyzer {
         })
     }
 
-    /// Create a stub analyzer for fallback when initialization fails
-    pub fn new_stub() -> Self {
+    /// Create an analyzer with empty state, for the fallback path when
+    /// [`Self::new`] fails.
+    ///
+    /// Every sub-analyzer starts from the same empty maps [`Self::new`] builds;
+    /// the only difference is that this constructor cannot fail. It is named
+    /// `new_empty` rather than the previous `new_stub` because nothing here is
+    /// stubbed out: analysis on this instance is fully functional, it simply
+    /// starts with no recorded history.
+    pub fn new_empty() -> Self {
         Self {
             kernel_profiles: HashMap::new(),
             optimization_suggestions: HashMap::new(),
-            launch_config_analyzer: LaunchConfigAnalyzer::new_stub(),
-            memory_access_analyzer: MemoryAccessAnalyzer::new_stub(),
-            compute_utilization_analyzer: ComputeUtilizationAnalyzer::new_stub(),
-            fusion_analyzer: KernelFusionAnalyzer::new_stub(),
-            performance_regression_detector: PerformanceRegressionDetector::new_stub(),
+            launch_config_analyzer: LaunchConfigAnalyzer::new_empty(),
+            memory_access_analyzer: MemoryAccessAnalyzer::new_empty(),
+            compute_utilization_analyzer: ComputeUtilizationAnalyzer::new_empty(),
+            fusion_analyzer: KernelFusionAnalyzer::new_empty(),
+            performance_regression_detector: PerformanceRegressionDetector::new_empty(),
         }
+    }
+
+    /// Names of every kernel this analyzer holds a real execution profile for.
+    pub fn analyzed_kernel_names(&self) -> Vec<&str> {
+        self.kernel_profiles.keys().map(String::as_str).collect()
+    }
+
+    /// Optimization suggestions recorded so far, keyed by kernel name.
+    pub fn optimization_suggestions(&self) -> &HashMap<String, Vec<KernelOptimization>> {
+        &self.optimization_suggestions
     }
 
     /// Analyze a kernel execution and generate optimization suggestions
@@ -819,7 +754,12 @@ pub struct KernelOptimizationReport {
     pub memory_analysis: MemoryAnalysisResult,
     pub compute_analysis: ComputeAnalysisResult,
     pub fusion_opportunities: Vec<FusionOpportunity>,
-    pub regression_status: RegressionStatus,
+    /// Real regression status computed from this kernel's execution-time
+    /// history, or `None` when there is not yet enough real data to
+    /// establish and compare against a baseline -- see
+    /// [`PerformanceRegressionDetector::get_status`]. Never a fabricated
+    /// "stable" placeholder.
+    pub regression_status: Option<RegressionStatus>,
     pub overall_optimization_potential: OptimizationPotential,
 }
 
@@ -914,30 +854,9 @@ pub struct ResourceImpact {
     pub performance_change: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegressionStatus {
-    pub has_regression: bool,
-    pub regression_alerts: Vec<RegressionAlert>,
-    pub performance_trend: PerformanceTrend,
-    pub baseline_comparison: BaselineComparison,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PerformanceTrend {
-    Improving,
-    Stable,
-    Degrading,
-    Volatile,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BaselineComparison {
-    pub current_vs_baseline: f64, // Percentage difference
-    pub statistical_significance: f64,
-    pub confidence_interval: (f64, f64),
-}
-
-// Implementation stubs for sub-analyzers
+// Sub-analyzer constructors. `new()` is the fallible form used on the normal
+// path; `new_empty()` is the infallible form used by
+// `KernelOptimizationAnalyzer::new_empty`. Both start from empty state.
 
 impl LaunchConfigAnalyzer {
     fn new() -> Result<Self> {
@@ -949,7 +868,7 @@ impl LaunchConfigAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             optimal_configs: HashMap::new(),
             config_performance_history: HashMap::new(),
@@ -998,13 +917,13 @@ impl MemoryAccessAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             access_patterns: HashMap::new(),
             coalescing_analysis: HashMap::new(),
             cache_performance: HashMap::new(),
             stride_analysis: HashMap::new(),
-            bank_conflict_analyzer: BankConflictAnalyzer::new_stub(),
+            bank_conflict_analyzer: BankConflictAnalyzer::new_empty(),
         }
     }
 
@@ -1066,12 +985,12 @@ impl ComputeUtilizationAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             utilization_profiles: HashMap::new(),
             bottleneck_analysis: HashMap::new(),
-            arithmetic_intensity_analyzer: ArithmeticIntensityAnalyzer::new_stub(),
-            resource_balancer: ResourceBalancer::new_stub(),
+            arithmetic_intensity_analyzer: ArithmeticIntensityAnalyzer::new_empty(),
+            resource_balancer: ResourceBalancer::new_empty(),
         }
     }
 
@@ -1148,12 +1067,12 @@ impl KernelFusionAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             fusion_opportunities: HashMap::new(),
             dependency_graph: KernelDependencyGraph::new(),
             fusion_templates: vec![],
-            cost_benefit_analyzer: FusionCostBenefitAnalyzer::new_stub(),
+            cost_benefit_analyzer: FusionCostBenefitAnalyzer::new_empty(),
         }
     }
 
@@ -1184,63 +1103,8 @@ impl KernelFusionAnalyzer {
     }
 }
 
-impl PerformanceRegressionDetector {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            baseline_profiles: HashMap::new(),
-            regression_alerts: vec![],
-            statistical_analyzer: StatisticalAnalyzer::new()?,
-            alert_thresholds: RegressionThresholds {
-                minor_threshold: 0.05,
-                moderate_threshold: 0.15,
-                major_threshold: 0.30,
-                critical_threshold: 0.50,
-                detection_window: Duration::from_secs(3600),
-                confidence_level: 0.95,
-            },
-        })
-    }
-
-    fn new_stub() -> Self {
-        Self {
-            baseline_profiles: HashMap::new(),
-            regression_alerts: vec![],
-            statistical_analyzer: StatisticalAnalyzer::new_stub(),
-            alert_thresholds: RegressionThresholds {
-                minor_threshold: 0.05,
-                moderate_threshold: 0.15,
-                major_threshold: 0.30,
-                critical_threshold: 0.50,
-                detection_window: Duration::from_secs(3600),
-                confidence_level: 0.95,
-            },
-        }
-    }
-
-    fn check_regression(
-        &mut self,
-        _kernel_name: &str,
-        _profile_data: &KernelProfileData,
-    ) -> Result<()> {
-        // Simplified implementation - would perform statistical regression analysis
-        Ok(())
-    }
-
-    fn get_status(&self, _kernel_name: &str) -> Result<RegressionStatus> {
-        Ok(RegressionStatus {
-            has_regression: false,
-            regression_alerts: vec![],
-            performance_trend: PerformanceTrend::Stable,
-            baseline_comparison: BaselineComparison {
-                current_vs_baseline: 0.0,
-                statistical_significance: 0.95,
-                confidence_interval: (-0.05, 0.05),
-            },
-        })
-    }
-}
-
-// Implementation stubs for remaining analyzers
+// Constructors for the remaining sub-analyzers; same `new`/`new_empty` pairing
+// as above.
 
 impl BankConflictAnalyzer {
     fn new() -> Result<Self> {
@@ -1250,7 +1114,7 @@ impl BankConflictAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             conflict_patterns: HashMap::new(),
             resolution_strategies: HashMap::new(),
@@ -1266,7 +1130,7 @@ impl ArithmeticIntensityAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             intensity_profiles: HashMap::new(),
             roofline_models: HashMap::new(),
@@ -1282,7 +1146,7 @@ impl ResourceBalancer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             resource_profiles: HashMap::new(),
             balancing_strategies: HashMap::new(),
@@ -1308,26 +1172,10 @@ impl FusionCostBenefitAnalyzer {
         })
     }
 
-    fn new_stub() -> Self {
+    fn new_empty() -> Self {
         Self {
             cost_models: HashMap::new(),
             benefit_predictors: HashMap::new(),
-        }
-    }
-}
-
-impl StatisticalAnalyzer {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            sample_size_requirements: HashMap::new(),
-            statistical_tests: vec![],
-        })
-    }
-
-    fn new_stub() -> Self {
-        Self {
-            sample_size_requirements: HashMap::new(),
-            statistical_tests: vec![],
         }
     }
 }
@@ -1361,6 +1209,10 @@ impl Default for KernelOptimizationConfig {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "kernel_optimizer_tests.rs"]
+mod kernel_optimizer_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1577,16 +1429,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fusion_cost_benefit_analyzer_new_stub() {
-        let analyzer = FusionCostBenefitAnalyzer::new_stub();
+    fn test_fusion_cost_benefit_analyzer_new_empty() {
+        let analyzer = FusionCostBenefitAnalyzer::new_empty();
         assert!(analyzer.cost_models.is_empty());
     }
 
-    #[test]
-    fn test_statistical_analyzer_new_stub() {
-        let analyzer = StatisticalAnalyzer::new_stub();
-        assert!(analyzer.sample_size_requirements.is_empty());
-    }
+    // StatisticalAnalyzer now lives in (and is private to) the `regression`
+    // submodule -- see kernel_optimizer/regression.rs's own test module for
+    // its `new`/`new_empty` coverage.
 
     #[test]
     fn test_stride_impact_variants() {
@@ -1665,12 +1515,6 @@ mod tests {
     #[test]
     fn test_fusion_cost_benefit_analyzer_new() {
         let result = FusionCostBenefitAnalyzer::new();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_statistical_analyzer_new() {
-        let result = StatisticalAnalyzer::new();
         assert!(result.is_ok());
     }
 

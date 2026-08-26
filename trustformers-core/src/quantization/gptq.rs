@@ -47,12 +47,14 @@ impl GptqConfig {
     /// Validate configuration parameters.
     pub fn validate(&self) -> Result<(), QuantError> {
         match self.bits {
-            2 | 3 | 4 | 8 => {}
-            _ => return Err(QuantError::ValueOutOfRange {
-                val: self.bits as i64,
-                min: 2,
-                max: 8,
-            }),
+            2 | 3 | 4 | 8 => {},
+            _ => {
+                return Err(QuantError::ValueOutOfRange {
+                    val: self.bits as i64,
+                    min: 2,
+                    max: 8,
+                })
+            },
         }
         if self.group_size == 0 {
             return Err(QuantError::InvalidGroupSize);
@@ -194,24 +196,22 @@ pub fn gptq_quantize_layer(
             let mean_diag = h.iter().sum::<f32>() / h.len() as f32;
             let damp = config.damp_percent * mean_diag;
             h.iter().map(|&v| v + damp).collect()
-        }
+        },
         Some(_) => {
             // Wrong length — fall back to identity.
             vec![1.0_f32; cols]
-        }
+        },
         None => {
             // No Hessian provided — use identity diagonal.
             vec![1.0_f32; cols]
-        }
+        },
     };
 
     // Column ordering (desc_act: sort by decreasing H diagonal).
     let col_order: Vec<usize> = if config.desc_act {
         let mut order: Vec<usize> = (0..cols).collect();
         order.sort_by(|&a, &b| {
-            hess_diag[b]
-                .partial_cmp(&hess_diag[a])
-                .unwrap_or(std::cmp::Ordering::Equal)
+            hess_diag[b].partial_cmp(&hess_diag[a]).unwrap_or(std::cmp::Ordering::Equal)
         });
         order
     } else {
@@ -230,12 +230,10 @@ pub fn gptq_quantize_layer(
         for group in 0..num_groups {
             let row_start = group * config.group_size;
             let row_end = (row_start + config.group_size).min(rows);
-            let group_vals: Vec<f32> = (row_start..row_end)
-                .map(|r| w_work[r * cols + col])
-                .collect();
+            let group_vals: Vec<f32> =
+                (row_start..row_end).map(|r| w_work[r * cols + col]).collect();
 
-            let (scale, zp) =
-                group_scale_zero_point(&group_vals, min_q, max_q, config.sym);
+            let (scale, zp) = group_scale_zero_point(&group_vals, min_q, max_q, config.sym);
             scales[group * cols + col] = scale;
             zero_points[group * cols + col] = zp;
         }
@@ -387,12 +385,7 @@ pub fn gptq_dequantize(qw: &GptqQuantizedWeight) -> Result<Vec<f32>, QuantError>
 // Quantization helpers
 // ---------------------------------------------------------------------------
 
-fn group_scale_zero_point(
-    group: &[f32],
-    min_q: i64,
-    max_q: i64,
-    symmetric: bool,
-) -> (f32, f32) {
+fn group_scale_zero_point(group: &[f32], min_q: i64, max_q: i64, symmetric: bool) -> (f32, f32) {
     let fmin = group.iter().cloned().fold(f32::INFINITY, f32::min);
     let fmax = group.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
@@ -452,20 +445,29 @@ mod tests {
     #[test]
     fn test_config_validation_valid() {
         for &bits in &[2u32, 3, 4, 8] {
-            let cfg = GptqConfig { bits, ..Default::default() };
+            let cfg = GptqConfig {
+                bits,
+                ..Default::default()
+            };
             assert!(cfg.validate().is_ok(), "bits={bits} should be valid");
         }
     }
 
     #[test]
     fn test_config_validation_invalid_bits() {
-        let cfg = GptqConfig { bits: 5, ..Default::default() };
+        let cfg = GptqConfig {
+            bits: 5,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_config_validation_zero_group_size() {
-        let cfg = GptqConfig { group_size: 0, ..Default::default() };
+        let cfg = GptqConfig {
+            group_size: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -507,18 +509,14 @@ mod tests {
         let cols = 4;
         // Simple weight matrix with values in [-1, 1].
         let weight: Vec<f32> = vec![
-            0.1, -0.2, 0.3, -0.4,
-            0.5, -0.6, 0.7, -0.8,
-            0.9, -1.0, 0.0,  0.5,
-            -0.5, 0.25, -0.75, 1.0,
+            0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.0, 0.5, -0.5, 0.25, -0.75, 1.0,
         ];
         let config = GptqConfig {
             bits: 4,
             group_size: 4, // one group per column
             ..Default::default()
         };
-        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config)
-            .expect("quantize failed");
+        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config).expect("quantize failed");
         assert_eq!(qw.rows, rows);
         assert_eq!(qw.cols, cols);
         assert_eq!(qw.bits, 4);
@@ -532,17 +530,14 @@ mod tests {
     fn test_dequantization_reconstruction_error() {
         let rows = 8;
         let cols = 8;
-        let weight: Vec<f32> = (0..rows * cols)
-            .map(|i| ((i as f32 - 32.0) / 32.0))
-            .collect();
+        let weight: Vec<f32> = (0..rows * cols).map(|i| (i as f32 - 32.0) / 32.0).collect();
         let config = GptqConfig {
             bits: 4,
             group_size: 8,
             sym: true,
             ..Default::default()
         };
-        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config)
-            .expect("quantize failed");
+        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config).expect("quantize failed");
         let reconstructed = gptq_dequantize(&qw).expect("dequantize failed");
 
         assert_eq!(reconstructed.len(), weight.len());
@@ -554,7 +549,10 @@ mod tests {
             .fold(0.0_f32, f32::max);
 
         // With 4-bit symmetric quantization, max error should be < 0.15 for this range.
-        assert!(max_err < 0.15_f32, "reconstruction error {max_err} exceeds threshold");
+        assert!(
+            max_err < 0.15_f32,
+            "reconstruction error {max_err} exceeds threshold"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -572,8 +570,7 @@ mod tests {
             group_size: 128, // much larger than rows=4
             ..Default::default()
         };
-        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config)
-            .expect("quantize failed");
+        let qw = gptq_quantize_layer(&weight, rows, cols, None, &config).expect("quantize failed");
         assert_eq!(qw.rows, rows);
         assert_eq!(qw.cols, cols);
     }
@@ -587,10 +584,7 @@ mod tests {
         let rows = 4;
         let cols = 4;
         let weight: Vec<f32> = vec![
-            0.1, 0.2, -0.3, 0.4,
-            -0.1, 0.5, 0.0, -0.2,
-            0.3, -0.4, 0.2, 0.1,
-            -0.5, 0.3, -0.1, 0.4,
+            0.1, 0.2, -0.3, 0.4, -0.1, 0.5, 0.0, -0.2, 0.3, -0.4, 0.2, 0.1, -0.5, 0.3, -0.1, 0.4,
         ];
         // Hessian diagonal — one value per column.
         let hessian: Vec<f32> = vec![1.0, 2.0, 0.5, 3.0];
@@ -655,6 +649,9 @@ mod tests {
         let qw = gptq_quantize_layer(&weight, rows, cols, Some(&hessian), &config)
             .expect("desc_act quantize failed");
         // Column with highest hessian (col 3) should appear at position 0 in g_idx.
-        assert_eq!(qw.g_idx[3], 0, "highest hessian column should be in group 0");
+        assert_eq!(
+            qw.g_idx[3], 0,
+            "highest hessian column should be in group 0"
+        );
     }
 }

@@ -22,9 +22,9 @@ pub mod variants;
 
 // Re-export advanced attention variants for convenient access.
 pub use variants::{
-    alibi_attention, alibi_attention_full, alibi_bias, alibi_slopes,
-    cross_attention, grouped_query_attention, multi_query_attention, repeat_kv,
-    AliBiConfig, AliBiFullConfig, CrossAttentionConfig, GqaConfig, MqaConfig,
+    alibi_attention, alibi_attention_full, alibi_bias, alibi_slopes, cross_attention,
+    grouped_query_attention, multi_query_attention, repeat_kv, AliBiConfig, AliBiFullConfig,
+    CrossAttentionConfig, GqaConfig, MqaConfig,
 };
 
 // ─── Error ────────────────────────────────────────────────────────────────────
@@ -251,10 +251,7 @@ impl FlashAttention {
             });
         }
 
-        let scale = self
-            .config
-            .scale
-            .unwrap_or_else(|| 1.0 / (head_dim as f64).sqrt());
+        let scale = self.config.scale.unwrap_or_else(|| 1.0 / (head_dim as f64).sqrt());
 
         let seq_q = q.len();
         let seq_k = k.len();
@@ -294,19 +291,13 @@ impl FlashAttention {
                     }
 
                     // Row max for this block
-                    let m_ij = s_row
-                        .iter()
-                        .cloned()
-                        .fold(f64::NEG_INFINITY, f64::max);
+                    let m_ij = s_row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
                     // New running max
                     let m_i_new = m_i[qi].max(m_ij);
 
                     // Shifted probabilities P_ij = exp(S_ij - m_i_new)
-                    let p_row: Vec<f64> = s_row
-                        .iter()
-                        .map(|&s| (s - m_i_new).exp())
-                        .collect();
+                    let p_row: Vec<f64> = s_row.iter().map(|&s| (s - m_i_new).exp()).collect();
 
                     // Row sum of P_ij
                     let p_sum: f64 = p_row.iter().sum();
@@ -326,8 +317,7 @@ impl FlashAttention {
                             for (local_kj, kj) in (kj_start..kj_end).enumerate() {
                                 new_contrib += p_row[local_kj] * v[kj][d];
                             }
-                            output[qi][d] =
-                                old_scale * output[qi][d] + new_contrib * inv_l;
+                            output[qi][d] = old_scale * output[qi][d] + new_contrib * inv_l;
                         }
                     }
 
@@ -380,13 +370,8 @@ impl FlashAttention {
         };
 
         let flash_out = self.forward(q, k, v)?;
-        let std_out = scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            mask_storage.as_deref(),
-            self.config.scale,
-        )?;
+        let std_out =
+            scaled_dot_product_attention(q, k, v, mask_storage.as_deref(), self.config.scale)?;
 
         let mut max_diff = 0.0_f64;
         for (row_f, row_s) in flash_out.iter().zip(std_out.iter()) {
@@ -426,7 +411,7 @@ impl MultiHeadAttentionConfig {
     /// # Errors
     /// Returns [`AttentionError::InvalidHeads`] if the condition is violated.
     pub fn new(d_model: usize, nheads: usize) -> Result<Self, AttentionError> {
-        if d_model % nheads != 0 {
+        if !d_model.is_multiple_of(nheads) {
             return Err(AttentionError::InvalidHeads {
                 dm: d_model,
                 nh: nheads,
@@ -686,9 +671,7 @@ pub struct MultiHeadKVCache {
 impl MultiHeadKVCache {
     /// Create one [`KVCache`] per head.
     pub fn new(nheads: usize, max_seq_len: usize, head_dim: usize) -> Self {
-        let caches = (0..nheads)
-            .map(|_| KVCache::new(max_seq_len, head_dim))
-            .collect();
+        let caches = (0..nheads).map(|_| KVCache::new(max_seq_len, head_dim)).collect();
         Self { nheads, caches }
     }
 
@@ -741,8 +724,8 @@ mod tests {
     /// Build an n×n identity matrix as Vec<Vec<f64>>.
     fn identity(n: usize) -> Vec<Vec<f64>> {
         let mut m = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            m[i][i] = 1.0;
+        for (i, row) in m.iter_mut().enumerate() {
+            row[i] = 1.0;
         }
         m
     }
@@ -756,7 +739,13 @@ mod tests {
     fn assert_close(a: &[Vec<f64>], b: &[Vec<f64>], tol: f64, label: &str) {
         assert_eq!(a.len(), b.len(), "{}: row count mismatch", label);
         for (i, (ra, rb)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(ra.len(), rb.len(), "{}: row {} col count mismatch", label, i);
+            assert_eq!(
+                ra.len(),
+                rb.len(),
+                "{}: row {} col count mismatch",
+                label,
+                i
+            );
             for (j, (&va, &vb)) in ra.iter().zip(rb.iter()).enumerate() {
                 assert!(
                     (va - vb).abs() < tol,
@@ -784,8 +773,7 @@ mod tests {
         let q = identity(n);
         let k = identity(n);
         let v = identity(n);
-        let out = scaled_dot_product_attention(&q, &k, &v, None, None)
-            .expect("sdpa identity");
+        let out = scaled_dot_product_attention(&q, &k, &v, None, None).expect("sdpa identity");
         assert_eq!(out.len(), n);
         assert_eq!(out[0].len(), n);
         // Each row of output should sum to 1 and be uniform
@@ -804,8 +792,7 @@ mod tests {
         let q = vec![vec![0.1_f64; head_dim]; seq_q];
         let k = vec![vec![0.2_f64; head_dim]; seq_k];
         let v = vec![vec![0.3_f64; head_dim]; seq_k];
-        let out = scaled_dot_product_attention(&q, &k, &v, None, None)
-            .expect("sdpa shape");
+        let out = scaled_dot_product_attention(&q, &k, &v, None, None).expect("sdpa shape");
         assert_eq!(out.len(), seq_q);
         assert_eq!(out[0].len(), head_dim);
     }
@@ -819,13 +806,12 @@ mod tests {
         let k = identity(n);
         let v = identity(n);
         let mut mask = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                mask[i][j] = f64::NEG_INFINITY;
+        for (i, row) in mask.iter_mut().enumerate() {
+            for cell in row.iter_mut().skip(i + 1) {
+                *cell = f64::NEG_INFINITY;
             }
         }
-        let out = scaled_dot_product_attention(&q, &k, &v, Some(&mask), None)
-            .expect("sdpa causal");
+        let out = scaled_dot_product_attention(&q, &k, &v, Some(&mask), None).expect("sdpa causal");
         // Row 0 can only attend to position 0 → output row 0 == v[0]
         assert_close(&[out[0].clone()], &[v[0].clone()], 1e-10, "causal row 0");
         // Row 1 attends to positions 0..=1 equally (same dot-product values
@@ -847,11 +833,11 @@ mod tests {
         let k = identity(head_dim);
         let v = identity(head_dim);
         // Default scale
-        let out_default = scaled_dot_product_attention(&q, &k, &v, None, None)
-            .expect("sdpa scale default");
+        let out_default =
+            scaled_dot_product_attention(&q, &k, &v, None, None).expect("sdpa scale default");
         // Large scale → very sharp distribution
-        let out_large = scaled_dot_product_attention(&q, &k, &v, None, Some(10.0))
-            .expect("sdpa scale large");
+        let out_large =
+            scaled_dot_product_attention(&q, &k, &v, None, Some(10.0)).expect("sdpa scale large");
         // With large scale the first key gets much higher weight → output[0][0]
         // should be larger in the large-scale case
         assert!(
@@ -880,9 +866,7 @@ mod tests {
             block_size_k: 4,
             ..Default::default()
         });
-        let ok = fa
-            .verify_against_standard(&q, &k, &v, 1e-9)
-            .expect("verify");
+        let ok = fa.verify_against_standard(&q, &k, &v, 1e-9).expect("verify");
         assert!(ok, "flash should match standard");
     }
 
@@ -891,9 +875,8 @@ mod tests {
     fn test_flash_causal_matches_standard() {
         let seq = 6;
         let dim = 4;
-        let q: Vec<Vec<f64>> = (0..seq)
-            .map(|i| (0..dim).map(|d| ((i + d) as f64) * 0.05).collect())
-            .collect();
+        let q: Vec<Vec<f64>> =
+            (0..seq).map(|i| (0..dim).map(|d| ((i + d) as f64) * 0.05).collect()).collect();
         let k = q.clone();
         let v = q.clone();
         let fa = FlashAttention::new(FlashAttentionConfig {
@@ -902,9 +885,7 @@ mod tests {
             block_size_k: 3,
             ..Default::default()
         });
-        let ok = fa
-            .verify_against_standard(&q, &k, &v, 1e-9)
-            .expect("verify causal");
+        let ok = fa.verify_against_standard(&q, &k, &v, 1e-9).expect("verify causal");
         assert!(ok, "flash causal should match standard");
     }
 
@@ -913,9 +894,8 @@ mod tests {
     fn test_flash_block_size_16() {
         let seq = 32;
         let dim = 8;
-        let q: Vec<Vec<f64>> = (0..seq)
-            .map(|i| (0..dim).map(|d| ((i + d) as f64) * 0.02).collect())
-            .collect();
+        let q: Vec<Vec<f64>> =
+            (0..seq).map(|i| (0..dim).map(|d| ((i + d) as f64) * 0.02).collect()).collect();
         let k = q.clone();
         let v = q.clone();
         let fa = FlashAttention::new(FlashAttentionConfig {
@@ -968,9 +948,7 @@ mod tests {
         let k = vec![vec![0.2_f64, 1.0, 0.0, -0.1]];
         let v = vec![vec![1.0_f64, 2.0, 3.0, 4.0]];
         let fa = FlashAttention::new(FlashAttentionConfig::default());
-        let ok = fa
-            .verify_against_standard(&q, &k, &v, 1e-9)
-            .expect("single token");
+        let ok = fa.verify_against_standard(&q, &k, &v, 1e-9).expect("single token");
         assert!(ok, "single token flash should match standard");
     }
 
@@ -989,9 +967,7 @@ mod tests {
             .collect();
         let k = q.clone();
         let v = q.clone();
-        let ok = fa
-            .verify_against_standard(&q, &k, &v, 1e-9)
-            .expect("long seq");
+        let ok = fa.verify_against_standard(&q, &k, &v, 1e-9).expect("long seq");
         assert!(ok, "long sequence flash should match standard");
     }
 
@@ -1053,9 +1029,8 @@ mod tests {
         let mha = MultiHeadAttention::new(cfg);
         let seq = 5;
         let d = 8;
-        let q: Vec<Vec<f64>> = (0..seq)
-            .map(|i| (0..d).map(|j| (i + j) as f64 * 0.1).collect())
-            .collect();
+        let q: Vec<Vec<f64>> =
+            (0..seq).map(|i| (0..d).map(|j| (i + j) as f64 * 0.1).collect()).collect();
         let out = mha.forward(&q, &q, &q).expect("mha std");
         for row in &out {
             for &x in row {
@@ -1081,9 +1056,8 @@ mod tests {
         cfg_flash.block_size = 4;
         let mha_flash = MultiHeadAttention::new(cfg_flash);
 
-        let q: Vec<Vec<f64>> = (0..seq)
-            .map(|i| (0..d).map(|j| (i + j) as f64 * 0.05).collect())
-            .collect();
+        let q: Vec<Vec<f64>> =
+            (0..seq).map(|i| (0..d).map(|j| (i + j) as f64 * 0.05).collect()).collect();
 
         let out_std = mha_std.forward(&q, &q, &q).expect("std");
         let out_flash = mha_flash.forward(&q, &q, &q).expect("flash");
@@ -1102,9 +1076,8 @@ mod tests {
         cfg.causal = true;
         let mha = MultiHeadAttention::new(cfg);
 
-        let q: Vec<Vec<f64>> = (0..seq)
-            .map(|i| (0..d).map(|j| (i + j) as f64 * 0.1).collect())
-            .collect();
+        let q: Vec<Vec<f64>> =
+            (0..seq).map(|i| (0..d).map(|j| (i + j) as f64 * 0.1).collect()).collect();
         let out = mha.forward(&q, &q, &q).expect("mha causal");
         assert_eq!(out.len(), seq);
         for row in &out {
@@ -1146,8 +1119,7 @@ mod tests {
     fn test_kvcache_reset() {
         let mut cache = KVCache::new(5, 3);
         for _ in 0..4 {
-            cache.append(vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0])
-                .expect("app");
+            cache.append(vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]).expect("app");
         }
         assert_eq!(cache.len(), 4);
         cache.reset();
@@ -1207,10 +1179,8 @@ mod tests {
     #[test]
     fn test_mhkv_reset_all() {
         let mut mhkv = MultiHeadKVCache::new(2, 5, 2);
-        mhkv.append_head(0, vec![1.0, 2.0], vec![3.0, 4.0])
-            .expect("h0");
-        mhkv.append_head(1, vec![5.0, 6.0], vec![7.0, 8.0])
-            .expect("h1");
+        mhkv.append_head(0, vec![1.0, 2.0], vec![3.0, 4.0]).expect("h0");
+        mhkv.append_head(1, vec![5.0, 6.0], vec![7.0, 8.0]).expect("h1");
         mhkv.reset_all();
         assert_eq!(mhkv.total_tokens_cached(), 0);
     }
@@ -1219,12 +1189,9 @@ mod tests {
     #[test]
     fn test_mhkv_total_tokens_cached() {
         let mut mhkv = MultiHeadKVCache::new(3, 10, 2);
-        mhkv.append_head(0, vec![1.0, 2.0], vec![3.0, 4.0])
-            .expect("h0a");
-        mhkv.append_head(0, vec![5.0, 6.0], vec![7.0, 8.0])
-            .expect("h0b");
-        mhkv.append_head(1, vec![9.0, 10.0], vec![11.0, 12.0])
-            .expect("h1");
+        mhkv.append_head(0, vec![1.0, 2.0], vec![3.0, 4.0]).expect("h0a");
+        mhkv.append_head(0, vec![5.0, 6.0], vec![7.0, 8.0]).expect("h0b");
+        mhkv.append_head(1, vec![9.0, 10.0], vec![11.0, 12.0]).expect("h1");
         // head 2: zero
         assert_eq!(mhkv.total_tokens_cached(), 3);
     }

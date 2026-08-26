@@ -31,6 +31,12 @@ pub struct PluginMetadata {
     pub plugin_type: PluginType,
     pub dependencies: Vec<String>,
     pub permissions: Vec<PluginPermission>,
+    /// Expected SHA-256 hex digest of the plugin's raw bytes, if the plugin
+    /// author published one. When present, [`PluginRegistry::register_plugin`]
+    /// verifies it against a real digest of the bytes passed to
+    /// registration (see [`calculate_plugin_checksum`]) before the plugin is
+    /// accepted - `None` means no integrity check was requested.
+    pub checksum: Option<String>,
 }
 
 /// Types of plugins supported
@@ -248,7 +254,29 @@ pub enum PluginErrorCode {
     InvalidConfiguration,
     DependencyMissing,
     UnsupportedOperation,
+    /// A plugin's real SHA-256 digest (see [`calculate_plugin_checksum`])
+    /// did not match [`PluginMetadata::checksum`].
+    ChecksumMismatch,
     Internal,
+}
+
+/// Real SHA-256 hex digest of `data`, used as the plugin-bytes integrity
+/// checksum by [`PluginRegistry::register_plugin`].
+///
+/// Ported from the orphaned (never `mod`-declared, never compiled)
+/// `plugins::loader::PluginLoader::calculate_checksum`, which had already
+/// moved on from an earlier `wrapping_mul(31)` rolling hash to real
+/// RustCrypto SHA-256 - a checksum weak enough to collide trivially is
+/// unsuitable for integrity verification. SHA-256 is pure Rust (RustCrypto
+/// `sha2`, no C/C++ FFI - COOLJAPAN policy compliant) and makes an
+/// accidental or deliberate collision computationally infeasible.
+#[wasm_bindgen]
+pub fn calculate_plugin_checksum(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Plugin registry for managing loaded plugins
@@ -274,16 +302,41 @@ impl PluginRegistry {
         }
     }
 
-    /// Register a new plugin
+    /// Register a new plugin.
+    ///
+    /// `plugin_bytes` is the plugin's raw payload (e.g. a downloaded WASM
+    /// module or bundled script), if the caller has it. When both
+    /// `plugin_bytes` and `metadata.checksum` are present, this verifies a
+    /// real SHA-256 digest of `plugin_bytes` against the expected checksum
+    /// (see [`calculate_plugin_checksum`]) and rejects the plugin with
+    /// [`PluginErrorCode::ChecksumMismatch`] on any mismatch - a corrupted
+    /// or tampered payload can no longer pass registration silently. Pass
+    /// `None` for plugins with no separate byte payload to verify (e.g.
+    /// natively-compiled, statically-linked plugins).
     pub fn register_plugin(
         &self,
         plugin_id: String,
         plugin: Box<dyn Plugin>,
         config: PluginConfig,
+        plugin_bytes: Option<&[u8]>,
     ) -> Result<(), PluginError> {
         // Validate plugin metadata
         let metadata = plugin.metadata();
         self.validate_plugin_metadata(&metadata)?;
+
+        // Real SHA-256 integrity check (see `calculate_plugin_checksum`).
+        if let (Some(expected), Some(bytes)) = (&metadata.checksum, plugin_bytes) {
+            let actual = calculate_plugin_checksum(bytes);
+            if actual != *expected {
+                return Err(PluginError {
+                    code: PluginErrorCode::ChecksumMismatch,
+                    message: format!(
+                        "Plugin '{plugin_id}' checksum mismatch: expected {expected}, got {actual}"
+                    ),
+                    details: None,
+                });
+            }
+        }
 
         // Check dependencies
         self.check_plugin_dependencies(&metadata.dependencies)?;
@@ -528,6 +581,140 @@ impl Default for PluginConfig {
 #[wasm_bindgen]
 pub fn create_default_plugin_config() -> String {
     serde_json::to_string(&PluginConfig::default()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_metadata(checksum: Option<String>) -> PluginMetadata {
+        PluginMetadata {
+            name: "Test Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            author: "Test Author".to_string(),
+            description: "A plugin used only in tests".to_string(),
+            plugin_type: PluginType::Utility,
+            dependencies: vec![],
+            permissions: vec![],
+            checksum,
+        }
+    }
+
+    struct StubPlugin {
+        metadata: PluginMetadata,
+    }
+
+    impl Plugin for StubPlugin {
+        fn metadata(&self) -> PluginMetadata {
+            self.metadata.clone()
+        }
+        fn initialize(&mut self, _config: PluginConfig) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn execute(&self, _context: &PluginContext) -> Result<PluginResult, PluginError> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn cleanup(&mut self) {}
+    }
+
+    // -----------------------------------------------------------------
+    // `calculate_plugin_checksum`: real SHA-256, ported (for real, not a
+    // reformat) from the orphaned `plugins::loader` module.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_calculate_plugin_checksum_matches_known_sha256_vector() {
+        // SHA-256("") is a well-known test vector; confirms this is real
+        // SHA-256, not a placeholder reformatted to look similar.
+        assert_eq!(
+            calculate_plugin_checksum(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_calculate_plugin_checksum_is_64_hex_chars() {
+        let checksum = calculate_plugin_checksum(b"some plugin bytecode");
+        assert_eq!(checksum.len(), 64);
+        assert!(checksum.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_calculate_plugin_checksum_deterministic_and_sensitive_to_every_byte() {
+        let a = calculate_plugin_checksum(b"plugin-code-v1");
+        let b = calculate_plugin_checksum(b"plugin-code-v1");
+        let c = calculate_plugin_checksum(b"plugin-code-v2");
+        assert_eq!(a, b, "checksum must be deterministic for identical input");
+        assert_ne!(a, c, "checksum must change when input changes");
+    }
+
+    // -----------------------------------------------------------------
+    // `PluginRegistry::register_plugin`: real checksum verification. Before
+    // this, plugin bytes had no integrity check at all anywhere in the
+    // compiled crate (the only prior implementation lived in the orphaned,
+    // never-`mod`-declared `plugins::loader`, which never compiled).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_register_plugin_accepts_matching_checksum() {
+        let bytes: &[u8] = b"\0asm\x01\x00\x00\x00fake-but-well-formed-plugin-bytes";
+        let checksum = calculate_plugin_checksum(bytes);
+        let metadata = sample_metadata(Some(checksum));
+        let plugin = Box::new(StubPlugin { metadata });
+        let registry = PluginRegistry::new();
+
+        let result = registry.register_plugin(
+            "test-plugin".to_string(),
+            plugin,
+            PluginConfig::default(),
+            Some(bytes),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_register_plugin_rejects_tampered_bytes() {
+        let original: &[u8] = b"\0asm\x01\x00\x00\x00fake-but-well-formed-plugin-bytes";
+        let checksum = calculate_plugin_checksum(original);
+        let metadata = sample_metadata(Some(checksum));
+        let plugin = Box::new(StubPlugin { metadata });
+        let registry = PluginRegistry::new();
+
+        let mut tampered = original.to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+
+        let result = registry.register_plugin(
+            "test-plugin".to_string(),
+            plugin,
+            PluginConfig::default(),
+            Some(&tampered),
+        );
+        assert!(matches!(
+            result,
+            Err(PluginError {
+                code: PluginErrorCode::ChecksumMismatch,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_register_plugin_without_checksum_or_bytes_still_succeeds() {
+        // No checksum requested and no bytes supplied: registration must
+        // not require an integrity check that was never asked for.
+        let metadata = sample_metadata(None);
+        let plugin = Box::new(StubPlugin { metadata });
+        let registry = PluginRegistry::new();
+
+        let result = registry.register_plugin(
+            "test-plugin".to_string(),
+            plugin,
+            PluginConfig::default(),
+            None,
+        );
+        assert!(result.is_ok());
+    }
 }
 
 #[wasm_bindgen]

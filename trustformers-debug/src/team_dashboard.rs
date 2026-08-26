@@ -105,7 +105,12 @@ pub struct TeamMetrics {
     /// Comments posted today
     pub comments_today: usize,
     /// Average response time (in minutes)
-    pub avg_response_time: f64,
+    /// Mean time between a request and its response, in minutes.
+    ///
+    /// Always `None`: see `TeamDashboard::calculate_avg_response_time` --
+    /// nothing here records the paired events such an average needs. It used
+    /// to be the constant `15.0`.
+    pub avg_response_time: Option<f64>,
     /// Collaboration score
     pub collaboration_score: f64,
     /// Top contributors
@@ -138,8 +143,13 @@ pub struct ActivityTrends {
     pub daily_activity: Vec<DailyActivity>,
     /// Weekly activity summary
     pub weekly_summary: WeeklyActivity,
-    /// Growth rate percentage
-    pub growth_rate: f64,
+    /// Percentage change in total recorded events between the last seven days
+    /// and the seven days before that: `(recent - prior) / prior * 100`.
+    ///
+    /// `None` when the prior window holds no events at all, because the ratio
+    /// is then undefined -- previously this was hardcoded to `0.0`, which reads
+    /// as "measured zero growth".
+    pub growth_rate: Option<f64>,
 }
 
 /// Daily activity metrics
@@ -166,8 +176,13 @@ pub struct WeeklyActivity {
     pub total_annotations: usize,
     /// Total comments this week
     pub total_comments: usize,
-    /// Peak activity day
-    pub peak_day: String,
+    /// Weekday name (`"Monday"` .. `"Sunday"`) of the busiest of the last seven
+    /// days, by total recorded events.
+    ///
+    /// `None` when no activity was recorded in the window -- there is no peak
+    /// day to name. This was previously the literal string `"Monday"`,
+    /// regardless of the data.
+    pub peak_day: Option<String>,
     /// Average daily active users
     pub avg_daily_active_users: f64,
 }
@@ -474,10 +489,16 @@ impl TeamDashboard {
         Ok(())
     }
 
-    /// Update activity feed from collaboration data
+    /// No-op: the activity feed is already the authoritative record.
+    ///
+    /// Entries reach it through [`Self::record_activity`], which every
+    /// dashboard mutation calls directly; [`CollaborationManager`] exposes only
+    /// aggregate [`crate::collaboration::CollaborationStats`], not an event log
+    /// that could be replayed here. Kept as an explicit no-op (rather than
+    /// deleted) because [`Self::update_metrics`] documents a fixed refresh
+    /// sequence, and silently dropping a step from it would be more confusing
+    /// than a named, empty one.
     fn update_activity_feed(&mut self, _collaboration: &CollaborationManager) -> Result<()> {
-        // This would typically sync with collaboration manager's events
-        // For now, we'll just update the existing feed
         Ok(())
     }
 
@@ -541,28 +562,98 @@ impl TeamDashboard {
         let avg_daily_active_users =
             daily_activity.iter().map(|d| d.active_users as f64).sum::<f64>() / 7.0;
 
+        // Real peak day: the day in the window with the most recorded events.
+        // `max_by_key` keeps the LAST maximum, so scan explicitly to keep the
+        // earliest (oldest) day on a tie, which is the deterministic choice.
+        let peak_day = daily_activity
+            .iter()
+            .map(|d| (d, d.reports + d.annotations + d.comments))
+            .filter(|(_, total)| *total > 0)
+            .fold(None::<(&DailyActivity, usize)>, |best, cur| match best {
+                Some((_, best_total)) if best_total >= cur.1 => best,
+                _ => Some(cur),
+            })
+            .map(|(day, _)| day.date.format("%A").to_string());
+
         let weekly_summary = WeeklyActivity {
             total_reports,
             total_annotations,
             total_comments,
-            peak_day: "Monday".to_string(), // This would be calculated properly
+            peak_day,
             avg_daily_active_users,
+        };
+
+        // Real growth rate: this week's event count against the previous
+        // week's, both counted from the same activity feed.
+        let week_ago = now - Duration::days(7);
+        let two_weeks_ago = now - Duration::days(14);
+        let recent = self.activity_feed.iter().filter(|a| a.timestamp >= week_ago).count();
+        let prior = self
+            .activity_feed
+            .iter()
+            .filter(|a| a.timestamp >= two_weeks_ago && a.timestamp < week_ago)
+            .count();
+        let growth_rate = if prior == 0 {
+            None
+        } else {
+            Some((recent as f64 - prior as f64) / prior as f64 * 100.0)
         };
 
         ActivityTrends {
             daily_activity,
             weekly_summary,
-            growth_rate: 0.0, // Calculate actual growth rate
+            growth_rate,
         }
     }
 
+    /// Composite collaboration score in `[0, 100]`.
+    ///
+    /// Defined here, from the real `stats`, as the mean of three bounded
+    /// sub-scores, each saturating at a documented target:
+    ///
+    /// * **participation** — `contributors / team_size`, the share of the team
+    ///   that appears in the activity feed at all;
+    /// * **discussion** — `(comments + annotations) / reports` against a target
+    ///   of 3 responses per shared report;
+    /// * **breadth** — `reports_per_member` against a target of 5.
+    ///
+    /// It is a *definition*, not a measurement of an external quantity, and the
+    /// weights are stated so a caller can reproduce it. The previous version was
+    /// `50.0 + activity_feed.len() * 0.1`: a magic baseline of 50 that ignored
+    /// `stats` entirely and grew without bound past 100 once the feed exceeded
+    /// 500 entries.
     fn calculate_collaboration_score(
         &self,
-        _stats: &crate::collaboration::CollaborationStats,
+        stats: &crate::collaboration::CollaborationStats,
     ) -> f64 {
-        // Calculate a collaboration score based on various metrics
-        // This is a simplified calculation
-        50.0 + (self.activity_feed.len() as f64 * 0.1)
+        /// Responses (comments + annotations) per shared report that counts as
+        /// a full discussion score.
+        const DISCUSSION_TARGET: f64 = 3.0;
+        /// Reports per member that counts as a full breadth score.
+        const BREADTH_TARGET: f64 = 5.0;
+
+        let contributors = self
+            .activity_feed
+            .iter()
+            .map(|a| a.actor)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let participation = if stats.team_size == 0 {
+            0.0
+        } else {
+            (contributors as f64 / stats.team_size as f64).min(1.0)
+        };
+
+        let responses = (stats.total_comments + stats.total_annotations) as f64;
+        let discussion = if stats.total_reports == 0 {
+            0.0
+        } else {
+            (responses / stats.total_reports as f64 / DISCUSSION_TARGET).min(1.0)
+        };
+
+        let breadth = (stats.reports_per_member / BREADTH_TARGET).clamp(0.0, 1.0);
+
+        (participation + discussion + breadth) / 3.0 * 100.0
     }
 
     fn calculate_top_contributors(&self) -> Vec<ContributorMetric> {
@@ -607,9 +698,11 @@ impl TeamDashboard {
             .count()
     }
 
-    fn calculate_avg_response_time(&self) -> f64 {
-        // Simplified calculation - would need more sophisticated tracking
-        15.0 // 15 minutes average response time
+    /// Always `None`: computing an average response time needs paired
+    /// request/response events, and this dashboard records neither. It used to
+    /// report a flat `15.0` minutes for every team, every week.
+    fn calculate_avg_response_time(&self) -> Option<f64> {
+        None
     }
 
     fn count_activities_by_type(&self, activities: &[&ActivityEvent]) -> HashMap<String, usize> {
@@ -738,7 +831,7 @@ impl Default for TeamMetrics {
             reports_today: 0,
             annotations_today: 0,
             comments_today: 0,
-            avg_response_time: 0.0,
+            avg_response_time: None,
             collaboration_score: 0.0,
             top_contributors: Vec::new(),
             activity_trends: ActivityTrends {
@@ -747,10 +840,12 @@ impl Default for TeamMetrics {
                     total_reports: 0,
                     total_annotations: 0,
                     total_comments: 0,
-                    peak_day: "Monday".to_string(),
+                    // An empty dashboard has no peak day and no baseline
+                    // week to grow from.
+                    peak_day: None,
                     avg_daily_active_users: 0.0,
                 },
-                growth_rate: 0.0,
+                growth_rate: None,
             },
         }
     }
@@ -815,6 +910,164 @@ impl Default for DashboardConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Push an event with an explicit timestamp (the public API always stamps
+    /// `Utc::now()`), so trend windows can be exercised deterministically.
+    fn push_event_at(
+        dashboard: &mut TeamDashboard,
+        event_type: ActivityType,
+        actor: Uuid,
+        timestamp: DateTime<Utc>,
+    ) {
+        dashboard.activity_feed.push(ActivityEvent {
+            id: Uuid::new_v4(),
+            event_type,
+            actor,
+            target: ActivityTarget::Report(Uuid::new_v4()),
+            timestamp,
+            description: String::new(),
+            metadata: HashMap::new(),
+        });
+    }
+
+    #[test]
+    fn peak_day_is_the_real_busiest_day_not_the_literal_monday() {
+        let mut dashboard = TeamDashboard::new(DashboardConfig::default());
+        let actor = Uuid::new_v4();
+        let now = Utc::now();
+        // Three events two days ago, one event today.
+        let busy = now - Duration::days(2);
+        for _ in 0..3 {
+            push_event_at(&mut dashboard, ActivityType::ReportShared, actor, busy);
+        }
+        push_event_at(&mut dashboard, ActivityType::CommentPosted, actor, now);
+
+        let trends = dashboard.calculate_activity_trends();
+        let expected = busy.format("%A").to_string();
+        assert_eq!(
+            trends.weekly_summary.peak_day,
+            Some(expected.clone()),
+            "peak day must be the real argmax ({expected}), not a constant"
+        );
+    }
+
+    #[test]
+    fn peak_day_is_absent_when_nothing_happened() {
+        let dashboard = TeamDashboard::new(DashboardConfig::default());
+        let trends = dashboard.calculate_activity_trends();
+        assert_eq!(
+            trends.weekly_summary.peak_day, None,
+            "no activity => no peak day"
+        );
+        assert_eq!(
+            trends.growth_rate, None,
+            "no prior week => growth is undefined"
+        );
+    }
+
+    #[test]
+    fn growth_rate_compares_this_week_against_the_previous_week() {
+        let mut dashboard = TeamDashboard::new(DashboardConfig::default());
+        let actor = Uuid::new_v4();
+        let now = Utc::now();
+        // 2 events in the prior week, 3 in the current week => +50%.
+        for _ in 0..2 {
+            push_event_at(
+                &mut dashboard,
+                ActivityType::ReportShared,
+                actor,
+                now - Duration::days(10),
+            );
+        }
+        for _ in 0..3 {
+            push_event_at(
+                &mut dashboard,
+                ActivityType::ReportShared,
+                actor,
+                now - Duration::days(2),
+            );
+        }
+        let trends = dashboard.calculate_activity_trends();
+        let rate = trends.growth_rate.expect("a prior week exists, so growth is defined");
+        assert!((rate - 50.0).abs() < 1e-9, "expected +50%, got {rate}");
+    }
+
+    #[test]
+    fn growth_rate_can_be_negative() {
+        let mut dashboard = TeamDashboard::new(DashboardConfig::default());
+        let actor = Uuid::new_v4();
+        let now = Utc::now();
+        for _ in 0..4 {
+            push_event_at(
+                &mut dashboard,
+                ActivityType::ReportShared,
+                actor,
+                now - Duration::days(9),
+            );
+        }
+        push_event_at(
+            &mut dashboard,
+            ActivityType::ReportShared,
+            actor,
+            now - Duration::days(1),
+        );
+        let rate = dashboard.calculate_activity_trends().growth_rate.expect("prior week non-empty");
+        assert!((rate + 75.0).abs() < 1e-9, "1 vs 4 is -75%, got {rate}");
+    }
+
+    #[test]
+    fn collaboration_score_responds_to_stats_and_stays_bounded() {
+        let mut dashboard = TeamDashboard::new(DashboardConfig::default());
+        let empty = crate::collaboration::CollaborationStats {
+            total_reports: 0,
+            total_annotations: 0,
+            total_comments: 0,
+            active_sessions: 0,
+            team_size: 0,
+            reports_per_member: 0.0,
+            annotations_per_report: 0.0,
+        };
+        // The old formula returned 50.0 here (a magic baseline) regardless of
+        // the fact that nothing at all had happened.
+        assert_eq!(dashboard.calculate_collaboration_score(&empty), 0.0);
+
+        let actor = Uuid::new_v4();
+        push_event_at(
+            &mut dashboard,
+            ActivityType::ReportShared,
+            actor,
+            Utc::now(),
+        );
+        let healthy = crate::collaboration::CollaborationStats {
+            total_reports: 10,
+            total_annotations: 20,
+            total_comments: 20,
+            active_sessions: 2,
+            team_size: 1,
+            reports_per_member: 10.0,
+            annotations_per_report: 2.0,
+        };
+        let score = dashboard.calculate_collaboration_score(&healthy);
+        assert!(
+            (score - 100.0).abs() < 1e-9,
+            "all three sub-scores saturate: {score}"
+        );
+
+        // The old formula grew past 100 once the feed exceeded 500 entries.
+        for _ in 0..600 {
+            push_event_at(
+                &mut dashboard,
+                ActivityType::CommentPosted,
+                actor,
+                Utc::now(),
+            );
+        }
+        let score = dashboard.calculate_collaboration_score(&healthy);
+        assert!(
+            (0.0..=100.0).contains(&score),
+            "score must stay bounded: {score}"
+        );
+    }
 
     #[test]
     fn test_dashboard_creation() {

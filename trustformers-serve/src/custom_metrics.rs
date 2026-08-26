@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Custom Metrics Collection System
 //!
 //! Advanced metrics collection beyond basic Prometheus metrics, including
@@ -14,6 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, error, warn};
+
+use crate::performance_optimizer::real_time_metrics::analytics::analyzers::series::pearson_p_value;
+use crate::server::system_stats::HostSnapshot;
 
 /// Custom metrics configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,8 +379,13 @@ pub struct CustomMetricsCollector {
     metrics_storage: Arc<RwLock<HashMap<String, VecDeque<CustomMetric>>>>,
     /// Real-time analytics
     analytics: Arc<Mutex<RealTimeAnalytics>>,
-    /// Performance profiler
-    profiler: Arc<Mutex<PerformanceProfile>>,
+    // 0.2.1: a `profiler: Arc<Mutex<PerformanceProfile>>` field lived here. It
+    // was constructed with four empty vectors and never written to or read
+    // again, so it could only ever have reported "no call traces, no hot spots,
+    // no bottlenecks" -- an empty profile presented as a measured one. Nothing
+    // in this crate traces calls or allocations, so the field is gone rather
+    // than kept as permanently-empty state. `PerformanceProfile` itself stays:
+    // it is a public type a real profiler can fill in.
     /// Prometheus metrics
     prometheus_metrics: Arc<PrometheusMetrics>,
     /// Collection statistics
@@ -428,18 +434,10 @@ impl CustomMetricsCollector {
             anomalies: Vec::new(),
         };
 
-        let profiler = PerformanceProfile {
-            call_traces: Vec::new(),
-            memory_patterns: Vec::new(),
-            hot_spots: Vec::new(),
-            bottlenecks: Vec::new(),
-        };
-
         Ok(Self {
             config,
             metrics_storage: Arc::new(RwLock::new(HashMap::new())),
             analytics: Arc::new(Mutex::new(analytics)),
-            profiler: Arc::new(Mutex::new(profiler)),
             prometheus_metrics: Arc::new(PrometheusMetrics::new()),
             stats: Arc::new(CollectionStats::default()),
             active_metrics: Arc::new(RwLock::new(HashSet::new())),
@@ -649,7 +647,7 @@ impl CustomMetricsCollector {
 
                 // Collect system metrics
                 if let Err(e) = collector.collect_system_metrics().await {
-                    eprintln!("Failed to collect system metrics: {}", e);
+                    error!("Failed to collect system metrics: {}", e);
                 }
 
                 // Update collection rate
@@ -673,7 +671,7 @@ impl CustomMetricsCollector {
                 interval.tick().await;
 
                 if let Err(e) = collector.analyze_metrics().await {
-                    eprintln!("Analytics failed: {}", e);
+                    error!("Analytics failed: {}", e);
                 }
             }
         });
@@ -692,7 +690,7 @@ impl CustomMetricsCollector {
                 interval_timer.tick().await;
 
                 if let Err(e) = collector.export_metrics().await {
-                    eprintln!("Metrics export failed: {}", e);
+                    error!("Metrics export failed: {}", e);
                 }
             }
         });
@@ -710,7 +708,7 @@ impl CustomMetricsCollector {
                 interval.tick().await;
 
                 if let Err(e) = collector.cleanup_old_metrics().await {
-                    eprintln!("Metrics cleanup failed: {}", e);
+                    error!("Metrics cleanup failed: {}", e);
                 }
             }
         });
@@ -718,9 +716,35 @@ impl CustomMetricsCollector {
         Ok(())
     }
 
+    /// Take one host measurement and publish the readings it actually carries.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// `get_cpu_usage`, `get_memory_usage` and `get_gpu_usage` returned the
+    /// constants `0.5`, `0.7` and `0.8`. With the default configuration
+    /// (`enabled: true`, a ten-second interval) those three numbers were
+    /// published as measurements of the running host every ten seconds, and
+    /// [`Self::detect_anomalies`] compared them against the alert thresholds as
+    /// if they had been sampled. CPU and memory are now read from `sysinfo`
+    /// through [`crate::server::system_stats`]; GPU utilization is read from
+    /// the NVIDIA driver and *omitted* when no driver answers, because there is
+    /// no portable source for it.
     async fn collect_system_metrics(&self) -> Result<()> {
-        // Collect CPU usage
-        let cpu_usage = self.get_cpu_usage().await?;
+        // One snapshot per tick: `measure_host_async` performs the two CPU
+        // samples `sysinfo` requires (separated by
+        // `MINIMUM_CPU_UPDATE_INTERVAL`) off the runtime, so both readings
+        // below come from the same measurement rather than from two.
+        let host = crate::server::system_stats::measure_host_async().await;
+
+        // `measure_host_async` substitutes a zeroed snapshot when its blocking
+        // task fails. A host that reports zero bytes of memory in total is that
+        // failure, not a machine without RAM -- publishing it would put an
+        // "idle CPU, empty memory" sample into the stream.
+        let Some(cpu_usage) = Self::cpu_usage_fraction(&host) else {
+            warn!("host measurement unavailable this tick; no system metric collected");
+            return Ok(());
+        };
+
         self.collect_system_metric(
             "cpu_usage",
             cpu_usage,
@@ -729,44 +753,91 @@ impl CustomMetricsCollector {
         )
         .await?;
 
-        // Collect memory usage
-        let memory_usage = self.get_memory_usage().await?;
-        self.collect_system_metric(
-            "memory_usage",
-            memory_usage,
-            SystemMetricType::MemoryUsage,
-            HashMap::new(),
-        )
-        .await?;
-
-        // Collect GPU metrics if available
-        if let Ok(gpu_usage) = self.get_gpu_usage().await {
+        if let Some(memory_usage) = Self::memory_usage_fraction(&host) {
             self.collect_system_metric(
-                "gpu_usage",
-                gpu_usage,
-                SystemMetricType::GpuUsage,
+                "memory_usage",
+                memory_usage,
+                SystemMetricType::MemoryUsage,
                 HashMap::new(),
             )
             .await?;
         }
 
+        // Collect GPU metrics only when a driver actually reports one.
+        match self.get_gpu_usage().await {
+            Ok(gpu_usage) => {
+                self.collect_system_metric(
+                    "gpu_usage",
+                    gpu_usage,
+                    SystemMetricType::GpuUsage,
+                    HashMap::new(),
+                )
+                .await?;
+            },
+            Err(e) => debug!("GPU utilization not collected: {}", e),
+        }
+
         Ok(())
     }
 
-    async fn get_cpu_usage(&self) -> Result<f64> {
-        // Simplified CPU usage collection
-        // In practice, this would use system APIs
-        Ok(0.5) // 50% usage
+    /// Mean CPU utilization of `host`, as a fraction of one.
+    ///
+    /// `sysinfo` reports percent (0-100) while [`AlertThresholds`] documents
+    /// its CPU threshold as `0.0-1.0` and [`Self::detect_anomalies`] compares
+    /// against it directly, so the reading is converted here rather than at the
+    /// comparison. `None` when the snapshot is the zeroed
+    /// measurement-unavailable fallback.
+    fn cpu_usage_fraction(host: &HostSnapshot) -> Option<f64> {
+        if host.total_memory_bytes == 0 {
+            return None;
+        }
+        Some((host.cpu_percent / 100.0).clamp(0.0, 1.0))
     }
 
-    async fn get_memory_usage(&self) -> Result<f64> {
-        // Simplified memory usage collection
-        Ok(0.7) // 70% usage
+    /// System memory in use on `host`, as a fraction of one.
+    ///
+    /// `None` when the platform reports no total memory, which is the
+    /// measurement-unavailable fallback rather than a real reading.
+    fn memory_usage_fraction(host: &HostSnapshot) -> Option<f64> {
+        if host.total_memory_bytes == 0 {
+            return None;
+        }
+        Some((host.memory_percent / 100.0).clamp(0.0, 1.0))
     }
 
+    /// Utilization of GPU 0, as a fraction of one, as reported by the driver.
+    ///
+    /// There is no portable GPU utilization source: this reads `nvidia-smi`
+    /// through [`GpuResourceManager::device_telemetry`], the same path the GPU
+    /// manager uses for its own telemetry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the missing source when no NVIDIA driver
+    /// answers, or when the driver answers without a utilization reading. The
+    /// caller omits the `gpu_usage` metric in that case; it is never defaulted.
+    ///
+    /// [`GpuResourceManager::device_telemetry`]:
+    ///     crate::resource_management::gpu_manager::manager::GpuResourceManager::device_telemetry
     async fn get_gpu_usage(&self) -> Result<f64> {
-        // Simplified GPU usage collection
-        Ok(0.8) // 80% usage
+        let sample =
+            crate::resource_management::gpu_manager::manager::GpuResourceManager::device_telemetry(
+                0,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("GPU telemetry query failed: {}", e))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no NVIDIA driver reported GPU 0; GPU utilization has no other source on \
+                     this host"
+                )
+            })?;
+
+        let utilization = sample.utilization_percent.ok_or_else(|| {
+            anyhow::anyhow!("the driver reported GPU 0 without a utilization reading")
+        })?;
+
+        Ok((utilization as f64 / 100.0).clamp(0.0, 1.0))
     }
 
     fn get_metric_name(&self, metric: &CustomMetric) -> String {
@@ -779,10 +850,105 @@ impl CustomMetricsCollector {
         }
     }
 
-    async fn update_prometheus_metrics(&self, _metric: &CustomMetric) -> Result<()> {
-        // Update Prometheus metrics based on custom metric type
-        // This is simplified - in practice would handle different metric types
+    /// Record `metric` into this collector's Prometheus registry.
+    ///
+    /// 0.2.1: this was `Ok(())` with the argument bound to `_metric`. Every
+    /// metric passed through `record_metric` was silently discarded while the
+    /// caller treated the call as a successful export, and the three
+    /// `PrometheusMetrics` maps stayed permanently empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CustomMetricsError::ExportError`] when a Prometheus collector
+    /// cannot be created for the metric's name (an invalid metric name, for
+    /// instance).
+    async fn update_prometheus_metrics(&self, metric: &CustomMetric) -> Result<()> {
+        let name = self.get_metric_name(metric);
+        let value = self.get_metric_value(metric);
+        match metric {
+            // Business metrics are monotonic totals, so they accumulate into a
+            // counter. A negative delta cannot be represented by a counter and
+            // is rejected rather than silently dropped or made positive.
+            CustomMetric::Business { .. } => {
+                if value < 0.0 {
+                    return Err(CustomMetricsError::ExportError {
+                        message: format!(
+                            "business metric {name} carried a negative value ({value}); a \
+                             Prometheus counter cannot decrease"
+                        ),
+                    }
+                    .into());
+                }
+                let mut counters = self.prometheus_metrics.custom_counters.write().await;
+                if !counters.contains_key(&name) {
+                    let counter = IntCounter::new(name.clone(), format!("custom metric {name}"))
+                        .map_err(|e| CustomMetricsError::ExportError {
+                            message: format!("cannot create counter {name}: {e}"),
+                        })?;
+                    counters.insert(name.clone(), counter);
+                }
+                if let Some(counter) = counters.get(&name) {
+                    counter.inc_by(value as u64);
+                }
+            },
+            // Latency-style samples belong in a histogram so percentiles are
+            // computed from the real distribution rather than the last value.
+            CustomMetric::Performance { .. } => {
+                let mut histograms = self.prometheus_metrics.custom_histograms.write().await;
+                if !histograms.contains_key(&name) {
+                    let opts = prometheus::HistogramOpts::new(
+                        name.clone(),
+                        format!("custom metric {name}"),
+                    );
+                    let histogram = Histogram::with_opts(opts).map_err(|e| {
+                        CustomMetricsError::ExportError {
+                            message: format!("cannot create histogram {name}: {e}"),
+                        }
+                    })?;
+                    histograms.insert(name.clone(), histogram);
+                }
+                if let Some(histogram) = histograms.get(&name) {
+                    histogram.observe(value);
+                }
+            },
+            // Everything else is a point-in-time reading: a gauge.
+            CustomMetric::System { .. }
+            | CustomMetric::Application { .. }
+            | CustomMetric::Custom { .. } => {
+                let mut gauges = self.prometheus_metrics.custom_gauges.write().await;
+                if !gauges.contains_key(&name) {
+                    let gauge =
+                        Gauge::new(name.clone(), format!("custom metric {name}")).map_err(|e| {
+                            CustomMetricsError::ExportError {
+                                message: format!("cannot create gauge {name}: {e}"),
+                            }
+                        })?;
+                    gauges.insert(name.clone(), gauge);
+                }
+                if let Some(gauge) = gauges.get(&name) {
+                    gauge.set(value);
+                }
+            },
+        }
         Ok(())
+    }
+
+    /// Current value of a recorded gauge metric, if one exists under `name`.
+    pub async fn prometheus_gauge_value(&self, name: &str) -> Option<f64> {
+        let gauges = self.prometheus_metrics.custom_gauges.read().await;
+        gauges.get(name).map(|gauge| gauge.get())
+    }
+
+    /// Number of observations recorded into a histogram metric, if any.
+    pub async fn prometheus_histogram_count(&self, name: &str) -> Option<u64> {
+        let histograms = self.prometheus_metrics.custom_histograms.read().await;
+        histograms.get(name).map(|histogram| histogram.get_sample_count())
+    }
+
+    /// Current value of a recorded counter metric, if one exists under `name`.
+    pub async fn prometheus_counter_value(&self, name: &str) -> Option<u64> {
+        let counters = self.prometheus_metrics.custom_counters.read().await;
+        counters.get(name).map(|counter| counter.get())
     }
 
     async fn calculate_averages(&self, analytics: &mut RealTimeAnalytics) -> Result<()> {
@@ -807,19 +973,139 @@ impl CustomMetricsCollector {
         Ok(())
     }
 
+    /// Fit a trend to every metric series held in the analytics window.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// Every metric in `current_averages` was handed the same
+    /// `TrendDirection::Stable`, `strength: 0.5`, `confidence: 0.8` and a
+    /// five-minute `duration`, whatever its samples did -- a series that had
+    /// doubled and one that had never moved produced byte-identical trends,
+    /// and `AnalyticsResult::trends` is published to callers. Each series is
+    /// now fitted by least squares over its own observed timestamps.
     async fn analyze_trends(&self, analytics: &mut RealTimeAnalytics) -> Result<()> {
-        // Simplified trend analysis
-        for (metric_name, &_current_avg) in &analytics.current_averages {
-            let trend = Trend {
-                direction: TrendDirection::Stable,
-                strength: 0.5,
-                duration: Duration::from_secs(300),
-                confidence: 0.8,
-            };
-            analytics.trends.insert(metric_name.clone(), trend);
+        // Group the window into per-metric series of (seconds since that
+        // series' first sample, value), in arrival order.
+        let mut series: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+        let mut origins: HashMap<String, SystemTime> = HashMap::new();
+
+        for metric in &analytics.metrics_window {
+            let name = self.get_metric_name(metric);
+            let timestamp = Self::metric_timestamp(metric);
+            let origin = *origins.entry(name.clone()).or_insert(timestamp);
+            let seconds = timestamp.duration_since(origin).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            series.entry(name).or_default().push((seconds, self.get_metric_value(metric)));
+        }
+
+        // A metric whose window no longer supports a fit loses its trend rather
+        // than keeping the last one computed for it.
+        analytics.trends.clear();
+        for (name, points) in series {
+            if let Some(trend) = Self::fit_trend(&points) {
+                analytics.trends.insert(name, trend);
+            }
         }
 
         Ok(())
+    }
+
+    /// Timestamp carried by `metric`, whichever variant it is.
+    fn metric_timestamp(metric: &CustomMetric) -> SystemTime {
+        match metric {
+            CustomMetric::Business { timestamp, .. }
+            | CustomMetric::Performance { timestamp, .. }
+            | CustomMetric::System { timestamp, .. }
+            | CustomMetric::Application { timestamp, .. }
+            | CustomMetric::Custom { timestamp, .. } => *timestamp,
+        }
+    }
+
+    /// Coefficient of variation above which a series with no significant
+    /// monotone component is reported as [`TrendDirection::Volatile`] rather
+    /// than [`TrendDirection::Stable`].
+    ///
+    /// This is a classification boundary, not a measurement: it says how much
+    /// relative movement counts as "volatile", and both branches describe the
+    /// same measured spread.
+    const VOLATILITY_CV_THRESHOLD: f64 = 0.1;
+
+    /// Least-squares trend of one metric series, or `None` when the samples
+    /// cannot support one.
+    ///
+    /// `strength` is the magnitude of the Pearson correlation between time and
+    /// value (so 1.0 is a perfectly straight line and 0.0 is no linear
+    /// relationship at all), `confidence` is `1 - p` for the two-sided t-test
+    /// on that correlation, and `duration` is the span the samples actually
+    /// cover. A direction is only reported when the correlation is significant
+    /// at the conventional 5% level.
+    ///
+    /// Returns `None` for fewer than three samples or a zero-length observation
+    /// span -- both are absences of evidence, not flat trends.
+    fn fit_trend(points: &[(f64, f64)]) -> Option<Trend> {
+        if points.len() < 3 {
+            return None;
+        }
+        let first = points.first()?;
+        let last = points.last()?;
+        let span = last.0 - first.0;
+        if span.is_nan() || span <= 0.0 {
+            return None;
+        }
+
+        let n = points.len() as f64;
+        let mean_x = points.iter().map(|(x, _)| *x).sum::<f64>() / n;
+        let mean_y = points.iter().map(|(_, y)| *y).sum::<f64>() / n;
+
+        let mut sxx = 0.0;
+        let mut syy = 0.0;
+        let mut sxy = 0.0;
+        for (x, y) in points {
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            sxx += dx * dx;
+            syy += dy * dy;
+            sxy += dx * dy;
+        }
+
+        let duration = Duration::from_secs_f64(span);
+
+        // A series that never moved is a measured result: it is exactly stable,
+        // and nothing about that statement is uncertain given these samples.
+        if syy <= 0.0 || sxx <= 0.0 {
+            return Some(Trend {
+                direction: TrendDirection::Stable,
+                strength: 0.0,
+                duration,
+                confidence: 1.0,
+            });
+        }
+
+        let correlation = sxy / (sxx * syy).sqrt();
+        let slope = sxy / sxx;
+        let p_value = pearson_p_value(correlation, points.len());
+        let confidence = (1.0 - p_value).clamp(0.0, 1.0);
+
+        let direction = if p_value > 0.05 {
+            // No monotone component the samples can distinguish from noise.
+            let std_dev = (syy / n).sqrt();
+            let coefficient_of_variation = std_dev / mean_y.abs().max(f64::EPSILON);
+            if coefficient_of_variation > Self::VOLATILITY_CV_THRESHOLD {
+                TrendDirection::Volatile
+            } else {
+                TrendDirection::Stable
+            }
+        } else if slope > 0.0 {
+            TrendDirection::Increasing
+        } else {
+            TrendDirection::Decreasing
+        };
+
+        Some(Trend {
+            direction,
+            strength: correlation.abs().clamp(0.0, 1.0),
+            duration,
+            confidence,
+        })
     }
 
     async fn detect_anomalies(&self, analytics: &mut RealTimeAnalytics) -> Result<()> {
@@ -849,13 +1135,55 @@ impl CustomMetricsCollector {
         Ok(())
     }
 
-    async fn generate_insights(&self, _analytics: &RealTimeAnalytics) -> Result<Vec<String>> {
-        // Generate actionable insights based on analytics
-        Ok(vec![
-            "CPU usage is trending upward".to_string(),
-            "Memory pressure detected".to_string(),
-            "Batch efficiency can be improved".to_string(),
-        ])
+    /// Statements read off the analytics that were just computed.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This returned the same three sentences ("CPU usage is trending upward",
+    /// "Memory pressure detected", "Batch efficiency can be improved") on every
+    /// call, on an empty window as readily as on a loaded one, and
+    /// `AnalyticsResult::insights` publishes them. Every line now names a
+    /// metric and quotes the numbers it was derived from; a window with nothing
+    /// to report yields an empty list.
+    async fn generate_insights(&self, analytics: &RealTimeAnalytics) -> Result<Vec<String>> {
+        let mut insights = Vec::new();
+
+        let mut anomalies: Vec<&Anomaly> = analytics.anomalies.iter().collect();
+        anomalies.sort_by(|a, b| a.metric_name.cmp(&b.metric_name));
+        for anomaly in anomalies {
+            insights.push(format!(
+                "{} averaged {:.4} over the window, {:.4} above its configured threshold of {:.4}",
+                anomaly.metric_name, anomaly.value, anomaly.deviation, anomaly.expected_value
+            ));
+        }
+
+        let mut trends: Vec<(&String, &Trend)> = analytics
+            .trends
+            .iter()
+            .filter(|(_, trend)| {
+                matches!(
+                    trend.direction,
+                    TrendDirection::Increasing | TrendDirection::Decreasing
+                )
+            })
+            .collect();
+        trends.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, trend) in trends {
+            let direction = match trend.direction {
+                TrendDirection::Increasing => "rising",
+                _ => "falling",
+            };
+            insights.push(format!(
+                "{} is {} over the {:.0}s covered by the window (|r| = {:.2}, confidence {:.2})",
+                name,
+                direction,
+                trend.duration.as_secs_f64(),
+                trend.strength,
+                trend.confidence
+            ));
+        }
+
+        Ok(insights)
     }
 
     fn get_metric_value(&self, metric: &CustomMetric) -> f64 {
@@ -868,18 +1196,170 @@ impl CustomMetricsCollector {
         }
     }
 
+    /// The last recorded value of every metric series currently held.
+    async fn current_metric_values(&self) -> HashMap<String, f64> {
+        let storage = self.metrics_storage.read().await;
+        storage
+            .iter()
+            .filter_map(|(name, metrics)| {
+                metrics.back().map(|metric| (name.clone(), self.get_metric_value(metric)))
+            })
+            .collect()
+    }
+
+    /// Render `values` in `format`, returning the body and its content type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CustomMetricsError::ExportError`] naming the format when this
+    /// crate carries no encoder for it, rather than silently shipping some
+    /// other encoding under that name.
+    fn encode_metrics(
+        values: &HashMap<String, f64>,
+        format: &MetricsFormat,
+        timestamp: SystemTime,
+    ) -> Result<(String, &'static str)> {
+        // Sorted so a body is reproducible across calls with the same values.
+        let mut entries: Vec<(&String, &f64)> = values.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        match format {
+            MetricsFormat::Prometheus => {
+                let mut body = String::new();
+                for (name, value) in entries {
+                    body.push_str(&format!("# TYPE {name} gauge\n{name} {value}\n"));
+                }
+                Ok((body, "text/plain; version=0.0.4"))
+            },
+            MetricsFormat::InfluxDB => {
+                let nanos = timestamp
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let mut body = String::new();
+                for (name, value) in entries {
+                    body.push_str(&format!("{name} value={value} {nanos}\n"));
+                }
+                Ok((body, "text/plain; charset=utf-8"))
+            },
+            MetricsFormat::Json => {
+                let body =
+                    serde_json::to_string(values).map_err(|e| CustomMetricsError::ExportError {
+                        message: format!("cannot serialize metrics as JSON: {e}"),
+                    })?;
+                Ok((body, "application/json"))
+            },
+            MetricsFormat::OpenTelemetry => Err(CustomMetricsError::ExportError {
+                message: "this crate carries no OpenTelemetry encoder; choose Prometheus, \
+                          InfluxDB or Json in `MetricsExportConfig::format`"
+                    .to_string(),
+            }
+            .into()),
+            MetricsFormat::Custom { format_name } => Err(CustomMetricsError::ExportError {
+                message: format!("no encoder is registered for the custom format {format_name:?}"),
+            }
+            .into()),
+        }
+    }
+
+    /// Prometheus is scraped, not pushed to.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This was `Ok(())` under the comment "Export to Prometheus endpoint",
+    /// which reported a successful export of a push that never happened. There
+    /// is genuinely nothing to push: [`Self::update_prometheus_metrics`]
+    /// records every collected metric into this collector's Prometheus
+    /// collectors as it arrives, and those values are what a scrape reads
+    /// (they are also readable directly through
+    /// [`Self::prometheus_gauge_value`], [`Self::prometheus_counter_value`] and
+    /// [`Self::prometheus_histogram_count`]). `MetricsExportConfig` carries no
+    /// push-gateway URL, so no second destination exists either.
     async fn export_to_prometheus(&self) -> Result<()> {
-        // Export to Prometheus endpoint
+        debug!(
+            "Prometheus export is pull-based; {} metric series are recorded and awaiting scrape",
+            self.active_metrics.read().await.len()
+        );
         Ok(())
     }
 
+    /// Push the current metric values to InfluxDB.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`CustomMetricsError::ExportError`]: `influxdb_enabled`
+    /// is a bare flag and [`MetricsExportConfig`] carries no InfluxDB URL,
+    /// organisation, bucket or token, so there is no destination to write to.
+    /// The error names the configuration that would make the push possible.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This was `Ok(())` under the comment "Export to InfluxDB": with
+    /// `influxdb_enabled` set, the export task reported a successful write
+    /// every interval while nothing left the process.
     async fn export_to_influxdb(&self) -> Result<()> {
-        // Export to InfluxDB
-        Ok(())
+        Err(CustomMetricsError::ExportError {
+            message: "influxdb_enabled is set, but MetricsExportConfig carries no InfluxDB URL, \
+                      organisation, bucket or token; add the server to `custom_endpoints` with \
+                      `format: MetricsFormat::InfluxDB` to push line protocol to it"
+                .to_string(),
+        }
+        .into())
     }
 
-    async fn export_to_custom_endpoint(&self, _endpoint: &CustomEndpoint) -> Result<()> {
-        // Export to custom endpoint
+    /// POST the current metric values to `endpoint`.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This was `Ok(())` with the endpoint bound to `_endpoint`, so every
+    /// configured endpoint was reported as exported to while no request was
+    /// ever made. The body is now encoded in the configured
+    /// [`MetricsFormat`] and sent, and a non-success response is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CustomMetricsError::ExportError`] when the body cannot be
+    /// encoded, when the request cannot be sent, or when the endpoint answers
+    /// with a non-success status.
+    async fn export_to_custom_endpoint(&self, endpoint: &CustomEndpoint) -> Result<()> {
+        let values = self.current_metric_values().await;
+        let (body, content_type) = Self::encode_metrics(
+            &values,
+            &self.config.export_config.format,
+            SystemTime::now(),
+        )?;
+
+        let mut request = reqwest::Client::new()
+            .post(&endpoint.url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body);
+
+        if let Some(auth_header) = &endpoint.auth_header {
+            request = request.header(reqwest::header::AUTHORIZATION, auth_header);
+        }
+        for (key, value) in &endpoint.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        let response = request.send().await.map_err(|e| CustomMetricsError::ExportError {
+            message: format!(
+                "cannot POST metrics to endpoint {} ({}): {e}",
+                endpoint.name, endpoint.url
+            ),
+        })?;
+
+        if !response.status().is_success() {
+            return Err(CustomMetricsError::ExportError {
+                message: format!(
+                    "endpoint {} ({}) answered {}",
+                    endpoint.name,
+                    endpoint.url,
+                    response.status()
+                ),
+            }
+            .into());
+        }
+
         Ok(())
     }
 
@@ -956,362 +1436,5 @@ pub enum CustomMetricsError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_custom_metrics_collector_creation() {
-        let config = CustomMetricsConfig::default();
-        let collector =
-            CustomMetricsCollector::new(config).expect("collection should succeed in test");
-        assert!(collector.config.enabled);
-    }
-
-    #[tokio::test]
-    async fn test_metric_collection() {
-        let config = CustomMetricsConfig::default();
-        let collector =
-            CustomMetricsCollector::new(config).expect("collection should succeed in test");
-
-        let result = collector.collect_business_metric("revenue", 1000.0, HashMap::new()).await;
-
-        assert!(result.is_ok());
-
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 1);
-    }
-
-    #[tokio::test]
-    async fn test_analytics() {
-        let config = CustomMetricsConfig::default();
-        let collector =
-            CustomMetricsCollector::new(config).expect("collection should succeed in test");
-
-        // Collect some test metrics
-        for i in 0..10 {
-            collector
-                .collect_performance_metric("latency", i as f64 * 10.0, None, HashMap::new())
-                .await
-                .expect("test operation should succeed");
-        }
-
-        let analytics = collector
-            .analyze_metrics()
-            .await
-            .expect("async operation should succeed in test");
-        assert!(!analytics.averages.is_empty());
-    }
-
-    #[test]
-    fn test_default_config() {
-        let config = CustomMetricsConfig::default();
-        assert!(config.enabled);
-        assert_eq!(config.collection_interval_seconds, 10);
-        assert!(config.enable_real_time_analytics);
-        assert!(config.enable_business_metrics);
-        assert!(config.enable_performance_profiling);
-        assert_eq!(config.retention_period_hours, 24);
-        assert_eq!(config.max_metric_series, 10000);
-    }
-
-    #[test]
-    fn test_default_alert_thresholds() {
-        let thresholds = AlertThresholds::default();
-        assert!((thresholds.cpu_usage_threshold - 0.8).abs() < f64::EPSILON);
-        assert!((thresholds.memory_usage_threshold - 0.9).abs() < f64::EPSILON);
-        assert!((thresholds.error_rate_threshold - 0.05).abs() < f64::EPSILON);
-        assert_eq!(thresholds.queue_depth_threshold, 100);
-    }
-
-    #[test]
-    fn test_default_export_config() {
-        let config = MetricsExportConfig::default();
-        assert!(config.prometheus_enabled);
-        assert!(!config.influxdb_enabled);
-        assert!(config.custom_endpoints.is_empty());
-        assert_eq!(config.export_interval_seconds, 60);
-    }
-
-    #[tokio::test]
-    async fn test_collect_disabled() {
-        let mut config = CustomMetricsConfig::default();
-        config.enabled = false;
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector.collect_business_metric("rev", 100.0, HashMap::new()).await;
-        assert!(result.is_ok());
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 0);
-    }
-
-    #[tokio::test]
-    async fn test_collect_business_disabled() {
-        let mut config = CustomMetricsConfig::default();
-        config.enable_business_metrics = false;
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector.collect_business_metric("rev", 100.0, HashMap::new()).await;
-        assert!(result.is_ok());
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 0);
-    }
-
-    #[tokio::test]
-    async fn test_collect_performance_disabled() {
-        let mut config = CustomMetricsConfig::default();
-        config.enable_performance_profiling = false;
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector.collect_performance_metric("lat", 50.0, None, HashMap::new()).await;
-        assert!(result.is_ok());
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 0);
-    }
-
-    #[tokio::test]
-    async fn test_collect_system_metric() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector
-            .collect_system_metric("cpu", 0.5, SystemMetricType::CpuUsage, HashMap::new())
-            .await;
-        assert!(result.is_ok());
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 1);
-    }
-
-    #[tokio::test]
-    async fn test_collect_multiple_metrics() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-
-        // Use LCG for deterministic values
-        let mut lcg: u64 = 42;
-        for i in 0..10 {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let val = (lcg % 1000) as f64 / 10.0;
-            collector
-                .collect_business_metric(&format!("metric_{}", i), val, HashMap::new())
-                .await
-                .expect("collect ok");
-        }
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 10);
-    }
-
-    #[tokio::test]
-    async fn test_metric_name_business() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let metric = CustomMetric::Business {
-            name: "revenue".to_string(),
-            value: 100.0,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        let name = collector.get_metric_name(&metric);
-        assert_eq!(name, "business_revenue");
-    }
-
-    #[tokio::test]
-    async fn test_metric_name_performance() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let metric = CustomMetric::Performance {
-            name: "latency".to_string(),
-            value: 50.0,
-            percentile: Some(95.0),
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        let name = collector.get_metric_name(&metric);
-        assert_eq!(name, "performance_latency");
-    }
-
-    #[tokio::test]
-    async fn test_metric_name_system() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let metric = CustomMetric::System {
-            name: "cpu_usage".to_string(),
-            value: 0.75,
-            metric_type: SystemMetricType::CpuUsage,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        let name = collector.get_metric_name(&metric);
-        assert_eq!(name, "system_cpu_usage");
-    }
-
-    #[tokio::test]
-    async fn test_metric_name_application() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let metric = CustomMetric::Application {
-            name: "accuracy".to_string(),
-            value: 0.95,
-            metric_type: ApplicationMetricType::ModelAccuracy,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        let name = collector.get_metric_name(&metric);
-        assert_eq!(name, "application_accuracy");
-    }
-
-    #[tokio::test]
-    async fn test_metric_name_custom() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let metric = CustomMetric::Custom {
-            name: "my_metric".to_string(),
-            value: 42.0,
-            metric_type: "gauge".to_string(),
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        let name = collector.get_metric_name(&metric);
-        assert_eq!(name, "custom_my_metric");
-    }
-
-    #[tokio::test]
-    async fn test_get_metric_value_variants() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-
-        let business = CustomMetric::Business {
-            name: "a".to_string(),
-            value: 1.0,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        assert!((collector.get_metric_value(&business) - 1.0).abs() < f64::EPSILON);
-
-        let perf = CustomMetric::Performance {
-            name: "b".to_string(),
-            value: 2.0,
-            percentile: None,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        assert!((collector.get_metric_value(&perf) - 2.0).abs() < f64::EPSILON);
-
-        let sys = CustomMetric::System {
-            name: "c".to_string(),
-            value: 3.0,
-            metric_type: SystemMetricType::CpuUsage,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        assert!((collector.get_metric_value(&sys) - 3.0).abs() < f64::EPSILON);
-
-        let app = CustomMetric::Application {
-            name: "d".to_string(),
-            value: 4.0,
-            metric_type: ApplicationMetricType::CacheHitRate,
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        assert!((collector.get_metric_value(&app) - 4.0).abs() < f64::EPSILON);
-
-        let custom = CustomMetric::Custom {
-            name: "e".to_string(),
-            value: 5.0,
-            metric_type: "counter".to_string(),
-            labels: HashMap::new(),
-            timestamp: SystemTime::now(),
-        };
-        assert!((collector.get_metric_value(&custom) - 5.0).abs() < f64::EPSILON);
-    }
-
-    #[tokio::test]
-    async fn test_analyze_empty_metrics() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector.analyze_metrics().await;
-        assert!(result.is_ok());
-        if let Ok(analytics) = result {
-            assert!(analytics.averages.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_metrics_summary_initial() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let summary = collector.get_metrics_summary().await;
-        assert_eq!(summary.total_metrics, 0);
-        assert_eq!(summary.active_metric_series, 0);
-        assert_eq!(summary.alert_count, 0);
-    }
-
-    #[tokio::test]
-    async fn test_export_metrics_no_error() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-        let result = collector.export_metrics().await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_collect_with_labels() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-
-        let mut labels = HashMap::new();
-        labels.insert("region".to_string(), "us-east".to_string());
-        labels.insert("env".to_string(), "prod".to_string());
-
-        let result = collector.collect_business_metric("requests", 500.0, labels).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_active_metrics_tracking() {
-        let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).expect("creation ok");
-
-        collector.collect_business_metric("a", 1.0, HashMap::new()).await.expect("ok");
-        collector.collect_business_metric("b", 2.0, HashMap::new()).await.expect("ok");
-
-        let active = collector.active_metrics.read().await;
-        assert_eq!(active.len(), 2);
-        assert!(active.contains("business_a"));
-        assert!(active.contains("business_b"));
-    }
-
-    #[test]
-    fn test_custom_metrics_error_display() {
-        let err = CustomMetricsError::ConfigurationError {
-            message: "bad config".to_string(),
-        };
-        let msg = format!("{}", err);
-        assert!(msg.contains("bad config"));
-    }
-
-    #[test]
-    fn test_collection_error_display() {
-        let err = CustomMetricsError::CollectionError {
-            message: "collection failed".to_string(),
-        };
-        let msg = format!("{}", err);
-        assert!(msg.contains("collection failed"));
-    }
-
-    #[test]
-    fn test_trend_direction_debug() {
-        let direction = TrendDirection::Increasing;
-        let debug_str = format!("{:?}", direction);
-        assert_eq!(debug_str, "Increasing");
-    }
-
-    #[test]
-    fn test_anomaly_severity_debug() {
-        let sev = AnomalySeverity::Critical;
-        let debug_str = format!("{:?}", sev);
-        assert_eq!(debug_str, "Critical");
-    }
-
-    #[test]
-    fn test_bottleneck_type_debug() {
-        let bt = BottleneckType::GpuBound;
-        let debug_str = format!("{:?}", bt);
-        assert_eq!(debug_str, "GpuBound");
-    }
-}
+#[path = "custom_metrics_tests.rs"]
+mod tests;

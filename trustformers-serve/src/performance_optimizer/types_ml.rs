@@ -406,10 +406,18 @@ pub struct ModelValidation {
 /// Interface for different model validation strategies including
 /// cross-validation, holdout validation, and custom methods.
 pub trait ValidationStrategy {
-    /// Validate the model
+    /// Validate `model` against held-out examples.
+    ///
+    /// The strategy receives the trained algorithm itself, not a snapshot of
+    /// its parameters, because measuring accuracy means calling
+    /// [`LearningAlgorithm::predict`] on the held-out features and comparing
+    /// against the recorded targets. A strategy handed only a [`ModelState`]
+    /// cannot evaluate anything, which is how the implementations in
+    /// `adaptive_parallelism::validation` came to score a model without ever
+    /// consulting it.
     fn validate(
         &self,
-        model: &ModelState,
+        model: &dyn LearningAlgorithm,
         validation_data: &[TrainingExample],
     ) -> Result<ValidationResult>;
 
@@ -417,7 +425,7 @@ pub trait ValidationStrategy {
     fn name(&self) -> &str;
 
     /// Check if strategy is applicable
-    fn is_applicable(&self, model: &ModelState) -> bool;
+    fn is_applicable(&self, model: &dyn LearningAlgorithm) -> bool;
 }
 
 /// Model validation result
@@ -450,6 +458,28 @@ pub struct ValidationResult {
 /// classification metrics, and ROC curve analysis.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationDetails {
+    /// Classification metrics, present only when the validated model is a
+    /// classifier.
+    ///
+    /// The adaptive-parallelism learners predict a continuous target, so a
+    /// confusion matrix and a ROC curve have no meaning for them and this is
+    /// `None`. Before 0.2.1 these were four zeroes and two empty vectors
+    /// carried inline, which read as "the classifier got nothing right".
+    pub classification: Option<ClassificationDetails>,
+    /// R-squared (coefficient of determination) over the held-out examples
+    pub r_squared: f32,
+    /// Mean absolute error over the held-out examples
+    pub mean_absolute_error: f32,
+    /// Root mean squared error over the held-out examples
+    pub root_mean_squared_error: f32,
+    /// Per-fold scores, one per evaluated split. Empty for single-split
+    /// strategies.
+    pub fold_scores: Vec<f32>,
+}
+
+/// Classification metrics for a validated classifier.
+#[derive(Debug, Clone, Default)]
+pub struct ClassificationDetails {
     /// True positives
     pub true_positives: usize,
     /// False positives
@@ -462,14 +492,6 @@ pub struct ValidationDetails {
     pub confusion_matrix: Vec<Vec<usize>>,
     /// ROC curve points
     pub roc_curve: Vec<(f32, f32)>,
-    /// R-squared score for regression models
-    pub r_squared: f32,
-    /// Mean absolute error
-    pub mean_absolute_error: f32,
-    /// Root mean squared error
-    pub root_mean_squared_error: f32,
-    /// Cross-validation scores from k-fold validation
-    pub cross_validation_scores: Vec<f32>,
 }
 
 /// Validation process record
@@ -844,14 +866,8 @@ impl Default for ModelPerformanceMetrics {
     fn default() -> Self {
         Self {
             training_accuracy: 0.0,
-            validation_accuracy: 0.0,
-            test_accuracy: 0.0,
-            loss: 0.0,
             convergence_status: ConvergenceStatus::NotConverged,
             accuracy: 0.0,
-            precision: 0.0,
-            recall: 0.0,
-            f1_score: 0.0,
             training_examples: 0,
             last_updated: Utc::now(),
         }
@@ -970,8 +986,6 @@ impl Default for SystemState {
             available_memory_mb: 8192,
             load_average: 0.0,
             active_processes: 0,
-            io_wait_percent: 0.0,
-            network_utilization: 0.0,
             temperature_metrics: None,
         }
     }

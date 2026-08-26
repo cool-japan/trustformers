@@ -167,12 +167,12 @@ mod tests {
             context_data: AlertContext {
                 test_execution_context: None,
                 system_state: SystemState {
-                    cpu_utilization: 50.0,
-                    memory_utilization: 60.0,
-                    disk_utilization: 70.0,
-                    network_utilization: 30.0,
+                    cpu_utilization: Some(50.0),
+                    memory_utilization: 0.60,
+                    disk_utilization: Some(0.70),
+                    network_bytes_per_second: Some(30.0),
                     active_processes: 100,
-                    load_average: 1.5,
+                    load_average: Some(1.5),
                     system_uptime: Duration::from_secs(24 * 3600),
                     resource_pressure: PressureLevel::Medium,
                     health_status: HealthStatus::Degraded,

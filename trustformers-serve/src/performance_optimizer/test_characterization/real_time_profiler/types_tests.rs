@@ -1,8 +1,7 @@
 //! Tests for real-time profiler types
 
 use super::types::*;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use super::types_engines::*;
 
 /// Simple LCG for deterministic pseudo-random values
 struct Lcg {
@@ -14,10 +13,7 @@ impl Lcg {
         Self { state: seed }
     }
     fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.state
     }
     fn next_f32(&mut self) -> f32 {
@@ -109,7 +105,13 @@ fn test_performance_counters_concurrent_increments() {
 fn test_performance_counters_zero_initial_state() {
     let counters = RealTimePerformanceCounters::new();
     let stats = counters.get_current_stats();
-    assert_eq!(stats.data_points_processed + stats.anomalies_detected + stats.insights_generated + stats.processing_rate, 0);
+    assert_eq!(
+        stats.data_points_processed
+            + stats.anomalies_detected
+            + stats.insights_generated
+            + stats.processing_rate,
+        0
+    );
 }
 
 #[test]
@@ -259,6 +261,6 @@ fn test_lcg_f32_range() {
     let mut lcg = Lcg::new(42);
     for _ in 0..100 {
         let val = lcg.next_f32();
-        assert!(val >= 0.0 && val < 1.0);
+        assert!((0.0..1.0).contains(&val));
     }
 }

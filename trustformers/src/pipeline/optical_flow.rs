@@ -1,4 +1,26 @@
-//! Optical flow pipeline — dense motion estimation between frames (RAFT/FlowFormer-compatible)
+//! # Optical flow pipeline — dense motion estimation between frames
+//!
+//! ## What this actually computes
+//!
+//! [`OpticalFlowPipeline::run`] is a **classical differential normal-flow
+//! estimator**, not a learned model: it takes the spatial gradients `Ix`, `Iy`
+//! of the first frame's luminance and the temporal difference `It = I2 - I1`,
+//! and solves the single-pixel brightness-constancy equation
+//!
+//! ```text
+//! (u, v) = -It · (Ix, Iy) / (Ix² + Iy² + α²)
+//! ```
+//!
+//! with a Tikhonov regulariser `α`. This recovers the component of motion
+//! along the image gradient (the "normal flow"); the aperture problem means the
+//! tangential component is not observable from a single pixel. It is a real,
+//! well-defined algorithm with known limitations — **it is not RAFT,
+//! FlowFormer, or any other learned architecture**, and this module no longer
+//! claims compatibility with them.
+//!
+//! Everything else here is real too: [`FlowField`] statistics, endpoint error,
+//! frame warping, HSV colour visualisation, [`FlowPyramid`] downsampling and
+//! the forward/backward occlusion check.
 
 use std::fmt;
 
@@ -302,14 +324,21 @@ impl fmt::Display for FlowError {
 
 impl std::error::Error for FlowError {}
 
-/// RAFT/FlowFormer-compatible optical flow pipeline
+/// Classical differential optical flow pipeline.
+///
+/// See the module documentation: [`Self::run`] computes normal flow from
+/// brightness constancy. It is not a learned model.
 pub struct OpticalFlowPipeline {
+    /// Caller-supplied identifier, recorded but not used to select an algorithm.
     pub model: String,
-    /// Number of recurrent refinement iterations (RAFT default: 12)
+    /// Reserved for iterative refinement schemes; the current estimator is
+    /// single-pass and ignores this field.
     pub num_iterations: usize,
-    /// Enable pyramid-based coarse-to-fine estimation
+    /// Reserved for coarse-to-fine schemes. [`Self::run`] always returns the
+    /// full-resolution estimate; call [`Self::run_pyramid`] for a multi-scale
+    /// view.
     pub use_pyramid: bool,
-    /// Number of pyramid levels when `use_pyramid` is true
+    /// Number of levels built by [`Self::run_pyramid`].
     pub pyramid_levels: usize,
 }
 
@@ -344,57 +373,57 @@ impl OpticalFlowPipeline {
             return Err(FlowError::InvalidDimensions);
         }
 
-        // Per-pixel luminance difference
-        let diff: Vec<f32> = frame1
-            .iter()
-            .zip(frame2.iter())
-            .enumerate()
-            .map(|(i, (&a, &b))| {
-                // Accumulate all three channels into the pixel's luminance slot
-                // We'll average into a single luma value per pixel below
-                let _ = i;
-                a - b
-            })
-            .collect();
-
-        // Reduce RGB diff to per-pixel luma diff
-        let luma_diff: Vec<f32> = (0..width * height)
-            .map(|px| {
-                let base = px * 3;
-                (diff[base] + diff[base + 1] + diff[base + 2]) / 3.0
-            })
-            .collect();
+        // Per-pixel luminance of both frames.
+        let luma = |frame: &[f32], px: usize| -> f32 {
+            let base = px * 3;
+            (frame[base] + frame[base + 1] + frame[base + 2]) / 3.0
+        };
+        let luma1: Vec<f32> = (0..width * height).map(|px| luma(frame1, px)).collect();
+        let luma2: Vec<f32> = (0..width * height).map(|px| luma(frame2, px)).collect();
 
         let mut flows = Vec::with_capacity(width * height);
 
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
-                let it = luma_diff[idx];
 
-                // Forward-difference spatial gradients of luma_diff
-                let ix = if x + 1 < width { luma_diff[y * width + (x + 1)] - it } else { 0.0 };
-                let iy = if y + 1 < height { luma_diff[(y + 1) * width + x] - it } else { 0.0 };
+                // Spatial gradients of the *first* frame (forward differences),
+                // and the temporal difference between the two frames.
+                let ix = if x + 1 < width { luma1[y * width + (x + 1)] - luma1[idx] } else { 0.0 };
+                let iy = if y + 1 < height { luma1[(y + 1) * width + x] - luma1[idx] } else { 0.0 };
+                let it = luma2[idx] - luma1[idx];
 
-                // Horn-Schunck: u = -It * Ix / (Ix^2 + Iy^2 + alpha^2)
+                // Brightness constancy: Ix·u + Iy·v + It = 0. The minimum-norm
+                // solution regularised by alpha^2 is the normal flow.
                 let alpha_sq = 0.01_f32;
                 let denom = ix * ix + iy * iy + alpha_sq;
                 let scale = -it / denom;
-                let dx = scale * ix;
-                let dy = scale * iy;
-
-                flows.push(FlowVector::new(dx, dy));
+                flows.push(FlowVector::new(scale * ix, scale * iy));
             }
         }
 
-        if self.use_pyramid {
-            let base = FlowField::new(flows, width, height);
-            let pyramid = FlowPyramid::from_base(base, self.pyramid_levels);
-            // For the mock: just return the finest level
-            return pyramid.levels.into_iter().next().ok_or(FlowError::EmptyFrame);
-        }
-
         Ok(FlowField::new(flows, width, height))
+    }
+
+    /// Build a coarse-to-fine [`FlowPyramid`] from the full-resolution estimate.
+    ///
+    /// The pyramid's finest level is exactly [`Self::run`]'s output; coarser
+    /// levels are real 2× box-downsamples of it (see [`FlowField::downsample`]).
+    /// This is a multi-scale *view* of one estimate, not a coarse-to-fine
+    /// refinement — the pipeline does not claim otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the validation errors of [`Self::run`].
+    pub fn run_pyramid(
+        &self,
+        frame1: &[f32],
+        frame2: &[f32],
+        width: usize,
+        height: usize,
+    ) -> Result<FlowPyramid, FlowError> {
+        let base = self.run(frame1, frame2, width, height)?;
+        Ok(FlowPyramid::from_base(base, self.pyramid_levels))
     }
 
     /// Compute forward and backward optical flow between two frames.
@@ -769,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_optical_flow_pipeline_run() {
-        let pipeline = OpticalFlowPipeline::new("raft");
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
         let frame1 = make_gradient_frame(4, 4);
         let frame2 = make_frame(4, 4, 0.3);
         let flow = pipeline.run(&frame1, &frame2, 4, 4).expect("run should succeed");
@@ -779,8 +808,83 @@ mod tests {
     }
 
     #[test]
+    fn test_identical_frames_produce_zero_flow() {
+        // Brightness constancy: It == 0 everywhere, so the normal flow must be
+        // exactly zero. This fails against any estimator that manufactures
+        // motion from the frame contents alone.
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
+        let frame = make_gradient_frame(8, 8);
+        let flow = pipeline.run(&frame, &frame, 8, 8).expect("run");
+        for v in &flow.flows {
+            assert!(v.magnitude() < 1e-6, "expected zero flow, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn test_flow_points_along_the_intensity_gradient() {
+        // A horizontal ramp `I(x) = x / W`, with the *content* shifted right by
+        // one pixel in the second frame (`I2(x) = I1(x - 1)`).
+        //
+        // Then Ix = 1/W > 0 and It = I2 - I1 = -1/W < 0, so the normal flow
+        // u = -It·Ix / (Ix² + α²) is positive: motion in +x, exactly matching
+        // the direction the pattern moved. dy must vanish because the ramp is
+        // constant along y.
+        let width = 8usize;
+        let height = 4usize;
+        let ramp = |shift: isize| -> Vec<f32> {
+            let mut out = Vec::with_capacity(width * height * 3);
+            for _y in 0..height {
+                for x in 0..width {
+                    let sx = (x as isize - shift).clamp(0, width as isize - 1);
+                    let v = sx as f32 / width as f32;
+                    out.extend_from_slice(&[v, v, v]);
+                }
+            }
+            out
+        };
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
+        let flow = pipeline.run(&ramp(0), &ramp(1), width, height).expect("run");
+
+        // Interior columns only: the ramp is clamped at both edges, and the
+        // last column has a zero forward difference.
+        let mut checked = 0usize;
+        for y in 0..height {
+            for x in 1..width - 2 {
+                let v = flow.get(x, y).expect("in bounds");
+                assert!(v.dx > 0.0, "dx must be positive at ({x},{y}): {v:?}");
+                assert!(v.dy.abs() < 1e-6, "dy must vanish at ({x},{y}): {v:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+
+        // Reversing the frames reverses the recovered direction.
+        let reversed = pipeline.run(&ramp(1), &ramp(0), width, height).expect("run");
+        for y in 0..height {
+            for x in 1..width - 2 {
+                let v = reversed.get(x, y).expect("in bounds");
+                assert!(
+                    v.dx < 0.0,
+                    "reversed dx must be negative at ({x},{y}): {v:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_run_pyramid_builds_real_levels() {
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
+        let frame1 = make_gradient_frame(8, 8);
+        let frame2 = make_frame(8, 8, 0.3);
+        let pyramid = pipeline.run_pyramid(&frame1, &frame2, 8, 8).expect("pyramid");
+        assert_eq!(pyramid.levels.len(), pipeline.pyramid_levels);
+        assert_eq!(pyramid.levels[0].width, 8);
+        assert_eq!(pyramid.levels[1].width, 4);
+    }
+
+    #[test]
     fn test_optical_flow_bidirectional() {
-        let pipeline = OpticalFlowPipeline::new("raft");
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
         let frame1 = make_gradient_frame(4, 4);
         let frame2 = make_frame(4, 4, 0.3);
         let (fwd, bwd) = pipeline
@@ -792,7 +896,7 @@ mod tests {
 
     #[test]
     fn test_optical_flow_occlusion_mask() {
-        let pipeline = OpticalFlowPipeline::new("raft");
+        let pipeline = OpticalFlowPipeline::new("normal-flow");
         let frame1 = make_gradient_frame(4, 4);
         let frame2 = make_frame(4, 4, 0.3);
         let (fwd, bwd) = pipeline

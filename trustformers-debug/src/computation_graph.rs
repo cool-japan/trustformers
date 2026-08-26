@@ -59,13 +59,27 @@ pub struct GraphNode {
     pub input_shapes: Vec<Vec<usize>>,
     /// Output tensor shapes
     pub output_shapes: Vec<Vec<usize>>,
-    /// Computational complexity (FLOPs)
-    pub flop_count: u64,
-    /// Memory usage estimate in bytes
-    pub memory_usage: u64,
+    /// Computational complexity (FLOPs), estimated from [`Self::input_shapes`].
+    ///
+    /// `None` when the node was built without shapes: FLOPs are a function of
+    /// tensor extents, and nothing else here can supply them. Every node used
+    /// to carry a constant here instead (`1_000_000` for MatMul, `1_000` for
+    /// elementwise ops, `5_000` for normalisations) because
+    /// [`ComputationGraphAnalyzer::create_graph`] passed an empty shape slice
+    /// to the estimator, making every shape-dependent branch unreachable.
+    pub flop_count: Option<u64>,
+    /// Memory usage estimate in bytes, from [`Self::input_shapes`]; `None` for
+    /// the same reason as [`Self::flop_count`] (previously a constant 1024).
+    pub memory_usage: Option<u64>,
     /// Execution time in microseconds (if profiled)
     pub execution_time_us: Option<u64>,
-    /// Number of parameters (for parameterized operations)
+    /// Number of learned parameters for parameterized operations, derived
+    /// from the node's shapes; `None` for operations that have none, or when
+    /// the shapes needed to count them are absent.
+    ///
+    /// It used to return `Some(1_000_000)` for every MatMul, `Some(500_000)`
+    /// for every Conv2D and `Some(2_000_000)` for every Embedding regardless
+    /// of the model -- literal "Example: 1M parameters" values.
     pub parameter_count: Option<u64>,
     /// Position in topological ordering
     pub topo_order: Option<usize>,
@@ -212,19 +226,55 @@ pub struct GraphAnalysisResult {
     pub recommendations: Vec<String>,
 }
 
+/// One operation to build a [`GraphNode`] from, including the tensor shapes
+/// that make its FLOP/memory/parameter estimates computable.
+///
+/// [`ComputationGraphAnalyzer::create_graph`]'s tuple form leaves the shape
+/// fields empty, which is why the estimates it produces are `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationSpec {
+    /// Identifier, also used as the node's display name.
+    pub node_id: String,
+    /// What the node computes.
+    pub operation_type: OperationType,
+    /// Ids of the nodes this one consumes.
+    pub dependencies: Vec<String>,
+    /// Shapes of the operation's inputs. For a `MatMul` the second entry is
+    /// the weight matrix (see
+    /// `ComputationGraphAnalyzer::estimate_parameters`).
+    pub input_shapes: Vec<Vec<usize>>,
+    /// Shapes of the operation's outputs.
+    pub output_shapes: Vec<Vec<usize>>,
+}
+
 /// Memory usage analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryAnalysis {
     /// Total memory usage in bytes
     pub total_memory_usage: u64,
-    /// Peak memory usage in bytes
+    /// Peak simultaneously-live memory usage in bytes, computed by a real
+    /// liveness walk over the graph's topological order (see
+    /// `ComputationGraphAnalyzer::compute_peak_memory_usage`): a node's
+    /// output is "live" from the step it is produced until the step of its
+    /// last consumer, and this is the maximum total live bytes at any one
+    /// step. Never equal to `total_memory_usage` by construction (as the
+    /// old placeholder was) unless every tensor really is live
+    /// simultaneously.
     pub peak_memory_usage: u64,
     /// Memory usage by operation type
     pub memory_by_operation: HashMap<OperationType, u64>,
     /// Nodes with highest memory usage
     pub memory_hotspots: Vec<(String, u64)>,
-    /// Memory fragmentation estimate
-    pub fragmentation_ratio: f64,
+    /// Memory fragmentation ratio, when measurable. This analyzer tracks
+    /// only logical per-node byte counts, not a real memory
+    /// allocator/placement model (address ranges, allocation order,
+    /// free-list state) -- fragmentation is a property of *how* an
+    /// allocator places live tensors in physical memory, which is a
+    /// different question from liveness overlap (already captured by
+    /// [`Self::peak_memory_usage`]) and depends on a placement policy this
+    /// crate does not implement. Honestly `None` rather than a fabricated
+    /// number.
+    pub fragmentation_ratio: Option<f64>,
     /// Suggested memory optimizations
     pub optimization_suggestions: Vec<String>,
 }
@@ -247,11 +297,26 @@ pub struct FlopAnalysis {
 /// Complexity analysis of the computation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplexityAnalysis {
-    /// Time complexity estimate
-    pub time_complexity: String,
-    /// Space complexity estimate
-    pub space_complexity: String,
-    /// Parallelization potential (0.0 to 1.0)
+    /// Asymptotic (Big-O) time complexity, when it can honestly be
+    /// derived. A single [`ComputationGraph`] is one concrete, fixed-shape
+    /// instance -- it has no symbolic size parameter `n` to be asymptotic
+    /// *in*, so there is nothing to honestly derive here today; always
+    /// `None`, never a fabricated `"O(n)"`. Concrete costs for the actual
+    /// instance are available for real via [`FlopAnalysis::total_flops`].
+    pub time_complexity: Option<String>,
+    /// Asymptotic (Big-O) space complexity. Same honesty caveat as
+    /// [`Self::time_complexity`]; concrete space for this instance is
+    /// available for real via [`MemoryAnalysis::total_memory_usage`].
+    pub space_complexity: Option<String>,
+    /// Real, structural parallelization-potential estimate in `[0, 1]`:
+    /// `1 - (critical_path_length_in_nodes / node_count)`, i.e. the
+    /// fraction of nodes that are *not* on the graph's longest
+    /// dependency chain and could in principle execute alongside it. `0.0`
+    /// for a pure sequential chain (every node is on the critical path),
+    /// approaching `1.0` for a wide, shallow graph. Computed from the
+    /// graph's real topology (see
+    /// `ComputationGraphAnalyzer::analyze_flop_usage`) -- never the old
+    /// constant `0.7`.
     pub parallelization_potential: f64,
     /// Sequential dependencies
     pub sequential_dependencies: usize,
@@ -403,11 +468,40 @@ impl ComputationGraphAnalyzer {
         Ok(())
     }
 
-    /// Create a computation graph from operations
+    /// Create a computation graph from operations whose tensor shapes are not
+    /// known.
+    ///
+    /// Every node's `flop_count`, `memory_usage` and `parameter_count` will be
+    /// `None`: those are functions of tensor extents, and this entry point has
+    /// none to give. Use [`Self::create_graph_with_shapes`] to get real
+    /// estimates.
     pub fn create_graph(
         &mut self,
         name: String,
         operations: Vec<(String, OperationType, Vec<String>)>, // (node_id, op_type, dependencies)
+    ) -> Result<Uuid> {
+        self.create_graph_with_shapes(
+            name,
+            operations
+                .into_iter()
+                .map(|(node_id, operation_type, dependencies)| OperationSpec {
+                    node_id,
+                    operation_type,
+                    dependencies,
+                    input_shapes: Vec::new(),
+                    output_shapes: Vec::new(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Create a computation graph from operations that carry their real tensor
+    /// shapes, so the per-node FLOP, memory and parameter estimates are
+    /// actually computed instead of falling back to constants.
+    pub fn create_graph_with_shapes(
+        &mut self,
+        name: String,
+        operations: Vec<OperationSpec>,
     ) -> Result<Uuid> {
         let graph_id = Uuid::new_v4();
         let mut nodes = HashMap::new();
@@ -416,17 +510,24 @@ impl ComputationGraphAnalyzer {
         let mut leaf_nodes = HashSet::new();
 
         // Create nodes
-        for (node_id, op_type, dependencies) in &operations {
+        for spec in &operations {
+            let OperationSpec {
+                node_id,
+                operation_type: op_type,
+                dependencies,
+                input_shapes,
+                output_shapes,
+            } = spec;
             let node = GraphNode {
                 id: node_id.clone(),
                 name: node_id.clone(),
                 operation_type: op_type.clone(),
-                input_shapes: vec![],
-                output_shapes: vec![],
-                flop_count: self.estimate_flops(op_type, &[]),
-                memory_usage: self.estimate_memory(op_type, &[]),
+                input_shapes: input_shapes.clone(),
+                output_shapes: output_shapes.clone(),
+                flop_count: self.estimate_flops(op_type, input_shapes),
+                memory_usage: self.estimate_memory(op_type, input_shapes),
                 execution_time_us: None,
-                parameter_count: self.estimate_parameters(op_type),
+                parameter_count: self.estimate_parameters(op_type, input_shapes),
                 topo_order: None,
                 depth: 0,
                 metadata: HashMap::new(),
@@ -456,8 +557,8 @@ impl ComputationGraphAnalyzer {
             node_count: nodes.len(),
             edge_count: edges.values().map(|deps| deps.len()).sum(),
             max_depth: nodes.values().map(|n| n.depth).max().unwrap_or(0),
-            estimated_memory_usage: nodes.values().map(|n| n.memory_usage).sum(),
-            estimated_flops: nodes.values().map(|n| n.flop_count).sum(),
+            estimated_memory_usage: nodes.values().filter_map(|n| n.memory_usage).sum(),
+            estimated_flops: nodes.values().filter_map(|n| n.flop_count).sum(),
             created_at: chrono::Utc::now(),
         };
 
@@ -542,11 +643,17 @@ impl ComputationGraphAnalyzer {
         for node in graph.nodes.values() {
             let color = self.get_node_color(&node.operation_type);
             let label = format!(
-                "{}\\n{}\\n{:.1} GFLOP\\n{:.1} MB",
+                "{}\\n{}\\n{}\\n{}",
                 node.name,
                 format!("{:?}", node.operation_type),
-                node.flop_count as f64 / 1e9,
-                node.memory_usage as f64 / (1024.0 * 1024.0)
+                node.flop_count.map_or_else(
+                    || "FLOPs n/a".to_string(),
+                    |f| format!("{:.1} GFLOP", f as f64 / 1e9)
+                ),
+                node.memory_usage.map_or_else(
+                    || "memory n/a".to_string(),
+                    |m| format!("{:.1} MB", m as f64 / (1024.0 * 1024.0))
+                )
             );
 
             dot.push_str(&format!(
@@ -629,79 +736,108 @@ impl ComputationGraphAnalyzer {
         Ok(())
     }
 
-    fn estimate_flops(&self, op_type: &OperationType, shapes: &[Vec<usize>]) -> u64 {
-        // Simplified FLOP estimation
+    /// FLOPs for one execution of `op_type` over `shapes`, or `None` when the
+    /// shapes needed for the count are missing.
+    ///
+    /// The constant fallbacks this replaces (1_000_000 / 1_000 / 5_000) were
+    /// unconditionally reachable, because the only in-crate caller passed an
+    /// empty `shapes` slice.
+    fn estimate_flops(&self, op_type: &OperationType, shapes: &[Vec<usize>]) -> Option<u64> {
+        let elements = |s: &Vec<usize>| s.iter().product::<usize>() as u64;
         match op_type {
             OperationType::MatMul => {
-                if shapes.len() >= 2 {
-                    let a_shape = &shapes[0];
-                    let b_shape = &shapes[1];
-                    if a_shape.len() >= 2 && b_shape.len() >= 2 {
-                        let m = a_shape[a_shape.len() - 2];
-                        let k = a_shape[a_shape.len() - 1];
-                        let n = b_shape[b_shape.len() - 1];
-                        return (2 * m * k * n) as u64;
-                    }
+                let (a_shape, b_shape) = (shapes.first()?, shapes.get(1)?);
+                if a_shape.len() < 2 || b_shape.len() < 2 {
+                    return None;
                 }
-                1000000 // Default estimate
+                let m = a_shape[a_shape.len() - 2];
+                let k = a_shape[a_shape.len() - 1];
+                let n = b_shape[b_shape.len() - 1];
+                Some((2 * m * k * n) as u64)
             },
-            OperationType::Add | OperationType::Subtract | OperationType::Multiply => {
-                shapes.first().map(|s| s.iter().product::<usize>() as u64).unwrap_or(1000)
-            },
-            OperationType::ReLU | OperationType::Sigmoid | OperationType::Tanh => {
-                shapes.first().map(|s| s.iter().product::<usize>() as u64).unwrap_or(1000)
-            },
+            OperationType::Add
+            | OperationType::Subtract
+            | OperationType::Multiply
+            | OperationType::ReLU
+            | OperationType::Sigmoid
+            | OperationType::Tanh => shapes.first().map(elements),
+            // Normalisation touches each element a small constant number of
+            // times (mean, centring, variance, scale, shift).
             OperationType::LayerNorm | OperationType::BatchNorm => {
-                shapes.first().map(|s| (s.iter().product::<usize>() * 5) as u64).unwrap_or(5000)
+                shapes.first().map(|s| elements(s) * 5)
             },
-            _ => 1000, // Default estimate
+            // Every other operation's cost model would be a guess: reported as
+            // absent rather than as the old flat 1_000.
+            _ => None,
         }
     }
 
-    fn estimate_memory(&self, op_type: &OperationType, shapes: &[Vec<usize>]) -> u64 {
-        // Simplified memory estimation (assuming float32 = 4 bytes)
-        let element_size = 4u64;
+    /// Bytes touched by one execution of `op_type` over `shapes`, assuming
+    /// float32 elements; `None` when the shapes are missing.
+    fn estimate_memory(&self, op_type: &OperationType, shapes: &[Vec<usize>]) -> Option<u64> {
+        const ELEMENT_SIZE: u64 = 4;
+        if shapes.is_empty() {
+            return None;
+        }
         match op_type {
-            OperationType::MatMul => {
+            OperationType::MatMul => Some(
                 shapes
                     .iter()
-                    .map(|s| s.iter().product::<usize>() as u64 * element_size)
-                    .sum::<u64>()
-                    .max(1024) // Minimum 1KB
-            },
-            _ => shapes
-                .first()
-                .map(|s| s.iter().product::<usize>() as u64 * element_size)
-                .unwrap_or(1024),
+                    .map(|s| s.iter().product::<usize>() as u64 * ELEMENT_SIZE)
+                    .sum::<u64>(),
+            ),
+            _ => shapes.first().map(|s| s.iter().product::<usize>() as u64 * ELEMENT_SIZE),
         }
     }
 
-    fn estimate_parameters(&self, op_type: &OperationType) -> Option<u64> {
+    /// Learned-parameter count for `op_type`, derived from `shapes`.
+    ///
+    /// For a `MatMul` the second operand *is* the weight matrix, so its element
+    /// count is the parameter count; a `LayerNorm` learns one scale and one
+    /// shift per normalised element. Anything whose parameter count cannot be
+    /// derived from the shapes present is `None` -- the previous version
+    /// returned the literals 1M / 500K / 2M / 1K keyed only on the operation
+    /// type, identical for every model and every layer size.
+    fn estimate_parameters(&self, op_type: &OperationType, shapes: &[Vec<usize>]) -> Option<u64> {
         match op_type {
-            OperationType::MatMul => Some(1000000), // Example: 1M parameters
-            OperationType::Conv2D => Some(500000),
-            OperationType::Embedding => Some(2000000),
-            OperationType::LayerNorm => Some(1000),
+            OperationType::MatMul => {
+                let weights = shapes.get(1)?;
+                Some(weights.iter().product::<usize>() as u64)
+            },
+            OperationType::LayerNorm => {
+                let normalised = shapes.first()?;
+                Some(2 * (*normalised.last()?) as u64)
+            },
             _ => None,
         }
     }
 
     fn analyze_memory_usage(&self, graph: &ComputationGraph) -> Result<MemoryAnalysis> {
-        let total_memory_usage = graph.nodes.values().map(|n| n.memory_usage).sum();
+        // Nodes with no shape information contribute nothing rather than a
+        // constant: an unmeasured node is not a zero-byte node, but it is also
+        // not the 1024-byte one the old estimator invented for it.
+        let total_memory_usage = graph.nodes.values().filter_map(|n| n.memory_usage).sum();
 
         let mut memory_by_operation: HashMap<OperationType, u64> = HashMap::new();
         for node in graph.nodes.values() {
-            *memory_by_operation.entry(node.operation_type.clone()).or_insert(0) +=
-                node.memory_usage;
+            if let Some(memory) = node.memory_usage {
+                *memory_by_operation.entry(node.operation_type.clone()).or_insert(0) += memory;
+            }
         }
 
-        let mut memory_hotspots: Vec<(String, u64)> =
-            graph.nodes.values().map(|n| (n.id.clone(), n.memory_usage)).collect();
+        let mut memory_hotspots: Vec<(String, u64)> = graph
+            .nodes
+            .values()
+            .filter_map(|n| n.memory_usage.map(|m| (n.id.clone(), m)))
+            .collect();
         memory_hotspots.sort_by_key(|item| std::cmp::Reverse(item.1));
         memory_hotspots.truncate(10); // Top 10
 
-        let peak_memory_usage = total_memory_usage; // Simplified
-        let fragmentation_ratio = 0.1; // Simplified estimate
+        let peak_memory_usage = self.compute_peak_memory_usage(graph);
+        // No real memory-allocator/placement model exists in this crate --
+        // see the field's own doc comment. Honestly absent, not a
+        // fabricated "10% fragmented" guess.
+        let fragmentation_ratio = None;
 
         let optimization_suggestions = vec![
             "Consider memory pooling for frequently allocated tensors".to_string(),
@@ -719,27 +855,88 @@ impl ComputationGraphAnalyzer {
         })
     }
 
+    /// Real peak simultaneously-live memory, via a liveness walk over the
+    /// graph's real topological order: at each node's execution step, its
+    /// output becomes live; a dependency's output is freed the moment the
+    /// *last* node (by topological position) that consumes it has
+    /// executed -- except outputs in [`ComputationGraph::leaf_nodes`],
+    /// which are the graph's own outputs and must stay live through the
+    /// end. The result is the maximum total live bytes observed at any
+    /// step; always `<= total_memory_usage` (equal only when nothing is
+    /// ever freed, i.e. every tensor really is live simultaneously).
+    fn compute_peak_memory_usage(&self, graph: &ComputationGraph) -> u64 {
+        let mut ordered: Vec<&GraphNode> = graph.nodes.values().collect();
+        ordered.sort_by_key(|n| n.topo_order.unwrap_or(usize::MAX));
+
+        // For every node, the topological position of its LAST consumer --
+        // the latest point at which its output is still needed as an
+        // input.
+        let mut last_use: HashMap<&str, usize> = HashMap::new();
+        for node in &ordered {
+            let Some(topo) = node.topo_order else {
+                continue;
+            };
+            for dep in graph.edges.get(&node.id).into_iter().flatten() {
+                last_use.entry(dep.as_str()).and_modify(|t| *t = (*t).max(topo)).or_insert(topo);
+            }
+        }
+
+        let mut live: u64 = 0;
+        let mut peak: u64 = 0;
+        for node in &ordered {
+            let Some(topo) = node.topo_order else {
+                continue;
+            };
+            live = live.saturating_add(node.memory_usage.unwrap_or(0));
+            peak = peak.max(live);
+            // Dedupe: an op can legitimately depend on the same upstream
+            // node twice (e.g. `Multiply(x, x)`), which would otherwise
+            // free `dep`'s memory once per OCCURRENCE in the edge list
+            // instead of once per real tensor -- an artificial extra
+            // free that could understate `live` (and therefore a LATER
+            // step's peak) even though nothing changed.
+            let unique_deps: HashSet<&str> =
+                graph.edges.get(&node.id).into_iter().flatten().map(|s| s.as_str()).collect();
+            for dep in unique_deps {
+                let is_last_use = last_use.get(dep) == Some(&topo);
+                if is_last_use && !graph.leaf_nodes.contains(dep) {
+                    if let Some(dep_node) = graph.nodes.get(dep) {
+                        live = live.saturating_sub(dep_node.memory_usage.unwrap_or(0));
+                    }
+                }
+            }
+        }
+        peak
+    }
+
     fn analyze_flop_usage(&self, graph: &ComputationGraph) -> Result<FlopAnalysis> {
-        let total_flops = graph.nodes.values().map(|n| n.flop_count).sum();
+        let total_flops = graph.nodes.values().filter_map(|n| n.flop_count).sum();
 
         let mut flops_by_operation: HashMap<OperationType, u64> = HashMap::new();
         for node in graph.nodes.values() {
-            *flops_by_operation.entry(node.operation_type.clone()).or_insert(0) += node.flop_count;
+            if let Some(flops) = node.flop_count {
+                *flops_by_operation.entry(node.operation_type.clone()).or_insert(0) += flops;
+            }
         }
 
-        let mut compute_hotspots: Vec<(String, u64)> =
-            graph.nodes.values().map(|n| (n.id.clone(), n.flop_count)).collect();
+        let mut compute_hotspots: Vec<(String, u64)> = graph
+            .nodes
+            .values()
+            .filter_map(|n| n.flop_count.map(|f| (n.id.clone(), f)))
+            .collect();
         compute_hotspots.sort_by_key(|item| std::cmp::Reverse(item.1));
         compute_hotspots.truncate(10); // Top 10
 
-        let total_memory = graph.nodes.values().map(|n| n.memory_usage).sum::<u64>();
+        let total_memory = graph.nodes.values().filter_map(|n| n.memory_usage).sum::<u64>();
         let arithmetic_intensity =
             if total_memory > 0 { total_flops as f64 / total_memory as f64 } else { 0.0 };
 
         let complexity_analysis = ComplexityAnalysis {
-            time_complexity: "O(n)".to_string(),  // Simplified
-            space_complexity: "O(n)".to_string(), // Simplified
-            parallelization_potential: 0.7,       // Simplified estimate
+            // See the fields' own doc comments: a Big-O class is not
+            // derivable from one concrete-shaped graph instance.
+            time_complexity: None,
+            space_complexity: None,
+            parallelization_potential: self.compute_parallelization_potential(graph),
             sequential_dependencies: graph.metadata.max_depth,
         };
 
@@ -750,6 +947,33 @@ impl ComputationGraphAnalyzer {
             arithmetic_intensity,
             complexity_analysis,
         })
+    }
+
+    /// Real, structural parallelization-potential estimate: `1 -
+    /// span/work`, using UNIT per-node cost (i.e. "work" = node count,
+    /// "span" = critical-path length in nodes = `max_depth + 1`) -- the
+    /// classical work/span parallelism ratio from parallel-scheduling
+    /// theory (Brent/Graham), consistent with
+    /// [`ComplexityAnalysis::sequential_dependencies`] already being the
+    /// same unweighted `max_depth`. `0.0` for a pure chain (span == work:
+    /// every node is on the critical path, so nothing can run
+    /// alongside it); approaches `1.0` for a wide, shallow graph where
+    /// most nodes are off the critical path.
+    ///
+    /// Deliberately unweighted by FLOPs/bytes: those are per-node
+    /// quantities that can vary by orders of magnitude between nodes, so
+    /// a work-weighted version would let one disproportionately expensive
+    /// node dominate the ratio and mislabel a structurally wide (many
+    /// independent branches), maximally parallel graph as having "low"
+    /// potential just because most of its FLOPs happen to sit on the
+    /// critical path.
+    fn compute_parallelization_potential(&self, graph: &ComputationGraph) -> f64 {
+        let node_count = graph.nodes.len();
+        if node_count == 0 {
+            return 0.0;
+        }
+        let span = graph.metadata.max_depth + 1;
+        (1.0 - span as f64 / node_count as f64).clamp(0.0, 1.0)
     }
 
     fn detect_optimization_opportunities(
@@ -807,12 +1031,84 @@ impl ComputationGraphAnalyzer {
         Ok(opportunities)
     }
 
+    /// Real common-subexpression detection: groups nodes by the exact
+    /// `(operation_type, ordered dependency list)` signature they compute.
+    /// Two internal nodes applying the *same operation* to the *same
+    /// ordered list of upstream node ids* are, for a deterministic pure
+    /// operation, computing an identical result -- all but one are fully
+    /// redundant. Dependency order is kept significant (never sorted), so
+    /// non-commutative operations (`Subtract`, `MatMul`, ...) are never
+    /// falsely flagged as duplicates of each other with swapped operands.
+    ///
+    /// [`ComputationGraph::root_nodes`] (no dependencies at all) are
+    /// excluded: an empty dependency list carries no proof that two roots
+    /// hold the same external data -- e.g. two distinct model inputs may
+    /// well share both an operation type and "no dependencies" without
+    /// being remotely the same tensor.
     fn detect_redundancy_opportunities(
         &self,
-        _graph: &ComputationGraph,
+        graph: &ComputationGraph,
     ) -> Result<Vec<OptimizationOpportunity>> {
-        // Simplified - in real implementation would detect common subexpressions
-        Ok(vec![])
+        let empty_deps: Vec<String> = Vec::new();
+        let mut signature_groups: HashMap<(&OperationType, &[String]), Vec<&str>> = HashMap::new();
+        for node in graph.nodes.values() {
+            let deps = graph.edges.get(&node.id).unwrap_or(&empty_deps);
+            if deps.is_empty() {
+                continue; // no real dependencies to prove equivalence from
+            }
+            signature_groups
+                .entry((&node.operation_type, deps.as_slice()))
+                .or_default()
+                .push(node.id.as_str());
+        }
+
+        let mut opportunities = Vec::new();
+        for ((op_type, deps), mut node_ids) in signature_groups {
+            if node_ids.len() < 2 {
+                continue;
+            }
+            node_ids.sort_unstable(); // deterministic report ordering
+
+            let redundant_count = node_ids.len() - 1;
+            let per_node_memory = node_ids
+                .iter()
+                .filter_map(|id| graph.nodes.get(*id))
+                .filter_map(|n| n.memory_usage)
+                .max()
+                .unwrap_or(0);
+
+            opportunities.push(OptimizationOpportunity {
+                optimization_type: OptimizationType::RedundancyElimination,
+                description: format!(
+                    "{} node(s) recompute the identical {} over the same {} input(s); keep one \
+                     and reuse its output for the other {}",
+                    node_ids.len(),
+                    op_type,
+                    deps.len(),
+                    redundant_count,
+                ),
+                affected_nodes: node_ids.iter().map(|s| s.to_string()).collect(),
+                estimated_improvement: EstimatedImprovement {
+                    // This group's own work shrinks from `node_ids.len()`
+                    // identical computations to 1 -- a real factor derived
+                    // from the actual duplicate count, not an invented
+                    // constant.
+                    speedup_factor: node_ids.len() as f64,
+                    memory_reduction: per_node_memory * redundant_count as u64,
+                    energy_savings: (redundant_count as f64 / node_ids.len() as f64)
+                        .clamp(0.0, 1.0),
+                },
+                implementation_difficulty: 2,
+                priority: if redundant_count >= 3 {
+                    OptimizationPriority::High
+                } else {
+                    OptimizationPriority::Medium
+                },
+            });
+        }
+
+        opportunities.sort_by(|a, b| a.affected_nodes.cmp(&b.affected_nodes));
+        Ok(opportunities)
     }
 
     fn detect_memory_optimizations(
@@ -823,7 +1119,12 @@ impl ComputationGraphAnalyzer {
 
         // Look for large memory operations
         for node in graph.nodes.values() {
-            if node.memory_usage > self.config.large_memory_threshold {
+            let Some(node_memory) = node.memory_usage else {
+                // Nothing is known about this node's memory, so it cannot be
+                // identified as a large one.
+                continue;
+            };
+            if node_memory > self.config.large_memory_threshold {
                 opportunities.push(OptimizationOpportunity {
                     optimization_type: OptimizationType::MemoryLayoutOptimization,
                     description: format!(
@@ -833,7 +1134,7 @@ impl ComputationGraphAnalyzer {
                     affected_nodes: vec![node.id.clone()],
                     estimated_improvement: EstimatedImprovement {
                         speedup_factor: 1.1,
-                        memory_reduction: node.memory_usage / 4, // 25% reduction
+                        memory_reduction: node_memory / 4, // 25% reduction
                         energy_savings: 0.05,
                     },
                     implementation_difficulty: 3,
@@ -890,41 +1191,73 @@ impl ComputationGraphAnalyzer {
     fn analyze_dataflow(&self, graph: &ComputationGraph) -> Result<DataFlowAnalysis> {
         let mut data_dependencies = HashMap::new();
         let mut live_variables = HashMap::new();
-        let mut variable_lifetimes = HashMap::new();
-
-        // Simplified dataflow analysis
         for (node_id, dependencies) in &graph.edges {
             data_dependencies.insert(node_id.clone(), dependencies.clone());
             live_variables.insert(node_id.clone(), dependencies.iter().cloned().collect());
-
-            // Create variable lifetimes for dependencies
-            for dep in dependencies {
-                if !variable_lifetimes.contains_key(dep) {
-                    variable_lifetimes.insert(
-                        dep.clone(),
-                        VariableLifetime {
-                            birth_node: dep.clone(),
-                            death_node: node_id.clone(),
-                            usage_nodes: vec![node_id.clone()],
-                            memory_footprint: graph
-                                .nodes
-                                .get(dep)
-                                .map(|n| n.memory_usage)
-                                .unwrap_or(0),
-                        },
-                    );
-                } else if let Some(lifetime) = variable_lifetimes.get_mut(dep) {
-                    lifetime.death_node = node_id.clone();
-                    lifetime.usage_nodes.push(node_id.clone());
-                }
-            }
         }
 
-        let memory_reuse_opportunities = vec![MemoryReuseOpportunity {
-            reusable_variables: vec!["var1".to_string(), "var2".to_string()],
-            memory_savings: 1024 * 1024, // 1MB
-            complexity: 2,
-        }];
+        // Real, deterministic variable lifetimes: each node's own OUTPUT
+        // is one "variable", born when the node executes (its real
+        // topological position) and alive until the topologically LAST
+        // real consumer runs -- or, for a `leaf_nodes` member (the
+        // graph's own published outputs), alive through the graph's end,
+        // since nothing inside the graph marks when an external caller
+        // is done reading it. Built from the real topo order (not
+        // `graph.edges`' `HashMap` iteration order, which the previous
+        // implementation used directly and which is not required to
+        // reflect real execution sequence).
+        let mut ordered: Vec<&GraphNode> = graph.nodes.values().collect();
+        ordered.sort_by_key(|n| n.topo_order.unwrap_or(usize::MAX));
+
+        let mut consumers_by_dep: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+        for node in &ordered {
+            let Some(topo) = node.topo_order else {
+                continue;
+            };
+            for dep in graph.edges.get(&node.id).into_iter().flatten() {
+                consumers_by_dep.entry(dep.as_str()).or_default().push((topo, node.id.as_str()));
+            }
+        }
+        let max_topo = ordered.iter().filter_map(|n| n.topo_order).max().unwrap_or(0);
+
+        let mut variable_lifetimes = HashMap::new();
+        let mut birth_death_topo: HashMap<&str, (usize, usize)> = HashMap::new();
+        for node in &ordered {
+            let Some(birth_topo) = node.topo_order else {
+                continue;
+            };
+            let mut consumers = consumers_by_dep.get(node.id.as_str()).cloned().unwrap_or_default();
+            consumers.sort(); // deterministic: (topo, consumer_id)
+
+            let death_topo = if graph.leaf_nodes.contains(&node.id) {
+                max_topo
+            } else {
+                consumers.iter().map(|&(t, _)| t).max().unwrap_or(birth_topo)
+            };
+            // No real consumer at `death_topo` only when the node has no
+            // consumers at all (it dies right at birth); otherwise this
+            // is the real id of whichever consumer's topo position IS
+            // `death_topo`.
+            let death_node = consumers
+                .iter()
+                .find(|&&(t, _)| t == death_topo)
+                .map(|&(_, id)| id.to_string())
+                .unwrap_or_else(|| node.id.clone());
+
+            birth_death_topo.insert(node.id.as_str(), (birth_topo, death_topo));
+            variable_lifetimes.insert(
+                node.id.clone(),
+                VariableLifetime {
+                    birth_node: node.id.clone(),
+                    death_node,
+                    usage_nodes: consumers.iter().map(|&(_, id)| id.to_string()).collect(),
+                    memory_footprint: node.memory_usage.unwrap_or(0),
+                },
+            );
+        }
+
+        let memory_reuse_opportunities =
+            self.find_memory_reuse_opportunities(graph, &ordered, &birth_death_topo);
 
         Ok(DataFlowAnalysis {
             data_dependencies,
@@ -934,23 +1267,157 @@ impl ComputationGraphAnalyzer {
         })
     }
 
-    fn find_critical_path(&self, graph: &ComputationGraph) -> Result<Vec<String>> {
-        // Simplified critical path finding - uses depth as proxy
-        let mut path = Vec::new();
-        let mut current_depth = graph.metadata.max_depth;
+    /// Real memory-reuse opportunities: pairs of internal (non-
+    /// [`ComputationGraph::leaf_nodes`]) variables whose real lifetime
+    /// intervals -- from [`Self::analyze_dataflow`]'s topo-order
+    /// liveness computation -- do NOT overlap, so one variable's buffer
+    /// could be physically reused for the other once the first is dead.
+    /// `memory_savings` is the real `min(footprint_a, footprint_b)`:
+    /// sizing one shared buffer to `max(a, b)` instead of allocating `a`
+    /// and `b` separately saves exactly the smaller footprint.
+    /// `complexity` is the real count of variables sharing the buffer
+    /// (always `2` here, since this only ever proposes pairwise reuse) --
+    /// not an editorial guess.
+    ///
+    /// Bounded to the `REUSE_CANDIDATE_LIMIT` largest-footprint
+    /// variables to keep an otherwise-O(n^2) pairing tractable on large
+    /// graphs; a documented performance bound, not a fabrication -- every
+    /// opportunity actually reported is still real.
+    fn find_memory_reuse_opportunities(
+        &self,
+        graph: &ComputationGraph,
+        ordered: &[&GraphNode],
+        birth_death_topo: &HashMap<&str, (usize, usize)>,
+    ) -> Vec<MemoryReuseOpportunity> {
+        const REUSE_CANDIDATE_LIMIT: usize = 200;
 
-        while current_depth > 0 {
-            // Find a node at the current depth
-            for node in graph.nodes.values() {
-                if node.depth == current_depth {
-                    path.push(node.id.clone());
-                    current_depth -= 1;
-                    break;
+        let mut candidates: Vec<&GraphNode> = ordered
+            .iter()
+            .filter(|n| n.memory_usage.is_some_and(|m| m > 0) && !graph.leaf_nodes.contains(&n.id))
+            .copied()
+            .collect();
+        candidates.sort_by_key(|n| std::cmp::Reverse(n.memory_usage.unwrap_or(0)));
+        candidates.truncate(REUSE_CANDIDATE_LIMIT);
+
+        let mut opportunities = Vec::new();
+        for (i, &a) in candidates.iter().enumerate() {
+            let Some(&(a_birth, a_death)) = birth_death_topo.get(a.id.as_str()) else {
+                continue;
+            };
+            for &b in &candidates[i + 1..] {
+                let Some(&(b_birth, b_death)) = birth_death_topo.get(b.id.as_str()) else {
+                    continue;
+                };
+                // Real non-overlap: does one variable's lifetime end
+                // strictly before the other's begins? (Strict, not `<=`:
+                // equality would mean one directly consumes the other at
+                // that exact step, which is not a safe blind reuse.)
+                let non_overlapping = a_death < b_birth || b_death < a_birth;
+                if !non_overlapping {
+                    continue;
                 }
+                let savings = a.memory_usage.unwrap_or(0).min(b.memory_usage.unwrap_or(0));
+                if savings == 0 {
+                    continue;
+                }
+                let mut reusable_variables = vec![a.id.clone(), b.id.clone()];
+                reusable_variables.sort();
+                opportunities.push(MemoryReuseOpportunity {
+                    reusable_variables,
+                    memory_savings: savings,
+                    complexity: 2,
+                });
             }
-            current_depth = current_depth.saturating_sub(1);
         }
 
+        opportunities.sort_by_key(|o| std::cmp::Reverse(o.memory_savings));
+        opportunities.truncate(10);
+        opportunities
+    }
+
+    /// Real critical path: the longest weighted path through the
+    /// dependency DAG, found by dynamic programming over the graph's real
+    /// topological order (replacing the old "depth as proxy" heuristic,
+    /// which only ever reported path *length*, never the actual
+    /// highest-cost chain, and in fact walked every other depth level due
+    /// to a double-decrement bug).
+    ///
+    /// Every node in the graph is weighted on the SAME scale: real
+    /// profiled `execution_time_us` when *any* node has been profiled
+    /// (unprofiled nodes contribute `0`, never compared against a
+    /// different unit), falling back to real estimated `flop_count` for
+    /// every node only when none of the graph has been profiled yet --
+    /// deciding this once per graph (not per node) so a `Some(50)` µs
+    /// node is never pitted against a `1_000_000`-FLOP node in the same
+    /// path sum.
+    fn find_critical_path(&self, graph: &ComputationGraph) -> Result<Vec<String>> {
+        let mut ordered: Vec<&GraphNode> = graph.nodes.values().collect();
+        ordered.sort_by_key(|n| n.topo_order.unwrap_or(usize::MAX));
+
+        let use_time = graph.nodes.values().any(|n| n.execution_time_us.is_some());
+        let weight = |node: &GraphNode| -> f64 {
+            if use_time {
+                node.execution_time_us.unwrap_or(0) as f64
+            } else {
+                // A node with no FLOP estimate contributes no weight to the
+                // critical path rather than a fabricated cost.
+                node.flop_count.unwrap_or(0) as f64
+            }
+        };
+
+        // best_cost[node] = weight of the longest path ending at `node`;
+        // predecessor[node] = the dependency that achieves it, for
+        // backtracking the actual path afterwards.
+        let mut best_cost: HashMap<&str, f64> = HashMap::new();
+        let mut predecessor: HashMap<&str, &str> = HashMap::new();
+
+        for node in &ordered {
+            if node.topo_order.is_none() {
+                continue;
+            }
+            let mut best_dep_cost = 0.0_f64;
+            let mut best_dep: Option<&str> = None;
+            for dep in graph.edges.get(&node.id).into_iter().flatten() {
+                if let Some(&cost) = best_cost.get(dep.as_str()) {
+                    // Deterministic tie-break (lexicographically greater
+                    // dep id wins) so results don't depend on HashMap
+                    // iteration order.
+                    let better = match best_dep {
+                        None => true,
+                        Some(bd) => {
+                            cost > best_dep_cost || (cost == best_dep_cost && dep.as_str() > bd)
+                        },
+                    };
+                    if better {
+                        best_dep_cost = cost;
+                        best_dep = Some(dep.as_str());
+                    }
+                }
+            }
+            best_cost.insert(node.id.as_str(), weight(node) + best_dep_cost);
+            if let Some(dep) = best_dep {
+                predecessor.insert(node.id.as_str(), dep);
+            }
+        }
+
+        // The critical path ends at whichever node has the largest total
+        // cost -- the real sink of the longest chain, not necessarily a
+        // declared `leaf_nodes` member on a multi-output graph. Ties break
+        // deterministically on node id.
+        let Some((&end_node, _)) = best_cost.iter().max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(b.0))
+        }) else {
+            return Ok(Vec::new());
+        };
+
+        let mut path = vec![end_node.to_string()];
+        let mut current = end_node;
+        while let Some(&pred) = predecessor.get(current) {
+            path.push(pred.to_string());
+            current = pred;
+        }
         path.reverse();
         Ok(path)
     }
@@ -971,9 +1438,64 @@ impl ComputationGraphAnalyzer {
             average_fan_in,
             average_fan_out,
             diameter: graph.metadata.max_depth,
-            clustering_coefficient: 0.0, // Simplified - DAGs have clustering coefficient of 0
+            clustering_coefficient: self.compute_clustering_coefficient(graph),
             strongly_connected_components: graph.nodes.len(), // Each node is its own SCC in a DAG
         })
+    }
+
+    /// Real average local clustering coefficient (Watts-Strogatz), computed
+    /// on the graph's *undirected* neighbor relation: a dependency edge
+    /// `dep -> node` makes `dep` and `node` neighbors regardless of
+    /// direction, the conventional way to compute this statistic on a
+    /// directed graph. For each node `v` with `k_v` neighbors,
+    /// `C_v = (edges among v's neighbors) / (k_v * (k_v - 1) / 2)`;
+    /// nodes with fewer than 2 neighbors contribute `0` (the standard
+    /// convention: no pair of neighbors exists to be connected or not).
+    /// The graph-level value is the mean of `C_v` over all nodes.
+    ///
+    /// This is *not* trivially `0.0` the way the old placeholder claimed:
+    /// a "diamond"/skip-connection pattern -- a value feeding both an
+    /// operation and that operation's own downstream consumer, e.g.
+    /// `x -> f(x)` followed by `Add(x, f(x))` -- makes `x`'s two
+    /// consumers neighbors of *each other* too (since one feeds the
+    /// other), producing a real triangle and a nonzero `C_v`. This exact
+    /// shape is common in transformer graphs (residual connections).
+    fn compute_clustering_coefficient(&self, graph: &ComputationGraph) -> f64 {
+        if graph.nodes.is_empty() {
+            return 0.0;
+        }
+
+        let mut neighbors: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for node_id in graph.nodes.keys() {
+            neighbors.entry(node_id.as_str()).or_default();
+        }
+        for (node_id, deps) in &graph.edges {
+            for dep in deps {
+                neighbors.entry(node_id.as_str()).or_default().insert(dep.as_str());
+                neighbors.entry(dep.as_str()).or_default().insert(node_id.as_str());
+            }
+        }
+
+        let mut coefficient_sum = 0.0;
+        for neighs in neighbors.values() {
+            let k = neighs.len();
+            if k < 2 {
+                continue; // contributes 0, per convention
+            }
+            let neigh_vec: Vec<&str> = neighs.iter().copied().collect();
+            let mut connected_pairs = 0usize;
+            for (i, &a) in neigh_vec.iter().enumerate() {
+                for &b in &neigh_vec[i + 1..] {
+                    if neighbors.get(a).is_some_and(|n| n.contains(b)) {
+                        connected_pairs += 1;
+                    }
+                }
+            }
+            let possible_pairs = k * (k - 1) / 2;
+            coefficient_sum += connected_pairs as f64 / possible_pairs as f64;
+        }
+
+        coefficient_sum / graph.nodes.len() as f64
     }
 
     fn generate_recommendations(&self, analysis: &GraphAnalysisResult) -> Result<Vec<String>> {
@@ -987,9 +1509,11 @@ impl ComputationGraphAnalyzer {
                     "Consider using gradient checkpointing to reduce memory usage".to_string(),
                 );
             }
-            if memory_analysis.fragmentation_ratio > 0.2 {
-                recommendations
-                    .push("Implement memory pooling to reduce fragmentation".to_string());
+            if let Some(ratio) = memory_analysis.fragmentation_ratio {
+                if ratio > 0.2 {
+                    recommendations
+                        .push("Implement memory pooling to reduce fragmentation".to_string());
+                }
             }
         }
 
@@ -1066,99 +1590,5 @@ impl Default for ComputationGraphAnalyzer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_computation_graph_creation() {
-        let mut analyzer = ComputationGraphAnalyzer::default();
-
-        let operations = vec![
-            (
-                "input".to_string(),
-                OperationType::Custom("Input".to_string()),
-                vec![],
-            ),
-            (
-                "linear1".to_string(),
-                OperationType::MatMul,
-                vec!["input".to_string()],
-            ),
-            (
-                "relu1".to_string(),
-                OperationType::ReLU,
-                vec!["linear1".to_string()],
-            ),
-            (
-                "linear2".to_string(),
-                OperationType::MatMul,
-                vec!["relu1".to_string()],
-            ),
-            (
-                "output".to_string(),
-                OperationType::Custom("Output".to_string()),
-                vec!["linear2".to_string()],
-            ),
-        ];
-
-        let graph_id = analyzer
-            .create_graph("test_model".to_string(), operations)
-            .expect("operation failed in test");
-        let analysis = analyzer.analyze_graph(graph_id).expect("operation failed in test");
-
-        assert_eq!(analysis.statistics.nodes_by_type.len(), 4); // MatMul, ReLU, Custom("Input"), Custom("Output")
-        assert!(!analysis.critical_path.is_empty());
-    }
-
-    #[test]
-    fn test_optimization_detection() {
-        let mut analyzer = ComputationGraphAnalyzer::default();
-
-        let operations = vec![
-            (
-                "input".to_string(),
-                OperationType::Custom("Input".to_string()),
-                vec![],
-            ),
-            (
-                "matmul".to_string(),
-                OperationType::MatMul,
-                vec!["input".to_string()],
-            ),
-            (
-                "add".to_string(),
-                OperationType::Add,
-                vec!["matmul".to_string()],
-            ),
-        ];
-
-        let graph_id = analyzer
-            .create_graph("fusion_test".to_string(), operations)
-            .expect("operation failed in test");
-        let analysis = analyzer.analyze_graph(graph_id).expect("operation failed in test");
-
-        assert!(analysis
-            .optimization_opportunities
-            .iter()
-            .any(|op| op.optimization_type == OptimizationType::OperationFusion));
-    }
-
-    #[test]
-    fn test_dot_export() {
-        let mut analyzer = ComputationGraphAnalyzer::default();
-
-        let operations = vec![
-            ("a".to_string(), OperationType::MatMul, vec![]),
-            ("b".to_string(), OperationType::ReLU, vec!["a".to_string()]),
-        ];
-
-        let graph_id = analyzer
-            .create_graph("simple".to_string(), operations)
-            .expect("operation failed in test");
-        let dot = analyzer.export_to_dot(graph_id).expect("operation failed in test");
-
-        assert!(dot.contains("digraph"));
-        assert!(dot.contains("MatMul"));
-        assert!(dot.contains("ReLU"));
-    }
-}
+#[path = "computation_graph_tests.rs"]
+mod tests;

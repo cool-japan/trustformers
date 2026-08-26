@@ -1,6 +1,6 @@
 # trustformers-training TODO List
 
-**Version:** 0.1.4 | **Last reviewed:** 2026-07-02
+**Version:** 0.2.1 | **Last reviewed:** 2026-08-24 (file-split and SLoC-total items refreshed; the detailed "72 compiled files / 58,207 SLoC / 1,673 public API items" breakdown below is unchanged since 2026-07-09 and is now stale on the file count specifically — this wave split 2 of those 72 files into 15, see the file-size correction below)
 
 ## Overview
 
@@ -14,11 +14,11 @@ plus elastic and multi-cloud orchestration).
 
 ## Current Status (verified 2026-07-01)
 
-- **~930 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings)
-- **1,673 public API items** reachable from `lib.rs` (69 compiled `.rs` files, 59,720 SLoC; the full `src/` tree on disk is 89,914 lines across 102 files, ~30,194 of which are orphaned/unwired)
+- **~1,010 tests passing** as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26)
+- **1,673 public API items** reachable from `lib.rs` as of 2026-07-09, not re-verified — the underlying file count (72 compiled `.rs` files) is stale: this wave split 2 of those files (`data_pipeline.rs`, `auto_parallelism.rs`) into 15 files total, so the true compiled-file count today is higher, not recounted. Whole-crate SLoC (compiled + orphaned, `tokei`, verified 2026-08-24): **83,319** — close to but not identical to the 2026-07-09 "full `src/` tree on disk is 83,317 lines" figure, consistent with real edits since (not itself evidence the orphaned-code inventory below is stale, but it wasn't re-run this pass).
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder") in compiled code
 - **0 `.unwrap()` calls** in compiled production code
-- No file in the compiled tree exceeds the workspace's 2000-line refactor threshold (largest: `auto_parallelism.rs` at 1,610 lines)
+- No file in the compiled tree exceeds the workspace's 2000-line refactor threshold. **Corrected 2026-08-24**: `auto_parallelism.rs` (this line's previous "largest, 1,610 lines" example) grew to 2,030 lines between 2026-07-09 and 2026-08-18 and was split this wave into a 6-file `auto_parallelism/` directory module (largest sub-file: `selector.rs` at 1,355 lines); `data_pipeline.rs` (2,143 lines by 2026-08-18) was likewise split into a 9-file `data_pipeline/` directory. Both directories' largest files stay under the limit — see root `TODO.md` for the current largest-files-in-the-workspace figures.
 - Status: **Alpha** — see "Known Issues" below for why this crate is not labeled Stable despite the test count
 
 This file replaces the previous TODO.md's checklist with one re-verified against the actual source
@@ -31,16 +31,19 @@ This file replaces the previous TODO.md's checklist with one re-verified against
 These are genuine findings from auditing `src/` against `lib.rs`'s module tree — not present in earlier
 drafts of this document.
 
-- [ ] **~30,000 lines of orphaned/unwired code.** 21 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`,
-  `ewc/`, `curriculum/`, `hpo/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`,
+- [ ] **~25,110 lines of orphaned/unwired code** (down from ~30,000 as of 2026-07-09; see the `hpo`/`mod.rs`
+  note below). 20 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`,
+  `ewc/`, `curriculum/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`,
   `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`,
-  `reward_modeling/`) plus 6 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`,
-  `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`, `mod.rs`) are not referenced by any `mod`
+  `reward_modeling/`) plus 5 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`,
+  `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`) are not referenced by any `mod`
   declaration in `lib.rs` and are therefore not compiled into the crate at all. Their functionality generally
   looks superseded by wired-in equivalents (`rlhf::ppo`/`rlhf::dpo` vs. the orphaned `ppo/`/`dpo/`;
   `data_pipeline`'s curriculum types vs. the orphaned `curriculum/`). Action needed: either wire the useful
   ones in (e.g. `grpo/`, which looks like it might add real GRPO support not otherwise present) or delete the
-  rest so the tree reflects what's actually shipped.
+  rest so the tree reflects what's actually shipped. (`hpo/` was mounted via `pub mod hpo;` in 0.2.0 and is
+  no longer on this orphaned list — see the Hyperparameter Tuning section below; the orphaned root-level
+  `mod.rs` was deleted in 0.2.0 rather than wired in — see Housekeeping below.)
 - [ ] **No ZeRO optimizer.** Earlier documentation for this crate advertised "ZeRO stages 1/2/3" as a
   flagship feature; there is no `ZeroStage`/sharded-optimizer implementation anywhere in the source. If ZeRO
   is wanted, it needs to be implemented from scratch.
@@ -150,10 +153,29 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Expert parallelism (MoE-style routing): `ExpertParallelism`, `TokenRouting` (`expert_parallelism.rs`)
 - [x] Ring attention for long-sequence distributed attention (`ring_attention.rs`)
 - [x] Hardware-aware automatic parallelism strategy selection: `AutoParallelismSelector` from
-  `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism.rs`) — note this is strategy
+  `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism/`, split from a single `auto_parallelism.rs` this wave) — note this is strategy
   *selection*, not general hyperparameter tuning from hardware
 - [x] Elastic training coordinator: worker heartbeats, scaling decisions, mid-training checkpoints
-  (`elastic_training.rs`)
+  (`elastic_training.rs`) — **honesty-audited 2026-08-25.** Before this pass, `scale_up`/
+  `rebalance_workers`/`recover_from_checkpoint` were log-and-`Ok(())` no-ops that still recorded
+  `ScalingEvent { success: true }`, `create_checkpoint` hardcoded `step: 0` instead of the caller's real
+  step, and `ResourceMonitor`/`FaultDetector`/`LoadBalancer` were one-bool no-op lifecycle types nothing
+  ever read. Fixed honestly rather than left fabricated: added a `WorkerProvisioner` trait (the
+  cluster-provisioning callback this workspace has no real substrate for); `scale_up`/`rebalance_workers`/
+  `recover_from_checkpoint` now return a structured `ElasticTrainingError::NoProvisioner` (naming exactly
+  what's missing) unless one is attached via `with_provisioner`, and `scale_up` also errors
+  (`PartialProvisioning`) if the provisioner starts fewer workers than requested rather than reporting the
+  full target reached; `execute_scaling` records `ScalingEvent::success` from the real operation result,
+  never unconditionally; `create_checkpoint` takes the caller's real `step: usize`; the three no-op
+  lifecycle types are deleted (dead weight, zero callers, converting them to "real" would still need the
+  cluster substrate that doesn't exist). `scale_down`'s local worker deregistration and the scaling
+  *decision* heuristics (`evaluate_scaling_decision`/`should_rebalance`) were already real, local bookkeeping
+  and are unchanged in kind, only in ordering (`scale_down` now confirms real termination via the
+  provisioner, when one is attached, before forgetting a worker locally — previously it could have forgotten
+  a worker whose real process termination failed). `WorkerPerformanceMetrics` gained a `workload` field so
+  `update_heartbeat` actually feeds `should_rebalance`'s imbalance check, which used to be structurally
+  always-false (workload was set to 0.0 at registration and never updated again). 11 new tests cover the
+  honest contract (`cargo nextest run -p trustformers-training elastic_training`).
 - [x] Multi-cloud orchestration: `MultiCloudOrchestrator`, `CloudScheduler`, cost-aware scheduling
   (`multicloud.rs`)
 - [x] Resource scheduling: `ResourceScheduler`, `ResourcePool` (`resource_scheduling.rs`)
@@ -161,8 +183,13 @@ trustformers-optim `pytorch_compat.rs`).
   `resource_scheduling.rs` model spot-instance and preemption concepts at the config/cost level, but an
   end-to-end "detect preemption signal → auto-checkpoint" pipeline is not confirmed
 - [~] Worker-failure recovery without a full restart: `elastic_training::ElasticTrainingCoordinator` has
-  real worker-monitoring/scaling-decision/checkpoint logic, but true zero-downtime replacement of a failed
-  worker is not independently verified
+  real worker-monitoring/scaling-decision/checkpoint logic. As of the 2026-08-25 honesty pass,
+  `recover_from_checkpoint` honestly requires a caller-supplied `WorkerProvisioner` (it returns
+  `ElasticTrainingError::NoProvisioner` without one, instead of the previous log-and-`Ok(())` that reported
+  a worker "recovered" with no state restored); `handle_worker_failure` still deregisters a confirmed-dead
+  worker locally even when recovery isn't possible, so the failure path itself cannot get stuck, but true
+  zero-downtime replacement is only as real as whatever `WorkerProvisioner` a caller supplies — this crate
+  ships no such implementation itself (there is no cluster substrate in this workspace)
 
 ### Mixed Precision & Quantization
 - [x] AMP: `AMPManager`, `MixedPrecisionConfig`, `LossScaler`, `DynamicBatchingManager` (`mixed_precision.rs`)
@@ -194,10 +221,10 @@ trustformers-optim `pytorch_compat.rs`).
 
 ### Curriculum Learning & Data Pipeline
 - [x] Curriculum learning (length/difficulty/self-paced): `CurriculumLearningManager`, `PacingFunction` —
-  lives in `data_pipeline.rs`, **not** the orphaned top-level `curriculum/` directory
-- [x] Active learning: `ActiveLearningManager`, `QueryStrategy` (`data_pipeline.rs`)
-- [x] Augmentation (image/text/audio/token) with adaptive scheduling (`data_pipeline.rs`)
-- [x] Multi-modal handling and data validation (`data_pipeline.rs`)
+  lives in `data_pipeline/` (a directory module since this wave's file split; previously `data_pipeline.rs`), **not** the orphaned top-level `curriculum/` directory
+- [x] Active learning: `ActiveLearningManager`, `QueryStrategy` (`data_pipeline/`)
+- [x] Augmentation (image/text/audio/token) with adaptive scheduling (`data_pipeline/`)
+- [x] Multi-modal handling and data validation (`data_pipeline/`)
 
 ### Hyperparameter Tuning (`hyperopt` module)
 - [x] Grid search, random search (`GridSearch`, `RandomSearch`)
@@ -205,7 +232,13 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Hyperband / successive halving (`Hyperband`, `SuccessiveHalving`)
 - [x] Population-Based Training (`PopulationBasedTraining`, `PBTConfig`)
 - [x] Bandit-based optimization (`BanditOptimizer`)
-- [~] Wire in hpo::multi_objective (planned 2026-07-05)
+- [x] Wire in hpo::multi_objective (planned 2026-07-05) — **DONE (2026-07-09):** `pub mod hpo;` added to
+  `lib.rs` (line 151), re-exporting `MultiObjectiveHpo`/`ParetoFront`/`compute_pareto_front`/
+  `hypervolume_indicator`/`non_domination_sort` (from `hpo::multi_objective`) and `AutoLrSelector`/
+  `LrRangeTest` (from `hpo::auto_lr`). The module's 83 pre-written tests (`auto_lr.rs`: 21, `mod.rs`: 32,
+  `multi_objective.rs`: 30) now compile and run for the first time. The module's one doctest (in
+  `multi_objective.rs`'s doc comment) already used `?`/`Ok::<(), Box<dyn std::error::Error>>(())` rather
+  than `.unwrap()`, so no additional no-unwrap fix was needed.
   - Goal: expose the already-complete (1332 lines) NSGA-II Pareto-front hyperparameter-search engine.
   - Design: add `pub mod hpo;` to lib.rs next to the existing `pub mod hyperopt;` — zero missing dependencies, zero name collisions confirmed against the ~90 names hyperopt already exports.
   - Files: trustformers-training/src/lib.rs only.
@@ -232,7 +265,18 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Model registry/versioning: `ModelRegistry`, `ModelVersion` (`model_versioning.rs`)
 - [x] Online learning with concept-drift detection (`online_learning.rs`)
 - [x] Cost tracking / budgeting / forecasting: `CostTracker`, `Budget`, `CostForecastingModel`
-  (`cost_tracking.rs`)
+  (`cost_tracking.rs`) — **honesty-audited 2026-08-25.** `EfficiencyMetrics::resource_utilization` and
+  `idle_cost_percentage` were previously hardcoded to `0.75`/`15.0`, pinning `efficiency_score` at exactly
+  `0.60` and making the resource-rightsizing recommendation (gated on `resource_utilization < 0.6`)
+  unreachable. `resource_utilization` is now real: the fraction of the report's time range covered by
+  billed entry durations (clamped to `[0, 1]`) — a genuine *temporal* utilization signal computed from data
+  the tracker already records, not per-machine hardware utilization (CPU/GPU busy %), which this tracker
+  has no way to observe. `idle_cost_percentage` is now `Option<f32>` and stays `None`: this tracker has no
+  signal distinguishing busy-vs-idle time *within* a billed entry, so it is left honestly absent rather than
+  invented; `efficiency_score` is now `Option<f64>`, `Some` only when `idle_cost_percentage` is `Some`. The
+  idle-resource-elimination recommendation is now `Some`-gated and will not fire until a real idle signal
+  exists. 4 new tests cover the honest contract, including one proving the previously-unreachable
+  rightsizing branch now fires (`cargo nextest run -p trustformers-training cost_tracking`).
 - [x] Neural Architecture Search: `NASController`, `NASAlgorithm`, `SearchSpaceConfig`
   (`nas_integration.rs`)
 
@@ -241,7 +285,7 @@ trustformers-optim `pytorch_compat.rs`).
 ## Future Enhancements
 
 ### High Priority
-- [ ] Decide the fate of the ~30,000 lines of orphaned modules: wire in (`grpo/` in particular looks like
+- [ ] Decide the fate of the ~25,110 lines of orphaned modules: wire in (`grpo/` in particular looks like
   it could add real GRPO support) or delete
 - [ ] Implement a real ZeRO optimizer (stage 1 at minimum) if distributed memory sharding is still a goal
 - [ ] Give `NCCLProcessGroup`/`GlooProcessGroup`/`MPIProcessGroup` real backend bindings, or rename/document
@@ -273,7 +317,8 @@ trustformers-optim `pytorch_compat.rs`).
 ### Housekeeping
 - [~] Delete the 5 stray `*.rs.prelude_fix` backup files — planned 2026-07-05 (see "Known Issues" above for
   the full plan)
-- [~] Delete dead src/mod.rs (planned 2026-07-05)
+- [x] Delete dead src/mod.rs (planned 2026-07-05) — **DONE (2026-07-09):** `trustformers-training/src/mod.rs`
+  is deleted (confirmed absent from the tree); `lib.rs` remains the sole crate root.
   - Goal/Design: delete the legacy src/mod.rs — crate root is lib.rs; everything mod.rs declares already exists, more completely, in lib.rs.
   - Files: trustformers-training/src/mod.rs.
   - Tests: cargo check --all-features (no-op diff).
@@ -285,7 +330,7 @@ trustformers-optim `pytorch_compat.rs`).
 
 ### Code Standards
 - **Use trustformers-core abstractions only**
-- **File size limit:** <2000 lines per file (currently satisfied — largest reachable file is 1,610 lines)
+- **File size limit:** <2000 lines per file (currently satisfied — verified 2026-08-24 via a full-workspace `wc -l` sweep; the "1,610 lines" figure this line previously cited for the largest file is stale, see the Current Status section above for what happened to it)
 - **Error handling:** Use `Result<T, TrustformersError>` / the crate's own `TrainingError`/`TrainingResult`
 - **Testing:** Integration tests for distributed training
 - **Naming:** snake_case for all identifiers
@@ -303,7 +348,17 @@ cargo check -p trustformers-training --all-features
 
 ---
 
-**Last Updated:** 2026-07-06 — 0.2.0 release-scope section added (tch/torch removal, OxiCUDA note); torch forwarder feature removal task marked done
-**Version:** 0.1.4
-**Status:** Alpha — ~930 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
+**Last Updated:** 2026-07-09 — version bumped to 0.2.1; `hpo` module wiring and `src/mod.rs` deletion
+confirmed done and checked off; orphaned-code inventory and file/SLoC/test counts refreshed via `tokei`
+and source inspection
+
+**2026-08-25 addendum (production-hardening honesty pass, `elastic_training.rs` + `cost_tracking.rs`
+only):** see the updated bullets above for `Elastic training coordinator` and `Cost tracking / budgeting /
+forecasting`. Baselines before and after this pass: `cargo check -p trustformers-training --all-targets`
+and `cargo clippy -p trustformers-training --all-targets -- -D warnings` both `EXIT=0` throughout;
+`cargo nextest run -p trustformers-training --no-fail-fast` went from 2100 passed / 2 skipped / 0 failed to
+2115 passed / 2 skipped / 0 failed (+15 new tests, 0 regressions). Nothing else in this crate was in scope
+for this pass and nothing else was touched.
+**Version:** 0.2.1
+**Status:** Alpha — ~1,010 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
 for the distributed-training and orphaned-module caveats that keep this crate from being labeled Stable.

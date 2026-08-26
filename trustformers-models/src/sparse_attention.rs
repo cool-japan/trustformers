@@ -48,6 +48,57 @@ use trustformers_core::layers::AttentionInput;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Layer;
 
+/// Deterministic generator for the LSH random rotations.
+///
+/// A SplitMix64 stream turned into standard normals with the Box–Muller
+/// transform. Seeded rather than drawn from entropy so that two identical
+/// forward passes hash to identical buckets: an attention pattern that varied
+/// run to run would make inference non-reproducible, which is worse than any
+/// benefit from fresh randomness.
+struct LshRng {
+    state: u64,
+    spare: Option<f32>,
+}
+
+impl LshRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed | 1,
+            spare: None,
+        }
+    }
+
+    /// SplitMix64 step, uniformly distributed over `u64`.
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in the open interval `(0, 1)`.
+    fn next_open_unit(&mut self) -> f32 {
+        // Shift into the 24-bit mantissa range and keep it strictly positive so
+        // `ln()` never sees zero.
+        let bits = (self.next_u64() >> 40) as f32; // [0, 2^24)
+        (bits + 0.5) / 16_777_216.0
+    }
+
+    /// Standard normal via Box–Muller, caching the second variate.
+    fn next_gaussian(&mut self) -> f32 {
+        if let Some(value) = self.spare.take() {
+            return value;
+        }
+        let u1 = self.next_open_unit();
+        let u2 = self.next_open_unit();
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let angle = 2.0 * std::f32::consts::PI * u2;
+        self.spare = Some(radius * angle.sin());
+        radius * angle.cos()
+    }
+}
+
 /// Configuration for sparse attention patterns
 #[derive(Debug, Clone)]
 pub struct SparseAttentionConfig {
@@ -480,34 +531,189 @@ impl SparseAttention {
         Ok(mask)
     }
 
+    /// Reformer LSH mask for a sequence whose query vectors are not available.
+    ///
+    /// The whole point of Reformer's attention (Kitaev et al., 2020, §3) is that
+    /// buckets are determined by the *content* of the query vectors, via
+    /// locality-sensitive hashing: only tokens whose queries point in a similar
+    /// direction end up in the same bucket. That information does not exist at
+    /// mask-generation time, so this entry point reports the fact rather than
+    /// producing something that looks like an LSH mask but is not one.
+    ///
+    /// A previous revision produced a mask here by chunking positions into
+    /// fixed `bucket_size` blocks and keeping pair `(i, j)` when
+    /// `((i + hash_idx) % seq_len) / bucket_size == bucket` — arithmetic on token
+    /// *indices*, with no hash, no random projection, and no reference to any
+    /// query vector. Two tokens with identical queries at distant positions were
+    /// never bucketed together, and two orthogonal queries at adjacent positions
+    /// always were; the `num_hashes` parameter only shifted the block boundaries.
+    /// That is chunked local attention wearing Reformer's name.
+    ///
+    /// Use [`SparseAttention::generate_lsh_mask`] with the projected queries to
+    /// get the real pattern; the layer's `forward` does exactly that.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: an LSH mask cannot be derived from a sequence length alone.
     fn generate_reformer_mask(
         &self,
         seq_len: usize,
         num_hashes: usize,
         bucket_size: usize,
     ) -> Result<SparseAttentionMask> {
-        let mut mask = SparseAttentionMask::new((seq_len, seq_len));
-        let num_buckets = seq_len.div_ceil(bucket_size);
+        Err(tensor_op_error(
+            "SparseAttention::generate_mask",
+            format!(
+                "Reformer LSH attention (num_hashes={num_hashes}, bucket_size={bucket_size}) \
+                 hashes the query vectors, so a mask cannot be built from the sequence length \
+                 ({seq_len}) alone. Call `generate_lsh_mask(&queries, ...)` — which \
+                 `SparseAttention::forward` does automatically — or pick a position-based \
+                 pattern such as `SparsePattern::BlockSparse`."
+            ),
+        ))
+    }
 
-        // Simplified LSH bucketing (in real implementation, use proper hash functions)
-        for hash_idx in 0..num_hashes {
-            for bucket in 0..num_buckets {
-                let start = bucket * bucket_size;
+    /// Real LSH bucketing of query vectors (Reformer, Kitaev et al. 2020 §3).
+    ///
+    /// # Algorithm
+    ///
+    /// Angular LSH by random rotation. For each of `num_hashes` independent
+    /// rounds:
+    ///
+    /// 1. Draw a random projection matrix `R` of shape `[head_dim, n_buckets/2]`
+    ///    and compute `p = q · R` for every query.
+    /// 2. Concatenate `p` with `−p`, giving `n_buckets` signed projections, and
+    ///    take the **argmax**. Two queries pointing in a similar direction
+    ///    maximise the same rotation with high probability, and the probability
+    ///    of a collision falls off with the angle between them — which is the
+    ///    locality-sensitive property the whole scheme rests on.
+    /// 3. Sort the positions by `(bucket, position)` and cut the sorted order
+    ///    into chunks of `bucket_size`. Attention is computed within each chunk
+    ///    and with the previous chunk, so a bucket that straddles a chunk
+    ///    boundary is not silently truncated.
+    ///
+    /// The projections are drawn from a **seeded, deterministic** generator, so
+    /// the same queries always produce the same mask: an attention pattern that
+    /// changed between two identical forward passes would make inference
+    /// non-reproducible.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `queries` is not a 2-D `F32` tensor, when `bucket_size` is 0,
+    /// or when the head dimension is 0.
+    pub fn generate_lsh_mask(
+        &self,
+        queries: &Tensor,
+        num_hashes: usize,
+        bucket_size: usize,
+    ) -> Result<SparseAttentionMask> {
+        if bucket_size == 0 {
+            return Err(tensor_op_error(
+                "SparseAttention::generate_lsh_mask",
+                "bucket_size must be greater than 0".to_string(),
+            ));
+        }
+        if num_hashes == 0 {
+            return Err(tensor_op_error(
+                "SparseAttention::generate_lsh_mask",
+                "num_hashes must be greater than 0; with no hash rounds no token is bucketed \
+                 with any other"
+                    .to_string(),
+            ));
+        }
+        let Tensor::F32(q) = queries else {
+            return Err(tensor_op_error(
+                "SparseAttention::generate_lsh_mask",
+                "LSH bucketing requires an F32 query tensor".to_string(),
+            ));
+        };
+        let shape = q.shape();
+        if shape.len() != 2 {
+            return Err(tensor_op_error(
+                "SparseAttention::generate_lsh_mask",
+                format!("queries must be [seq_len, head_dim], got shape {shape:?}"),
+            ));
+        }
+        let (seq_len, head_dim) = (shape[0], shape[1]);
+        if seq_len == 0 || head_dim == 0 {
+            return Err(tensor_op_error(
+                "SparseAttention::generate_lsh_mask",
+                format!("cannot hash an empty query tensor with shape {shape:?}"),
+            ));
+        }
+
+        // Round the bucket count up to an even number: the ±projection trick
+        // needs `n_buckets / 2` rotations.
+        let n_buckets = seq_len.div_ceil(bucket_size).max(2);
+        let half_buckets = n_buckets.div_ceil(2);
+
+        // Deterministic projections. A fixed seed keeps inference reproducible;
+        // each hash round gets its own stream so the rounds are independent.
+        let mut pairs: std::collections::BTreeSet<(usize, usize)> =
+            std::collections::BTreeSet::new();
+
+        for round in 0..num_hashes {
+            let mut rng = LshRng::new(
+                0x5245_464F_524D_4552 ^ (round as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            );
+            // [head_dim, half_buckets] random Gaussian projection.
+            let mut rotations = vec![0.0f32; head_dim * half_buckets];
+            for value in rotations.iter_mut() {
+                *value = rng.next_gaussian();
+            }
+
+            // Bucket each query by argmax over the signed projections.
+            let mut buckets = vec![0usize; seq_len];
+            for (t, bucket) in buckets.iter_mut().enumerate() {
+                let mut best_index = 0usize;
+                let mut best_value = f32::NEG_INFINITY;
+                for r in 0..half_buckets {
+                    let mut projection = 0.0f32;
+                    for d in 0..head_dim {
+                        projection += q[[t, d]] * rotations[d * half_buckets + r];
+                    }
+                    // +projection is rotation `r`, -projection is `r + half`.
+                    if projection > best_value {
+                        best_value = projection;
+                        best_index = r;
+                    }
+                    let negated = -projection;
+                    if negated > best_value {
+                        best_value = negated;
+                        best_index = r + half_buckets;
+                    }
+                }
+                *bucket = best_index;
+            }
+
+            // Sort positions by (bucket, position) and chunk the sorted order.
+            let mut order: Vec<usize> = (0..seq_len).collect();
+            order.sort_by_key(|&t| (buckets[t], t));
+
+            let num_chunks = seq_len.div_ceil(bucket_size);
+            for chunk in 0..num_chunks {
+                let start = chunk * bucket_size;
                 let end = (start + bucket_size).min(seq_len);
-
-                // All tokens in same bucket attend to each other
-                for i in start..end {
-                    for j in start..end {
-                        let hash_offset = (i + hash_idx) % seq_len;
-                        let hash_bucket = hash_offset / bucket_size;
-                        if hash_bucket == bucket {
-                            mask.add_entry(i, j, 0.0);
+                // Queries attend within their own chunk and to the previous one,
+                // so a bucket split across the boundary keeps its neighbours.
+                let context_start = start.saturating_sub(bucket_size);
+                for &i in &order[start..end] {
+                    for &j in &order[context_start..end] {
+                        // Only pairs that actually share a bucket are kept; the
+                        // previous-chunk window widens the candidate set, it does
+                        // not admit unrelated tokens.
+                        if buckets[i] == buckets[j] {
+                            pairs.insert((i, j));
                         }
                     }
                 }
             }
         }
 
+        let mut mask = SparseAttentionMask::new((seq_len, seq_len));
+        for (row, col) in pairs {
+            mask.add_entry(row, col, 0.0);
+        }
         Ok(mask)
     }
 
@@ -680,8 +886,19 @@ impl Layer for SparseAttention {
             },
         };
 
-        // Generate sparse mask
-        let mask = self.generate_mask(seq_len)?;
+        // Generate the sparse mask.
+        //
+        // Reformer is the one pattern whose mask depends on the *values* of the
+        // queries rather than only their positions, so it is routed through the
+        // LSH path with the projected queries in hand. Every other pattern is a
+        // pure function of the sequence length.
+        let mask = match &self.config.pattern {
+            SparsePattern::Reformer {
+                num_hashes,
+                bucket_size,
+            } => self.generate_lsh_mask(&query, *num_hashes, *bucket_size)?,
+            _ => self.generate_mask(seq_len)?,
+        };
 
         // Compute sparse attention
         let attention_output = self.compute_sparse_attention(&query, &key, &value, &mask)?;
@@ -910,5 +1127,211 @@ mod tests {
         assert_eq!(dense[0][0], 0.0);
         assert_eq!(dense[0][1], 0.0);
         assert_eq!(dense[0][2], f32::NEG_INFINITY);
+    }
+
+    // ── Reformer LSH (regression for the positional-bucketing fake) ─────────
+
+    fn lsh_attention(head_dim: usize, num_hashes: usize, bucket_size: usize) -> SparseAttention {
+        SparseAttention::new(
+            SparseAttentionConfig::new()
+                .with_hidden_size(head_dim)
+                .with_num_heads(1)
+                .with_pattern(SparsePattern::Reformer {
+                    num_hashes,
+                    bucket_size,
+                }),
+        )
+        .expect("LSH attention must build")
+    }
+
+    /// Regression: `generate_reformer_mask` bucketed by *token index*
+    /// (`((i + hash_idx) % seq_len) / bucket_size`), so the mask was a pure
+    /// function of position and could be produced without any query at all. It
+    /// now reports that a mask cannot be derived from a length alone.
+    #[test]
+    fn reformer_mask_cannot_be_built_from_a_sequence_length_alone() {
+        let attention = lsh_attention(4, 2, 4);
+        let err = attention
+            .generate_mask(16)
+            .expect_err("LSH needs the query vectors, not just a length");
+        let message = err.to_string();
+        assert!(
+            message.contains("hashes the query vectors"),
+            "unexpected: {message}"
+        );
+        assert!(
+            message.contains("generate_lsh_mask"),
+            "unexpected: {message}"
+        );
+    }
+
+    /// The defining property of LSH: tokens whose queries point in the same
+    /// direction land in the same bucket, regardless of how far apart they are.
+    ///
+    /// The old positional bucketing gave the opposite behaviour — identical
+    /// queries at distant positions were never connected — so this fails
+    /// against it.
+    #[test]
+    fn lsh_buckets_distant_tokens_with_similar_queries_together() {
+        let head_dim = 8usize;
+        let seq_len = 16usize;
+        let bucket_size = 4usize;
+        let attention = lsh_attention(head_dim, 4, bucket_size);
+
+        // Positions 0 and 15 share one direction; everything between them points
+        // the opposite way.
+        let mut values = vec![0.0f32; seq_len * head_dim];
+        for t in 0..seq_len {
+            let sign = if t == 0 || t == seq_len - 1 { 1.0 } else { -1.0 };
+            for d in 0..head_dim {
+                values[t * head_dim + d] = sign * ((d + 1) as f32);
+            }
+        }
+        let queries = Tensor::from_vec(values, &[seq_len, head_dim]).expect("queries must build");
+
+        let mask = attention
+            .generate_lsh_mask(&queries, 4, bucket_size)
+            .expect("LSH mask must be produced");
+
+        assert!(
+            mask.indices.contains(&(0, seq_len - 1)) || mask.indices.contains(&(seq_len - 1, 0)),
+            "two identical queries {} positions apart must share a bucket",
+            seq_len - 1
+        );
+    }
+
+    /// Conversely, tokens whose queries are near-orthogonal should mostly *not*
+    /// be bucketed together, even when they are adjacent — the old positional
+    /// scheme always connected neighbours.
+    #[test]
+    fn lsh_separates_adjacent_tokens_with_dissimilar_queries() {
+        let head_dim = 16usize;
+        let seq_len = 32usize;
+        let attention = lsh_attention(head_dim, 1, 4);
+
+        // One-hot queries: every token points along a different axis, so almost
+        // no pair is similar.
+        let mut values = vec![0.0f32; seq_len * head_dim];
+        for t in 0..seq_len {
+            values[t * head_dim + (t % head_dim)] = 1.0;
+        }
+        let queries = Tensor::from_vec(values, &[seq_len, head_dim]).expect("queries must build");
+
+        let mask = attention.generate_lsh_mask(&queries, 1, 4).expect("LSH mask must be produced");
+
+        // With near-orthogonal queries the mask must be genuinely sparse rather
+        // than the dense block-diagonal a positional chunking would give.
+        let density = mask.indices.len() as f32 / (seq_len * seq_len) as f32;
+        assert!(
+            density < 0.35,
+            "orthogonal queries must not all collide; density was {density}"
+        );
+        assert!(
+            !mask.indices.is_empty(),
+            "every token attends to at least itself"
+        );
+    }
+
+    /// The mask must depend on the queries. Under positional bucketing it did
+    /// not: two completely different query tensors of the same length produced
+    /// byte-identical masks.
+    #[test]
+    fn lsh_masks_differ_for_different_queries() {
+        let head_dim = 8usize;
+        let seq_len = 16usize;
+        let attention = lsh_attention(head_dim, 2, 4);
+
+        let clustered = Tensor::from_vec(
+            (0..seq_len * head_dim)
+                .map(|i| if (i / head_dim) < seq_len / 2 { 1.0 } else { -1.0 })
+                .collect(),
+            &[seq_len, head_dim],
+        )
+        .expect("queries must build");
+        let spread = Tensor::from_vec(
+            (0..seq_len * head_dim).map(|i| ((i * 13) % 17) as f32 - 8.0).collect(),
+            &[seq_len, head_dim],
+        )
+        .expect("queries must build");
+
+        let mask_a = attention.generate_lsh_mask(&clustered, 2, 4).expect("mask must build");
+        let mask_b = attention.generate_lsh_mask(&spread, 2, 4).expect("mask must build");
+
+        assert_ne!(
+            mask_a.indices, mask_b.indices,
+            "the LSH mask must depend on the query values, not only on their positions"
+        );
+    }
+
+    /// Inference must be reproducible: the same queries must hash identically
+    /// on every call.
+    #[test]
+    fn lsh_bucketing_is_deterministic() {
+        let head_dim = 8usize;
+        let seq_len = 16usize;
+        let attention = lsh_attention(head_dim, 3, 4);
+        let queries = Tensor::from_vec(
+            (0..seq_len * head_dim).map(|i| ((i * 7) % 19) as f32 - 9.0).collect(),
+            &[seq_len, head_dim],
+        )
+        .expect("queries must build");
+
+        let first = attention.generate_lsh_mask(&queries, 3, 4).expect("mask must build");
+        let second = attention.generate_lsh_mask(&queries, 3, 4).expect("mask must build");
+        assert_eq!(
+            first.indices, second.indices,
+            "identical queries must produce an identical attention pattern"
+        );
+    }
+
+    /// More hash rounds recover more true neighbours, so the mask can only grow.
+    #[test]
+    fn more_hash_rounds_never_lose_pairs() {
+        let head_dim = 8usize;
+        let seq_len = 24usize;
+        let attention = lsh_attention(head_dim, 1, 4);
+        let queries = Tensor::from_vec(
+            (0..seq_len * head_dim).map(|i| ((i * 11) % 23) as f32 - 11.0).collect(),
+            &[seq_len, head_dim],
+        )
+        .expect("queries must build");
+
+        let one = attention.generate_lsh_mask(&queries, 1, 4).expect("mask must build");
+        let many = attention.generate_lsh_mask(&queries, 6, 4).expect("mask must build");
+        assert!(
+            many.indices.len() >= one.indices.len(),
+            "extra hash rounds must not shrink the candidate set: {} vs {}",
+            many.indices.len(),
+            one.indices.len()
+        );
+    }
+
+    #[test]
+    fn lsh_rejects_degenerate_parameters() {
+        let attention = lsh_attention(4, 1, 4);
+        let queries = Tensor::zeros(&[8, 4]).expect("queries must build");
+        assert!(attention.generate_lsh_mask(&queries, 1, 0).is_err());
+        assert!(attention.generate_lsh_mask(&queries, 0, 4).is_err());
+        let three_d = Tensor::zeros(&[2, 4, 4]).expect("tensor must build");
+        assert!(attention.generate_lsh_mask(&three_d, 1, 4).is_err());
+    }
+
+    /// The layer's `forward` must route Reformer through the LSH path rather
+    /// than failing on `generate_mask`.
+    #[test]
+    fn forward_routes_reformer_through_the_lsh_path() {
+        let hidden = 8usize;
+        let seq_len = 16usize;
+        let attention = lsh_attention(hidden, 2, 4);
+        let input = Tensor::from_vec(
+            (0..seq_len * hidden).map(|i| ((i * 5) % 13) as f32 * 0.1 - 0.6).collect(),
+            &[seq_len, hidden],
+        )
+        .expect("input must build");
+
+        let output = attention
+            .forward(AttentionInput::new(input))
+            .expect("Reformer attention must run through the LSH path");
+        assert_eq!(output.shape(), vec![seq_len, hidden]);
     }
 }

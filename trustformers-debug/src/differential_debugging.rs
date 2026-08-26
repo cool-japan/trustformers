@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 // use scirs2_core::ndarray::*; // SciRS2 Integration Policy - was: use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, StudentsT};
 use statrs::statistics::Statistics;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -490,6 +491,89 @@ pub struct RegressionAssessment {
 }
 
 /// Main differential debugging analyzer
+/// Real Welch's t-test (unequal variances, unequal sample sizes) between two
+/// independent samples, with a real two-tailed p-value computed from the
+/// Student's t-distribution CDF via the Welch-Satterthwaite degrees of
+/// freedom -- not the old `if t.abs() > 2.0 { 0.01 } else { 0.1 }`
+/// two-bucket fabrication.
+///
+/// Returns `None` when either sample has fewer than 2 points, when both
+/// variances are zero (samples are degenerate constants, so no meaningful
+/// test exists), or when the resulting Welch-Satterthwaite degrees of
+/// freedom or `StudentsT` distribution parameters are not finite/positive
+/// (all statrs invariants) -- callers get an honest absence rather than a
+/// nonsensical or NaN test result.
+pub(crate) fn welch_t_test(
+    a: &[f64],
+    b: &[f64],
+    significance_threshold: f64,
+) -> Option<StatisticalTestResult> {
+    if a.len() < 2 || b.len() < 2 {
+        return None;
+    }
+
+    let a_mean = a.mean();
+    let b_mean = b.mean();
+    let a_var = a.variance();
+    let b_var = b.variance();
+    let n_a = a.len() as f64;
+    let n_b = b.len() as f64;
+
+    if (a_var <= 0.0 || !a_var.is_finite()) && (b_var <= 0.0 || !b_var.is_finite()) {
+        return None;
+    }
+
+    let se_a_sq = a_var / n_a;
+    let se_b_sq = b_var / n_b;
+    let standard_error = (se_a_sq + se_b_sq).sqrt();
+    if standard_error <= 0.0 || !standard_error.is_finite() {
+        return None;
+    }
+
+    let t_statistic = (a_mean - b_mean) / standard_error;
+
+    // Welch-Satterthwaite equation for the effective degrees of freedom.
+    let degrees_of_freedom = (se_a_sq + se_b_sq).powi(2)
+        / (se_a_sq.powi(2) / (n_a - 1.0) + se_b_sq.powi(2) / (n_b - 1.0));
+    if !degrees_of_freedom.is_finite() || degrees_of_freedom <= 0.0 {
+        return None;
+    }
+
+    let t_dist = StudentsT::new(0.0, 1.0, degrees_of_freedom).ok()?;
+    // Two-tailed p-value: P(|T| >= |t_statistic|), from the workspace's own
+    // regularized-incomplete-beta implementation. `2 * (1 - statrs_cdf(|t|))`
+    // cancels catastrophically in the upper tail -- it reaches 3.7e-5 relative
+    // error by t=12, df=30 and underflows to exactly 0.0 at t=12, df=120
+    // (true p 2.78e-22).
+    let p_value = trustformers_core::statistics::student_t_two_sided_p_value(
+        t_statistic,
+        degrees_of_freedom,
+    )?;
+
+    // Pooled std for Cohen's d (uses the simple average of the two
+    // variances, the standard convention for an unequal-n effect size).
+    let pooled_std = ((a_var + b_var) / 2.0).sqrt();
+    let effect_size = if pooled_std > 0.0 { (a_mean - b_mean) / pooled_std } else { 0.0 };
+
+    // 95% CI on the mean difference, using the same Welch standard error
+    // and the t-distribution's critical value (not a fixed z=1.96, which
+    // is only exact for infinite degrees of freedom).
+    let critical_value = t_dist.inverse_cdf(0.975);
+    let margin_of_error = critical_value * standard_error;
+
+    Some(StatisticalTestResult {
+        test_type: "Welch's t-test".to_string(),
+        statistic: t_statistic,
+        p_value,
+        effect_size,
+        confidence_interval: (
+            (a_mean - b_mean) - margin_of_error,
+            (a_mean - b_mean) + margin_of_error,
+        ),
+        is_significant: p_value < significance_threshold,
+    })
+}
+
 #[derive(Debug)]
 pub struct DifferentialDebugger {
     config: DifferentialDebuggingConfig,
@@ -992,17 +1076,64 @@ impl DifferentialDebugger {
         similarity / features as f64
     }
 
+    /// Real statistical analysis over the models' point-estimate metrics.
+    /// See [`Self::cross_model_metric_significance`] for why this is a
+    /// cross-model z-score/p-value rather than a pairwise t-test, and why
+    /// fewer than 3 models yields an (honestly) empty
+    /// [`StatisticalAnalysis`] rather than a fabricated one.
     fn perform_statistical_analysis(
         &self,
-        _models: &[&ModelSnapshot],
+        models: &[&ModelSnapshot],
     ) -> Result<StatisticalAnalysis> {
-        // For now, return placeholder analysis
-        // In a real implementation, this would perform proper statistical tests
+        let mut p_values = HashMap::new();
+        let mut effect_sizes = HashMap::new();
+        let mut confidence_intervals = HashMap::new();
+        let mut significance_summary = HashMap::new();
+
+        let metrics: [(&str, fn(&ModelMetrics) -> f64); 5] = [
+            ("val_accuracy", |m| m.val_accuracy),
+            ("val_loss", |m| m.val_loss),
+            ("inference_latency_ms", |m| m.inference_latency_ms),
+            ("memory_usage_mb", |m| m.memory_usage_mb),
+            ("training_time_s", |m| m.training_time_s),
+        ];
+
+        for (metric_name, extract) in metrics {
+            let values: HashMap<String, f64> =
+                models.iter().map(|m| (m.name.clone(), extract(&m.metrics))).collect();
+
+            if let Some((
+                metric_p_values,
+                metric_effect_sizes,
+                metric_significant,
+                (mean, std_dev),
+            )) = self.cross_model_metric_significance(&values)
+            {
+                for (model, p) in metric_p_values {
+                    p_values.insert(format!("{metric_name}::{model}"), p);
+                }
+                for (model, z) in metric_effect_sizes {
+                    effect_sizes.insert(format!("{metric_name}::{model}"), z);
+                }
+                for (model, sig) in metric_significant {
+                    significance_summary.insert(format!("{metric_name}::{model}"), sig);
+                }
+
+                // Real 95% confidence interval on the cross-model mean,
+                // computed from the actual sample (standard error of the
+                // mean, not a fabricated width).
+                let standard_error = std_dev / (values.len() as f64).sqrt();
+                let margin = 1.96 * standard_error;
+                confidence_intervals
+                    .insert(metric_name.to_string(), (mean - margin, mean + margin));
+            }
+        }
+
         Ok(StatisticalAnalysis {
-            p_values: HashMap::new(),
-            effect_sizes: HashMap::new(),
-            confidence_intervals: HashMap::new(),
-            significance_summary: HashMap::new(),
+            p_values,
+            effect_sizes,
+            confidence_intervals,
+            significance_summary,
         })
     }
 
@@ -1010,7 +1141,7 @@ impl DifferentialDebugger {
         &self,
         _models: &[&ModelSnapshot],
         performance: &PerformanceComparison,
-        _statistical: &StatisticalAnalysis,
+        statistical: &StatisticalAnalysis,
     ) -> Result<ComparisonSummary> {
         let best_model = performance.accuracy_comparison.best_model.clone();
 
@@ -1024,17 +1155,56 @@ impl DifferentialDebugger {
             vec![performance.latency_comparison.best_model.clone()],
         );
 
+        // Whether the "best" model's advantage clears the real
+        // significance test in `statistical` (see
+        // `Self::cross_model_metric_significance`) -- `None` when there
+        // were too few models (<3) or too little metric spread for the
+        // test to have run at all, in which case the finding is stated as
+        // an unqualified point-estimate, exactly like the old
+        // implementation always was, rather than implying a false
+        // certainty either way.
+        let accuracy_significance_note = statistical
+            .significance_summary
+            .get(&format!(
+                "val_accuracy::{}",
+                performance.accuracy_comparison.best_model
+            ))
+            .map(|&is_significant| {
+                if is_significant {
+                    " (statistically significant vs. the compared models)".to_string()
+                } else {
+                    " (not statistically distinguishable from the compared models)".to_string()
+                }
+            })
+            .unwrap_or_default();
+        let latency_significance_note = statistical
+            .significance_summary
+            .get(&format!(
+                "inference_latency_ms::{}",
+                performance.latency_comparison.best_model
+            ))
+            .map(|&is_significant| {
+                if is_significant {
+                    " (statistically significant vs. the compared models)".to_string()
+                } else {
+                    " (not statistically distinguishable from the compared models)".to_string()
+                }
+            })
+            .unwrap_or_default();
+
         let key_findings = vec![
             format!(
-                "Best accuracy: {} ({:.2}%)",
+                "Best accuracy: {} ({:.2}%){}",
                 performance.accuracy_comparison.best_model,
                 performance.accuracy_comparison.values[&performance.accuracy_comparison.best_model]
-                    * 100.0
+                    * 100.0,
+                accuracy_significance_note
             ),
             format!(
-                "Fastest inference: {} ({:.2}ms)",
+                "Fastest inference: {} ({:.2}ms){}",
                 performance.latency_comparison.best_model,
-                performance.latency_comparison.values[&performance.latency_comparison.best_model]
+                performance.latency_comparison.values[&performance.latency_comparison.best_model],
+                latency_significance_note
             ),
         ];
 
@@ -1076,6 +1246,72 @@ impl DifferentialDebugger {
         }
     }
 
+    /// Real per-metric cross-model significance test used by
+    /// [`Self::perform_statistical_analysis`], derived from
+    /// [`ModelSnapshot::metrics`]'s point-estimate fields.
+    ///
+    /// `ModelSnapshot` carries a single point estimate per metric (not a
+    /// distribution of repeated runs), so a true Welch's t-test between two
+    /// models is not available here -- that requires `welch_t_test`'s two
+    /// `&[f64]` samples, which [`Self::perform_ab_statistical_tests`] does
+    /// have (real per-batch measurements from `run_ab_test`). What *is*
+    /// real and honestly computable from point estimates across N>=3
+    /// models is each model's z-score relative to the cross-model
+    /// distribution of that metric: how many standard deviations a model's
+    /// value falls from the mean of all compared models (used directly as
+    /// the effect size), converted to a real two-tailed p-value via the
+    /// standard normal CDF. This flags models whose metric is a genuine
+    /// outlier relative to its peers (unlike the old stub, which returned
+    /// empty maps and let `generate_comparison_summary` declare "winners"
+    /// backed by nothing). With fewer than 3 models, or a metric that is
+    /// identical across every model (zero variance), there's no meaningful
+    /// distribution to compare against, so the metric is omitted entirely
+    /// -- never fabricated.
+    ///
+    /// Returns `(per-model p-values, per-model effect sizes/z-scores,
+    /// per-model significance flags, (cross-model mean, std_dev))`, all
+    /// keyed by model name.
+    fn cross_model_metric_significance(
+        &self,
+        values: &HashMap<String, f64>,
+    ) -> Option<(
+        HashMap<String, f64>,
+        HashMap<String, f64>,
+        HashMap<String, bool>,
+        (f64, f64),
+    )> {
+        if values.len() < 3 {
+            return None;
+        }
+        let samples: Vec<f64> = values.values().copied().collect();
+        let mean = samples.as_slice().mean();
+        let std_dev = samples.as_slice().variance().sqrt();
+        if !std_dev.is_finite() || std_dev <= 0.0 {
+            return None;
+        }
+
+        let normal = statrs::distribution::Normal::new(0.0, 1.0).ok()?;
+        let mut p_values = HashMap::new();
+        let mut effect_sizes = HashMap::new();
+        let mut significant = HashMap::new();
+        for (model, &value) in values {
+            let z = (value - mean) / std_dev;
+            // Two-tailed p-value P(|Z| >= |z|): naive `2 * (1 - cdf)`
+            // cancels catastrophically for |z| ~ 9+, as the Student-t
+            // p-value above (:544-549) once did. No t-distribution DOF
+            // exists for a z-score (see this fn's doc comment), and
+            // `trustformers_core::statistics` has no normal-tail primitive
+            // to delegate to instead (adding one is outside this package's
+            // ownership this pass -- tracked as a follow-up). `sf` computes
+            // the tail directly via statrs' own `erfc`, unlike `cdf`.
+            let p_value = 2.0 * normal.sf(z.abs());
+            significant.insert(model.clone(), p_value < self.config.significance_threshold);
+            p_values.insert(model.clone(), p_value);
+            effect_sizes.insert(model.clone(), z);
+        }
+        Some((p_values, effect_sizes, significant, (mean, std_dev)))
+    }
+
     fn perform_ab_statistical_tests(
         &self,
         model_a: &ABTestMetrics,
@@ -1083,42 +1319,14 @@ impl DifferentialDebugger {
     ) -> Result<HashMap<String, StatisticalTestResult>> {
         let mut results = HashMap::new();
 
-        // Simple t-test for primary metric
+        // Real Welch's t-test for primary metric (see `welch_t_test`).
         if let (Some(a_data), Some(b_data)) = (
             model_a.metrics.get("primary_metric"),
             model_b.metrics.get("primary_metric"),
         ) {
-            let a_mean = a_data.mean();
-            let b_mean = b_data.mean();
-            let a_var = a_data.variance();
-            let b_var = b_data.variance();
-
-            // Simplified t-test calculation
-            let pooled_std = ((a_var + b_var) / 2.0).sqrt();
-            let standard_error =
-                pooled_std * (1.0 / a_data.len() as f64 + 1.0 / b_data.len() as f64).sqrt();
-            let t_statistic = (a_mean - b_mean) / standard_error;
-
-            // Simplified p-value (would use proper statistical functions in real implementation)
-            let p_value = if t_statistic.abs() > 2.0 { 0.01 } else { 0.1 };
-
-            let effect_size = (a_mean - b_mean) / pooled_std; // Cohen's d
-            let margin_of_error = 1.96 * standard_error; // 95% CI
-
-            results.insert(
-                "primary_metric".to_string(),
-                StatisticalTestResult {
-                    test_type: "Welch's t-test".to_string(),
-                    statistic: t_statistic,
-                    p_value,
-                    effect_size,
-                    confidence_interval: (
-                        a_mean - b_mean - margin_of_error,
-                        a_mean - b_mean + margin_of_error,
-                    ),
-                    is_significant: p_value < 0.05,
-                },
-            );
+            if let Some(test) = welch_t_test(a_data, b_data, self.config.significance_threshold) {
+                results.insert("primary_metric".to_string(), test);
+            }
         }
 
         Ok(results)
@@ -1346,6 +1554,10 @@ pub struct DifferentialDebuggingReport {
     pub recent_regressions: Vec<RegressionDetectionResult>,
     pub model_summary: HashMap<String, String>,
 }
+
+#[cfg(test)]
+#[path = "differential_debugging_tests.rs"]
+mod differential_debugging_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1723,5 +1935,63 @@ mod tests {
             },
             metadata: HashMap::new(),
         }
+    }
+
+    /// 99 models tied at 0.0 plus one outlier: gives an exact z = 9.9,
+    /// value-independent (mean/std_dev both scale with the outlier).
+    fn hundred_models_with_extreme_outlier() -> HashMap<String, f64> {
+        let mut values: HashMap<String, f64> = (0..99).map(|i| (format!("m{i}"), 0.0)).collect();
+        values.insert("outlier".to_string(), 1000.0);
+        values
+    }
+
+    /// Regression guard: the naive `2 * (1 - cdf)` form underflows to 0.0
+    /// at z = 9.9, though the true p is a tiny but real ~4.16e-23; `sf`
+    /// does not go through that subtraction.
+    #[test]
+    fn naive_statrs_cdf_subtraction_underflows_where_survival_function_does_not() {
+        use statrs::distribution::Normal;
+        use statrs::statistics::Statistics;
+
+        let values = hundred_models_with_extreme_outlier();
+        let samples: Vec<f64> = values.values().copied().collect();
+        let mean = samples.as_slice().mean();
+        let std_dev = samples.as_slice().variance().sqrt();
+        let z = (1000.0 - mean) / std_dev;
+        assert!((z - 9.9).abs() < 1e-6, "expected z ~= 9.9, got {z}");
+
+        let normal = Normal::new(0.0, 1.0).expect("standard normal is always valid");
+        let naive_p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
+        assert_eq!(
+            naive_p_value, 0.0,
+            "expected the naive form to underflow to 0.0 at z = {z}"
+        );
+
+        let fixed_p_value = 2.0 * normal.sf(z.abs());
+        assert!(
+            fixed_p_value > 0.0 && fixed_p_value < 1e-20,
+            "expected a tiny nonzero p-value, got {fixed_p_value}"
+        );
+    }
+
+    /// Same scenario through the real code path, not the primitive.
+    #[test]
+    fn cross_model_metric_significance_reports_tiny_nonzero_p_for_extreme_outlier() {
+        let debugger = DifferentialDebugger::new(DifferentialDebuggingConfig::default());
+        let values = hundred_models_with_extreme_outlier();
+
+        let (p_values, _effect_sizes, significant, _mean_std) = debugger
+            .cross_model_metric_significance(&values)
+            .expect(">= 3 models with nonzero variance must produce a result");
+
+        let outlier_p = p_values["outlier"];
+        assert!(
+            outlier_p > 0.0 && outlier_p < 1e-20,
+            "expected a tiny nonzero p, got {outlier_p}"
+        );
+        assert!(
+            significant["outlier"],
+            "p-value {outlier_p} must be flagged significant"
+        );
     }
 }

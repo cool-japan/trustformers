@@ -1355,9 +1355,24 @@ impl UITestingFramework {
     ) -> Result<Box<dyn UITestRunner + Send + Sync>> {
         match framework {
             UITestFramework::Appium => Ok(Box::new(AppiumTestRunner::new(device_info.clone())?)),
-            UITestFramework::XCUITest => Ok(Box::new(XCUITestRunner::new(device_info.clone())?)),
-            UITestFramework::Espresso => {
-                Ok(Box::new(EspressoTestRunner::new(device_info.clone())?))
+            // `XCUITestRunner`/`EspressoTestRunner` exist (below) and every
+            // one of their `UITestRunner` methods honestly returns
+            // "not implemented" -- driving real XCUITest/Espresso requires
+            // an actual attached iOS/Android automation bridge this crate
+            // does not have. Constructing them here used to *succeed*,
+            // which advertised XCUITest/Espresso as available frameworks
+            // right up until the caller's first actual test/screenshot/
+            // element call failed. Failing here instead, at framework
+            // selection, reports the true capability immediately rather
+            // than after a caller has already committed to the framework.
+            UITestFramework::XCUITest | UITestFramework::Espresso => {
+                Err(TrustformersError::runtime_error(format!(
+                    "{:?} test framework is not available: it requires a real on-device \
+                     automation bridge (Xcode/xcodebuild for XCUITest, the Android test \
+                     orchestrator for Espresso) that is not attached in this environment",
+                    framework
+                ))
+                .into())
             },
             _ => Err(TrustformersError::runtime_error(format!(
                 "Unsupported test framework: {:?}",
@@ -1549,7 +1564,6 @@ impl AppiumTestRunner {
 
 impl UITestRunner for AppiumTestRunner {
     fn run_test(&self, test_config: &UITestConfig) -> Result<UITestResult> {
-        // Simplified Appium test execution
         let start_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1567,11 +1581,25 @@ impl UITestRunner for AppiumTestRunner {
             .unwrap_or_default()
             .as_secs();
 
+        // The real aggregate status: `Failed` if any step failed,
+        // `Passed` only if every step actually did. Previously this was
+        // the hardcoded constant `TestStatus::Passed` regardless of
+        // `test_steps`' real contents -- `execute_step` already converts a
+        // failed `perform_action` into a `TestStatus::Failed` *step*
+        // result rather than propagating the error, but `run_test`'s
+        // overall verdict never looked at that before reporting the test
+        // as a whole.
+        let status = if test_steps.iter().any(|s| s.status == TestStatus::Failed) {
+            TestStatus::Failed
+        } else {
+            TestStatus::Passed
+        };
+
         Ok(UITestResult {
             test_id: format!("appium_test_{}", start_time),
             test_name: test_config.test_name.clone(),
             test_type: test_config.test_type,
-            status: TestStatus::Passed,
+            status,
             start_time,
             end_time,
             duration: Duration::from_secs(end_time - start_time),
@@ -1585,50 +1613,59 @@ impl UITestRunner for AppiumTestRunner {
         })
     }
 
-    fn capture_screenshot(&self, path: &str) -> Result<Screenshot> {
-        // Appium screenshot capture
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        Ok(Screenshot {
-            id: format!("appium_screenshot_{}", timestamp),
-            file_path: path.to_string(),
-            timestamp,
-            dimensions: (1080, 1920),
-            format: ImageFormat::PNG,
-        })
+    /// This crate has no real Appium WebDriver HTTP client (no session
+    /// creation against a running Appium server, no
+    /// `POST /session/:id/screenshot` call) -- the previous implementation
+    /// fabricated a plausible-looking `Screenshot` (`dimensions: (1080,
+    /// 1920)` unconditionally) for a `path` no bytes were ever written to.
+    /// Same honesty policy as `mobile_testing::providers`'s AWS/Firebase
+    /// device-farm fix: an honest error, not fabricated metadata for a
+    /// file that does not exist.
+    fn capture_screenshot(&self, _path: &str) -> Result<Screenshot> {
+        Err(TrustformersError::runtime_error(
+            "Appium screenshot capture is not available: this crate does not implement a real \
+             Appium WebDriver client, so no screenshot was actually captured."
+                .to_string(),
+        )
+        .into())
     }
 
-    fn find_element(&self, selector: &str) -> Result<UIElement> {
-        // Appium element finding
-        Ok(UIElement {
-            id: format!("element_{}", selector),
-            element_type: "unknown".to_string(),
-            text: Some("Element text".to_string()),
-            bounds: ScreenArea {
-                x: 0,
-                y: 0,
-                width: 100,
-                height: 50,
-            },
-            properties: HashMap::new(),
-        })
+    /// Same honesty policy as [`Self::capture_screenshot`]: no real
+    /// element lookup happens without a WebDriver client, so the previous
+    /// implementation's fabricated `UIElement` (`text: Some("Element
+    /// text")`, a fixed `100x50` bounds box, regardless of `selector` or
+    /// of whether any such element exists in a real UI) is replaced with
+    /// an honest error.
+    fn find_element(&self, _selector: &str) -> Result<UIElement> {
+        Err(TrustformersError::runtime_error(
+            "Appium element lookup is not available: this crate does not implement a real \
+             Appium WebDriver client, so no element was actually located."
+                .to_string(),
+        )
+        .into())
     }
 
+    /// Same honesty policy: the previous implementation `println!`ed the
+    /// requested action and returned `Ok(())` unconditionally -- every
+    /// action "succeeded" whether or not any UI interaction was even
+    /// possible, which is exactly why [`Self::run_test`]'s aggregate
+    /// status used to always read `TestStatus::Passed` regardless of what
+    /// a test actually checked.
     fn perform_action(&self, action: &UITestAction) -> Result<()> {
-        // Appium action execution
-        println!(
-            "Performing action: {:?} on {}",
+        Err(TrustformersError::runtime_error(format!(
+            "Appium action execution ({:?} on '{}') is not available: this crate does not \
+             implement a real Appium WebDriver client, so no action was actually performed.",
             action.action_type, action.target_element
-        );
-        Ok(())
+        ))
+        .into())
     }
 
-    fn wait_for_element(&self, selector: &str, timeout: Duration) -> Result<UIElement> {
-        // Appium element waiting
-        std::thread::sleep(timeout);
+    fn wait_for_element(&self, selector: &str, _timeout: Duration) -> Result<UIElement> {
+        // No real WebDriver client to poll against (see `find_element`),
+        // so there is nothing to wait for. Previously this slept for the
+        // *entire* `timeout` unconditionally before delegating to
+        // `find_element` -- fabricated latency on top of a fabricated
+        // result, rather than failing fast.
         self.find_element(selector)
     }
 }
@@ -1788,5 +1825,115 @@ mod tests {
         assert_eq!(thresholds.min_frame_rate, 30.0);
         assert_eq!(thresholds.max_memory_usage, 512);
         assert_eq!(thresholds.max_cpu_usage, 80.0);
+    }
+
+    /// Regression test: `create_test_runner` (and therefore
+    /// `UITestingFramework::new`) used to construct `XCUITestRunner` and
+    /// `EspressoTestRunner` successfully even though every one of their
+    /// `UITestRunner` trait methods unconditionally returns a
+    /// "not implemented" error -- so requesting either framework looked
+    /// available right up until the first real test/screenshot/element
+    /// call. Framework selection must now fail immediately instead.
+    #[test]
+    fn test_xcuitest_and_espresso_are_not_falsely_advertised_as_available() {
+        for framework in [UITestFramework::XCUITest, UITestFramework::Espresso] {
+            let mut config = UITestingConfig::default();
+            config.automation_config.frameworks = vec![framework];
+
+            let result = UITestingFramework::new(config, MobileDeviceInfo::default());
+            assert!(
+                result.is_err(),
+                "{:?} must not construct a usable test runner in this environment",
+                framework
+            );
+        }
+    }
+
+    /// `AppiumTestRunner` construction itself must remain unaffected by
+    /// the XCUITest/Espresso fix above -- it still succeeds unconditionally
+    /// (unlike `UITestingFramework::new` for XCUITest/Espresso, which now
+    /// fails at *construction* time). Note this only tests construction,
+    /// not that Appium test *execution* is genuinely implemented -- see
+    /// the regression tests below for that; `AppiumTestRunner` turned out
+    /// to have the exact same "always reports a fabricated pass" problem
+    /// XCUITest/Espresso had, just not yet caught when this test (and its
+    /// original, now-corrected, comment claiming Appium "genuinely works")
+    /// was written.
+    #[test]
+    fn test_appium_framework_still_constructs() {
+        let mut config = UITestingConfig::default();
+        config.automation_config.frameworks = vec![UITestFramework::Appium];
+
+        let result = UITestingFramework::new(config, MobileDeviceInfo::default());
+        assert!(result.is_ok());
+    }
+
+    fn single_step_test_config() -> UITestConfig {
+        UITestConfig {
+            test_name: "probe".to_string(),
+            test_type: UITestType::Functional,
+            test_steps: vec![UITestStep {
+                step_id: "step-1".to_string(),
+                step_name: "tap button".to_string(),
+                action: UITestAction {
+                    action_type: ActionType::Tap,
+                    target_element: "submit_button".to_string(),
+                    parameters: HashMap::new(),
+                },
+                status: TestStatus::Passed,
+                duration: Duration::from_secs(0),
+                screenshot: None,
+                error: None,
+            }],
+            timeout: Duration::from_secs(30),
+            test_data: HashMap::new(),
+        }
+    }
+
+    /// Regression test for `AppiumTestRunner::perform_action`/
+    /// `find_element`/`capture_screenshot`, which previously fabricated
+    /// success (a `println!` plus `Ok(())`, a made-up `UIElement` with
+    /// `text: Some("Element text")`, and a made-up `Screenshot` with fixed
+    /// `1080x1920` dimensions) regardless of whether any real device or
+    /// Appium server was involved at all. None of this crate's Appium
+    /// support has a real WebDriver client behind it, so every one of
+    /// these must now report that honestly.
+    #[test]
+    fn test_appium_runner_reports_honest_errors_not_fabricated_ui_data() {
+        let runner = AppiumTestRunner::new(MobileDeviceInfo::default()).expect("runner creation");
+
+        let screenshot_path = std::env::temp_dir().join("trustformers_mobile_appium_test.png");
+        assert!(runner
+            .capture_screenshot(screenshot_path.to_str().expect("valid utf8 path"))
+            .is_err());
+        assert!(runner.find_element("#submit_button").is_err());
+        assert!(runner
+            .perform_action(&UITestAction {
+                action_type: ActionType::Tap,
+                target_element: "submit_button".to_string(),
+                parameters: HashMap::new(),
+            })
+            .is_err());
+    }
+
+    /// Regression test for `AppiumTestRunner::run_test`'s previous
+    /// hardcoded `status: TestStatus::Passed` -- with `perform_action`
+    /// now honestly failing every step (see the test above), a real
+    /// aggregate status must reflect that as `TestStatus::Failed`, not
+    /// silently report the run as passed regardless of its steps' real
+    /// outcomes.
+    #[test]
+    fn test_appium_run_test_status_reflects_real_step_failures() {
+        let runner = AppiumTestRunner::new(MobileDeviceInfo::default()).expect("runner creation");
+        let result = runner.run_test(&single_step_test_config()).expect("run_test itself succeeds");
+
+        assert_eq!(result.test_steps.len(), 1);
+        assert_eq!(result.test_steps[0].status, TestStatus::Failed);
+        assert_eq!(
+            result.status,
+            TestStatus::Failed,
+            "the overall result must reflect that its one step actually failed, not a hardcoded \
+             Passed"
+        );
     }
 }

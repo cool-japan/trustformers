@@ -13,6 +13,57 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{window, HtmlCanvasElement, Navigator, Performance, WebGlRenderingContext};
 
+/// Minimal WASM module (single function returning a `v128` local built from
+/// a `v128.const` and read back via `i32x4.extract_lane`) that only passes
+/// `WebAssembly.validate` on engines that implement the SIMD proposal. This
+/// is the same probe used by the widely-adopted `wasm-feature-detect`
+/// package. See `tests::test_wasm_feature_probe_bytes_are_well_formed_modules`
+/// for a native, browser-free structural sanity check of these bytes.
+const WASM_SIMD_PROBE: &[u8] = &[
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253,
+    15, 253, 98, 11,
+];
+
+/// Minimal WASM module (a function performing a `memory.copy`, opcode
+/// `0xFC 0x0A`) that only passes `WebAssembly.validate` on engines that
+/// implement the bulk-memory-operations proposal. Same technique/source as
+/// [`WASM_SIMD_PROBE`].
+const WASM_BULK_MEMORY_PROBE: &[u8] = &[
+    0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 3, 1, 0, 1, 10, 14, 1, 12, 0,
+    65, 0, 65, 0, 65, 0, 252, 10, 0, 0, 11,
+];
+
+/// Run `WebAssembly.validate` over `module_bytes`. Real runtime feature
+/// detection - compile-correct here, semantically exercised only where
+/// `WebAssembly.validate` actually runs (a real browser), same as the rest
+/// of this file's `#[cfg(target_arch = "wasm32")]`-only browser-API paths.
+#[cfg(target_arch = "wasm32")]
+fn wasm_validate(module_bytes: &[u8]) -> bool {
+    let array = js_sys::Uint8Array::from(module_bytes);
+    js_sys::WebAssembly::validate(&array).unwrap_or(false)
+}
+
+/// Native builds have no `WebAssembly.validate` to call - report `false`
+/// rather than fabricating a result.
+#[cfg(not(target_arch = "wasm32"))]
+fn wasm_validate(_module_bytes: &[u8]) -> bool {
+    false
+}
+
+/// Evaluate a CSS media query via `window.matchMedia` - the standard,
+/// real way to read the handful of preference/display signals a page can
+/// see (`prefers-color-scheme`, `prefers-reduced-motion`, `display-mode`).
+/// Returns `false` if `matchMedia` itself is unavailable, rather than
+/// panicking or fabricating a match.
+fn matches_media_query(window: &web_sys::Window, query: &str) -> bool {
+    window
+        .match_media(query)
+        .ok()
+        .flatten()
+        .map(|mql| mql.matches())
+        .unwrap_or(false)
+}
+
 #[wasm_bindgen]
 pub struct DeviceCapabilityDetector {
     capabilities: Option<DeviceCapabilities>,
@@ -284,7 +335,8 @@ impl DeviceCapabilityDetector {
         let performance = window.performance().ok_or("No performance object")?;
 
         // Memory information
-        let (memory_used_mb, memory_total_mb, memory_limit_mb) = self.get_memory_info(&performance);
+        let (memory_used_mb, memory_total_mb, memory_limit_mb, memory_api_available) =
+            self.get_memory_info(&performance);
 
         // Navigation timing
         let timing = performance.timing();
@@ -294,16 +346,18 @@ impl DeviceCapabilityDetector {
         let timing_load_event_end = timing.load_event_end() as f64;
 
         // Network information
-        let (connection_type, connection_downlink, connection_rtt) =
+        let (connection_type, connection_downlink, connection_rtt, connection_api_available) =
             self.get_network_info(&window.navigator());
 
         // Battery information
-        let (battery_level, battery_charging) = self.get_battery_info(&window.navigator()).await;
+        let (battery_level, battery_charging, battery_api_available) =
+            self.get_battery_info(&window.navigator()).await;
 
         Ok(PerformanceMetrics {
             memory_used_mb,
             memory_total_mb,
             memory_limit_mb,
+            memory_api_available,
             timing_navigation_start,
             timing_dom_loading,
             timing_dom_complete,
@@ -311,8 +365,10 @@ impl DeviceCapabilityDetector {
             connection_type,
             connection_downlink,
             connection_rtt,
+            connection_api_available,
             battery_level,
             battery_charging,
+            battery_api_available,
         })
     }
 
@@ -320,7 +376,7 @@ impl DeviceCapabilityDetector {
         let window = window().ok_or("No window object")?;
 
         // Power and performance
-        let is_low_power_mode = self.detect_low_power_mode(&window);
+        let is_low_power_mode = Self::detect_low_power_mode();
 
         // Screen and orientation
         let screen_orientation = self.get_screen_orientation(&window);
@@ -333,7 +389,7 @@ impl DeviceCapabilityDetector {
         let supports_picture_in_picture = self.supports_picture_in_picture(&window);
 
         // Accessibility and preferences
-        let thermal_state = self.get_thermal_state(&window);
+        let thermal_state = Self::get_thermal_state();
         let network_save_data = self.get_network_save_data(&window.navigator());
         let prefers_reduced_motion = self.get_prefers_reduced_motion(&window);
         let prefers_color_scheme = self.get_prefers_color_scheme(&window);
@@ -571,14 +627,49 @@ impl DeviceCapabilityDetector {
         )
     }
 
+    /// Real runtime WebAssembly feature probes.
+    ///
+    /// `simd`/`bulk_memory` are detected by handing `WebAssembly.validate` a
+    /// minimal, hand-assembled module that only type-checks if the engine
+    /// implements the feature in question - the same technique used by the
+    /// widely-used `wasm-feature-detect` package. The exact module bytes are
+    /// structurally sanity-checked by
+    /// `tests::test_wasm_feature_probe_bytes_are_well_formed_modules` below
+    /// (native, no browser needed); full semantic validation only happens
+    /// where `WebAssembly.validate` actually runs, i.e. in a real browser.
+    ///
+    /// `threads` is detected differently: real WASM threads usability
+    /// requires `SharedArrayBuffer` *and* cross-origin isolation, both of
+    /// which are directly reflectable without any byte probe.
     async fn detect_wasm_features(&self) -> (bool, bool, bool) {
-        // Simplified WASM feature detection
-        (false, false, false)
+        let window = match window() {
+            Some(window) => window,
+            None => return (false, false, false),
+        };
+
+        let simd = wasm_validate(WASM_SIMD_PROBE);
+        let bulk_memory = wasm_validate(WASM_BULK_MEMORY_PROBE);
+
+        let has_shared_array_buffer =
+            js_sys::Reflect::has(&window, &"SharedArrayBuffer".into()).unwrap_or(false);
+        let cross_origin_isolated = js_sys::Reflect::get(&window, &"crossOriginIsolated".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let threads = has_shared_array_buffer && cross_origin_isolated;
+
+        (simd, threads, bulk_memory)
     }
 
-    async fn detect_media_support(&self, _navigator: &Navigator) -> (bool, bool, bool) {
-        // Simplified media detection
-        (true, true, true)
+    /// Real (if coarse) media-device detection: whether the `MediaDevices`
+    /// API is exposed at all. Distinguishing camera vs. microphone vs.
+    /// speaker presence specifically would require an async, permission-
+    /// gated `enumerateDevices()` call; without it, the honest answer for
+    /// all three is "the browser exposes an API that could plausibly
+    /// provide this", not an unconditional `true`.
+    async fn detect_media_support(&self, navigator: &Navigator) -> (bool, bool, bool) {
+        let has_media_devices = navigator.media_devices().is_ok();
+        (has_media_devices, has_media_devices, has_media_devices)
     }
 
     fn classify_device_type(&self, user_agent: &str, _window: &web_sys::Window) -> DeviceType {
@@ -633,28 +724,111 @@ impl DeviceCapabilityDetector {
             || user_agent.contains("Android") && user_agent.contains("Tablet")
     }
 
-    fn detect_standalone_mode(&self, _window: &web_sys::Window) -> bool {
-        // Check for PWA standalone mode
-        false // Simplified for now
+    fn detect_standalone_mode(&self, window: &web_sys::Window) -> bool {
+        // Real check for PWA standalone display mode via the
+        // `(display-mode: standalone)` media query - the standard way to
+        // detect this without any dedicated JS property.
+        matches_media_query(window, "(display-mode: standalone)")
     }
 
     fn detect_webview(&self, user_agent: &str, _navigator: &Navigator) -> bool {
         user_agent.contains("WebView") || user_agent.contains("wv)")
     }
 
-    fn get_memory_info(&self, _performance: &Performance) -> (f64, f64, f64) {
-        // Simplified memory detection
-        (1024.0, 4096.0, 8192.0)
+    /// Real memory detection via `performance.memory` - a non-standard,
+    /// Chromium-only extension not exposed by `web_sys::Performance`, so
+    /// this reads it through `js_sys::Reflect`. Returns `(used_mb,
+    /// total_mb, limit_mb, api_available)`; when the API is absent (Firefox,
+    /// Safari), the first three are `0.0` and `api_available` is `false` -
+    /// an honest "not measured" result, not a fabricated reading.
+    fn get_memory_info(&self, performance: &Performance) -> (f64, f64, f64, bool) {
+        let memory = match js_sys::Reflect::get(performance, &"memory".into()) {
+            Ok(memory) if !memory.is_undefined() && !memory.is_null() => memory,
+            _ => return (0.0, 0.0, 0.0, false),
+        };
+
+        let read_bytes_as_mb = |key: &str| {
+            js_sys::Reflect::get(&memory, &JsValue::from_str(key))
+                .ok()
+                .and_then(|v| v.as_f64())
+                .map(|bytes| bytes / (1024.0 * 1024.0))
+                .unwrap_or(0.0)
+        };
+
+        (
+            read_bytes_as_mb("usedJSHeapSize"),
+            read_bytes_as_mb("totalJSHeapSize"),
+            read_bytes_as_mb("jsHeapSizeLimit"),
+            true,
+        )
     }
 
-    fn get_network_info(&self, _navigator: &Navigator) -> (String, f64, u32) {
-        // Simplified network info
-        ("4g".to_string(), 10.0, 50)
+    /// Real network detection via the Network Information API
+    /// (`navigator.connection`). `effectiveType`/`downlink`/`rtt` are read
+    /// through `js_sys::Reflect` since only `type` (a different,
+    /// enum-typed field) has a typed `web_sys::NetworkInformation` binding.
+    /// Returns `(effective_type, downlink_mbps, rtt_ms, api_available)`;
+    /// when the API is absent (Safari, Firefox), this is
+    /// `("unknown", 0.0, 0, false)` - not a fabricated "4g" reading.
+    fn get_network_info(&self, navigator: &Navigator) -> (String, f64, u32, bool) {
+        let Ok(connection) = navigator.connection() else {
+            return ("unknown".to_string(), 0.0, 0, false);
+        };
+
+        let effective_type = js_sys::Reflect::get(&connection, &"effectiveType".into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let downlink = js_sys::Reflect::get(&connection, &"downlink".into())
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let rtt = js_sys::Reflect::get(&connection, &"rtt".into())
+            .ok()
+            .and_then(|v| v.as_f64())
+            .map(|v| v as u32)
+            .unwrap_or(0);
+
+        (effective_type, downlink, rtt, true)
     }
 
-    async fn get_battery_info(&self, _navigator: &Navigator) -> (f64, bool) {
-        // Simplified battery info
-        (0.8, true)
+    /// Real battery detection via `navigator.getBattery()` (the Battery
+    /// Status API - deprecated and removed from most browsers besides
+    /// Firefox for Android). Checked and read entirely through
+    /// `js_sys::Reflect`/`js_sys::Function` rather than a typed
+    /// `web_sys::BatteryManager` binding, so this doesn't need that extra
+    /// `web-sys` feature just to probe presence. Returns `(level,
+    /// charging, api_available)`; when the API is absent, this is `(0.0,
+    /// false, false)` - not a fabricated 80%-charged reading.
+    async fn get_battery_info(&self, navigator: &Navigator) -> (f64, bool, bool) {
+        let not_available = (0.0, false, false);
+
+        let Ok(get_battery) = js_sys::Reflect::get(navigator, &"getBattery".into()) else {
+            return not_available;
+        };
+        let Some(get_battery_fn) = get_battery.dyn_ref::<js_sys::Function>() else {
+            return not_available;
+        };
+        let Ok(promise) = get_battery_fn.call0(navigator) else {
+            return not_available;
+        };
+        let Ok(promise) = promise.dyn_into::<js_sys::Promise>() else {
+            return not_available;
+        };
+        let Ok(battery_manager) = wasm_bindgen_futures::JsFuture::from(promise).await else {
+            return not_available;
+        };
+
+        let level = js_sys::Reflect::get(&battery_manager, &"level".into())
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let charging = js_sys::Reflect::get(&battery_manager, &"charging".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        (level, charging, true)
     }
 
     fn generate_model_recommendations(
@@ -679,7 +853,14 @@ impl DeviceCapabilityDetector {
     // Additional helper methods would be implemented here...
     // These are simplified stubs for compilation
 
-    fn detect_low_power_mode(&self, _window: &web_sys::Window) -> bool {
+    /// No standard browser API exposes low-power-mode state (iOS Low Power
+    /// Mode, Android battery saver, etc. are not reflectable from a web
+    /// page). Always `false` - an honest "cannot detect", not a fabricated
+    /// measurement. Takes no `&self`/browser-object parameter (there is
+    /// nothing to query), so it is callable from native tests without
+    /// constructing a `DeviceCapabilityDetector` (whose fields include
+    /// `js_sys::Object`s that cannot be built off wasm32).
+    fn detect_low_power_mode() -> bool {
         false
     }
     fn get_screen_orientation(&self, window: &web_sys::Window) -> String {
@@ -696,36 +877,77 @@ impl DeviceCapabilityDetector {
             _ => "unknown".to_string(),
         }
     }
-    fn supports_orientation_lock(&self, _window: &web_sys::Window) -> bool {
-        false
+    fn supports_orientation_lock(&self, window: &web_sys::Window) -> bool {
+        window
+            .screen()
+            .ok()
+            .map(|screen| screen.orientation())
+            .map(|orientation| js_sys::Reflect::has(&orientation, &"lock".into()).unwrap_or(false))
+            .unwrap_or(false)
     }
-    fn supports_vibration(&self, _navigator: &Navigator) -> bool {
-        true
+    fn supports_vibration(&self, navigator: &Navigator) -> bool {
+        js_sys::Reflect::has(navigator, &"vibrate".into()).unwrap_or(false)
     }
-    fn supports_fullscreen(&self, _window: &web_sys::Window) -> bool {
-        true
+    fn supports_fullscreen(&self, window: &web_sys::Window) -> bool {
+        window.document().map(|doc| doc.fullscreen_enabled()).unwrap_or(false)
     }
-    fn supports_wake_lock(&self, _navigator: &Navigator) -> bool {
-        false
+    fn supports_wake_lock(&self, navigator: &Navigator) -> bool {
+        js_sys::Reflect::has(navigator, &"wakeLock".into()).unwrap_or(false)
     }
-    fn supports_picture_in_picture(&self, _window: &web_sys::Window) -> bool {
-        false
+    fn supports_picture_in_picture(&self, window: &web_sys::Window) -> bool {
+        // `Document::picture_in_picture_enabled` (typed) requires building
+        // with `--cfg=web_sys_unstable_apis`, which this workspace does
+        // not set; `js_sys::Reflect` reads the same real DOM property
+        // without that build-time dependency.
+        window
+            .document()
+            .and_then(|doc| {
+                js_sys::Reflect::get(&doc, &"pictureInPictureEnabled".into())
+                    .ok()
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
     }
-    fn get_thermal_state(&self, _window: &web_sys::Window) -> String {
-        "normal".to_string()
+    /// No standard browser API exposes device thermal state. `"unknown"` -
+    /// an honest "cannot detect", not the previous fabricated `"normal"`
+    /// (which claimed a specific, unmeasured thermal state). Takes no
+    /// `&self`/browser-object parameter (there is nothing to query); see
+    /// [`Self::detect_low_power_mode`] for why.
+    fn get_thermal_state() -> String {
+        "unknown".to_string()
     }
-    fn get_network_save_data(&self, _navigator: &Navigator) -> bool {
-        false
+    fn get_network_save_data(&self, navigator: &Navigator) -> bool {
+        navigator
+            .connection()
+            .ok()
+            .and_then(|connection| js_sys::Reflect::get(&connection, &"saveData".into()).ok())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
-    fn get_prefers_reduced_motion(&self, _window: &web_sys::Window) -> bool {
-        false
+    fn get_prefers_reduced_motion(&self, window: &web_sys::Window) -> bool {
+        matches_media_query(window, "(prefers-reduced-motion: reduce)")
     }
-    fn get_prefers_color_scheme(&self, _window: &web_sys::Window) -> String {
-        "light".to_string()
+    fn get_prefers_color_scheme(&self, window: &web_sys::Window) -> String {
+        if matches_media_query(window, "(prefers-color-scheme: dark)") {
+            "dark".to_string()
+        } else if matches_media_query(window, "(prefers-color-scheme: light)") {
+            "light".to_string()
+        } else {
+            "unknown".to_string()
+        }
     }
-    fn get_viewport_size(&self, _window: &web_sys::Window) -> (u32, u32) {
-        (375, 667)
+    fn get_viewport_size(&self, window: &web_sys::Window) -> (u32, u32) {
+        let width =
+            window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0) as u32;
+        let height =
+            window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0) as u32;
+        (width, height)
     }
+    /// No standard JS API reads the CSS `env(safe-area-inset-*)` values
+    /// directly; doing so honestly would require the host page to already
+    /// mirror them into custom CSS properties this crate has no way to know
+    /// the names of. Zero insets - an honest "no inset assumed", not a
+    /// fabricated non-zero measurement.
     fn get_safe_area_insets(&self, _window: &web_sys::Window) -> Vec<f64> {
         vec![0.0, 0.0, 0.0, 0.0]
     }
@@ -823,5 +1045,109 @@ impl DeviceCapabilityDetector {
             &JsValue::from_str(event_type),
             callback,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parses the (very permissive) WASM binary module structure - magic +
+    /// version header, followed by a sequence of `(section_id: u8,
+    /// section_size: LEB128 u32, content: [u8; section_size])` records -
+    /// and asserts the section sizes exactly consume the remaining bytes.
+    /// This is a native, browser-free sanity check against transcription
+    /// errors in the hand-written probe byte arrays; it does not (cannot,
+    /// without a real `WebAssembly.validate`) confirm the module
+    /// type-checks - that is exercised only in a real browser (see the
+    /// `detect_wasm_features` doc comment).
+    fn assert_well_formed_wasm_module(bytes: &[u8]) {
+        assert!(bytes.len() >= 8, "module too short for a header");
+        assert_eq!(&bytes[0..4], &[0, 97, 115, 109], "wrong WASM magic number");
+        assert_eq!(&bytes[4..8], &[1, 0, 0, 0], "wrong WASM version");
+
+        let mut offset = 8usize;
+        while offset < bytes.len() {
+            offset += 1; // section id
+            assert!(offset < bytes.len(), "truncated section header");
+
+            // LEB128-decode the section size.
+            let mut size: u32 = 0;
+            let mut shift = 0u32;
+            loop {
+                assert!(offset < bytes.len(), "truncated LEB128 section size");
+                let byte = bytes[offset];
+                offset += 1;
+                size |= u32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+
+            offset += size as usize;
+        }
+
+        assert_eq!(
+            offset,
+            bytes.len(),
+            "section sizes don't exactly consume the module bytes"
+        );
+    }
+
+    #[test]
+    fn test_wasm_feature_probe_bytes_are_well_formed_modules() {
+        assert_well_formed_wasm_module(WASM_SIMD_PROBE);
+        assert_well_formed_wasm_module(WASM_BULK_MEMORY_PROBE);
+    }
+
+    #[test]
+    fn test_wasm_validate_native_returns_false() {
+        // Regression guard: native builds have no `WebAssembly.validate` to
+        // call; `wasm_validate` must report `false` rather than panicking
+        // or fabricating a positive result.
+        assert!(!wasm_validate(WASM_SIMD_PROBE));
+        assert!(!wasm_validate(WASM_BULK_MEMORY_PROBE));
+        assert!(!wasm_validate(&[]));
+    }
+
+    #[test]
+    fn test_detect_low_power_mode_is_honestly_false_not_fabricated() {
+        assert!(!DeviceCapabilityDetector::detect_low_power_mode());
+    }
+
+    #[test]
+    fn test_get_thermal_state_reports_unknown_not_fabricated_normal() {
+        // Regression guard: this used to unconditionally claim "normal"
+        // with no measurement behind it.
+        assert_eq!(DeviceCapabilityDetector::get_thermal_state(), "unknown");
+    }
+
+    #[test]
+    fn test_performance_metrics_api_availability_flags_exist_and_default_honest() {
+        // Regression guard for the `PerformanceMetrics` struct shape: the
+        // new `*_api_available` flags must be constructible and readable so
+        // callers can distinguish "not measured" from a real zero reading.
+        let metrics = PerformanceMetrics {
+            memory_used_mb: 0.0,
+            memory_total_mb: 0.0,
+            memory_limit_mb: 0.0,
+            memory_api_available: false,
+            timing_navigation_start: 0.0,
+            timing_dom_loading: 0.0,
+            timing_dom_complete: 0.0,
+            timing_load_event_end: 0.0,
+            connection_type: "unknown".to_string(),
+            connection_downlink: 0.0,
+            connection_rtt: 0,
+            connection_api_available: false,
+            battery_level: 0.0,
+            battery_charging: false,
+            battery_api_available: false,
+        };
+        assert!(!metrics.memory_api_available());
+        assert!(!metrics.connection_api_available());
+        assert!(!metrics.battery_api_available());
+        assert_eq!(metrics.connection_type(), "unknown");
     }
 }

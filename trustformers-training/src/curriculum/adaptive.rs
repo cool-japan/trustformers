@@ -155,8 +155,7 @@ impl CurriculumState {
         }
         // Linear regression slope over the loss history.
         let half = n / 2;
-        let first_half_mean: f64 =
-            self.loss_history.iter().take(half).sum::<f64>() / half as f64;
+        let first_half_mean: f64 = self.loss_history.iter().take(half).sum::<f64>() / half as f64;
         let second_half_mean: f64 =
             self.loss_history.iter().skip(half).sum::<f64>() / (n - half) as f64;
         second_half_mean - first_half_mean
@@ -307,9 +306,12 @@ impl AdaptiveCurriculumScheduler {
 
         match &self.strategy.clone() {
             CurriculumAdvanceStrategy::Linear { steps_per_advance } => {
-                self.state.step > 0 && self.state.step % steps_per_advance == 0
-            }
-            CurriculumAdvanceStrategy::LossTriggered { threshold, patience } => {
+                self.state.step > 0 && self.state.step.is_multiple_of(*steps_per_advance)
+            },
+            CurriculumAdvanceStrategy::LossTriggered {
+                threshold,
+                patience,
+            } => {
                 let recent_avg = if self.state.loss_history.is_empty() {
                     f64::INFINITY
                 } else {
@@ -323,13 +325,13 @@ impl AdaptiveCurriculumScheduler {
                     self.patience_counter = 0;
                     false
                 }
-            }
+            },
             CurriculumAdvanceStrategy::AccuracyTriggered { threshold } => {
                 self.state.competence >= *threshold
-            }
+            },
             CurriculumAdvanceStrategy::CompetenceBased { target_competence } => {
                 self.state.competence >= *target_competence
-            }
+            },
             CurriculumAdvanceStrategy::FixedSchedule { advance_at_steps } => {
                 if self.schedule_idx < advance_at_steps.len() {
                     let target = advance_at_steps[self.schedule_idx];
@@ -337,7 +339,7 @@ impl AdaptiveCurriculumScheduler {
                 } else {
                     false
                 }
-            }
+            },
         }
     }
 
@@ -431,7 +433,11 @@ impl SelfPacedLearning {
             .map(|i| initial_lambda + (max_lambda - initial_lambda) * (i as f64 / n as f64))
             .collect();
 
-        Self { lambda: initial_lambda, step: 0, lambda_schedule: schedule }
+        Self {
+            lambda: initial_lambda,
+            step: 0,
+            lambda_schedule: schedule,
+        }
     }
 
     /// Returns `true` if an example with the given difficulty and loss values
@@ -492,7 +498,10 @@ mod tests {
         for _ in 0..50 {
             state.update_accuracy(0.95);
         }
-        assert!(state.competence > 0.3, "Competence should rise with high accuracy");
+        assert!(
+            state.competence > 0.3,
+            "Competence should rise with high accuracy"
+        );
     }
 
     // ---- AdaptiveCurriculumScheduler — Linear ------------------------------
@@ -500,7 +509,9 @@ mod tests {
     #[test]
     fn test_linear_advance_at_correct_steps() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 10 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 10,
+            },
             5,
         );
 
@@ -510,8 +521,8 @@ mod tests {
             match action {
                 CurriculumAction::Advance { .. } | CurriculumAction::Complete => {
                     advance_or_complete_count += 1;
-                }
-                CurriculumAction::Continue => {}
+                },
+                CurriculumAction::Continue => {},
             }
         }
         // 50 steps / 10 steps_per_advance = 5 curriculum transitions
@@ -522,7 +533,9 @@ mod tests {
     #[test]
     fn test_linear_completes_after_all_phases() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 5 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 5,
+            },
             3,
         );
 
@@ -542,7 +555,10 @@ mod tests {
     #[test]
     fn test_loss_triggered_advances_when_loss_low() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::LossTriggered { threshold: 0.5, patience: 3 },
+            CurriculumAdvanceStrategy::LossTriggered {
+                threshold: 0.5,
+                patience: 3,
+            },
             4,
         );
 
@@ -561,7 +577,10 @@ mod tests {
     #[test]
     fn test_loss_triggered_does_not_advance_when_loss_high() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::LossTriggered { threshold: 0.5, patience: 5 },
+            CurriculumAdvanceStrategy::LossTriggered {
+                threshold: 0.5,
+                patience: 5,
+            },
             4,
         );
         for _ in 0..10 {
@@ -588,16 +607,21 @@ mod tests {
             match &action {
                 CurriculumAction::Advance { new_phase, .. } => {
                     transitions.push((step, *new_phase));
-                }
+                },
                 CurriculumAction::Complete => {
                     transitions.push((step, usize::MAX));
                     break;
-                }
-                CurriculumAction::Continue => {}
+                },
+                CurriculumAction::Continue => {},
             }
         }
         // 3 schedule points → 3 transitions total (the last one may be Complete).
-        assert_eq!(transitions.len(), 3, "Expected 3 curriculum transitions, got {:?}", transitions);
+        assert_eq!(
+            transitions.len(),
+            3,
+            "Expected 3 curriculum transitions, got {:?}",
+            transitions
+        );
     }
 
     // ---- Sampling weights --------------------------------------------------
@@ -605,7 +629,9 @@ mod tests {
     #[test]
     fn test_sampling_weights_update_on_advance() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 1 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 1,
+            },
             4,
         );
 
@@ -626,7 +652,9 @@ mod tests {
     #[test]
     fn test_progress_report_structure() {
         let sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 100 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 100,
+            },
             5,
         );
         let report = sched.progress_report();

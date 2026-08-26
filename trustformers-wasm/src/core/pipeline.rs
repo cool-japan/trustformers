@@ -74,43 +74,130 @@ impl TextGenerationPipeline {
 
     /// Generate text from a prompt
     pub async fn generate(&self, prompt: &str) -> Result<String, JsValue> {
-        // Tokenize input
-        let input_ids = self.tokenizer.encode(prompt, true);
-        let input_tensor = WasmTensor::new(
-            input_ids.iter().map(|&id| id as f32).collect(),
-            vec![1, input_ids.len()],
-        )?;
+        let input_ids = self.tokenizer.encode(prompt, true)?;
+        let generated_ids = self.generate_ids(&input_ids)?;
 
-        // Generate tokens
-        let mut generated_ids = input_ids.clone();
-        let _past_key_values: Option<Vec<WasmTensor>> = None;
+        // Decode generated tokens
+        let generated_text = self.tokenizer.decode(generated_ids, true)?;
+        Ok(generated_text)
+    }
+
+    /// Autoregressively generate up to `self.config.max_length` new token
+    /// ids on top of `prompt_ids`, feeding every previously generated token
+    /// back into the model as context for the next step.
+    ///
+    /// This used to build `input_tensor` once from the prompt and then call
+    /// `self.model.forward(&input_tensor)` in a loop *without ever
+    /// rebuilding it* — every "generated" token was really just the
+    /// argmax/sample of the same first next-token prediction, repeated
+    /// `max_length` times. There is intentionally no KV cache here: each
+    /// step reruns the full transformer over the whole growing sequence
+    /// (`O(generated_len^2)` total), which is correct but not the fastest
+    /// possible implementation — a real incremental cache is future work,
+    /// not something to fake in the meantime.
+    ///
+    /// Stops (without erroring) once the sequence would exceed the model's
+    /// `max_position_embeddings`, since `WasmModel::forward` rejects
+    /// sequences longer than that.
+    fn generate_ids(&self, prompt_ids: &[u32]) -> Result<Vec<u32>, JsValue> {
+        let mut generated_ids = prompt_ids.to_vec();
+        let max_position = self.model.config().max_position_embeddings;
 
         for _ in 0..self.config.max_length {
-            // Forward pass
-            let outputs = self.model.forward(&input_tensor)?;
+            if generated_ids.len() >= max_position {
+                break;
+            }
 
-            // Get next token (simplified - just take argmax of last position)
-            let logits = outputs.data();
-            let vocab_size = self.model.config().vocab_size;
-            let last_logits = &logits[logits.len() - vocab_size..];
-
-            let next_token_id = if self.config.do_sample {
-                self.sample_token(last_logits)?
-            } else {
-                self.argmax(last_logits)
-            };
-
+            let next_token_id = self.next_token(&generated_ids)?;
             generated_ids.push(next_token_id);
 
-            // Check stopping conditions
             if self.should_stop(&generated_ids) {
                 break;
             }
         }
 
-        // Decode generated tokens
-        let generated_text = self.tokenizer.decode(generated_ids, true);
-        Ok(generated_text)
+        Ok(generated_ids)
+    }
+
+    /// Run one real forward pass over `context_ids` and return the next
+    /// token id (argmax or temperature/top-k sample, per
+    /// [`GenerationConfig::do_sample`]). Rebuilds the input tensor from the
+    /// full context every call — no KV cache, matching `Self::generate_ids`.
+    ///
+    /// Exposed publicly (unlike the rest of this pipeline's step-by-step
+    /// internals) so external incremental/streaming callers - such as
+    /// [`crate::streaming_generation::StreamingGenerator`] - can drive real
+    /// model generation one token at a time without duplicating the
+    /// forward-pass/logits-extraction/sampling logic, and without ever
+    /// having to fabricate placeholder tokens themselves.
+    pub fn next_token(&self, context_ids: &[u32]) -> Result<u32, JsValue> {
+        self.next_token_with_confidence(context_ids).map(|(id, _confidence)| id)
+    }
+
+    /// Like [`Self::next_token`], but also returns the model's real softmax
+    /// probability of the chosen token (its own confidence in that
+    /// prediction) - not a fabricated placeholder value.
+    ///
+    /// Not `#[wasm_bindgen]`-exported: `wasm-bindgen` cannot describe a
+    /// bare tuple return type across the JS boundary. Crate-internal
+    /// callers (currently just
+    /// [`crate::streaming_generation::StreamingGenerator`]) use it
+    /// directly; JS callers get the same information indirectly via
+    /// [`Self::next_token`] plus a separate confidence query if ever
+    /// needed.
+    pub(crate) fn next_token_with_confidence(
+        &self,
+        context_ids: &[u32],
+    ) -> Result<(u32, f32), JsValue> {
+        let vocab_size = self.model.config().vocab_size;
+
+        let current_tensor = WasmTensor::new(
+            context_ids.iter().map(|&id| id as f32).collect(),
+            vec![1, context_ids.len()],
+        )?;
+        let outputs = self.model.forward(&current_tensor)?;
+
+        let logits = outputs.data();
+        if logits.len() < vocab_size {
+            return Err(JsValue::from_str(
+                "TextGenerationPipeline: model output is shorter than one vocabulary row",
+            ));
+        }
+        let last_logits = &logits[logits.len() - vocab_size..];
+
+        let token_id = if self.config.do_sample {
+            self.sample_token(last_logits)?
+        } else {
+            self.argmax(last_logits)
+        };
+
+        let confidence = softmax_probability(last_logits, token_id as usize);
+
+        Ok((token_id, confidence))
+    }
+
+    /// Tokenize `text` the same way [`Self::generate`] does. Errors if the
+    /// pipeline's tokenizer has no vocabulary loaded (see
+    /// [`crate::core::tokenizer::WasmTokenizer::encode`]).
+    pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>, JsValue> {
+        self.tokenizer.encode(text, add_special_tokens)
+    }
+
+    /// Decode `token_ids` the same way [`Self::generate`] does. Errors if
+    /// the pipeline's tokenizer has no vocabulary loaded (see
+    /// [`crate::core::tokenizer::WasmTokenizer::decode`]).
+    pub fn decode(
+        &self,
+        token_ids: Vec<u32>,
+        skip_special_tokens: bool,
+    ) -> Result<String, JsValue> {
+        self.tokenizer.decode(token_ids, skip_special_tokens)
+    }
+
+    /// The model's maximum context length (`max_position_embeddings`),
+    /// beyond which [`Self::next_token`] cannot be called.
+    pub fn max_position_embeddings(&self) -> usize {
+        self.model.config().max_position_embeddings
     }
 
     /// Generate text with streaming support - yields tokens incrementally
@@ -120,36 +207,27 @@ impl TextGenerationPipeline {
         callback: &js_sys::Function,
     ) -> Result<String, JsValue> {
         // Tokenize input
-        let input_ids = self.tokenizer.encode(prompt, true);
-        let input_tensor = WasmTensor::new(
-            input_ids.iter().map(|&id| id as f32).collect(),
-            vec![1, input_ids.len()],
-        )?;
+        let input_ids = self.tokenizer.encode(prompt, true)?;
 
-        // Generate tokens
+        // Generate tokens. As in `generate_ids`, the input tensor is
+        // rebuilt from the full running context on every step — the old
+        // code built it once from the prompt and reused it for every
+        // iteration, so every streamed token was a copy of the same first
+        // prediction.
         let mut generated_ids = input_ids.clone();
-        let _past_key_values: Option<Vec<WasmTensor>> = None;
         let mut generated_text = String::new();
+        let max_position = self.model.config().max_position_embeddings;
 
         for step in 0..self.config.max_length {
-            // Forward pass
-            let outputs = self.model.forward(&input_tensor)?;
+            if generated_ids.len() >= max_position {
+                break;
+            }
 
-            // Get next token
-            let logits = outputs.data();
-            let vocab_size = self.model.config().vocab_size;
-            let last_logits = &logits[logits.len() - vocab_size..];
-
-            let next_token_id = if self.config.do_sample {
-                self.sample_token(last_logits)?
-            } else {
-                self.argmax(last_logits)
-            };
-
+            let next_token_id = self.next_token(&generated_ids)?;
             generated_ids.push(next_token_id);
 
             // Decode new token
-            let new_token_text = self.tokenizer.decode(vec![next_token_id], false);
+            let new_token_text = self.tokenizer.decode(vec![next_token_id], false)?;
             generated_text.push_str(&new_token_text);
 
             // Call callback with progress
@@ -254,16 +332,39 @@ impl TextGenerationPipeline {
             return true;
         }
 
-        // Check for EOS token (simplified)
-        if let Some(&last_id) = token_ids.last() {
-            // Common EOS token IDs
-            if last_id == 2 || last_id == 50256 {
-                return true;
-            }
-        }
-
-        false
+        Self::is_eos_token(token_ids.last().copied())
     }
+
+    /// Whether `token_id` is one of the recognized end-of-sequence token
+    /// ids (simplified: common EOS ids across tokenizer families, not a
+    /// per-tokenizer lookup). Exposed publicly, independent of
+    /// `Self::should_stop`'s length-based cutoff, so callers that manage
+    /// their own generation-length budget (like
+    /// [`crate::streaming_generation::StreamingGenerator`]) can check for
+    /// a real end-of-text condition without being coupled to this
+    /// pipeline's own `config.max_length`.
+    pub fn is_eos_token(token_id: Option<u32>) -> bool {
+        matches!(token_id, Some(2) | Some(50256))
+    }
+}
+
+/// The softmax probability of `logits[index]` among all of `logits`.
+///
+/// Used by [`TextGenerationPipeline::next_token_with_confidence`] to report
+/// a token's real model-assigned probability, replacing the fabricated
+/// `0.8 + Math::random() * 0.2` "confidence" that
+/// `streaming_generation::StreamingGenerator` used to invent for every
+/// token regardless of what (fake) token it was attached to.
+fn softmax_probability(logits: &[f32], index: usize) -> f32 {
+    if logits.is_empty() || index >= logits.len() {
+        return 0.0;
+    }
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
+    if exp_sum <= 0.0 {
+        return 0.0;
+    }
+    (logits[index] - max_logit).exp() / exp_sum
 }
 
 /// Text classification pipeline
@@ -294,7 +395,7 @@ impl TextClassificationPipeline {
     /// Classify text
     pub async fn classify(&self, text: &str) -> Result<ClassificationResult, JsValue> {
         // Tokenize input
-        let input_ids = self.tokenizer.encode(text, true);
+        let input_ids = self.tokenizer.encode(text, true)?;
         let input_tensor = WasmTensor::new(
             input_ids.iter().map(|&id| id as f32).collect(),
             vec![1, input_ids.len()],
@@ -393,8 +494,8 @@ impl QuestionAnsweringPipeline {
     /// Answer a question given context
     pub async fn answer(&self, question: &str, context: &str) -> Result<AnswerResult, JsValue> {
         // Tokenize question and context
-        let question_tokens = self.tokenizer.encode(question, false);
-        let context_tokens = self.tokenizer.encode(context, false);
+        let question_tokens = self.tokenizer.encode(question, false)?;
+        let context_tokens = self.tokenizer.encode(context, false)?;
 
         // Combine with special tokens
         let mut input_ids = vec![101]; // [CLS]
@@ -423,7 +524,7 @@ impl QuestionAnsweringPipeline {
 
         // Extract answer tokens
         let answer_tokens: Vec<u32> = input_ids[start_idx..=end_idx].to_vec();
-        let answer_text = self.tokenizer.decode(answer_tokens, true);
+        let answer_text = self.tokenizer.decode(answer_tokens, true)?;
 
         Ok(AnswerResult {
             answer: answer_text,
@@ -574,7 +675,7 @@ impl TokenClassificationPipeline {
         }
 
         // Tokenize with special tokens so the model sees the standard BERT layout.
-        let input_ids = self.tokenizer.encode(text, true);
+        let input_ids = self.tokenizer.encode(text, true)?;
         let seq_len = input_ids.len();
 
         let input_tensor = WasmTensor::new(
@@ -625,7 +726,7 @@ impl TokenClassificationPipeline {
             };
 
             let label = self.labels.get(label_idx).cloned().unwrap_or_else(|| "O".to_string());
-            let token_str = self.tokenizer.decode(vec![token_id], false);
+            let token_str = self.tokenizer.decode(vec![token_id], false)?;
 
             results.push(TokenResult {
                 token: token_str,
@@ -717,11 +818,289 @@ pub struct StreamProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::weights::{layer_prefix, NamedWeights};
 
     #[test]
     fn test_generation_config() {
         let config = GenerationConfig::default();
         assert_eq!(config.max_length, 50);
         assert_eq!(config.temperature, 1.0);
+    }
+
+    /// Deterministic pseudo-random f32 generator (no external RNG dependency
+    /// needed — just enough spread to make matmuls non-degenerate).
+    fn fill(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed.wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                ((s >> 8) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn tensor(data: Vec<f32>, shape: Vec<usize>) -> WasmTensor {
+        WasmTensor::new(data, shape).expect("valid tensor")
+    }
+
+    /// Build a tiny, fully-populated GPT-2-shaped `TextGenerationPipeline`
+    /// (real weights, real tokenizer, no network/wasm-bindgen boundary) for
+    /// exercising the autoregressive loop directly.
+    fn build_test_pipeline() -> TextGenerationPipeline {
+        build_test_pipeline_seeded(3)
+    }
+
+    fn build_test_pipeline_seeded(seed_base: u32) -> TextGenerationPipeline {
+        let config = ModelConfig {
+            architecture: ModelArchitecture::GPT2,
+            vocab_size: 12,
+            hidden_size: 8,
+            num_layers: 2,
+            num_heads: 2,
+            max_position_embeddings: 16,
+            intermediate_size: 10,
+            hidden_dropout_prob: 0.0,
+            attention_dropout_prob: 0.0,
+        };
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let mut w = NamedWeights::new();
+        let mut seed = seed_base;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_add(211);
+            fill(n, seed)
+        };
+
+        w.insert(
+            "token_embeddings.weight",
+            tensor(next(config.vocab_size * h), vec![config.vocab_size, h]),
+        );
+        w.insert(
+            "position_embeddings.weight",
+            tensor(
+                next(config.max_position_embeddings * h),
+                vec![config.max_position_embeddings, h],
+            ),
+        );
+        for i in 0..config.num_layers {
+            let p = layer_prefix(i);
+            for name in ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj"] {
+                w.insert(format!("{p}{name}.weight"), tensor(next(h * h), vec![h, h]));
+            }
+            w.insert(format!("{p}norm1.weight"), tensor(vec![1.0; h], vec![h]));
+            w.insert(format!("{p}norm2.weight"), tensor(vec![1.0; h], vec![h]));
+            w.insert(
+                format!("{p}ffn.fc1.weight"),
+                tensor(next(h * inter), vec![h, inter]),
+            );
+            w.insert(
+                format!("{p}ffn.fc2.weight"),
+                tensor(next(inter * h), vec![inter, h]),
+            );
+        }
+        w.insert("final_norm.weight", tensor(vec![1.0; h], vec![h]));
+
+        let vocab_size = config.vocab_size;
+        let model = WasmModel::with_weights_for_test(config, w);
+        let mut tokenizer = WasmTokenizer::new(TokenizerType::BPE);
+        // Real (if tiny) vocabulary, loaded through the `JsValue`-free
+        // native-test path (`load_vocab_map`, not the `#[wasm_bindgen]`
+        // `load_vocab`, which needs a real `JsValue` and would panic
+        // natively) - one single-byte-alphabet symbol per id, covering the
+        // whole `vocab_size` range so any argmax-selected token id decodes
+        // to real text.
+        let vocab: std::collections::BTreeMap<String, u32> = (0u32..vocab_size as u32)
+            .map(|id| (((b'a' + id as u8) as char).to_string(), id))
+            .collect();
+        tokenizer.load_vocab_map(vocab).expect("non-empty vocab");
+        TextGenerationPipeline::new(model, tokenizer)
+    }
+
+    #[test]
+    fn test_generate_ids_feeds_generated_tokens_back_into_context() {
+        // Regression test for the former bug: `input_tensor` was built once
+        // from the prompt and never rebuilt from `generated_ids`, so every
+        // step's forward pass saw the identical frozen prompt tensor and
+        // every generated token was a copy of the very first prediction.
+        //
+        // `do_sample: false` (argmax) keeps this deterministic and avoids
+        // `js_sys::Math::random()`, which is unavailable on native targets.
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 6,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+
+        let prompt_ids = vec![1u32, 2, 3];
+        let generated = pipeline
+            .generate_ids(&prompt_ids)
+            .expect("generation over real weights should succeed");
+
+        assert!(
+            generated.len() > prompt_ids.len(),
+            "must generate at least one new token"
+        );
+        let new_tokens = &generated[prompt_ids.len()..];
+
+        assert!(
+            new_tokens.iter().any(|&t| t != new_tokens[0]),
+            "generated tokens must not all be identical — the old bug re-predicted the same \
+             token every step because the input tensor was never rebuilt: {new_tokens:?}"
+        );
+    }
+
+    #[test]
+    fn test_generate_ids_stops_at_model_context_limit() {
+        // max_position_embeddings is 16; start near that limit and ask for
+        // far more new tokens than could possibly fit. The old code had no
+        // notion of a context limit at all (it never grew the sequence), so
+        // this guards the new stopping condition added alongside the fix.
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 100,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+
+        let prompt_ids: Vec<u32> = (0..14).map(|i| i % 5).collect();
+        let generated = pipeline
+            .generate_ids(&prompt_ids)
+            .expect("must stop cleanly at the context limit, not error");
+        assert!(
+            generated.len() <= 16,
+            "must not exceed max_position_embeddings: {}",
+            generated.len()
+        );
+    }
+
+    #[test]
+    fn test_generate_produces_nonempty_text_from_real_model() {
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 4,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+        // `generate_ids` (not the async `generate`/wasm-bindgen boundary) —
+        // native tests have no JS microtask queue to drive
+        // `wasm_bindgen_futures`/`JsFuture`, but `generate`'s only `.await`
+        // point lives in `generate_stream`, not here; `generate_ids` is the
+        // synchronous core shared by both.
+        let generated = pipeline.generate_ids(&[1, 2]).expect("generation should succeed");
+        assert!(generated.len() >= 2);
+    }
+
+    // -----------------------------------------------------------------
+    // `next_token`/`next_token_with_confidence`: the incremental,
+    // one-token-at-a-time API extracted from `generate_ids` so external
+    // callers (`streaming_generation::StreamingGenerator`) can drive real
+    // generation without duplicating the forward-pass/sampling logic.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_next_token_matches_first_step_of_generate_ids() {
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 1,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+
+        let prompt_ids = [1u32, 2, 3];
+        let via_next_token = pipeline.next_token(&prompt_ids).expect("next_token should succeed");
+        let via_generate_ids =
+            pipeline.generate_ids(&prompt_ids).expect("generate_ids should succeed");
+
+        assert_eq!(via_generate_ids.len(), prompt_ids.len() + 1);
+        assert_eq!(via_generate_ids[prompt_ids.len()], via_next_token);
+    }
+
+    #[test]
+    fn test_next_token_with_confidence_reports_a_real_probability() {
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            do_sample: false,
+            ..GenerationConfig::default()
+        });
+
+        let (token_id, confidence) =
+            pipeline.next_token_with_confidence(&[1, 2, 3]).expect("should succeed");
+
+        assert!(
+            (0.0..=1.0).contains(&confidence),
+            "confidence must be a valid softmax probability: {confidence}"
+        );
+        assert!((token_id as usize) < pipeline.model.config().vocab_size);
+    }
+
+    #[test]
+    fn test_next_token_with_confidence_varies_with_different_contexts() {
+        // Regression guard for the property `streaming_generation`'s old
+        // fabricated confidence never had: a real softmax probability is a
+        // deterministic function of the model's real logits for a given
+        // context, so two different contexts over the same (deterministic,
+        // argmax) pipeline generally produce different confidences - unlike
+        // the old `0.8 + Math::random() * 0.2`, which was independent of
+        // any context and merely redrawn from the same fixed range.
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            do_sample: false,
+            ..GenerationConfig::default()
+        });
+
+        let (_id_a, confidence_a) =
+            pipeline.next_token_with_confidence(&[1, 2, 3]).expect("should succeed");
+        let (_id_b, confidence_b) =
+            pipeline.next_token_with_confidence(&[4, 5, 6, 7]).expect("should succeed");
+
+        assert_ne!(
+            confidence_a, confidence_b,
+            "confidence should be a genuine function of context, not a fixed/random constant"
+        );
+    }
+
+    /// Regression guard: `TextGenerationPipeline::encode`/`decode` used to
+    /// be infallible passthroughs to a tokenizer that could never fail
+    /// (real fabricated vocabulary always available); now that
+    /// `WasmTokenizer` requires a real, loaded vocabulary, these must
+    /// propagate that as a `Result` rather than panicking or silently
+    /// returning nothing.
+    #[test]
+    fn test_pipeline_encode_decode_round_trip_with_real_vocab() {
+        let pipeline = build_test_pipeline();
+        let ids = pipeline.encode("abc", false).expect("real vocab must encode");
+        assert!(!ids.is_empty());
+        let text = pipeline.decode(ids, false).expect("real vocab must decode");
+        assert_eq!(text, "abc");
+    }
+
+    #[test]
+    fn test_is_eos_token() {
+        assert!(TextGenerationPipeline::is_eos_token(Some(2)));
+        assert!(TextGenerationPipeline::is_eos_token(Some(50256)));
+        assert!(!TextGenerationPipeline::is_eos_token(Some(5)));
+        assert!(!TextGenerationPipeline::is_eos_token(None));
+    }
+
+    #[test]
+    fn test_softmax_probability_sums_to_one_across_all_indices() {
+        let logits = [1.0f32, 2.0, 0.5, -1.0];
+        let total: f32 = (0..logits.len()).map(|i| softmax_probability(&logits, i)).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "softmax probabilities must sum to 1, got {total}"
+        );
+    }
+
+    #[test]
+    fn test_softmax_probability_out_of_bounds_index_is_zero_not_panic() {
+        let logits = [1.0f32, 2.0, 0.5];
+        assert_eq!(softmax_probability(&logits, 10), 0.0);
+        assert_eq!(softmax_probability(&[], 0), 0.0);
     }
 }

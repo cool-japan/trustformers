@@ -508,20 +508,17 @@ pub struct ResourceUsage {
     /// Network usage
     pub network_usage: f32,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceInsightEngine {
-    /// Resource patterns detected
-    pub patterns_detected: u64,
-    /// Insight confidence
-    pub confidence: f64,
-}
+/// Reports on memory and I/O metrics in an observation window.
+///
+/// Before 0.2.1 this carried `patterns_detected` and `confidence` fields that
+/// nothing ever wrote to, and announced "high"/"moderate optimization
+/// potential" by comparing the permanently-zero `confidence` to 0.7.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ResourceInsightEngine;
 impl ResourceInsightEngine {
-    /// Create a new ResourceInsightEngine with default settings
+    /// Create a new ResourceInsightEngine.
     pub fn new() -> Self {
-        Self {
-            patterns_detected: 0,
-            confidence: 0.0,
-        }
+        Self
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

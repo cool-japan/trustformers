@@ -11,6 +11,8 @@
 
 pub mod cross_framework;
 pub mod memory_leak_detector;
+/// Minimal dependency-free XML reader used to parse Valgrind's `--xml` output.
+pub mod mini_xml;
 pub mod naming_conventions;
 pub mod precision_tracker;
 
@@ -101,9 +103,10 @@ impl IntegrationTestRunner {
         let report = self.detector.generate_report(test_name);
 
         if report.leaked_bytes > 0 {
-            eprintln!(
+            tracing::warn!(
                 "Memory leak in test '{}': {} bytes",
-                test_name, report.leaked_bytes
+                test_name,
+                report.leaked_bytes
             );
         }
 

@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Health Check and High Availability Module
 //!
 //! Provides health monitoring, circuit breaker patterns, and high availability
@@ -97,11 +94,15 @@ impl HighAvailabilityService {
 
         // Check circuit breaker state
         if !circuit_breaker.can_execute().await {
+            // The breaker stopped a call that would have hit a failing service.
+            self.metrics.record_failure_prevented().await;
             return Err(anyhow::anyhow!(
                 "Circuit breaker open for service: {}",
                 service_name
             ));
         }
+
+        self.metrics.record_request_protected().await;
 
         // Execute with retry policy
         let retry_policy = self.get_retry_policy(service_name.clone()).await;
@@ -110,10 +111,23 @@ impl HighAvailabilityService {
         // Update circuit breaker based on result
         match &result {
             Ok(_) => circuit_breaker.record_success().await,
-            Err(_) => circuit_breaker.record_failure().await,
+            Err(_) => {
+                circuit_breaker.record_failure().await;
+                self.metrics.record_retry_attempt().await;
+            },
         }
 
         result.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// Counters accumulated by this service.
+    ///
+    /// 0.2.1: the `metrics` field was constructed and never touched again, so
+    /// `HAMetrics`' four `record_*` methods had no callers and every counter
+    /// was permanently zero. They are recorded on the real protected-execution
+    /// path now, and this accessor exposes them.
+    pub async fn metrics_snapshot(&self) -> HAMetricsSnapshot {
+        self.metrics.snapshot().await
     }
 
     /// Get or create retry policy for service
@@ -129,6 +143,31 @@ impl HighAvailabilityService {
     /// Get overall system health
     pub async fn get_system_health(&self) -> SystemHealth {
         self.health_service.get_system_health().await
+    }
+
+    /// Fail over to `target_node`.
+    ///
+    /// Delegates to the real failover manager: an unknown or unhealthy target is
+    /// an error, and the returned outcome names the node that was actually
+    /// active before and after the switch.
+    pub async fn trigger_failover(&self, target_node: &str) -> Result<FailoverOutcome> {
+        let previous_node = self.failover_manager.get_primary_node().await;
+        self.failover_manager.force_failover(target_node.to_string()).await?;
+        let active_node = self.failover_manager.get_primary_node().await;
+        Ok(FailoverOutcome {
+            previous_node,
+            active_node,
+        })
+    }
+
+    /// The node currently serving as primary, if one has been elected.
+    pub async fn primary_node(&self) -> Option<String> {
+        self.failover_manager.get_primary_node().await
+    }
+
+    /// Register a node with the failover manager.
+    pub async fn register_node(&self, node_id: String, endpoint: String) -> Result<()> {
+        self.failover_manager.register_node(node_id, endpoint).await
     }
 
     /// Get HA statistics
@@ -231,6 +270,15 @@ impl Default for HAConfig {
     }
 }
 
+/// Result of a manual failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverOutcome {
+    /// Node that was primary before the switch, if any.
+    pub previous_node: Option<String>,
+    /// Node that is primary after the switch.
+    pub active_node: Option<String>,
+}
+
 /// High availability statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HAStats {
@@ -280,6 +328,29 @@ impl HAMetrics {
     pub async fn record_retry_attempt(&self) {
         *self.retry_attempts.write().await += 1;
     }
+
+    /// Read all four counters at once.
+    pub async fn snapshot(&self) -> HAMetricsSnapshot {
+        HAMetricsSnapshot {
+            requests_protected: *self.requests_protected.read().await,
+            failures_prevented: *self.failures_prevented.read().await,
+            successful_failovers: *self.successful_failovers.read().await,
+            retry_attempts: *self.retry_attempts.read().await,
+        }
+    }
+}
+
+/// A point-in-time read of [`HAMetrics`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HAMetricsSnapshot {
+    /// Calls admitted through a closed circuit breaker.
+    pub requests_protected: u64,
+    /// Calls refused by an open circuit breaker.
+    pub failures_prevented: u64,
+    /// Failovers that completed successfully.
+    pub successful_failovers: u64,
+    /// Protected calls that ended in failure after the retry policy ran.
+    pub retry_attempts: u64,
 }
 
 #[cfg(test)]

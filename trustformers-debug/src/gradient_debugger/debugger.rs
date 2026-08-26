@@ -97,7 +97,28 @@ impl GradientDebugger {
         }
     }
 
-    /// Record gradient flow for a layer
+    /// Report the real number of elements in `layer_name`'s gradient
+    /// tensor, for callers that have access to the actual tensor (and not
+    /// just the reduced norm/mean/std [`Self::record_gradient_flow`]
+    /// takes). Once set, vanishing/exploding-region reports for this layer
+    /// (see [`super::visualization::RegionExtent::affected_parameters`])
+    /// carry this real count instead of an honest `None`. Creates the
+    /// layer's history entry if `record_gradient_flow` has not been called
+    /// for it yet.
+    pub fn set_layer_parameter_count(&mut self, layer_name: &str, count: usize) {
+        self.gradient_histories
+            .entry(layer_name.to_string())
+            .or_insert_with(|| GradientHistory::new(layer_name.to_string(), 1000))
+            .parameter_count = Some(count);
+    }
+
+    /// Record gradient flow for a layer from REDUCED statistics.
+    ///
+    /// The per-element quantities on [`GradientFlow`] (`gradient_max`,
+    /// `gradient_min`, `dead_neurons_ratio`, `active_neurons_ratio`) are
+    /// honestly `None` here: norm, mean and std do not determine them. Call
+    /// [`Self::record_gradient_values`] instead when the real gradient tensor
+    /// is at hand and those fields are wanted.
     pub fn record_gradient_flow(
         &mut self,
         layer_name: &str,
@@ -105,18 +126,74 @@ impl GradientDebugger {
         gradient_mean: f64,
         gradient_std: f64,
     ) -> Result<()> {
-        let flow = GradientFlow {
+        self.record_flow(GradientFlow {
             layer_name: layer_name.to_string(),
             step: self.current_step,
             gradient_norm,
             gradient_mean,
             gradient_std,
-            gradient_max: gradient_mean + gradient_std,
-            gradient_min: gradient_mean - gradient_std,
-            dead_neurons_ratio: self.estimate_dead_neurons_ratio(gradient_norm),
-            active_neurons_ratio: 1.0 - self.estimate_dead_neurons_ratio(gradient_norm),
+            gradient_max: None,
+            gradient_min: None,
+            dead_neurons_ratio: None,
+            active_neurons_ratio: None,
             timestamp: chrono::Utc::now(),
-        };
+        })
+    }
+
+    /// Record gradient flow for a layer from the REAL per-element gradients.
+    ///
+    /// Computes every [`GradientFlow`] field from the supplied values: the L2
+    /// norm, the mean, the population standard deviation, the true max/min, and
+    /// the real dead fraction (elements whose magnitude is at or below
+    /// [`GradientDebugConfig::dead_gradient_magnitude`]). Also records the real
+    /// element count so region reports can name a real
+    /// `affected_parameters`.
+    ///
+    /// Returns an error for an empty slice rather than reporting a
+    /// zero-gradient layer that was never measured.
+    pub fn record_gradient_values(&mut self, layer_name: &str, gradients: &[f64]) -> Result<()> {
+        if gradients.is_empty() {
+            anyhow::bail!(
+                "record_gradient_values({layer_name:?}): empty gradient slice -- there is \
+                 nothing to measure"
+            );
+        }
+        let n = gradients.len() as f64;
+        let gradient_mean = gradients.iter().sum::<f64>() / n;
+        let variance = gradients.iter().map(|g| (g - gradient_mean).powi(2)).sum::<f64>() / n;
+        let gradient_norm = gradients.iter().map(|g| g * g).sum::<f64>().sqrt();
+        let gradient_max = gradients.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let gradient_min = gradients.iter().copied().fold(f64::INFINITY, f64::min);
+        let dead = gradients
+            .iter()
+            .filter(|g| g.abs() <= self.gradient_config.dead_gradient_magnitude)
+            .count();
+        let dead_neurons_ratio = dead as f64 / n;
+
+        self.set_layer_parameter_count(layer_name, gradients.len());
+        self.record_flow(GradientFlow {
+            layer_name: layer_name.to_string(),
+            step: self.current_step,
+            gradient_norm,
+            gradient_mean,
+            gradient_std: variance.sqrt(),
+            gradient_max: Some(gradient_max),
+            gradient_min: Some(gradient_min),
+            dead_neurons_ratio: Some(dead_neurons_ratio),
+            active_neurons_ratio: Some(1.0 - dead_neurons_ratio),
+            timestamp: chrono::Utc::now(),
+        })
+    }
+
+    /// Shared bookkeeping for both `record_gradient_flow` entry points.
+    fn record_flow(&mut self, flow: GradientFlow) -> Result<()> {
+        // Timed across the whole bookkeeping body -- see the
+        // `record_layer_performance` call at the end of this function for what
+        // the measurement actually covers.
+        let timer = self.performance_tracker.start_timing(&flow.layer_name);
+        let layer_name = flow.layer_name.clone();
+        let layer_name = layer_name.as_str();
+        let gradient_norm = flow.gradient_norm;
 
         // Update gradient history
         {
@@ -148,11 +225,16 @@ impl GradientDebugger {
         // Check for alerts
         self.check_gradient_alerts(layer_name, &flow)?;
 
-        // Record performance metrics
-        let timer = self.performance_tracker.start_timing(layer_name);
-        let (_, computation_time) = timer.finish();
+        // Record how long this debugger's own bookkeeping took. This is
+        // explicitly NOT the layer's backward-pass time -- the debugger never
+        // executes the layer -- and the timer therefore spans exactly the body
+        // of `record_flow`. (It used to be started and finished on adjacent
+        // lines at the very end, so it timed nothing at all.) No per-layer
+        // memory figure is measurable from here, hence `None` rather than the
+        // previous fabricated `0`.
+        let (_, bookkeeping_time) = timer.finish();
         self.performance_tracker
-            .record_layer_performance(layer_name, computation_time, 0); // Memory usage simplified
+            .record_layer_performance(layer_name, bookkeeping_time, None);
 
         // Detect anomalies
         let anomalies =
@@ -381,17 +463,6 @@ impl GradientDebugger {
 
     // Private helper methods
 
-    fn estimate_dead_neurons_ratio(&self, gradient_norm: f64) -> f64 {
-        // Simplified estimation - in practice would analyze individual neuron gradients
-        if gradient_norm < 1e-6 {
-            0.9 // Assume 90% dead if very low gradient
-        } else if gradient_norm < 1e-4 {
-            0.3 // Assume 30% dead if low gradient
-        } else {
-            0.05 // Assume 5% dead for normal gradients
-        }
-    }
-
     fn check_gradient_alerts(&mut self, layer_name: &str, flow: &GradientFlow) -> Result<()> {
         // Check adaptive thresholds first
         if let Some(thresholds) = self.adaptive_thresholds.get(layer_name) {
@@ -416,13 +487,15 @@ impl GradientDebugger {
             }
         }
 
-        // Check dead neurons
-        if flow.dead_neurons_ratio > self.gradient_config.dead_neuron_threshold {
-            self.alerts.push(GradientAlert::DeadNeurons {
-                layer_name: layer_name.to_string(),
-                ratio: flow.dead_neurons_ratio,
-                threshold: self.gradient_config.dead_neuron_threshold,
-            });
+        // Check dead neurons -- only when a real per-element ratio was measured.
+        if let Some(ratio) = flow.dead_neurons_ratio {
+            if ratio > self.gradient_config.dead_neuron_threshold {
+                self.alerts.push(GradientAlert::DeadNeurons {
+                    layer_name: layer_name.to_string(),
+                    ratio,
+                    threshold: self.gradient_config.dead_neuron_threshold,
+                });
+            }
         }
 
         // Check oscillation
@@ -889,7 +962,10 @@ pub struct PerformanceInsights {
     pub recommendations: Vec<OptimizationRecommendation>,
     pub bottlenecks: Vec<String>,
     pub current_throughput: f64,
-    pub memory_usage: usize,
+    /// Aggregate tracked memory usage; `None` when no caller has reported a
+    /// real per-layer memory sample (see
+    /// [`super::performance_tracking::GradientPerformanceTracker::record_layer_performance`]).
+    pub memory_usage: Option<usize>,
 }
 
 /// Gradient debugging recommendation
@@ -947,4 +1023,145 @@ pub enum GradientTrend {
     Increasing,
     Decreasing,
     Stable,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Wave 6c debug-sweep2 honesty regressions ------------------------
+
+    fn debugger() -> GradientDebugger {
+        GradientDebugger::new(crate::DebugConfig::default())
+    }
+
+    #[test]
+    fn reduced_entry_point_reports_absence_for_per_element_fields() {
+        let mut dbg = debugger();
+        dbg.record_gradient_flow("layer", 1e-9, 0.0, 0.0).expect("record");
+        let history = dbg.get_layer_history("layer").expect("history");
+        assert_eq!(history.gradient_norms.len(), 1);
+        // The old code filled these from norm/mean/std and from a 0.9/0.3/0.05
+        // ladder over the norm.
+        assert!(
+            dbg.get_layer_alerts("layer")
+                .into_iter()
+                .all(|a| !matches!(a, GradientAlert::DeadNeurons { .. })),
+            "a dead-neuron alert must never fire from reduced statistics alone"
+        );
+    }
+
+    #[test]
+    fn record_gradient_values_computes_the_real_statistics() {
+        let mut dbg = debugger();
+        let gradients = vec![0.0, 0.0, 3.0, -4.0];
+        dbg.record_gradient_values("layer", &gradients).expect("record");
+        let history = dbg.get_layer_history("layer").expect("history");
+        let norm = history.gradient_norms.back().copied().expect("a norm");
+        assert!(
+            (norm - 5.0).abs() < 1e-12,
+            "L2 norm of [0,0,3,-4] is 5, got {norm}"
+        );
+        let mean = history.gradient_means.back().copied().expect("a mean");
+        assert!((mean + 0.25).abs() < 1e-12, "mean is -0.25, got {mean}");
+        assert_eq!(
+            history.parameter_count,
+            Some(4),
+            "real element count is recorded"
+        );
+    }
+
+    #[test]
+    fn dead_neuron_alert_fires_only_from_real_per_element_data() {
+        let mut dbg = debugger();
+        // Half the elements are exactly zero => real dead ratio 0.5, over the
+        // 0.1 default threshold.
+        dbg.record_gradient_values("layer", &[0.0, 0.0, 1.0, 2.0]).expect("record");
+        let dead: Vec<f64> = dbg
+            .get_layer_alerts("layer")
+            .into_iter()
+            .filter_map(|alert| match alert {
+                GradientAlert::DeadNeurons { ratio, .. } => Some(*ratio),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dead.len(),
+            1,
+            "one real dead-neuron alert expected, got {dead:?}"
+        );
+        assert!(
+            (dead[0] - 0.5).abs() < 1e-12,
+            "the reported ratio must be the real 0.5"
+        );
+    }
+
+    #[test]
+    fn no_dead_neuron_alert_when_no_element_is_dead() {
+        let mut dbg = debugger();
+        // Tiny but non-zero gradients: the OLD ladder reported 90% dead here
+        // because the norm was below 1e-6.
+        dbg.record_gradient_values("layer", &[1e-7, 2e-7, 3e-7, 4e-7]).expect("record");
+        assert!(
+            dbg.get_layer_alerts("layer")
+                .into_iter()
+                .all(|a| !matches!(a, GradientAlert::DeadNeurons { .. })),
+            "no element is below the 1e-8 dead magnitude, so nothing is dead"
+        );
+    }
+
+    #[test]
+    fn record_gradient_values_refuses_an_empty_slice() {
+        let mut dbg = debugger();
+        let err = dbg.record_gradient_values("layer", &[]).expect_err("must refuse");
+        assert!(err.to_string().contains("nothing to measure"), "{err}");
+    }
+
+    #[test]
+    fn tracked_memory_is_absent_until_a_caller_reports_a_real_figure() {
+        let mut dbg = debugger();
+        dbg.record_gradient_flow("layer", 1.0, 0.0, 1.0).expect("record");
+        let insights = dbg.get_performance_insights();
+        assert_eq!(
+            insights.memory_usage, None,
+            "no memory sample was ever supplied, so the aggregate must be absent, not 0"
+        );
+    }
+
+    #[test]
+    fn test_set_layer_parameter_count_creates_history_if_absent() {
+        let mut debugger = GradientDebugger::new(DebugConfig::default());
+        assert!(!debugger.gradient_histories.contains_key("new_layer"));
+
+        debugger.set_layer_parameter_count("new_layer", 42);
+
+        assert_eq!(
+            debugger.gradient_histories.get("new_layer").and_then(|h| h.parameter_count),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn test_set_layer_parameter_count_updates_existing_history() {
+        let mut debugger = GradientDebugger::new(DebugConfig::default());
+        debugger.record_gradient_flow("layer0", 1.0, 0.5, 0.1).expect("record ok");
+        assert_eq!(
+            debugger.gradient_histories.get("layer0").and_then(|h| h.parameter_count),
+            None,
+            "record_gradient_flow only ever receives reduced scalars, never a shape"
+        );
+
+        debugger.set_layer_parameter_count("layer0", 123_456);
+
+        assert_eq!(
+            debugger.gradient_histories.get("layer0").and_then(|h| h.parameter_count),
+            Some(123_456)
+        );
+        // The real gradient history recorded before the count was set must
+        // survive untouched.
+        assert_eq!(
+            debugger.gradient_histories.get("layer0").unwrap().gradient_norms.len(),
+            1
+        );
+    }
 }

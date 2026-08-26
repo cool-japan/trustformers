@@ -53,6 +53,80 @@ mod tests {
     }
 
     #[test]
+    fn test_constraint_validator_regex_accepts_real_prefixes() {
+        // Regression: prefix viability used to be guessed by appending a fixed
+        // list of strings (" ", "\\s", " world", "  world"), so the legitimate
+        // prefix "hello " of `hello\s+there` was rejected and the constraint
+        // could never be satisfied.
+        let mut cfg = guided_config_empty();
+        cfg.regex_pattern = Some(r"hello\s+there".to_string());
+        let validator = ConstraintValidator::new(&cfg).expect("Should create validator");
+
+        assert!(validator.validate_token("", "hello", None));
+        assert!(validator.validate_token("hello", " ", None));
+        assert!(validator.validate_token("hello ", "the", None));
+        assert!(validator.validate_token("hello ", "there", None));
+        assert!(!validator.validate_token("hello ", "x", None));
+        assert!(!validator.validate_token("hel", "p", None));
+    }
+
+    #[test]
+    fn test_constraint_validator_regex_multibyte_token_does_not_panic() {
+        // Regression: the old heuristic sliced `&text[i..]` at raw byte offsets,
+        // which panics the moment a non-ASCII token is appended.
+        let mut cfg = guided_config_empty();
+        cfg.regex_pattern = Some(r"\d+".to_string());
+        let validator = ConstraintValidator::new(&cfg).expect("Should create validator");
+
+        assert!(!validator.validate_token("", "日本語", None));
+        assert!(!validator.is_complete("日本語"));
+        assert!(validator.validate_token("12", "3", None));
+        assert!(validator.is_complete("123"));
+    }
+
+    #[test]
+    fn test_constraint_validator_regex_is_complete_is_anchored() {
+        // Regression: `is_complete` used an unanchored `is_match`, so any text
+        // that merely *contained* a match counted as a finished document.
+        let mut cfg = guided_config_empty();
+        cfg.regex_pattern = Some(r"\d+".to_string());
+        let validator = ConstraintValidator::new(&cfg).expect("Should create validator");
+
+        assert!(validator.is_complete("42"));
+        assert!(!validator.is_complete("abc42"));
+        assert!(!validator.is_complete("42abc"));
+    }
+
+    #[test]
+    fn test_constraint_validator_regex_filters_tokens() {
+        let mut cfg = guided_config_empty();
+        cfg.regex_pattern = Some("(?:yes|no)".to_string());
+        let validator = ConstraintValidator::new(&cfg).expect("Should create validator");
+
+        let tokens: Vec<(usize, f32)> = vec![(0, 1.0), (1, 0.5), (2, 0.25)];
+        let tokenizer = |id: usize| match id {
+            0 => "y".to_string(),
+            1 => "n".to_string(),
+            _ => "q".to_string(),
+        };
+        let kept = validator.filter_valid_tokens("", &tokens, &tokenizer);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|(id, _)| *id == 0 || *id == 1));
+    }
+
+    #[test]
+    fn test_constraint_validator_exposes_the_compiled_regex() {
+        let mut cfg = guided_config_empty();
+        cfg.regex_pattern = Some(r"\w+".to_string());
+        let validator = ConstraintValidator::new(&cfg).expect("Should create validator");
+        assert_eq!(validator.regex().map(|regex| regex.pattern()), Some(r"\w+"));
+
+        let unconstrained =
+            ConstraintValidator::new(&guided_config_empty()).expect("Should create validator");
+        assert!(unconstrained.regex().is_none());
+    }
+
+    #[test]
     fn test_constraint_validator_choice_list_valid_prefix() {
         let mut cfg = guided_config_empty();
         cfg.choice_list = Some(vec![
@@ -184,6 +258,37 @@ mod tests {
         assert!(!validator.validate_complete("{"));
     }
 
+    #[test]
+    fn test_json_schema_validator_enforces_the_schema() {
+        // Regression: the validator used to ignore `self.schema` entirely and
+        // only check that the text was well-formed JSON.
+        let validator = JsonSchemaValidator::new(r#"{"type":"object","required":["name"]}"#)
+            .expect("Should create");
+        assert!(validator.validate_complete(r#"{"name": "a"}"#));
+        assert!(
+            !validator.validate_complete("42"),
+            "a number is well-formed JSON but violates the schema"
+        );
+        assert!(
+            !validator.validate_complete(r#"{"other": 1}"#),
+            "the required property is missing"
+        );
+    }
+
+    #[test]
+    fn test_json_schema_validator_partial_rejects_finished_violations() {
+        let validator = JsonSchemaValidator::new(r#"{"type":"object"}"#).expect("Should create");
+        // Still growing: cannot be judged yet.
+        assert!(validator.validate_partial(r#"{"a": "#));
+        // Already a complete document, and it violates the schema.
+        assert!(!validator.validate_partial("42"));
+    }
+
+    #[test]
+    fn test_json_schema_validator_rejects_broken_schema_text() {
+        assert!(JsonSchemaValidator::new("{not json}").is_err());
+    }
+
     // ---- GrammarValidator tests ----
 
     #[test]
@@ -200,26 +305,64 @@ mod tests {
     }
 
     #[test]
-    fn test_grammar_validator_validate_partial_always_true() {
+    fn test_grammar_validator_validate_partial_rejects_dead_ends() {
+        // Regression: `validate_partial` used to `return true` unconditionally,
+        // so grammar-constrained generation was a no-op.
         let validator = GrammarValidator::new("start ::= 'hello'").expect("Should create");
         assert!(validator.validate_partial("hello"));
         assert!(validator.validate_partial("hel"));
         assert!(validator.validate_partial(""));
+        assert!(
+            !validator.validate_partial("help"),
+            "`help` can never become `hello`"
+        );
+        assert!(!validator.validate_partial("x"));
     }
 
     #[test]
-    fn test_grammar_validator_validate_complete_always_true() {
+    fn test_grammar_validator_validate_complete_rejects_non_sentences() {
+        // Regression: `validate_complete` used to `return true` unconditionally.
         let validator = GrammarValidator::new("start ::= 'hello'").expect("Should create");
         assert!(validator.validate_complete("hello"));
-        assert!(validator.validate_complete("anything"));
+        assert!(!validator.validate_complete("anything"));
+        assert!(!validator.validate_complete("hell"));
+        assert!(!validator.validate_complete("helloo"));
     }
 
     #[test]
-    fn test_grammar_validator_get_valid_next_tokens_returns_vec() {
+    fn test_grammar_validator_enforces_multi_rule_grammar() {
+        let grammar = "start ::= noun verb\nnoun ::= 'cat' | 'dog'\nverb ::= 'runs' | 'walks'";
+        let validator = GrammarValidator::new(grammar).expect("Should create");
+        assert!(validator.validate_complete("catruns"));
+        assert!(validator.validate_complete("dogwalks"));
+        assert!(!validator.validate_complete("catflies"));
+        assert!(validator.validate_partial("cat"));
+        assert!(!validator.validate_partial("bird"));
+    }
+
+    #[test]
+    fn test_grammar_validator_empty_grammar_is_unconstrained() {
+        let validator = GrammarValidator::new("").expect("Should create");
+        assert!(validator.grammar().is_none());
+        assert!(validator.validate_partial("anything at all"));
+        assert!(validator.validate_complete("anything at all"));
+    }
+
+    #[test]
+    fn test_grammar_validator_get_valid_next_tokens_returns_continuations() {
         let validator = GrammarValidator::new("start ::= 'a' | 'b'").expect("Should create");
-        let tokens = validator.get_valid_next_tokens("start");
-        // Returns empty vec in simplified implementation
-        assert_eq!(tokens.len(), 0);
+        // `start` is not a viable prefix of the language, so nothing follows.
+        assert_eq!(validator.get_valid_next_tokens("start").len(), 0);
+
+        let words = GrammarValidator::new("start ::= 'foo' | 'fizz'").expect("Should create");
+        let mut tokens = words.get_valid_next_tokens("f");
+        tokens.sort();
+        assert_eq!(tokens, vec!["izz".to_string(), "oo".to_string()]);
+    }
+
+    #[test]
+    fn test_grammar_validator_rejects_undefined_rule() {
+        assert!(GrammarValidator::new("start ::= undefined_rule").is_err());
     }
 
     #[test]

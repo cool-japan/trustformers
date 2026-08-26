@@ -15,3 +15,6 @@ pub mod workloadtype_traits;
 
 // Re-export all types
 pub use types::*;
+
+#[cfg(test)]
+mod types_tests;

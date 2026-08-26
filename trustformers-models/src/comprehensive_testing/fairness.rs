@@ -1,5 +1,8 @@
 //! Fairness assessment framework for model evaluation
 
+use super::stats::{
+    chi_square_quantile, chi_square_test, expected_calibration_error, two_proportion_z_test,
+};
 use anyhow::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -242,7 +245,7 @@ impl FairnessAssessment {
         }
 
         // Perform statistical tests
-        statistical_tests.extend(self.perform_statistical_tests(test_data)?);
+        statistical_tests.extend(self.perform_statistical_tests(model, test_data)?);
 
         // Compute intersectional bias if enabled
         let intersectional_bias = if self.config.test_intersectional {
@@ -270,11 +273,7 @@ impl FairnessAssessment {
         Ok(result)
     }
 
-    // All the helper methods from the original implementation would follow...
-    // [Continuing with all the bias computation methods, statistical tests, etc.]
-    // Due to length constraints, I'll include just a few key methods as examples
-
-    /// Compute individual bias metric
+    /// Compute a single bias metric for one protected attribute.
     fn compute_bias_metric<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
         model: &M,
@@ -297,19 +296,19 @@ impl FairnessAssessment {
             FairnessMetricType::CalibrationMetrics => {
                 self.compute_calibration_metrics(model, test_data, attribute, &groups)
             },
-            _ => Ok(BiasMetric {
-                name: format!("{:?}", metric_type),
-                metric_type: metric_type.clone(),
-                protected_attribute: attribute.to_string(),
-                bias_value: 0.02,
-                p_value: Some(0.1),
-                confidence_interval: Some((0.01, 0.03)),
-                exceeds_threshold: false,
-            }),
+            // Metrics without an implementation must fail loudly: a fairness
+            // audit that quietly reports "no bias" is worse than no audit.
+            other => Err(Error::msg(format!(
+                "fairness metric {other:?} is not implemented; remove it from \
+                 FairnessConfig::fairness_metrics or implement it"
+            ))),
         }
     }
 
-    /// Compute demographic parity metric
+    /// Demographic parity: the gap in positive-decision rate across groups.
+    ///
+    /// Significance comes from a two-proportion z-test between the two extreme
+    /// groups — the same pair the reported gap is measured on.
     fn compute_demographic_parity<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
         model: &M,
@@ -317,159 +316,513 @@ impl FairnessAssessment {
         attribute: &str,
         groups: &[String],
     ) -> Result<BiasMetric> {
-        let mut positive_rates = Vec::new();
+        let outcomes = self.collect_group_outcomes(model, test_data, attribute, groups)?;
 
-        for group in groups {
-            let group_data = test_data.get_group_data(attribute, group)?;
-            let predictions = self.get_model_predictions(model, &group_data.inputs)?;
-            let positive_rate = self.compute_positive_rate(&predictions);
-            positive_rates.push(positive_rate);
+        let rates: Vec<MeasuredRate> = outcomes
+            .iter()
+            .map(|outcome| {
+                let (successes, total) = outcome.positive_rate();
+                MeasuredRate {
+                    group: outcome.group.clone(),
+                    rate: successes / total,
+                    successes,
+                    total,
+                }
+            })
+            .collect();
+
+        self.metric_from_rates(
+            "Demographic Parity",
+            FairnessMetricType::DemographicParity,
+            attribute,
+            &rates,
+        )
+    }
+}
+
+/// Decision threshold: a predicted positive-class probability above this counts
+/// as a positive decision.
+const POSITIVE_DECISION_THRESHOLD: f32 = 0.5;
+
+/// Number of equal-width bins used when measuring calibration error.
+const CALIBRATION_BINS: usize = 10;
+
+/// Predictions and ground truth for one protected group.
+#[derive(Debug, Clone)]
+struct GroupOutcome {
+    group: String,
+    /// Probability of the positive class for every example in the group.
+    predictions: Vec<f32>,
+    /// Ground-truth labels (`> 0` means positive).
+    labels: Vec<i32>,
+}
+
+impl GroupOutcome {
+    /// (positive predictions, examples).
+    fn positive_rate(&self) -> (f64, f64) {
+        let positives =
+            self.predictions.iter().filter(|&&p| p > POSITIVE_DECISION_THRESHOLD).count();
+        (positives as f64, self.predictions.len() as f64)
+    }
+
+    /// (true positives, positive examples), or `None` when the group has no
+    /// positive ground-truth examples.
+    fn true_positive_rate(&self) -> Option<(f64, f64)> {
+        self.conditional_rate(true)
+    }
+
+    /// (false positives, negative examples), or `None` when the group has no
+    /// negative ground-truth examples.
+    fn false_positive_rate(&self) -> Option<(f64, f64)> {
+        self.conditional_rate(false)
+    }
+
+    fn conditional_rate(&self, positive_label: bool) -> Option<(f64, f64)> {
+        let mut hits = 0.0;
+        let mut total = 0.0;
+        for (&prediction, &label) in self.predictions.iter().zip(self.labels.iter()) {
+            if (label > 0) == positive_label {
+                total += 1.0;
+                if prediction > POSITIVE_DECISION_THRESHOLD {
+                    hits += 1.0;
+                }
+            }
+        }
+        if total == 0.0 {
+            None
+        } else {
+            Some((hits, total))
+        }
+    }
+}
+
+/// A rate measured on one group, together with the counts behind it.
+struct MeasuredRate {
+    /// Group the rate was measured on (kept for diagnostics).
+    #[allow(dead_code)]
+    group: String,
+    rate: f64,
+    successes: f64,
+    total: f64,
+}
+
+impl FairnessAssessment {
+    /// Run every group of `attribute` through the model and collect the real
+    /// predictions and labels.
+    fn collect_group_outcomes<M: Model<Input = Tensor, Output = Tensor>>(
+        &self,
+        model: &M,
+        test_data: &FairnessTestData,
+        attribute: &str,
+        groups: &[String],
+    ) -> Result<Vec<GroupOutcome>> {
+        if groups.len() < 2 {
+            return Err(Error::msg(format!(
+                "fairness metrics for `{attribute}` need at least two groups, got {}",
+                groups.len()
+            )));
         }
 
-        let max_rate = positive_rates.iter().cloned().fold(0.0f32, f32::max);
-        let min_rate = positive_rates.iter().cloned().fold(1.0f32, f32::min);
-        let bias_value = max_rate - min_rate;
+        let mut outcomes = Vec::with_capacity(groups.len());
+        for group in groups {
+            let group_data = test_data.get_group_data(attribute, group)?;
+            if group_data.inputs.is_empty() {
+                return Err(Error::msg(format!(
+                    "group `{attribute}:{group}` carries no examples"
+                )));
+            }
+            if !group_data.labels.is_empty() && group_data.labels.len() != group_data.inputs.len() {
+                return Err(Error::msg(format!(
+                    "group `{attribute}:{group}` has {} inputs but {} labels",
+                    group_data.inputs.len(),
+                    group_data.labels.len()
+                )));
+            }
 
-        let (p_value, confidence_interval) =
-            self.compute_statistical_significance(&positive_rates)?;
+            outcomes.push(GroupOutcome {
+                group: group.clone(),
+                predictions: self.get_model_predictions(model, &group_data.inputs)?,
+                labels: group_data.labels.clone(),
+            });
+        }
+
+        Ok(outcomes)
+    }
+
+    /// Build a bias metric out of per-group rates: the bias value is the gap
+    /// between the extreme groups, and the significance comes from a real
+    /// two-proportion z-test between exactly those groups.
+    fn metric_from_rates(
+        &self,
+        name: &str,
+        metric_type: FairnessMetricType,
+        attribute: &str,
+        rates: &[MeasuredRate],
+    ) -> Result<BiasMetric> {
+        if rates.len() < 2 {
+            return Err(Error::msg(format!(
+                "`{name}` for `{attribute}` needs at least two comparable groups, got {}",
+                rates.len()
+            )));
+        }
+
+        let highest = rates
+            .iter()
+            .max_by(|a, b| a.rate.partial_cmp(&b.rate).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| Error::msg("no group rates to compare"))?;
+        let lowest = rates
+            .iter()
+            .min_by(|a, b| a.rate.partial_cmp(&b.rate).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| Error::msg("no group rates to compare"))?;
+
+        let bias_value = (highest.rate - lowest.rate) as f32;
+
+        let test = two_proportion_z_test(
+            highest.successes,
+            highest.total,
+            lowest.successes,
+            lowest.total,
+            f64::from(self.config.confidence_level),
+        )
+        .map_err(|e| Error::msg(e.to_string()))?;
 
         Ok(BiasMetric {
-            name: "Demographic Parity".to_string(),
-            metric_type: FairnessMetricType::DemographicParity,
+            name: name.to_string(),
+            metric_type,
             protected_attribute: attribute.to_string(),
             bias_value,
-            p_value: Some(p_value),
-            confidence_interval: Some(confidence_interval),
+            p_value: Some(test.p_value as f32),
+            confidence_interval: Some((
+                test.confidence_interval.0 as f32,
+                test.confidence_interval.1 as f32,
+            )),
             exceeds_threshold: bias_value > self.config.bias_threshold,
         })
     }
 
-    // Additional helper methods would be included here...
-    // [All the other computation methods from the original implementation]
-
-    // Simplified placeholder implementations for brevity
+    /// Equal opportunity: the gap in true-positive rate across groups.
     fn compute_equal_opportunity<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
-        _model: &M,
-        _test_data: &FairnessTestData,
+        model: &M,
+        test_data: &FairnessTestData,
         attribute: &str,
-        _groups: &[String],
+        groups: &[String],
     ) -> Result<BiasMetric> {
-        Ok(BiasMetric {
-            name: "Equal Opportunity".to_string(),
-            metric_type: FairnessMetricType::EqualOpportunity,
-            protected_attribute: attribute.to_string(),
-            bias_value: 0.02,
-            p_value: Some(0.1),
-            confidence_interval: Some((0.01, 0.03)),
-            exceeds_threshold: false,
-        })
+        let outcomes = self.collect_group_outcomes(model, test_data, attribute, groups)?;
+
+        let rates: Vec<MeasuredRate> = outcomes
+            .iter()
+            .filter_map(|outcome| {
+                outcome.true_positive_rate().map(|(successes, total)| MeasuredRate {
+                    group: outcome.group.clone(),
+                    rate: successes / total,
+                    successes,
+                    total,
+                })
+            })
+            .collect();
+
+        if rates.len() < 2 {
+            return Err(Error::msg(format!(
+                "equal opportunity for `{attribute}` needs at least two groups with \
+                     positive ground-truth examples; only {} qualify",
+                rates.len()
+            )));
+        }
+
+        self.metric_from_rates(
+            "Equal Opportunity",
+            FairnessMetricType::EqualOpportunity,
+            attribute,
+            &rates,
+        )
     }
 
+    /// Equalized odds: the larger of the true-positive-rate gap and the
+    /// false-positive-rate gap across groups.
     fn compute_equalized_odds<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
-        _model: &M,
-        _test_data: &FairnessTestData,
+        model: &M,
+        test_data: &FairnessTestData,
         attribute: &str,
-        _groups: &[String],
+        groups: &[String],
     ) -> Result<BiasMetric> {
-        Ok(BiasMetric {
-            name: "Equalized Odds".to_string(),
-            metric_type: FairnessMetricType::EqualizeDOdds,
-            protected_attribute: attribute.to_string(),
-            bias_value: 0.02,
-            p_value: Some(0.1),
-            confidence_interval: Some((0.01, 0.03)),
-            exceeds_threshold: false,
-        })
+        let outcomes = self.collect_group_outcomes(model, test_data, attribute, groups)?;
+
+        let collect = |positive_label: bool| -> Vec<MeasuredRate> {
+            outcomes
+                .iter()
+                .filter_map(|outcome| {
+                    let counts = if positive_label {
+                        outcome.true_positive_rate()
+                    } else {
+                        outcome.false_positive_rate()
+                    };
+                    counts.map(|(successes, total)| MeasuredRate {
+                        group: outcome.group.clone(),
+                        rate: successes / total,
+                        successes,
+                        total,
+                    })
+                })
+                .collect()
+        };
+
+        let tpr = collect(true);
+        let fpr = collect(false);
+
+        if tpr.len() < 2 && fpr.len() < 2 {
+            return Err(Error::msg(format!(
+                "equalized odds for `{attribute}` needs at least two groups with both \
+                     positive and negative ground-truth examples"
+            )));
+        }
+
+        let gap = |rates: &[MeasuredRate]| -> f32 {
+            if rates.len() < 2 {
+                return 0.0;
+            }
+            let max = rates.iter().map(|r| r.rate).fold(f64::NEG_INFINITY, f64::max);
+            let min = rates.iter().map(|r| r.rate).fold(f64::INFINITY, f64::min);
+            (max - min) as f32
+        };
+
+        // Report the dominating gap, with the significance of that same gap.
+        let dominant = if gap(&tpr) >= gap(&fpr) { &tpr } else { &fpr };
+        let mut metric = self.metric_from_rates(
+            "Equalized Odds",
+            FairnessMetricType::EqualizeDOdds,
+            attribute,
+            dominant,
+        )?;
+        metric.bias_value = gap(&tpr).max(gap(&fpr));
+        metric.exceeds_threshold = metric.bias_value > self.config.bias_threshold;
+        Ok(metric)
     }
 
+    /// Calibration: the gap in expected calibration error across groups.
+    ///
+    /// There is no closed-form significance test for a difference of ECEs, so
+    /// `p_value` and `confidence_interval` are `None` rather than invented.
     fn compute_calibration_metrics<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
-        _model: &M,
-        _test_data: &FairnessTestData,
+        model: &M,
+        test_data: &FairnessTestData,
         attribute: &str,
-        _groups: &[String],
+        groups: &[String],
     ) -> Result<BiasMetric> {
+        let outcomes = self.collect_group_outcomes(model, test_data, attribute, groups)?;
+
+        let mut errors = Vec::with_capacity(outcomes.len());
+        for outcome in &outcomes {
+            if outcome.labels.len() != outcome.predictions.len() {
+                return Err(Error::msg(format!(
+                    "calibration for `{attribute}:{}` needs one label per example",
+                    outcome.group
+                )));
+            }
+            let ece =
+                expected_calibration_error(&outcome.predictions, &outcome.labels, CALIBRATION_BINS)
+                    .map_err(|e| Error::msg(e.to_string()))?;
+            errors.push(ece);
+        }
+
+        if errors.len() < 2 {
+            return Err(Error::msg(format!(
+                "calibration for `{attribute}` needs at least two labelled groups"
+            )));
+        }
+
+        let max = errors.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min = errors.iter().copied().fold(f64::INFINITY, f64::min);
+        let bias_value = (max - min) as f32;
+
         Ok(BiasMetric {
             name: "Calibration".to_string(),
             metric_type: FairnessMetricType::CalibrationMetrics,
             protected_attribute: attribute.to_string(),
-            bias_value: 0.02,
-            p_value: Some(0.1),
-            confidence_interval: Some((0.01, 0.03)),
-            exceeds_threshold: false,
+            bias_value,
+            p_value: None,
+            confidence_interval: None,
+            exceeds_threshold: bias_value > self.config.bias_threshold,
         })
     }
 
+    /// Run the model over a group's inputs and read out the positive-class
+    /// probability for each example.
     fn get_model_predictions<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
         model: &M,
         inputs: &[Tensor],
     ) -> Result<Vec<f32>> {
-        let mut predictions = Vec::new();
+        let mut predictions = Vec::with_capacity(inputs.len());
         for input in inputs {
             let output = model.forward(input.clone())?;
-            let prob = self.extract_probability(&output);
-            predictions.push(prob);
+            predictions.push(Self::extract_probability(&output)?);
         }
         Ok(predictions)
     }
 
-    fn extract_probability(&self, output: &Tensor) -> f32 {
-        match output {
-            Tensor::F32(arr) => {
-                if arr.len() == 1 {
-                    arr[0]
-                } else if arr.len() == 2 {
-                    arr[1]
+    /// Interpret a model output as the probability of the positive class.
+    ///
+    /// * A single value is taken as an already-normalised probability and must
+    ///   lie in `[0, 1]`.
+    /// * Several values are taken as class scores for one example: if they are
+    ///   non-negative and sum to 1 they are used as-is, otherwise they are
+    ///   softmaxed. The last class is the positive one.
+    ///
+    /// Anything else (an empty output, a batched output, a non-float tensor) is
+    /// an error — there is no defensible probability to report.
+    fn extract_probability(output: &Tensor) -> Result<f32> {
+        let values = output
+            .data()
+            .map_err(|e| Error::msg(format!("failed to read the model output: {e}")))?;
+
+        match values.len() {
+            0 => Err(Error::msg("the model returned an empty output")),
+            1 => {
+                let probability = values[0];
+                if !(0.0..=1.0).contains(&probability) {
+                    return Err(Error::msg(format!(
+                        "a single-valued model output is interpreted as a probability but \
+                             {probability} is outside [0, 1]"
+                    )));
+                }
+                Ok(probability)
+            },
+            _ => {
+                let sum: f32 = values.iter().sum();
+                let already_normalized =
+                    values.iter().all(|&v| (0.0..=1.0).contains(&v)) && (sum - 1.0).abs() < 1e-3;
+
+                if already_normalized {
+                    Ok(values[values.len() - 1])
                 } else {
-                    arr.iter().cloned().fold(0.0f32, f32::max)
+                    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    if !max.is_finite() {
+                        return Err(Error::msg(
+                            "the model output contains no finite values".to_string(),
+                        ));
+                    }
+                    let exps: Vec<f32> = values.iter().map(|&v| (v - max).exp()).collect();
+                    let total: f32 = exps.iter().sum();
+                    if total <= 0.0 {
+                        return Err(Error::msg(
+                            "the softmax of the model output is degenerate".to_string(),
+                        ));
+                    }
+                    Ok(exps[exps.len() - 1] / total)
                 }
             },
-            _ => 0.5,
         }
     }
 
+    /// Share of examples the model decides positively.
     fn compute_positive_rate(&self, predictions: &[f32]) -> f32 {
-        let positive_count = predictions.iter().filter(|&&p| p > 0.5).count();
+        if predictions.is_empty() {
+            return 0.0;
+        }
+        let positive_count =
+            predictions.iter().filter(|&&p| p > POSITIVE_DECISION_THRESHOLD).count();
         positive_count as f32 / predictions.len() as f32
     }
 
+    /// Demographic-parity gap for every pair of protected attributes for which
+    /// intersectional data was supplied.
+    ///
+    /// The returned map is keyed by `"attr1:group1+attr2:group2"`-style pairs
+    /// collapsed to the attribute pair, and is empty when the caller provided
+    /// no intersectional data (there is nothing to measure, and inventing a
+    /// number would be worse than saying nothing).
     fn analyze_intersectional_bias<M: Model<Input = Tensor, Output = Tensor>>(
         &self,
-        _model: &M,
-        _test_data: &FairnessTestData,
+        model: &M,
+        test_data: &FairnessTestData,
     ) -> Result<HashMap<String, f32>> {
-        Ok(HashMap::new())
-    }
+        let mut rates_by_pair: HashMap<String, Vec<f32>> = HashMap::new();
 
-    fn perform_statistical_tests(
-        &self,
-        _test_data: &FairnessTestData,
-    ) -> Result<Vec<StatisticalTest>> {
-        Ok(vec![StatisticalTest {
-            test_name: "Chi-square test for independence".to_string(),
-            statistic: 12.5,
-            p_value: 0.002,
-            critical_value: 9.21,
-            is_significant: true,
-            degrees_of_freedom: Some(4),
-        }])
-    }
+        for (key, group_data) in &test_data.intersectional_data {
+            if group_data.inputs.is_empty() {
+                return Err(Error::msg(format!(
+                    "intersectional cell `{key}` carries no examples"
+                )));
+            }
+            let predictions = self.get_model_predictions(model, &group_data.inputs)?;
+            let rate = self.compute_positive_rate(&predictions);
 
-    fn compute_statistical_significance(&self, values: &[f32]) -> Result<(f32, (f32, f32))> {
-        if values.len() < 2 {
-            return Ok((1.0, (0.0, 0.0)));
+            // `attr1:group1+attr2:group2` -> `attr1+attr2`
+            let pair = key
+                .split('+')
+                .map(|part| part.split(':').next().unwrap_or(part).to_string())
+                .collect::<Vec<_>>()
+                .join("+");
+            rates_by_pair.entry(pair).or_default().push(rate);
         }
-        let mean = values.iter().sum::<f32>() / values.len() as f32;
-        let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / values.len() as f32;
-        let p_value = if variance < 0.001 { 0.001 } else { variance.min(0.5) };
-        let std_dev = variance.sqrt();
-        let margin = 1.96 * std_dev / (values.len() as f32).sqrt();
-        Ok((p_value, (mean - margin, mean + margin)))
+
+        let mut bias = HashMap::new();
+        for (pair, rates) in rates_by_pair {
+            if rates.len() < 2 {
+                continue;
+            }
+            let max = rates.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let min = rates.iter().copied().fold(f32::INFINITY, f32::min);
+            bias.insert(pair, max - min);
+        }
+
+        Ok(bias)
     }
 
+    /// Chi-square test of independence between group membership and the
+    /// model's decision, one test per protected attribute.
+    ///
+    /// The contingency table is `groups x {positive, negative}`, so the test
+    /// has `(groups - 1)` degrees of freedom. Attributes whose table is
+    /// degenerate (a single group, or a decision column nobody lands in) are
+    /// skipped rather than reported with a fabricated statistic.
+    fn perform_statistical_tests<M: Model<Input = Tensor, Output = Tensor>>(
+        &self,
+        model: &M,
+        test_data: &FairnessTestData,
+    ) -> Result<Vec<StatisticalTest>> {
+        let mut tests = Vec::new();
+
+        for attribute in &self.config.protected_attributes {
+            let groups = test_data.get_groups_for_attribute(attribute);
+            if groups.len() < 2 {
+                continue;
+            }
+
+            let outcomes = self.collect_group_outcomes(model, test_data, attribute, &groups)?;
+            let table: Vec<Vec<f64>> = outcomes
+                .iter()
+                .map(|outcome| {
+                    let (positives, total) = outcome.positive_rate();
+                    vec![positives, total - positives]
+                })
+                .collect();
+
+            let result = match chi_square_test(&table) {
+                Ok(result) => result,
+                // A degenerate table means the test does not apply here.
+                Err(_) => continue,
+            };
+
+            let significance = 1.0 - f64::from(self.config.confidence_level);
+            tests.push(StatisticalTest {
+                test_name: format!("Chi-square test for independence ({attribute})"),
+                statistic: result.statistic as f32,
+                p_value: result.p_value as f32,
+                critical_value: chi_square_quantile(result.degrees_of_freedom, significance) as f32,
+                is_significant: result.p_value < significance,
+                degrees_of_freedom: Some(result.degrees_of_freedom as i32),
+            });
+        }
+
+        Ok(tests)
+    }
+}
+
+impl FairnessAssessment {
     fn compute_overall_fairness_score(
         &self,
         bias_metrics: &HashMap<String, Vec<BiasMetric>>,

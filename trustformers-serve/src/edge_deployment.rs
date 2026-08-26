@@ -1,16 +1,22 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 // Edge Deployment Infrastructure for TrustformeRS
 // Provides comprehensive edge deployment capabilities for distributed inference
 // at the edge, including offline mode, model synchronization, and bandwidth optimization
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
+
+/// Size of one chunk in the edge artifact transfer, in bytes.
+///
+/// Model artifacts are copied and hashed a chunk at a time so a multi-gigabyte
+/// artifact never has to be held in memory.
+pub const TRANSFER_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// Edge deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,12 +222,94 @@ pub enum SyncEvent {
     },
 }
 
+/// A model artifact registered with the orchestrator and available for transfer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelArtifact {
+    /// Identifier of the model this artifact belongs to.
+    pub model_id: String,
+    /// Absolute or relative path of the artifact on the orchestrator host.
+    pub source_path: PathBuf,
+    /// Size of the artifact in bytes, measured by reading it.
+    pub size_bytes: u64,
+    /// Lowercase hex SHA-256 digest of the artifact contents.
+    pub sha256: String,
+}
+
+/// A model artifact that has been transferred onto an edge node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeployedArtifact {
+    /// Node the artifact lives on.
+    pub node_id: String,
+    /// Model the artifact belongs to.
+    pub model_id: String,
+    /// Path of the artifact inside the node's storage root.
+    pub path: PathBuf,
+    /// Bytes actually written to the node.
+    pub bytes_written: u64,
+    /// SHA-256 digest computed while writing, and re-verified by reading back.
+    pub sha256: String,
+    /// When the transfer completed.
+    pub deployed_at: SystemTime,
+}
+
+/// Output of a real offline inference run on an edge node.
+#[derive(Debug, Clone)]
+pub struct OfflineInferenceOutput {
+    /// Text produced by the local model.
+    pub text: String,
+    /// Confidence reported by the engine. Engines that cannot measure a
+    /// confidence must say so rather than inventing one — see
+    /// [`OfflineInferenceEngine`].
+    pub confidence: f32,
+    /// Whether the engine answered from its local result cache.
+    pub served_from_cache: bool,
+}
+
+/// A local inference runtime that an edge node can execute models on.
+///
+/// The orchestrator itself owns no model weights and cannot generate text, so
+/// [`EdgeOrchestrator::handle_offline_request`] refuses the request unless an
+/// engine is installed with [`EdgeOrchestrator::with_offline_engine`]. Every
+/// field of the resulting [`InferenceResponse`] comes from the engine or is
+/// measured by the orchestrator; none of them is a constant.
+///
+/// Implementations must report a confidence they actually computed. If the
+/// model exposes no confidence signal, return an error rather than a
+/// placeholder number.
+#[async_trait::async_trait]
+pub trait OfflineInferenceEngine: Send + Sync + std::fmt::Debug {
+    /// Run `request` against the locally deployed `model`.
+    async fn infer(
+        &self,
+        model: &EdgeModel,
+        artifact: Option<&DeployedArtifact>,
+        request: &InferenceRequest,
+    ) -> Result<OfflineInferenceOutput, EdgeError>;
+}
+
 /// Edge deployment orchestrator
 pub struct EdgeOrchestrator {
     nodes: Arc<RwLock<HashMap<String, EdgeNode>>>,
     config: EdgeConfig,
     sync_sender: mpsc::Sender<SyncEvent>,
     metrics_collector: Arc<RwLock<EdgeMetrics>>,
+    /// Registered source artifacts, keyed by model id.
+    artifacts: Arc<RwLock<HashMap<String, ModelArtifact>>>,
+    /// Filesystem root for each node's local model store, keyed by node id.
+    node_storage: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// Artifacts that have really been transferred, keyed by `"{node}/{model}"`.
+    deployed: Arc<RwLock<HashMap<String, DeployedArtifact>>>,
+    /// Local runtime used to answer offline inference requests, if installed.
+    offline_engine: Option<Arc<dyn OfflineInferenceEngine>>,
+}
+
+impl std::fmt::Debug for EdgeOrchestrator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EdgeOrchestrator")
+            .field("config", &self.config)
+            .field("offline_engine", &self.offline_engine.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl EdgeOrchestrator {
@@ -234,9 +322,110 @@ impl EdgeOrchestrator {
             config,
             sync_sender,
             metrics_collector: Arc::new(RwLock::new(EdgeMetrics::default())),
+            artifacts: Arc::new(RwLock::new(HashMap::new())),
+            node_storage: Arc::new(RwLock::new(HashMap::new())),
+            deployed: Arc::new(RwLock::new(HashMap::new())),
+            offline_engine: None,
         };
 
         (orchestrator, sync_receiver)
+    }
+
+    /// Install the local inference runtime used to serve offline requests.
+    #[must_use]
+    pub fn with_offline_engine(mut self, engine: Arc<dyn OfflineInferenceEngine>) -> Self {
+        self.offline_engine = Some(engine);
+        self
+    }
+
+    /// Register the on-disk artifact that backs `model_id`.
+    ///
+    /// The file is read end to end to measure its real size and SHA-256 digest;
+    /// nothing is assumed from the [`EdgeModel::size_mb`] metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdgeError::ArtifactUnavailable`] if the path cannot be read.
+    pub async fn register_model_artifact(
+        &self,
+        model_id: &str,
+        source_path: impl AsRef<Path>,
+    ) -> Result<ModelArtifact, EdgeError> {
+        let source_path = source_path.as_ref().to_path_buf();
+        let (size_bytes, sha256) = hash_file(&source_path).await?;
+        let artifact = ModelArtifact {
+            model_id: model_id.to_string(),
+            source_path,
+            size_bytes,
+            sha256,
+        };
+        self.artifacts.write().await.insert(model_id.to_string(), artifact.clone());
+        Ok(artifact)
+    }
+
+    /// Register the directory that `node_id` uses as its local model store.
+    ///
+    /// The directory (and any missing parents) is created if necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdgeError::StorageError`] if the directory cannot be created.
+    pub async fn register_node_storage(
+        &self,
+        node_id: &str,
+        root: impl AsRef<Path>,
+    ) -> Result<(), EdgeError> {
+        let root = root.as_ref().to_path_buf();
+        tokio::fs::create_dir_all(&root).await.map_err(|e| {
+            EdgeError::StorageError(format!(
+                "cannot create storage root {}: {e}",
+                root.display()
+            ))
+        })?;
+        self.node_storage.write().await.insert(node_id.to_string(), root);
+        Ok(())
+    }
+
+    /// Look up the artifact registered for a model, if any.
+    pub async fn get_model_artifact(&self, model_id: &str) -> Option<ModelArtifact> {
+        self.artifacts.read().await.get(model_id).cloned()
+    }
+
+    /// Look up an artifact that has been transferred to a node.
+    pub async fn get_deployed_artifact(
+        &self,
+        node_id: &str,
+        model_id: &str,
+    ) -> Option<DeployedArtifact> {
+        self.deployed.read().await.get(&deployment_key(node_id, model_id)).cloned()
+    }
+
+    /// Re-read a deployed artifact from the node's storage and verify that its
+    /// SHA-256 digest still matches the digest recorded at transfer time.
+    ///
+    /// # Errors
+    ///
+    /// * [`EdgeError::ArtifactUnavailable`] if nothing was deployed, or the file
+    ///   has since disappeared.
+    /// * [`EdgeError::ChecksumMismatch`] if the contents changed.
+    pub async fn verify_deployment(
+        &self,
+        node_id: &str,
+        model_id: &str,
+    ) -> Result<DeployedArtifact, EdgeError> {
+        let artifact = self.get_deployed_artifact(node_id, model_id).await.ok_or_else(|| {
+            EdgeError::ArtifactUnavailable(format!(
+                "no artifact of model {model_id} has been deployed to node {node_id}"
+            ))
+        })?;
+        let (size, digest) = hash_file(&artifact.path).await?;
+        if digest != artifact.sha256 || size != artifact.bytes_written {
+            return Err(EdgeError::ChecksumMismatch {
+                expected: artifact.sha256.clone(),
+                actual: digest,
+            });
+        }
+        Ok(artifact)
     }
 
     /// Register a new edge node
@@ -292,70 +481,216 @@ impl EdgeOrchestrator {
         })
     }
 
-    /// Deploy model to a specific node
+    /// Deploy a model to a specific node by really transferring its artifact.
+    ///
+    /// The artifact registered for `model.id` is copied chunk by chunk into the
+    /// node's storage root, hashed while it is written, and then read back and
+    /// re-hashed. The returned [`NodeDeploymentResult`] carries the number of
+    /// bytes that were actually written and the verified digest. Nothing is
+    /// reported as deployed unless the round trip succeeded.
     async fn deploy_model_to_node(
         &self,
         model: &EdgeModel,
         node: &EdgeNode,
     ) -> Result<NodeDeploymentResult, EdgeError> {
-        // Check resource availability
-        if node.resources.storage_available_mb < model.size_mb {
-            return Ok(NodeDeploymentResult {
-                node_id: node.id.clone(),
-                success: false,
-                error: Some("Insufficient storage".to_string()),
-                deployment_time_ms: 0,
+        let start_time = SystemTime::now();
+
+        let failure = |error: String| NodeDeploymentResult {
+            node_id: node.id.clone(),
+            success: false,
+            error: Some(error),
+            deployment_time_ms: 0,
+            bytes_transferred: 0,
+            checksum_sha256: None,
+        };
+
+        let Some(artifact) = self.get_model_artifact(&model.id).await else {
+            return Ok(failure(format!(
+                "no artifact registered for model {}: call register_model_artifact() first",
+                model.id
+            )));
+        };
+
+        let Some(root) = self.node_storage.read().await.get(&node.id).cloned() else {
+            return Ok(failure(format!(
+                "node {} has no storage root: call register_node_storage() first",
+                node.id
+            )));
+        };
+
+        // Check real capacity against the artifact's measured size, not metadata.
+        let required_mb = artifact.size_bytes.div_ceil(1024 * 1024);
+        if node.resources.storage_available_mb < required_mb {
+            return Ok(failure(format!(
+                "insufficient storage on node {}: {} MB available, {} MB required",
+                node.id, node.resources.storage_available_mb, required_mb
+            )));
+        }
+
+        let file_name = artifact
+            .source_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}.bin", model.id));
+        let target_dir = root.join(&model.id).join(&model.version);
+        let target_path = target_dir.join(file_name);
+
+        match self.transfer_artifact(&artifact, &target_path).await {
+            Ok((bytes_written, digest)) => {
+                let deployed = DeployedArtifact {
+                    node_id: node.id.clone(),
+                    model_id: model.id.clone(),
+                    path: target_path,
+                    bytes_written,
+                    sha256: digest.clone(),
+                    deployed_at: SystemTime::now(),
+                };
+                self.deployed
+                    .write()
+                    .await
+                    .insert(deployment_key(&node.id, &model.id), deployed);
+
+                Ok(NodeDeploymentResult {
+                    node_id: node.id.clone(),
+                    success: true,
+                    error: None,
+                    deployment_time_ms: start_time.elapsed().unwrap_or_default().as_millis() as u64,
+                    bytes_transferred: bytes_written,
+                    checksum_sha256: Some(digest),
+                })
+            },
+            Err(e) => Ok(failure(e.to_string())),
+        }
+    }
+
+    /// Copy `artifact` to `target_path` in [`TRANSFER_CHUNK_BYTES`] chunks,
+    /// hashing as it goes, then read the result back and verify the digest.
+    async fn transfer_artifact(
+        &self,
+        artifact: &ModelArtifact,
+        target_path: &Path,
+    ) -> Result<(u64, String), EdgeError> {
+        if let Some(parent) = target_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                EdgeError::StorageError(format!("cannot create {}: {e}", parent.display()))
+            })?;
+        }
+
+        let mut source = tokio::fs::File::open(&artifact.source_path).await.map_err(|e| {
+            EdgeError::ArtifactUnavailable(format!(
+                "cannot open source artifact {}: {e}",
+                artifact.source_path.display()
+            ))
+        })?;
+        let mut target = tokio::fs::File::create(target_path).await.map_err(|e| {
+            EdgeError::StorageError(format!("cannot create {}: {e}", target_path.display()))
+        })?;
+
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; TRANSFER_CHUNK_BYTES];
+        let mut written: u64 = 0;
+        loop {
+            let read = source.read(&mut buffer).await.map_err(|e| {
+                EdgeError::ArtifactUnavailable(format!(
+                    "read failed at byte {written} of {}: {e}",
+                    artifact.source_path.display()
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            target.write_all(&buffer[..read]).await.map_err(|e| {
+                EdgeError::StorageError(format!(
+                    "write failed at byte {written} of {}: {e}",
+                    target_path.display()
+                ))
+            })?;
+            hasher.update(&buffer[..read]);
+            written += read as u64;
+        }
+        target.flush().await.map_err(|e| {
+            EdgeError::StorageError(format!("flush failed for {}: {e}", target_path.display()))
+        })?;
+        target.sync_all().await.map_err(|e| {
+            EdgeError::StorageError(format!("fsync failed for {}: {e}", target_path.display()))
+        })?;
+        drop(target);
+
+        let digest = hex::encode(hasher.finalize());
+        if digest != artifact.sha256 || written != artifact.size_bytes {
+            let _ = tokio::fs::remove_file(target_path).await;
+            return Err(EdgeError::ChecksumMismatch {
+                expected: artifact.sha256.clone(),
+                actual: digest,
             });
         }
 
-        let start_time = SystemTime::now();
+        // Read the written file back: this catches truncation and storage
+        // corruption that the write-side hash cannot see.
+        let (verified_size, verified_digest) = hash_file(target_path).await?;
+        if verified_digest != artifact.sha256 || verified_size != artifact.size_bytes {
+            let _ = tokio::fs::remove_file(target_path).await;
+            return Err(EdgeError::ChecksumMismatch {
+                expected: artifact.sha256.clone(),
+                actual: verified_digest,
+            });
+        }
 
-        // Simulate deployment process
-        let deployment_time = self.estimate_deployment_time(model, node);
-        tokio::time::sleep(Duration::from_millis(deployment_time / 10)).await; // Simulate work
-
-        let elapsed = start_time.elapsed().unwrap_or_default().as_millis() as u64;
-
-        Ok(NodeDeploymentResult {
-            node_id: node.id.clone(),
-            success: true,
-            error: None,
-            deployment_time_ms: elapsed,
-        })
+        Ok((written, digest))
     }
 
-    /// Estimate deployment time based on model and node characteristics
-    fn estimate_deployment_time(&self, model: &EdgeModel, node: &EdgeNode) -> u64 {
-        let base_time = 1000; // 1 second base
-        let size_factor = model.size_mb / 100; // +10ms per 100MB
-        let bandwidth_factor = if node.resources.network_usage_mbps > 0.0 {
-            (model.size_mb as f32 * 8.0 / node.resources.network_usage_mbps) as u64 * 1000
-        } else {
-            size_factor * 100
-        };
-
-        base_time + size_factor * 10 + bandwidth_factor
-    }
-
-    /// Synchronize models across edge nodes
+    /// Synchronize models across edge nodes.
+    ///
+    /// This re-verifies every artifact that has really been transferred: each
+    /// deployed file is read back and re-hashed. `bytes_transferred` is the
+    /// number of bytes actually re-read, and `sync_time_ms` is measured, not
+    /// derived from a formula.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdgeError::SyncError`] if the sync event channel is closed.
     pub async fn sync_models(&self) -> Result<SyncResult, EdgeError> {
-        let sync_event = SyncEvent::HealthCheck;
         self.sync_sender
-            .send(sync_event)
+            .send(SyncEvent::HealthCheck)
             .await
             .map_err(|e| EdgeError::SyncError(format!("Failed to send sync event: {}", e)))?;
 
-        let nodes = self.nodes.read().await;
-        let sync_results: Vec<_> = nodes
-            .values()
-            .map(|node| NodeSyncResult {
-                node_id: node.id.clone(),
-                success: true,
-                models_synced: node.models.len(),
-                bytes_transferred: node.models.iter().map(|m| m.size_mb).sum::<u64>() * 1024 * 1024,
-                sync_time_ms: 1000 + (node.models.len() as u64 * 100),
-            })
-            .collect();
+        let node_ids: Vec<(String, Vec<String>)> = {
+            let nodes = self.nodes.read().await;
+            nodes
+                .values()
+                .map(|node| {
+                    (
+                        node.id.clone(),
+                        node.models.iter().map(|m| m.id.clone()).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        let mut sync_results = Vec::with_capacity(node_ids.len());
+        for (node_id, model_ids) in node_ids {
+            let started = std::time::Instant::now();
+            let mut verified = 0usize;
+            let mut bytes = 0u64;
+            let mut failed = false;
+            for model_id in &model_ids {
+                match self.verify_deployment(&node_id, model_id).await {
+                    Ok(artifact) => {
+                        verified += 1;
+                        bytes += artifact.bytes_written;
+                    },
+                    Err(_) => failed = true,
+                }
+            }
+            sync_results.push(NodeSyncResult {
+                node_id,
+                success: !failed,
+                models_synced: verified,
+                bytes_transferred: bytes,
+                sync_time_ms: started.elapsed().as_millis() as u64,
+            });
+        }
 
         Ok(SyncResult {
             timestamp: SystemTime::now(),
@@ -425,40 +760,75 @@ impl EdgeOrchestrator {
         })
     }
 
-    /// Handle offline inference request
+    /// Handle an offline inference request on a specific edge node.
+    ///
+    /// The request is executed by the installed [`OfflineInferenceEngine`]. With
+    /// no engine installed the orchestrator has no way to run a model, so it
+    /// returns [`EdgeError::InferenceUnavailable`] instead of echoing the input
+    /// back with an invented confidence. `processing_time_ms` is measured around
+    /// the real call.
+    ///
+    /// # Errors
+    ///
+    /// * [`EdgeError::NodeNotFound`] / [`EdgeError::ModelNotFound`] when the
+    ///   node or model is unknown to the orchestrator.
+    /// * [`EdgeError::InferenceUnavailable`] when no local runtime is installed.
+    /// * Whatever the engine returns when execution fails.
     pub async fn handle_offline_request(
         &self,
         node_id: &str,
         request: InferenceRequest,
     ) -> Result<InferenceResponse, EdgeError> {
-        let nodes = self.nodes.read().await;
-        let node =
-            nodes.get(node_id).ok_or_else(|| EdgeError::NodeNotFound(node_id.to_string()))?;
-
-        // Check if model is available locally
-        let model = node
-            .models
-            .iter()
-            .find(|m| m.id == request.model_id)
-            .ok_or_else(|| EdgeError::ModelNotFound(request.model_id.clone()))?;
-
-        // Simulate inference
-        let response = InferenceResponse {
-            request_id: request.request_id,
-            model_id: model.id.clone(),
-            result: format!("Offline inference result for: {}", request.input),
-            confidence: 0.95,
-            processing_time_ms: 150,
-            served_from_cache: false,
-            node_id: node_id.to_string(),
+        let model = {
+            let nodes = self.nodes.read().await;
+            let node =
+                nodes.get(node_id).ok_or_else(|| EdgeError::NodeNotFound(node_id.to_string()))?;
+            node.models
+                .iter()
+                .find(|m| m.id == request.model_id)
+                .cloned()
+                .ok_or_else(|| EdgeError::ModelNotFound(request.model_id.clone()))?
         };
 
-        // Update metrics
-        let mut metrics = self.metrics_collector.write().await;
-        metrics.offline_requests += 1;
-        metrics.requests_served += 1;
+        let engine = self.offline_engine.as_ref().ok_or_else(|| {
+            EdgeError::InferenceUnavailable(format!(
+                "node {node_id} has no local inference runtime: install one with \
+                 EdgeOrchestrator::with_offline_engine() before serving offline requests"
+            ))
+        })?;
 
-        Ok(response)
+        let artifact = self.get_deployed_artifact(node_id, &request.model_id).await;
+
+        let started = std::time::Instant::now();
+        let output = engine.infer(&model, artifact.as_ref(), &request).await?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        {
+            let mut metrics = self.metrics_collector.write().await;
+            metrics.offline_requests += 1;
+            metrics.requests_served += 1;
+            if output.served_from_cache {
+                let served = metrics.requests_served as f32;
+                let hits = metrics.cache_hit_rate * (served - 1.0) + 1.0;
+                metrics.cache_hit_rate = hits / served;
+            } else if metrics.requests_served > 1 {
+                let served = metrics.requests_served as f32;
+                metrics.cache_hit_rate = metrics.cache_hit_rate * (served - 1.0) / served;
+            }
+            let served = metrics.requests_served as f32;
+            metrics.average_latency_ms =
+                (metrics.average_latency_ms * (served - 1.0) + elapsed_ms as f32) / served;
+        }
+
+        Ok(InferenceResponse {
+            request_id: request.request_id,
+            model_id: model.id,
+            result: output.text,
+            confidence: output.confidence,
+            processing_time_ms: elapsed_ms,
+            served_from_cache: output.served_from_cache,
+            node_id: node_id.to_string(),
+        })
     }
 
     /// Get edge deployment statistics
@@ -506,6 +876,46 @@ pub enum EdgeError {
     ConfigError(String),
     #[error("Resource error: {0}")]
     ResourceError(String),
+    /// The model artifact is missing or unreadable on the orchestrator host.
+    #[error("Model artifact unavailable: {0}")]
+    ArtifactUnavailable(String),
+    /// The edge node's local storage could not be written.
+    #[error("Edge storage error: {0}")]
+    StorageError(String),
+    /// A transferred artifact does not hash to the expected digest.
+    #[error("Checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+    /// No local inference runtime is installed on this orchestrator.
+    #[error("Offline inference unavailable: {0}")]
+    InferenceUnavailable(String),
+}
+
+/// Compute the byte length and lowercase hex SHA-256 digest of a file, reading
+/// it in [`TRANSFER_CHUNK_BYTES`] chunks so large artifacts never need to fit in
+/// memory.
+async fn hash_file(path: &Path) -> Result<(u64, String), EdgeError> {
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+        EdgeError::ArtifactUnavailable(format!("cannot open {}: {e}", path.display()))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; TRANSFER_CHUNK_BYTES];
+    let mut size: u64 = 0;
+    loop {
+        let read = file.read(&mut buffer).await.map_err(|e| {
+            EdgeError::ArtifactUnavailable(format!("cannot read {}: {e}", path.display()))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((size, hex::encode(hasher.finalize())))
+}
+
+/// Key used to index deployed artifacts by node and model.
+fn deployment_key(node_id: &str, model_id: &str) -> String {
+    format!("{node_id}/{model_id}")
 }
 
 /// Deployment result
@@ -523,7 +933,12 @@ pub struct NodeDeploymentResult {
     pub node_id: String,
     pub success: bool,
     pub error: Option<String>,
+    /// Wall-clock duration of the real transfer, in milliseconds.
     pub deployment_time_ms: u64,
+    /// Bytes actually written to the node's storage.
+    pub bytes_transferred: u64,
+    /// SHA-256 digest of the transferred artifact, verified by reading it back.
+    pub checksum_sha256: Option<String>,
 }
 
 /// Synchronization result
@@ -759,12 +1174,26 @@ mod tests {
             priority: ModelPriority::High,
         };
 
+        // Without a registered artifact and storage root there is nothing to
+        // transfer, so the deployment must fail loudly instead of reporting a
+        // success it never performed.
         let result = orchestrator
             .deploy_model(model, vec!["test-node".to_string()])
             .await
             .expect("async operation should succeed in test");
         assert_eq!(result.total_deployments, 1);
-        assert_eq!(result.successful_deployments, 1);
+        assert_eq!(
+            result.successful_deployments, 0,
+            "deployment without an artifact must not report success"
+        );
+        let node_result =
+            result.node_results.get("test-node").expect("node result must be present");
+        assert!(node_result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no artifact registered"));
+        assert_eq!(node_result.bytes_transferred, 0);
     }
 
     #[tokio::test]
@@ -816,12 +1245,71 @@ mod tests {
             parameters: HashMap::new(),
         };
 
-        let response = orchestrator
+        // Regression test: this used to return
+        // `format!("Offline inference result for: {input}")` with a hardcoded
+        // 0.95 confidence and 150 ms latency. With no local runtime installed,
+        // the orchestrator cannot run a model and must say so.
+        let err = orchestrator
             .handle_offline_request("test-node", request)
             .await
-            .expect("async operation should succeed in test");
-        assert_eq!(response.model_id, "test-model");
-        assert!(response.result.contains("test input"));
+            .expect_err("offline inference without a runtime must fail");
+        assert!(
+            matches!(err, EdgeError::InferenceUnavailable(_)),
+            "expected InferenceUnavailable, got {err:?}"
+        );
+    }
+
+    /// Unique per-test scratch directory under the system temp dir.
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join("trustformers-edge-tests")
+            .join(format!("{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        dir
+    }
+
+    async fn write_artifact(path: &std::path::Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("parent dir");
+        }
+        tokio::fs::write(path, bytes).await.expect("artifact write");
+    }
+
+    async fn cleanup(dir: &std::path::Path) {
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    /// Deterministic local runtime used to exercise the offline path. It is a
+    /// test double for a model runtime, declared under `#[cfg(test)]`: the
+    /// production path has no built-in engine and refuses the request instead.
+    #[derive(Debug)]
+    struct EchoLengthEngine;
+
+    #[async_trait::async_trait]
+    impl OfflineInferenceEngine for EchoLengthEngine {
+        async fn infer(
+            &self,
+            model: &EdgeModel,
+            artifact: Option<&DeployedArtifact>,
+            request: &InferenceRequest,
+        ) -> Result<OfflineInferenceOutput, EdgeError> {
+            let artifact = artifact.ok_or_else(|| {
+                EdgeError::ArtifactUnavailable(format!(
+                    "model {} is not present on this node",
+                    model.id
+                ))
+            })?;
+            Ok(OfflineInferenceOutput {
+                text: format!(
+                    "{} bytes of {} answered {} chars",
+                    artifact.bytes_written,
+                    model.id,
+                    request.input.len()
+                ),
+                confidence: 0.5,
+                served_from_cache: false,
+            })
+        }
     }
 
     fn make_node(id: &str, loc: &str, status: EdgeNodeStatus) -> EdgeNode {
@@ -922,11 +1410,30 @@ mod tests {
             orchestrator.register_node(node).await.expect("register ok");
         }
 
+        let temp = temp_root("multi-node");
         let model = make_model("m2", 1); // Tiny model for fast test
+        let source = temp.join("m2.bin");
+        write_artifact(&source, &vec![7u8; 4096]).await;
+        orchestrator
+            .register_model_artifact("m2", &source)
+            .await
+            .expect("register artifact");
+        for i in 0..2 {
+            orchestrator
+                .register_node_storage(&format!("mn-{i}"), temp.join(format!("node-{i}")))
+                .await
+                .expect("register storage");
+        }
+
         let nodes = vec!["mn-0".to_string(), "mn-1".to_string()];
         let result = orchestrator.deploy_model(model, nodes).await.expect("deploy ok");
         assert_eq!(result.total_deployments, 2);
         assert_eq!(result.successful_deployments, 2);
+        for node_result in result.node_results.values() {
+            assert_eq!(node_result.bytes_transferred, 4096);
+            assert!(node_result.checksum_sha256.is_some());
+        }
+        cleanup(&temp).await;
     }
 
     #[test]
@@ -1140,5 +1647,290 @@ mod tests {
         let (orchestrator, _rx) = EdgeOrchestrator::new(config);
         let result = orchestrator.optimize_deployment().await.expect("optimize ok");
         assert!(result.optimizations.is_empty());
+    }
+    // ── Real artifact transfer ────────────────────────────────────────────────
+
+    /// Regression test: `deploy_model_to_node` used to `tokio::time::sleep` for
+    /// a fraction of an estimated duration and then report `success: true`
+    /// without moving a single byte.
+    #[tokio::test]
+    async fn test_deploy_transfers_the_real_artifact() {
+        let temp = temp_root("transfer");
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        orchestrator
+            .register_node(make_node("n1", "loc", EdgeNodeStatus::Online))
+            .await
+            .expect("register");
+
+        // A payload larger than one transfer chunk, to exercise the loop.
+        let payload: Vec<u8> =
+            (0..(TRANSFER_CHUNK_BYTES + 12_345)).map(|i| (i % 251) as u8).collect();
+        let source = temp.join("source").join("weights.safetensors");
+        write_artifact(&source, &payload).await;
+
+        let artifact = orchestrator
+            .register_model_artifact("m1", &source)
+            .await
+            .expect("artifact registration");
+        assert_eq!(artifact.size_bytes, payload.len() as u64);
+
+        let node_root = temp.join("node-store");
+        orchestrator.register_node_storage("n1", &node_root).await.expect("storage");
+
+        let result = orchestrator
+            .deploy_model(make_model("m1", 8), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+        assert_eq!(result.successful_deployments, 1);
+        let node_result = result.node_results.get("n1").expect("node result");
+        assert_eq!(node_result.bytes_transferred, payload.len() as u64);
+        assert_eq!(
+            node_result.checksum_sha256.as_deref(),
+            Some(artifact.sha256.as_str())
+        );
+
+        // The bytes really are on the node, and they are the right bytes.
+        let deployed = orchestrator
+            .get_deployed_artifact("n1", "m1")
+            .await
+            .expect("deployed artifact must be recorded");
+        assert!(deployed.path.starts_with(&node_root));
+        let on_disk = tokio::fs::read(&deployed.path).await.expect("read back");
+        assert_eq!(
+            on_disk, payload,
+            "transferred bytes must match the source exactly"
+        );
+
+        orchestrator.verify_deployment("n1", "m1").await.expect("verification");
+        cleanup(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn test_deploy_without_storage_root_fails_honestly() {
+        let temp = temp_root("no-storage");
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        orchestrator
+            .register_node(make_node("n1", "loc", EdgeNodeStatus::Online))
+            .await
+            .expect("register");
+        let source = temp.join("m.bin");
+        write_artifact(&source, b"payload").await;
+        orchestrator.register_model_artifact("m1", &source).await.expect("artifact");
+
+        let result = orchestrator
+            .deploy_model(make_model("m1", 1), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+        assert_eq!(result.successful_deployments, 0);
+        assert!(result.node_results["n1"]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no storage root"));
+        cleanup(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn test_register_missing_artifact_errors() {
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        let missing = std::env::temp_dir().join(format!("absent-{}", Uuid::new_v4()));
+        let err = orchestrator
+            .register_model_artifact("m1", &missing)
+            .await
+            .expect_err("missing artifact must error");
+        assert!(matches!(err, EdgeError::ArtifactUnavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_verify_deployment_detects_corruption() {
+        let temp = temp_root("corrupt");
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        orchestrator
+            .register_node(make_node("n1", "loc", EdgeNodeStatus::Online))
+            .await
+            .expect("register");
+        let source = temp.join("m.bin");
+        write_artifact(&source, b"the original model weights").await;
+        orchestrator.register_model_artifact("m1", &source).await.expect("artifact");
+        orchestrator
+            .register_node_storage("n1", temp.join("store"))
+            .await
+            .expect("storage");
+        orchestrator
+            .deploy_model(make_model("m1", 1), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+
+        let deployed = orchestrator.get_deployed_artifact("n1", "m1").await.expect("deployed");
+        tokio::fs::write(&deployed.path, b"the tampered model weights")
+            .await
+            .expect("tamper");
+
+        let err = orchestrator
+            .verify_deployment("n1", "m1")
+            .await
+            .expect_err("tampering must be detected");
+        assert!(matches!(err, EdgeError::ChecksumMismatch { .. }), "{err:?}");
+        cleanup(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn test_deploy_rejects_artifact_larger_than_free_storage() {
+        let temp = temp_root("capacity");
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        let mut node = make_node("n1", "loc", EdgeNodeStatus::Online);
+        node.resources.storage_available_mb = 0;
+        orchestrator.register_node(node).await.expect("register");
+        let source = temp.join("m.bin");
+        write_artifact(&source, &vec![0u8; 2 * 1024 * 1024]).await;
+        orchestrator.register_model_artifact("m1", &source).await.expect("artifact");
+        orchestrator
+            .register_node_storage("n1", temp.join("store"))
+            .await
+            .expect("storage");
+
+        let result = orchestrator
+            .deploy_model(make_model("m1", 2), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+        assert_eq!(result.successful_deployments, 0);
+        assert!(result.node_results["n1"]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("insufficient storage"));
+        cleanup(&temp).await;
+    }
+
+    /// Regression test: `sync_models` used to derive `bytes_transferred` from
+    /// `size_mb * 1024 * 1024` and `sync_time_ms` from a formula, for models
+    /// that had never been transferred anywhere.
+    #[tokio::test]
+    async fn test_sync_reports_only_verified_artifacts() {
+        let temp = temp_root("sync");
+        let (orchestrator, mut rx) = EdgeOrchestrator::new(EdgeConfig::default());
+
+        let mut node = make_node("n1", "loc", EdgeNodeStatus::Online);
+        node.models = vec![make_model("m1", 1), make_model("m2", 1)];
+        orchestrator.register_node(node).await.expect("register");
+
+        let source = temp.join("m1.bin");
+        write_artifact(&source, &vec![3u8; 2048]).await;
+        orchestrator.register_model_artifact("m1", &source).await.expect("artifact");
+        orchestrator
+            .register_node_storage("n1", temp.join("store"))
+            .await
+            .expect("storage");
+        orchestrator
+            .deploy_model(make_model("m1", 1), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+
+        let sync = orchestrator.sync_models().await.expect("sync");
+        assert_eq!(sync.nodes_synced, 1);
+        assert_eq!(
+            sync.total_models_synced, 1,
+            "only the model that was really transferred may be counted"
+        );
+        assert_eq!(sync.total_bytes_transferred, 2048);
+        assert!(!sync.node_results[0].success, "m2 was never transferred");
+        assert!(rx.try_recv().is_ok(), "a sync event must have been emitted");
+        cleanup(&temp).await;
+    }
+
+    // ── Offline inference ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_offline_inference_uses_the_installed_engine() {
+        let temp = temp_root("offline");
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        let orchestrator = orchestrator.with_offline_engine(Arc::new(EchoLengthEngine));
+
+        let mut node = make_node("n1", "loc", EdgeNodeStatus::Online);
+        node.models = vec![make_model("m1", 1)];
+        orchestrator.register_node(node).await.expect("register");
+
+        let source = temp.join("m1.bin");
+        write_artifact(&source, &vec![9u8; 1024]).await;
+        orchestrator.register_model_artifact("m1", &source).await.expect("artifact");
+        orchestrator
+            .register_node_storage("n1", temp.join("store"))
+            .await
+            .expect("storage");
+        orchestrator
+            .deploy_model(make_model("m1", 1), vec!["n1".to_string()])
+            .await
+            .expect("deploy");
+
+        let response = orchestrator
+            .handle_offline_request(
+                "n1",
+                InferenceRequest {
+                    request_id: "r1".to_string(),
+                    model_id: "m1".to_string(),
+                    input: "hello".to_string(),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .expect("inference");
+        assert_eq!(response.result, "1024 bytes of m1 answered 5 chars");
+        assert!(
+            (response.confidence - 0.5).abs() < f32::EPSILON,
+            "confidence must come from the engine, not a constant 0.95"
+        );
+
+        let stats = orchestrator.get_statistics().await;
+        assert_eq!(stats.total_requests_served, 1);
+        cleanup(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn test_offline_inference_without_deployed_artifact_errors() {
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        let orchestrator = orchestrator.with_offline_engine(Arc::new(EchoLengthEngine));
+        let mut node = make_node("n1", "loc", EdgeNodeStatus::Online);
+        node.models = vec![make_model("m1", 1)];
+        orchestrator.register_node(node).await.expect("register");
+
+        let err = orchestrator
+            .handle_offline_request(
+                "n1",
+                InferenceRequest {
+                    request_id: "r1".to_string(),
+                    model_id: "m1".to_string(),
+                    input: "hello".to_string(),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .expect_err("engine must refuse to answer without the model present");
+        assert!(matches!(err, EdgeError::ArtifactUnavailable(_)), "{err:?}");
+
+        // A refused request must not be counted as served.
+        assert_eq!(orchestrator.get_statistics().await.total_requests_served, 0);
+    }
+
+    #[tokio::test]
+    async fn test_offline_inference_unknown_model_errors() {
+        let (orchestrator, _rx) = EdgeOrchestrator::new(EdgeConfig::default());
+        let orchestrator = orchestrator.with_offline_engine(Arc::new(EchoLengthEngine));
+        orchestrator
+            .register_node(make_node("n1", "loc", EdgeNodeStatus::Online))
+            .await
+            .expect("register");
+        let err = orchestrator
+            .handle_offline_request(
+                "n1",
+                InferenceRequest {
+                    request_id: "r1".to_string(),
+                    model_id: "absent".to_string(),
+                    input: "hello".to_string(),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .expect_err("unknown model must error");
+        assert!(matches!(err, EdgeError::ModelNotFound(_)), "{err:?}");
     }
 }

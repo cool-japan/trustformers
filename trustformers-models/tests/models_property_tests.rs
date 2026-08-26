@@ -44,8 +44,14 @@ proptest! {
         // Generous per-case timeout: this only guards against runaway cases.
         // Each case takes ~50ms unloaded, but a saturated machine (parallel
         // test runs / concurrent builds) can starve a case well past a tight
-        // budget, turning the timeout into a flake.
-        timeout: 10_000,
+        // budget, turning the timeout into a flake. Measured empirically in
+        // this workspace's own dev environment (many concurrent agent
+        // sessions building/testing on the same tree): a case that takes
+        // ~50ms unloaded took 13547ms under load with a 10_000ms timeout,
+        // i.e. a ~270x slowdown from contention, not from this test. 30s
+        // keeps a real margin over that observed worst case while staying
+        // well under nextest's default 60s slow-test warning threshold.
+        timeout: 30_000,
         max_shrink_iters: 10,
         ..ProptestConfig::default()
     })]
@@ -251,7 +257,13 @@ proptest! {
     #![proptest_config(ProptestConfig {
         // Generous per-case timeout: guards against runaway cases only.
         // Cases run in ~45ms unloaded; a tight budget flakes under load.
-        timeout: 10_000,
+        // Already at the minimum practical case count (8, below) -- this
+        // test still flaked at 13257ms under concurrent-agent load with a
+        // 10_000ms timeout, proving the lever that matters here is the
+        // per-case timeout, not the case count. See the sibling
+        // `test_bert_output_shapes_memory_constrained` config above for the
+        // same measurement and reasoning.
+        timeout: 30_000,
         max_shrink_iters: 1, // Reduce shrink iterations
         cases: 8, // Reduce number of test cases from default 256
         ..ProptestConfig::default()

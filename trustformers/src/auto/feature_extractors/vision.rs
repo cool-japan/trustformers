@@ -10,20 +10,31 @@
 //! detection, and image-to-text generation. It supports multiple image formats and
 //! provides extensive preprocessing capabilities.
 //!
-//! ## Supported Model Architectures
+//! ## What is real here
 //!
-//! - **CLIP**: Contrastive Language-Image Pre-training models
-//! - **BLIP**: Bootstrapping Language-Image Pre-training models
-//! - **ViT**: Vision Transformer models
-//! - **Custom Vision Models**: Extensible architecture for additional models
+//! [`VisionFeatureExtractor::preprocess_image`] does the whole preprocessing
+//! chain for real: decode (binary Netpbm always; JPEG/PNG/WebP/BMP/TIFF with
+//! the `vision` feature, via the pure-Rust `image` crate), aspect-preserving
+//! bilinear resize with half-pixel centres, centre crop, and per-channel
+//! `(pixel - mean) / std` normalisation into a flat CHW buffer.
+//!
+//! ## What is not available
+//!
+//! This extractor owns **no vision encoder**.
+//! [`VisionFeatureExtractor::extract_visual_features`] therefore returns a
+//! structured [`TrustformersError::FeatureUnavailable`] rather than the
+//! all-zero embedding it used to produce — a constant embedding makes every
+//! image identical under cosine similarity and silently poisons any search
+//! index built from it.
+//!
+//! To obtain embeddings, call `preprocess_image` and run your own encoder, or
+//! use the `image-classification` pipeline with a backbone attached.
 //!
 //! ## Key Features
 //!
-//! - **Multi-format Support**: JPEG, PNG, WebP, BMP, TIFF
-//! - **Advanced Preprocessing**: Resize, crop, normalize, augmentation
+//! - **Multi-format Support**: Netpbm always; JPEG, PNG, WebP, BMP, TIFF with `vision`
+//! - **Real Preprocessing**: Resize, crop, normalize
 //! - **Batch Processing**: Efficient handling of multiple images
-//! - **Memory Optimization**: Intelligent memory management for large images
-//! - **GPU Acceleration**: Hardware-accelerated processing when available
 //!
 //! ## Image Processing Pipeline
 //!
@@ -116,8 +127,17 @@
 use super::{FeatureExtractor, FeatureExtractorConfig};
 use crate::auto::types::{FeatureInput, FeatureOutput, ImageFormat};
 use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::image_proc;
+use crate::pipeline::media::unsupported_model;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Encoders that can serve a vision feature-extraction request.
+///
+/// Deliberately empty: this extractor owns no model, and
+/// [`VisionFeatureExtractor::extract_visual_features`] says so instead of
+/// returning a constant embedding.
+const SUPPORTED_ENCODERS: &[&str] = &[];
 
 // =============================================================================
 // Vision Feature Extractor Implementation
@@ -232,25 +252,90 @@ impl VisionFeatureExtractor {
     ///
     /// # Implementation Notes
     ///
-    /// This is a simplified implementation. A production version would:
-    /// - Use proper image decoding libraries (e.g., image crate)
-    /// - Implement efficient resizing algorithms
-    /// - Support hardware acceleration
-    /// - Handle edge cases and error conditions robustly
-    fn preprocess_image(&self, data: &[u8], format: ImageFormat) -> Result<Vec<f32>> {
-        // Simplified image preprocessing implementation
-        // In a real implementation, this would:
-        // 1. Decode the image based on format
-        // 2. Resize to target dimensions
-        // 3. Apply center cropping if enabled
-        // 4. Normalize with mean/std values
-        // 5. Convert to model input format
+    /// Decoding uses [`crate::pipeline::media::image_proc`]: binary Netpbm is
+    /// always supported, and with the `vision` feature every format the
+    /// pure-Rust `image` crate handles. The resize is real bilinear
+    /// interpolation with half-pixel centres, the crop is a real centre crop,
+    /// and normalisation is `(pixel - mean) / std` per channel. Output is a
+    /// flat CHW buffer of `3 · size · size` values.
+    ///
+    /// Undecodable data produces an error — never a zero-filled vector.
+    pub fn preprocess_image(&self, data: &[u8], format: ImageFormat) -> Result<Vec<f32>> {
+        if data.is_empty() {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "vision feature extractor: empty {format:?} image buffer"
+            )));
+        }
+        let size = self.config.image_size;
+        if size == 0 {
+            return Err(TrustformersError::invalid_input_simple(
+                "vision feature extractor: image_size must be greater than zero".to_string(),
+            ));
+        }
 
-        let processed_size = self.config.image_size * self.config.image_size * 3; // RGB channels
+        let image = image_proc::decode_image_bytes(data)?;
 
-        // For this simplified implementation, return zero-initialized vector
-        // Real implementation would perform actual image processing
-        Ok(vec![0.0; processed_size])
+        let resized = if self.config.do_resize {
+            // Resize the shorter side to `size`, preserving aspect ratio, so the
+            // subsequent centre crop sees the same framing torchvision produces.
+            let (h, w) = if image.height <= image.width {
+                let scaled =
+                    (image.width as f64 * size as f64 / image.height as f64).round() as usize;
+                (size, scaled.max(size))
+            } else {
+                let scaled =
+                    (image.height as f64 * size as f64 / image.width as f64).round() as usize;
+                (scaled.max(size), size)
+            };
+            image_proc::resize_bilinear(&image, h, w)?
+        } else {
+            image
+        };
+
+        let crop_size = self.config.crop_size.unwrap_or(size);
+        let cropped = if self.config.do_center_crop {
+            let crop_h = crop_size.min(resized.height);
+            let crop_w = crop_size.min(resized.width);
+            image_proc::center_crop(&resized, crop_h, crop_w)?
+        } else {
+            resized
+        };
+
+        // The model input is always `size × size`; resize again when the crop
+        // could not reach it (e.g. a source image smaller than `crop_size`).
+        let final_image = if cropped.height == size && cropped.width == size {
+            cropped
+        } else {
+            image_proc::resize_bilinear(&cropped, size, size)?
+        };
+
+        let (mean, std) = self.normalisation_parameters()?;
+        image_proc::normalize_to_chw(&final_image, mean, std)
+    }
+
+    /// Resolve the per-channel normalisation parameters from the config.
+    ///
+    /// Returns identity parameters when `normalize` is disabled.
+    fn normalisation_parameters(&self) -> Result<([f32; 3], [f32; 3])> {
+        if !self.config.normalize {
+            return Ok(([0.0; 3], [1.0; 3]));
+        }
+        let to_array = |values: &[f32], what: &str| -> Result<[f32; 3]> {
+            <[f32; 3]>::try_from(values).map_err(|_| {
+                TrustformersError::invalid_input_simple(format!(
+                    "vision feature extractor: `{what}` must have exactly 3 entries, got {}",
+                    values.len()
+                ))
+            })
+        };
+        let mean = to_array(&self.config.mean, "mean")?;
+        let std = to_array(&self.config.std, "std")?;
+        if std.contains(&0.0) {
+            return Err(TrustformersError::invalid_input_simple(
+                "vision feature extractor: `std` entries must be non-zero".to_string(),
+            ));
+        }
+        Ok((mean, std))
     }
 
     /// Extract visual features from preprocessed image data
@@ -274,23 +359,29 @@ impl VisionFeatureExtractor {
     ///
     /// # Implementation Notes
     ///
-    /// This is a simplified implementation. A production version would:
-    /// - Load and execute actual vision models (ViT, CLIP, etc.)
-    /// - Support different model architectures
-    /// - Implement efficient inference pipelines
-    /// - Handle batch processing optimally
-    /// - Support GPU acceleration
-    fn extract_visual_features(&self, image: &[f32]) -> Result<Vec<f32>> {
-        // Simplified feature extraction implementation
-        // In a real implementation, this would:
-        // 1. Load the vision model (ViT, CLIP, etc.)
-        // 2. Run inference on the preprocessed image
-        // 3. Extract features from the appropriate layer
-        // 4. Apply any post-processing transformations
-
-        // For this simplified implementation, return zero-initialized features
-        // Real implementation would run actual model inference
-        Ok(vec![0.0; self.config.feature_size])
+    /// This extractor owns no vision model. Rather than emit a constant
+    /// embedding — which would make every image identical under cosine
+    /// similarity and silently corrupt any index built on it — the method
+    /// returns a structured [`TrustformersError::FeatureUnavailable`] naming
+    /// the architectures that can serve the request.
+    ///
+    /// Use [`Self::preprocess_image`] (which is fully real) and run the encoder
+    /// of your choice on its output, or attach a backbone through the
+    /// `image-classification` pipeline.
+    pub fn extract_visual_features(&self, image: &[f32]) -> Result<Vec<f32>> {
+        let expected = self.config.image_size * self.config.image_size * 3;
+        if image.len() != expected {
+            return Err(TrustformersError::invalid_input_simple(format!(
+                "vision feature extractor: preprocessed buffer has {} values but {expected} were \
+                 expected",
+                image.len()
+            )));
+        }
+        Err(unsupported_model(
+            "vision-feature-extraction",
+            "VisionFeatureExtractor (no encoder attached)",
+            SUPPORTED_ENCODERS,
+        ))
     }
 }
 
@@ -898,66 +989,130 @@ mod tests {
         assert_eq!(extractor.config().max_batch_size(), Some(32));
     }
 
+    /// Build a binary P6 PPM fixture with a distinctive gradient.
+    fn ppm_fixture(h: usize, w: usize, flip: bool) -> Vec<u8> {
+        let mut bytes = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g) = if flip {
+                    ((y * 255 / h.max(1)) as u8, (x * 255 / w.max(1)) as u8)
+                } else {
+                    ((x * 255 / w.max(1)) as u8, (y * 255 / h.max(1)) as u8)
+                };
+                bytes.extend_from_slice(&[r, g, 32u8]);
+            }
+        }
+        bytes
+    }
+
     #[test]
-    fn test_vision_feature_extraction() {
+    fn test_vision_feature_extraction_reports_missing_encoder() {
+        // Regression: `extract_features` used to return `vec![0.0; 768]` for
+        // any input, so every image had an identical embedding.
         let config = VisionFeatureConfig::default();
         let extractor = VisionFeatureExtractor::new(config);
 
         let input = FeatureInput::Image {
-            data: vec![0u8; 1024],
-            format: ImageFormat::Jpeg,
+            data: ppm_fixture(32, 32, false),
+            format: ImageFormat::Png,
             metadata: Some(ImageMetadata {
-                width: 640,
-                height: 480,
+                width: 32,
+                height: 32,
                 channels: 3,
                 dpi: Some(96),
             }),
         };
 
-        let result = extractor.extract_features(&input);
-        assert!(result.is_ok());
+        match extractor.extract_features(&input) {
+            Err(TrustformersError::FeatureUnavailable { message, .. }) => {
+                assert!(
+                    message.contains("no real model implementation"),
+                    "message: {message}"
+                );
+            },
+            other => panic!("expected FeatureUnavailable, got {other:?}"),
+        }
+    }
 
-        let output = result.expect("operation failed in test");
-        assert_eq!(output.features.len(), 768);
-        assert_eq!(output.shape, vec![768]);
+    #[test]
+    fn test_preprocess_image_is_not_all_zero() {
+        // Regression: `preprocess_image` used to ignore `data` and return
+        // `vec![0.0; size * size * 3]`.
+        let config = VisionFeatureConfig {
+            image_size: 8,
+            ..VisionFeatureConfig::default()
+        };
+        let extractor = VisionFeatureExtractor::new(config);
+        let pixels = extractor
+            .preprocess_image(&ppm_fixture(24, 32, false), ImageFormat::Png)
+            .expect("preprocess");
+        assert_eq!(pixels.len(), 8 * 8 * 3);
+        assert!(
+            pixels.iter().any(|&v| v != 0.0),
+            "preprocessed pixels must not be uniformly zero"
+        );
+    }
 
-        // Check metadata preservation
-        assert_eq!(
-            output
-                .metadata
-                .get("width")
-                .expect("expected value not found")
-                .as_u64()
-                .expect("expected u64 value"),
-            640
+    #[test]
+    fn test_preprocess_image_distinguishes_images() {
+        let config = VisionFeatureConfig {
+            image_size: 8,
+            ..VisionFeatureConfig::default()
+        };
+        let extractor = VisionFeatureExtractor::new(config);
+        let a = extractor
+            .preprocess_image(&ppm_fixture(24, 24, false), ImageFormat::Png)
+            .expect("a");
+        let b = extractor
+            .preprocess_image(&ppm_fixture(24, 24, true), ImageFormat::Png)
+            .expect("b");
+        assert_ne!(a, b, "different images must preprocess differently");
+    }
+
+    #[test]
+    fn test_preprocess_image_rejects_undecodable_data() {
+        let extractor = VisionFeatureExtractor::new(VisionFeatureConfig::default());
+        assert!(extractor.preprocess_image(&[], ImageFormat::Jpeg).is_err());
+        // 1024 zero bytes are not a decodable image in any supported format.
+        assert!(extractor.preprocess_image(&[0u8; 1024], ImageFormat::Jpeg).is_err());
+    }
+
+    #[test]
+    fn test_preprocess_image_honours_normalisation_toggle() {
+        let raw = VisionFeatureExtractor::new(VisionFeatureConfig {
+            image_size: 4,
+            normalize: false,
+            ..VisionFeatureConfig::default()
+        })
+        .preprocess_image(&ppm_fixture(8, 8, false), ImageFormat::Png)
+        .expect("raw");
+        // Without normalisation the values stay in [0, 1].
+        assert!(
+            raw.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "raw: {raw:?}"
         );
-        assert_eq!(
-            output
-                .metadata
-                .get("height")
-                .expect("expected value not found")
-                .as_u64()
-                .expect("expected u64 value"),
-            480
+
+        let normalised = VisionFeatureExtractor::new(VisionFeatureConfig {
+            image_size: 4,
+            normalize: true,
+            ..VisionFeatureConfig::default()
+        })
+        .preprocess_image(&ppm_fixture(8, 8, false), ImageFormat::Png)
+        .expect("normalised");
+        assert!(
+            normalised.iter().any(|&v| v < 0.0),
+            "ImageNet normalisation must push dark pixels negative"
         );
-        assert_eq!(
-            output
-                .metadata
-                .get("channels")
-                .expect("expected value not found")
-                .as_u64()
-                .expect("expected u64 value"),
-            3
-        );
-        assert_eq!(
-            output
-                .metadata
-                .get("dpi")
-                .expect("expected value not found")
-                .as_u64()
-                .expect("expected u64 value"),
-            96
-        );
+    }
+
+    #[test]
+    fn test_extract_visual_features_rejects_wrong_buffer_size() {
+        let extractor = VisionFeatureExtractor::new(VisionFeatureConfig {
+            image_size: 4,
+            ..VisionFeatureConfig::default()
+        });
+        let err = extractor.extract_visual_features(&[0.0; 10]).expect_err("size mismatch");
+        assert!(err.to_string().contains("expected"), "err: {err}");
     }
 
     #[test]

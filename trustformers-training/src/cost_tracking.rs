@@ -149,10 +149,25 @@ pub struct CostDriver {
 #[derive(Debug, Clone)]
 pub struct EfficiencyMetrics {
     pub cost_per_hour: f64,
+    /// Fraction of the report's time range covered by billed resource
+    /// activity (sum of entry durations / time-range span), clamped to
+    /// `[0, 1]`. This is *temporal* utilization -- how continuously
+    /// resources were being paid for across the window -- computed from
+    /// the cost entries this tracker actually records. It is not
+    /// per-machine hardware utilization (CPU%/GPU% busy), which this
+    /// tracker has no way to observe.
     pub resource_utilization: f64,
-    pub idle_cost_percentage: f32,
+    /// Percentage of billed cost attributable to idle (provisioned but
+    /// unused) resources. `None` because this tracker only records what
+    /// was billed, not what was actually consumed within a billed span --
+    /// it has no signal to distinguish "busy the whole entry" from "idle
+    /// the whole entry".
+    pub idle_cost_percentage: Option<f32>,
     pub spot_instance_savings: f64,
-    pub efficiency_score: f64,
+    /// `(resource_utilization * 100 - idle_cost_percentage) / 100`. `None`
+    /// whenever `idle_cost_percentage` is `None`, since there is then no
+    /// real idle component to combine with `resource_utilization`.
+    pub efficiency_score: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -483,9 +498,10 @@ impl CostTracker {
                     threshold.last_triggered = Some(current_time);
 
                     // In a real implementation, would send notifications here
-                    println!(
+                    tracing::warn!(
                         "Budget alert: {} has reached {}% of budget",
-                        budget.name, threshold.percentage
+                        budget.name,
+                        threshold.percentage
                     );
                 }
             }
@@ -524,7 +540,7 @@ impl CostTracker {
         let top_cost_drivers = self.generate_top_cost_drivers(&filtered_entries);
 
         // Calculate efficiency metrics
-        let efficiency_metrics = self.calculate_efficiency_metrics(&filtered_entries);
+        let efficiency_metrics = self.calculate_efficiency_metrics(&filtered_entries, &time_range);
 
         // Generate recommendations
         let recommendations =
@@ -629,7 +645,11 @@ impl CostTracker {
         sorted_drivers
     }
 
-    fn calculate_efficiency_metrics(&self, entries: &[&CostEntry]) -> EfficiencyMetrics {
+    fn calculate_efficiency_metrics(
+        &self,
+        entries: &[&CostEntry],
+        time_range: &TimeRange,
+    ) -> EfficiencyMetrics {
         let total_cost: f64 = entries.iter().map(|e| e.total_cost).sum();
         let total_hours: f64 = entries
             .iter()
@@ -639,15 +659,31 @@ impl CostTracker {
 
         let cost_per_hour = if total_hours > 0.0 { total_cost / total_hours } else { 0.0 };
 
-        // Simplified efficiency calculations
-        let resource_utilization = 0.75; // Would be calculated from actual usage data
-        let idle_cost_percentage = 15.0; // Would be calculated from idle resources
-        let spot_instance_savings = entries.iter()
+        // Temporal resource utilization: how much of the report's time
+        // window had billed activity, computed from the entries' own
+        // durations -- the only usage signal this tracker actually
+        // records. Concurrent entries can sum to more than the window
+        // itself (multiple resources running in parallel), which is
+        // genuinely "fully utilized", so this clamps to 1.0 rather than
+        // reporting over 100%.
+        let window_hours = time_range.end.saturating_sub(time_range.start) as f64 / 3600.0;
+        let resource_utilization =
+            if window_hours > 0.0 { (total_hours / window_hours).min(1.0) } else { 0.0 };
+
+        // This tracker only records what was billed, not what was actually
+        // consumed by the workload inside a billed span, so it has no
+        // signal to compute an idle-vs-busy cost split. Left absent rather
+        // than fabricated.
+        let idle_cost_percentage: Option<f32> = None;
+
+        let spot_instance_savings = entries
+            .iter()
             .filter(|e| matches!(e.billing_model, BillingModel::Spot))
-            .map(|e| e.total_cost * 0.3) // Estimated 30% savings
+            .map(|e| e.total_cost * 0.3) // Estimated 30% savings vs. on-demand
             .sum();
 
-        let efficiency_score = (resource_utilization * 100.0 - idle_cost_percentage as f64) / 100.0;
+        let efficiency_score =
+            idle_cost_percentage.map(|idle| (resource_utilization * 100.0 - idle as f64) / 100.0);
 
         EfficiencyMetrics {
             cost_per_hour,
@@ -697,18 +733,23 @@ impl CostTracker {
             });
         }
 
-        // Recommend idle resource elimination
-        if efficiency_metrics.idle_cost_percentage > 20.0 {
-            recommendations.push(CostRecommendation {
-                recommendation_id: uuid::Uuid::new_v4().to_string(),
-                title: "Eliminate Idle Resources".to_string(),
-                description: "High percentage of idle resources detected. Implement automatic shutdown policies for unused resources.".to_string(),
-                potential_savings: efficiency_metrics.cost_per_hour * 24.0 * 30.0 * (efficiency_metrics.idle_cost_percentage / 100.0) as f64,
-                confidence: 0.9,
-                implementation_effort: ImplementationEffort::Low,
-                category: RecommendationCategory::IdleResourceElimination,
-                priority: RecommendationPriority::Critical,
-            });
+        // Recommend idle resource elimination -- only when we actually have
+        // a real idle-cost measurement to act on (see
+        // `EfficiencyMetrics::idle_cost_percentage`'s doc comment for why
+        // this tracker usually does not).
+        if let Some(idle_cost_percentage) = efficiency_metrics.idle_cost_percentage {
+            if idle_cost_percentage > 20.0 {
+                recommendations.push(CostRecommendation {
+                    recommendation_id: uuid::Uuid::new_v4().to_string(),
+                    title: "Eliminate Idle Resources".to_string(),
+                    description: "High percentage of idle resources detected. Implement automatic shutdown policies for unused resources.".to_string(),
+                    potential_savings: efficiency_metrics.cost_per_hour * 24.0 * 30.0 * (idle_cost_percentage / 100.0) as f64,
+                    confidence: 0.9,
+                    implementation_effort: ImplementationEffort::Low,
+                    category: RecommendationCategory::IdleResourceElimination,
+                    priority: RecommendationPriority::Critical,
+                });
+            }
         }
 
         // Always provide a general cost optimization recommendation
@@ -1109,5 +1150,172 @@ mod tests {
         for point in forecast {
             assert!(point.cost >= 0.0);
         }
+    }
+
+    // ---- Honest-contract tests for calculate_efficiency_metrics ----
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs()
+    }
+
+    #[test]
+    fn test_low_resource_utilization_triggers_rightsizing_recommendation() {
+        // Regression: `resource_utilization` used to be hardcoded to 0.75,
+        // so this branch (`< 0.6`) was permanently unreachable. It is now a
+        // real temporal-coverage measurement: a short job inside a wide
+        // reporting window must drive it below 0.6 and surface the
+        // recommendation.
+        let tracker = CostTracker::new();
+
+        tracker
+            .record_cost(
+                "job-short".to_string(),
+                "cpu".to_string(),
+                4.0,
+                Duration::from_secs(3600), // 1 hour of billed activity
+                BillingModel::PayPerUse,
+                "us-east-1".to_string(),
+                "aws".to_string(),
+                HashMap::new(),
+            )
+            .expect("record_cost failed");
+
+        // A 100-hour reporting window around a 1-hour job -> utilization ~= 0.01.
+        let time_range = TimeRange {
+            start: 0,
+            end: now_secs() + 100 * 3600,
+        };
+
+        let report = tracker
+            .generate_cost_report(ReportType::Custom, time_range)
+            .expect("generate_cost_report failed");
+
+        assert!(
+            report.efficiency_metrics.resource_utilization < 0.6,
+            "expected low temporal utilization, got {}",
+            report.efficiency_metrics.resource_utilization
+        );
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|r| matches!(r.category, RecommendationCategory::ResourceRightsizing)),
+            "a resource_utilization below 0.6 must surface the rightsizing recommendation, got: {:?}",
+            report.recommendations.iter().map(|r| &r.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_full_window_coverage_gives_high_resource_utilization() {
+        let tracker = CostTracker::new();
+        tracker
+            .record_cost(
+                "job-full".to_string(),
+                "cpu".to_string(),
+                4.0,
+                Duration::from_secs(3600),
+                BillingModel::PayPerUse,
+                "us-east-1".to_string(),
+                "aws".to_string(),
+                HashMap::new(),
+            )
+            .expect("record_cost failed");
+
+        // A window barely wider than the recorded 1-hour job -> utilization near 1.0.
+        let now = now_secs();
+        let time_range = TimeRange {
+            start: now.saturating_sub(60),
+            end: now + 3600,
+        };
+
+        let report = tracker
+            .generate_cost_report(ReportType::Custom, time_range)
+            .expect("generate_cost_report failed");
+
+        assert!(
+            report.efficiency_metrics.resource_utilization > 0.9,
+            "got {}",
+            report.efficiency_metrics.resource_utilization
+        );
+    }
+
+    #[test]
+    fn test_resource_utilization_clamps_at_one_for_concurrent_entries() {
+        // Three concurrent 1-hour jobs inside a ~1-hour window sum to ~3
+        // raw utilization-hours; this must clamp to 1.0 rather than report
+        // 300% utilization.
+        let tracker = CostTracker::new();
+        for i in 0..3 {
+            tracker
+                .record_cost(
+                    format!("job-concurrent-{i}"),
+                    "cpu".to_string(),
+                    4.0,
+                    Duration::from_secs(3600),
+                    BillingModel::PayPerUse,
+                    "us-east-1".to_string(),
+                    "aws".to_string(),
+                    HashMap::new(),
+                )
+                .expect("record_cost failed");
+        }
+
+        let now = now_secs();
+        let time_range = TimeRange {
+            start: now.saturating_sub(60),
+            end: now + 3600,
+        };
+
+        let report = tracker
+            .generate_cost_report(ReportType::Custom, time_range)
+            .expect("generate_cost_report failed");
+
+        assert!(
+            (report.efficiency_metrics.resource_utilization - 1.0).abs() < 1e-9,
+            "expected clamping to 1.0, got {}",
+            report.efficiency_metrics.resource_utilization
+        );
+    }
+
+    #[test]
+    fn test_idle_cost_percentage_and_efficiency_score_are_honestly_absent() {
+        // This tracker has no signal to measure idle-vs-busy time within a
+        // billed span, so these must stay `None` rather than fabricate a
+        // number, and the recommendation gated on idle_cost_percentage must
+        // never fire.
+        let tracker = CostTracker::new();
+        tracker
+            .record_cost(
+                "job-1".to_string(),
+                "cpu".to_string(),
+                4.0,
+                Duration::from_secs(3600),
+                BillingModel::PayPerUse,
+                "us-east-1".to_string(),
+                "aws".to_string(),
+                HashMap::new(),
+            )
+            .expect("record_cost failed");
+
+        let time_range = TimeRange {
+            start: 0,
+            end: now_secs() + 86400,
+        };
+        let report = tracker
+            .generate_cost_report(ReportType::Custom, time_range)
+            .expect("generate_cost_report failed");
+
+        assert_eq!(report.efficiency_metrics.idle_cost_percentage, None);
+        assert_eq!(report.efficiency_metrics.efficiency_score, None);
+        assert!(
+            !report
+                .recommendations
+                .iter()
+                .any(|r| matches!(r.category, RecommendationCategory::IdleResourceElimination)),
+            "idle-resource-elimination must never fire without a real idle measurement"
+        );
     }
 }

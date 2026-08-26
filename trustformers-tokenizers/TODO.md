@@ -21,7 +21,7 @@ Python bindings.
 
 ## Current Status
 
-**Version:** 0.1.4 | **Date:** 2026-07-02 | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-08-24 (SLoC and the migration-docs correction above refreshed; remainder largely last reviewed 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** — 24 tokenizer types implemented and tested, 0 genuine stub/placeholder implementations
@@ -31,16 +31,16 @@ Python bindings.
 ✅ **HUGGINGFACE `.json` COMPATIBLE** — `TokenizerImpl` wraps the real upstream `tokenizers` crate (re-exported via `trustformers-core`), not a reimplementation
 ✅ **24 TOKENIZER TYPES + MULTIMODAL** — general-purpose, language-specific (Arabic/Chinese/Japanese/Korean/Thai), domain-specific (Chemical/Music/Math/Code/BIO/Multimodal)
 ✅ **ZERO-COPY VOCAB** — memory-mapped vocabulary access (`ZeroCopyTokenizer`, `MmapVocab`, `memmap2`)
-✅ **SIMD ACCELERATION** — AVX2 intrinsics for character classification (x86_64-only; no ARM/NEON path yet)
+✅ **SIMD ACCELERATION** — AVX2 (x86_64) and NEON (aarch64) intrinsics for character classification, with a scalar fallback elsewhere
 ✅ **ASYNC TOKENIZATION** — non-blocking encode/decode via `tokio` (`AsyncTokenizer`); CPU-parallel batches separately via `scirs2-core`
 ✅ **VOCABULARY INTELLIGENCE** — `VocabIntelligenceAnalyzer` (semantic/compression/cross-lingual/domain/evolution analysis + scoring)
-⚠️ **PURE-RUST HYGIENE FOLLOW-UP** — the `hangul = "0.1.3"` dependency has no references anywhere in `src/` (Korean Hangul decomposition uses inline Unicode code-point arithmetic instead); candidate for removal or wiring-in
+✅ **HANGUL DEPENDENCY REMOVED** (verified stale 2026-08-18) — `Cargo.toml` no longer declares `hangul`; Korean Hangul decomposition uses inline Unicode code-point arithmetic (`korean.rs`). This line previously described it as a still-present "candidate for removal"; the removal already landed (see CHANGELOG 0.2.0).
 
 ### Test Metrics
-- **Test Count:** ~500 tests in this crate (workspace-wide: 18,102 passed / 0 failed / 119 skipped — verified 2026-07-01)
-- **Pass Rate:** 100%
-- **Public API Surface:** ~1,339 `pub fn`/`struct`/`enum`/`trait` items
-- **SLoC:** 51,372 (`tokei src/`, 68 files, 2026-07-01)
+- **Test Count:** `cargo nextest run -p trustformers-tokenizers` (2026-08-18, default features) — 620 tests, 619 passed, **1 FAILED**, 0 skipped. Workspace-wide baseline reported to this documentation pass: 20,629 passed / 43 skipped / 0 failed (`cargo nextest run --workspace`, default features) — that baseline predates the one failure below, which was found while writing this file; see root `TODO.md` P0 #1.
+- **Pass Rate:** 99.8% in this crate right now, not 100% — `workspace_hygiene::workspace_dependency_table_has_no_unused_entries` fails: `trustformers-serve` dropped 7 cloud-SDK dependencies with no remaining consumer, and root `Cargo.toml`'s `[workspace.dependencies]` still declares all 7. This crate's test is correctly catching a real, current problem in a manifest this crate does not own; see root `TODO.md` for the fix (delete the 7 lines from root `Cargo.toml`).
+- **Public API Surface:** ~1,341 `pub fn`/`struct`/`enum`/`trait` items (+2 for `NFKCNormalizer`/`NFKDNormalizer`, added 2026-07-09)
+- **SLoC:** 45,324 (`tokei`, whole crate, verified 2026-08-24; the 2026-07-01 figure was `src/` only, 68 files, not directly comparable)
 - **Coverage:** Encoding/decoding, special tokens, edge cases, language-specific, domain-specific
 
 ---
@@ -94,7 +94,9 @@ Python bindings.
 
 - ✅ Byte-level encoding, merge-table lookup (`HashMap`), regex-free byte fallback for unknown characters
 - ✅ `from_files(vocab_path, merges_path)` and `from_roberta_files(vocab_path, merges_path)` loaders
-- ✅ `tokenize_with_offsets` for character-offset tracking
+- ✅ `tokenize_with_offsets` for byte-offset tracking (spans index `text.as_bytes()`, so
+  `&text[start..end]` is the token's source substring; convert with
+  `byte_offsets_to_char_offsets` when a caller needs code-point indices)
 - ✅ Training via `training::BPETrainer`
 
 **Example:**
@@ -139,7 +141,7 @@ let encoding = tokenizer.encode_pair("First sentence.", "Second sentence.")?;
 
 - ✅ Unigram language-model segmentation via Viterbi decoding
 - ✅ `from_model_file(path)` loads a real SentencePiece `.model` file
-- ⚠️ `from_pretrained(model_name_or_path)` **ignores its argument** and always builds a simplified built-in vocabulary — it does not fetch or parse the named model. Use `from_model_file` for real usage.
+- ✅ `from_pretrained(model_name_or_path)` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file and loads it via `from_model_file` on a hit; only falls back to a simplified built-in vocabulary when none of those candidates resolve
 
 **Example:**
 ```rust
@@ -305,7 +307,7 @@ let tokenizer = trainer.train(&texts)?; // -> BPETokenizer
 ### Performance Optimization
 
 - ✅ **Parallel Tokenization** — `ParallelTokenizer`/`BatchTokenizer` parallelize batch encode/decode via `scirs2-core`'s `parallel` feature
-- ✅ **SIMD Acceleration** — AVX2 intrinsics (`std::arch::x86_64`, `#[target_feature(enable = "avx2")]`) for character scanning; **x86_64-only**, no ARM/NEON path
+- ✅ **SIMD Acceleration** — AVX2 (`std::arch::x86_64`) and NEON (`std::arch::aarch64`) intrinsics for character scanning, both `#[target_feature]`-gated with runtime detection; scalar fallback on other architectures
 - ✅ **Zero-Copy Vocabulary Access** — `memmap2`-backed `MmapVocab`/`ZeroCopyTokenizer`
 - ✅ **Async Tokenization** — `AsyncTokenizer` via `tokio` tasks/channels/timeouts (not `scirs2-core` — that crate powers the *parallel* CPU batch path instead)
 - ✅ **Vocabulary Intelligence** — see above
@@ -343,15 +345,14 @@ Reference docs live under `docs/migration/`:
 - ✅ `docs/examples.md`
 - ✅ `docs/custom-tokenizer-tutorial.md`
 - ✅ `docs/ml-framework-integration.md`
-- ✅ `docs/migration/` (6 guides, see above)
+- ⚠️ `docs/migration/` (6 guides, see above) — **corrected 2026-08-24**: this checkmark previously implied the whole set was done/accurate. It isn't: `tiktoken-migration.md` was found to describe ~30 methods/types that don't exist on the real `TiktokenTokenizer` (batching, caching config, chat templating, cost estimation, a whole Python-bindings section for a tokenizer with no Python binding, and more) and has been rewritten from the real source this pass. The other five guides plus `migration/README.md` carry smaller amounts of the same problem (a same-pattern grep found roughly 12/9/2/2/0/1 hits respectively) and now each carry a dated accuracy banner rather than a full rewrite — see the item below, which already flagged the performance-table half of this but not the API-fabrication half.
 - ✅ Rustdoc for public APIs (0 rustdoc warnings workspace-wide, verified 2026-07-01)
 - [~] Write tokenizer-selection, performance-tuning, and troubleshooting guides (planned 2026-07-05)
   - Goal: one combined deliverable (confirmed not 3 separate asks — TODO.md names all 3 in one line at two locations).
   - Design: 3 new files under docs/. Follow docs/migration/README.md's STRUCTURE (tables, checklists, troubleshooting section) but NOT its content practice — that file was found to contain fabricated benchmark numbers and references to APIs that don't exist anywhere in src/. Every code sample in the new docs must be grep-verified against a real `pub fn` signature before inclusion. Use README.md's honest style as the tone template instead.
   - Files: new docs/tokenizer-selection-guide.md, docs/performance-tuning-guide.md, docs/troubleshooting-guide.md.
   - Tests: grep every method name used in the new docs against `grep -rn "pub fn <name>" src/` before finalizing.
-  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it.
-- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
+  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it. (2026-08-18: the invented-performance-table half of that pattern was found and fixed. 2026-08-24: a second, larger half of the same pattern was found — fabricated API methods/types, not just numbers — and `tiktoken-migration.md` was rewritten to fix it; the other five guides got dated accuracy banners instead of a full rewrite, see "Documentation" above. The 3 new guide files below still don't exist; this remains genuinely open.)
 
 ---
 
@@ -359,7 +360,7 @@ Reference docs live under `docs/migration/`:
 
 ### Test Coverage
 
-- ✅ **~500 unit tests** in this crate, 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped, 2026-07-01)
+- **620 tests** in this crate as of 2026-08-18 (`cargo nextest run -p trustformers-tokenizers`), 619 passing — **not** 100%: see "Test Metrics" above for the 1 currently-failing hygiene test, which is a real, current finding, not flaky.
 - ✅ **Encoding/Decoding Correctness** — round-trip verification
 - ✅ **Special Token Handling** — insertion/preservation checks
 - ✅ **Edge Cases** — empty strings, very long texts, Unicode
@@ -373,12 +374,12 @@ Reference docs live under `docs/migration/`:
 ## Known Limitations
 
 - `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` only resolve local cache paths / a small built-in vocabulary set — neither downloads from the Hugging Face Hub
-- `SentencePieceTokenizer::from_pretrained` ignores its argument and always returns a simplified built-in vocabulary — use `from_model_file` for real `.model` files
+- `SentencePieceTokenizer::from_pretrained` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file before falling back to a simplified built-in vocabulary — see the SentencePiece section above
 - TikToken ships only `cl100k_base`/`r50k_base` as named presets; other encodings need `from_tiktoken_file`
-- SIMD acceleration is AVX2/x86_64-only (no ARM/NEON path)
-- `gpu`, `jax`, `tensorflow`, `pytorch`, `onnx` features are pure-Rust detection/data-structure/metadata layers — not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution (each adds zero extra crate dependencies)
-- NFKC/NFKD normalizers are not yet exposed as dedicated `Normalizer` types (only NFC/NFD, plus whitespace/accent/punctuation/digit/case normalizers)
-- The `hangul = "0.1.3"` dependency has no references in `src/`; Korean Hangul decomposition uses inline Unicode arithmetic instead
+- SIMD acceleration covers AVX2 (x86_64) and NEON (aarch64); other architectures use the scalar fallback
+- `jax`, `tensorflow`, `pytorch` features are pure-Rust detection/data-structure/metadata layers — not real JAX/TensorFlow/PyTorch execution (each adds zero extra crate dependencies)
+- `gpu` feature: no real CUDA/ROCm/OpenCL/Vulkan kernel dispatch is compiled in (this crate is pure Rust with no unsafe FFI GPU driver bindings) — `GpuTokenizer::tokenize_batch` always executes via the real wrapped `Tokenizer`, sequentially or chunked across CPU cores in parallel (`scirs2_core::parallel_ops`) depending on `GpuTokenizerConfig::enable_gpu`; set `require_real_gpu: true` to get a hard `BackendUnavailable` error instead of the CPU fallback
+- `onnx` feature: no real ONNX protobuf format or ONNX Runtime session — `OnnxTokenizerExporter` writes (and `OnnxTokenizerRuntime` reads back) this crate's own JSON interchange format, structured to mirror ONNX's graph/tensor model; `OnnxTokenizerRuntime::tokenize` performs real greedy longest-match tokenization against the real vocabulary recovered from that file (not hash-derived), and rejects a genuine binary `.onnx` protobuf file with a structured error rather than fabricating a vocabulary for it
 - `AutoTokenizer` is Python-only; Rust callers use `TokenizerWrapper` (enum dispatch) or a concrete tokenizer type directly
 - This crate's `pyproject.toml` still targets a `maturin` extension-module build, but `Cargo.toml` no longer declares a `cdylib` target (moved to `trustformers-py`) — `maturin build` here will not currently produce a working native module
 - No `python/tests/` directory exists yet
@@ -400,25 +401,20 @@ Reference docs live under `docs/migration/`:
   - Files: trustformers/src/automodel.rs (NOT a file in this crate).
   - Tests: cache-hit test asserting no network call when file already exists; existing offline tests must keep passing.
   - Risk: none new — copying an already-proven 130-line-away pattern in the same file.
-- [~] Fix SentencePieceTokenizer::from_pretrained ignoring its argument (planned 2026-07-05)
+- [x] Fix SentencePieceTokenizer::from_pretrained ignoring its argument (planned 2026-07-05) — **DONE (2026-07-09):** `from_pretrained` now probes `{path}/spiece.model`, `{path}.model`, and the bare path (delegating to `from_model_file` on a hit) before falling back to the fabricated built-in vocabulary; verified via `test_from_pretrained_loads_real_fixture_not_hardcoded_fallback`, which writes a real fixture `.model` file under `std::env::temp_dir()` and asserts the fixture's tokens load correctly while the fallback's T5 sentinel tokens do not appear.
   - Goal: the argument is no longer ignored (currently always returns the same hardcoded fake T5 vocab regardless of input).
   - Design: probe candidate paths built from the argument, delegate to the existing, already-correct from_model_file() on a hit; keep today's fabricated-vocab body only as the final fallback arm, now actually gated on the argument.
   - Files: trustformers-tokenizers/src/sentencepiece.rs only.
   - Tests: the existing tests cannot detect this bug (both call from_pretrained with the same argument) — add a new test with a distinct fixture file via std::env::temp_dir().
   - Risk: interacts with the Hub-download item above — out of scope to design against it now.
 - [ ] Enhanced multilingual support (better handling of non-Latin scripts)
-- [ ] ONNX export for tokenizers (export tokenizer to ONNX for cross-framework compatibility)
-  - **Note:** Use the `oxionnx` crate per COOLJAPAN policy; current `onnx` feature only produces model/graph metadata types, no ONNX Runtime execution
+- [ ] Real binary ONNX protobuf export/import for tokenizers (export tokenizer to a file an actual ONNX runtime can load, for cross-framework compatibility)
+  - **Note:** Use the `oxionnx` crate per COOLJAPAN policy. `OnnxTokenizerExporter`/`OnnxTokenizerRuntime` (src/onnx.rs) currently read and write this crate's own JSON interchange format instead of real ONNX protobuf bytes -- `OnnxTokenizerRuntime::tokenize` does perform real greedy longest-match tokenization against the real vocabulary recovered from that JSON file (not a stub), it just is not talking to an actual ONNX Runtime session or a real `.onnx` file.
 
 ### Performance
-- [~] Port 4 AVX2 SIMD functions to ARM/NEON (planned 2026-07-05)
-  - Goal: classify_ascii_chars, find_whitespace_boundaries, validate_utf8, to_lowercase_ascii get real NEON siblings — this dev machine is Apple Silicon (ARM64), natively testable.
-  - Design: extend the existing 2-way (x86_64/scalar) #[cfg] dispatch to 3-way with #[cfg(target_arch = "aarch64")] variants. Correctness trap: _mm256_movemask_epi8 has no 1-instruction NEON equivalent — needs the standard bit-position-multiply + pairwise-narrow emulation sequence. Bonus fix in the same pass: classify_ascii_chars_avx2 is dead code dressed as SIMD today (loads into a variable it never reads, does a plain scalar loop) — port the intended vectorized behavior, not the fake one.
-  - Files: trustformers-tokenizers/src/simd.rs only.
-  - Tests: add explicit NEON-vs-scalar byte-parity tests at chunk-boundary edge cases (16-byte NEON vs 32-byte AVX2 chunking).
-  - Risk: the movemask emulation is the main correctness risk — verify with parity tests, not by inspection alone.
-- [ ] Real GPU kernel dispatch for the `gpu` feature (currently device-detection + CPU-executed fallback only)
-  - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)?
+- [x] Port 4 AVX2 SIMD functions to ARM/NEON (planned 2026-07-05) — **DONE (2026-08-17):** `classify_ascii_chars`, `find_whitespace_boundaries`, `validate_utf8_fast`, `to_lowercase_ascii` all got real `#[cfg(target_arch = "aarch64")]` NEON siblings in `src/simd.rs`, dispatched 3-way (x86_64 AVX2 / aarch64 NEON / scalar) with `std::arch::is_aarch64_feature_detected!("neon")` mirroring the existing `is_x86_feature_detected!("avx2")` check. `find_whitespace_boundaries_neon` avoids needing a `_mm256_movemask_epi8`-style emulation entirely by storing the NEON comparison result to a 16-byte array and scanning it directly for transitions (the comparison itself, the expensive part, is still real NEON). Also fixed in the same pass, both found by exhaustive `*_parity_with_scalar_for_every_byte` tests (all 256 byte values) added for classify/whitespace/lowercase: (1) `classify_ascii_chars_avx2` was dead code dressed as SIMD — it loaded a chunk into an AVX2 register via `_mm256_loadu_si256` and then never read it, doing a plain scalar per-byte lookup-table loop instead; replaced with real vectorized ASCII range comparisons (falling back to the scalar table only for chunks containing a non-ASCII byte). (2) `find_whitespace_boundaries_avx2` only checked space/tab/LF/CR, silently disagreeing with the scalar reference (built from real `char::is_whitespace()`) for VT (0x0B), FF (0x0C), NEL (0x85), and NBSP (0xA0) — both bugs affected the pre-existing AVX2 path too, not just the new NEON one. Verified for real on this Apple Silicon dev machine (native NEON execution, all parity tests passing) and cross-compile-checked for `x86_64-apple-darwin`; the corrected AVX2 intrinic patterns were additionally spot-verified by extracting the exact range-comparison sequence into a standalone program and running it under Rosetta 2 with `-C target-feature=+avx2` forced (`is_x86_feature_detected!` reports `false` under Rosetta, so the crate's own runtime-dispatched tests exercise the scalar fallback there, not AVX2).
+- [ ] Real GPU kernel dispatch for the `gpu` feature (currently: best-effort driver-presence detection only, informational; `GpuTokenizer::tokenize_batch` always executes via the real wrapped `Tokenizer`, parallelized across CPU cores or sequential per `enable_gpu` — see `src/gpu_tokenization.rs` module docs. An earlier version of this module simulated GPU kernel dispatch entirely — fake memory pointers, fake kernel function pointers, fake per-vendor "compute capability" numbers — and its batch tokenization path returned the hardcoded sequence `[1, 2, .., 10]` for every input regardless of content; that whole fake pipeline has been removed.)
+  - **Refinement needed:** which ops to GPU-accelerate (vocab lookup? regex? both)? Target throughput (tokens/sec)? Given the pure-Rust-without-unsafe-FFI constraint, a real implementation likely means a `wgpu` compute-shader backend (feature-gated) rather than direct CUDA/ROCm driver bindings.
 - [~] Implement real incremental/streaming tokenization (planned 2026-07-05)
   - Goal: tokenize arbitrary raw byte chunks incrementally — the existing streaming.rs doesn't solve this (buffers whole lines/whole text, not arbitrary byte boundaries).
   - Design: add IncrementalTokenizer<T: Tokenizer> with a pending: Vec<u8> field and push_bytes() using std::str::from_utf8's error_len()/valid_up_to() to distinguish "genuinely invalid" from "incomplete multi-byte tail"; plus finish() for real stream end.
@@ -429,27 +425,25 @@ Reference docs live under `docs/migration/`:
 
 ### Features
 - [ ] Custom normalizers / pre-tokenizers plugin API for user-supplied normalizers
-- [~] Add NFKC/NFKD normalizers (planned 2026-07-05)
+- [x] Add NFKC/NFKD normalizers (planned 2026-07-05) — **DONE (2026-07-09):** `NFKCNormalizer`/`NFKDNormalizer` added to `src/normalizer.rs` via `.nfkc()`/`.nfkd()` on the already-imported `unicode_normalization::UnicodeNormalization` trait; tests cover U+00B2 (SUPERSCRIPT TWO) and U+FB01 (LATIN SMALL LIGATURE FI), both of which fold under NFKC/NFKD but are left untouched by NFC/NFD, proving the K-variants do genuinely different work rather than aliasing the plain variants.
   - Goal/Design: add NFKCNormalizer/NFKDNormalizer via .nfkc()/.nfkd() — sibling methods on the exact trait already imported for NFC/NFD. Zero new dependency; sentencepiece.rs already calls .nfkc() internally, proving it works here.
   - Files: trustformers-tokenizers/src/normalizer.rs only.
   - Tests: assert on a real compatibility-decomposition case that changes under NFKC/NFKD but is a no-op under plain NFC/NFD.
   - Risk: none — lowest-risk item in the whole batch.
-- [~] Build tokenizer alignment visualizer (planned 2026-07-05)
-  - Goal: visualize token<->source-text alignment using real byte offsets (existing TokenVisualizer hardcodes None because it's generic against a trait with no offset method, even though real offsets already exist elsewhere).
-  - Design: build a new visualizer consuming the concrete offset-bearing types directly (BPETokenizer::tokenize_with_offsets, TokenizerImpl::encode_with_offsets) rather than widening the generic Tokenizer trait (too high blast radius). Copy (do not depend on) trustformers-debug's ~40-line HTML/JSON/ASCII three-format pattern.
-  - Files: trustformers-tokenizers/src/visualization.rs, src/alignment.rs.
-  - Tests: invariant test that computed byte ranges exactly tile 0..text.len() with no gaps/overlaps.
-  - Risk: low — confirmed no dependency cycle risk; just don't add trustformers-debug as a dependency, copy the small pattern.
-- [~] Delete unused hangul dependency (planned 2026-07-05)
-  - Goal/Design: remove hangul = "0.1.3" from Cargo.toml — confirmed zero usage anywhere (korean.rs hand-rolls the real Unicode arithmetic); also confirmed the crate wouldn't even fully solve the problem if wired in (decomposition-only, no composition function).
-  - Files: trustformers-tokenizers/Cargo.toml; drop orphaned mentions in TODO.md/README.md.
-  - Tests: cargo tree -i hangul reports not-found after removal.
-  - Risk: none — highest-confidence item in the batch.
+- [ ] Build tokenizer alignment visualizer (planned 2026-07-05; **premise, design and file list corrected 2026-08-24** — the entry below described a tree that no longer exists)
+  - Still true: `TokenVisualizer` shows no alignment. `src/visualization.rs:154-155` hardcodes `start_char: None` / `end_char: None`, with the comment "Would need offset mapping from tokenizer".
+  - **Stale, corrected**: that comment's reason is no longer the reason. `extract_token_info` already receives a `&TokenizedInput`, and `TokenizedInput::offset_mapping` is now populated with real **byte** spans by `WordPieceTokenizer` and `BPETokenizer` (single sequences and pairs), by the protobuf / messagepack / python-bridge / sequence-packing paths, and end-to-end through `src/offsets.rs` (725 lines: `AlignmentBuilder`, `ByteSpan`, `byte_offsets_to_char_offsets`, `char_offsets_to_byte_offsets`, all re-exported from `lib.rs`). The offsets are in the struct the visualizer is handed — no trait widening and no separate concrete-type visualizer is needed.
+  - **Stale, corrected**: the previous entry listed `src/alignment.rs` as a file to write. It exists (738 lines, `Word` / `TokenAlignment` / `AlignmentEngine`, mounted at `lib.rs:17` and re-exported at `lib.rs:91`), and it reconstructs alignment by re-scanning the text with `char_indices()` rather than by reading the offsets the tokenizer already produced. Whether it should now be rebuilt on `offset_mapping`, or left as the no-offsets fallback for tokenizer families that still return `None`, is an open design question — not a file to create.
+  - Remaining work: read `tokenized.offset_mapping` in `extract_token_info` and fill `start_char`/`end_char` from it (naming note: those two fields are named for *characters* but every producer emits bytes — either convert with `byte_offsets_to_char_offsets` or rename the fields, and say which in the doc), leaving `None` only when the tokenizer genuinely supplied no mapping. Then decide `alignment.rs`'s relationship to `offsets.rs`.
+  - Files: `trustformers-tokenizers/src/visualization.rs` (and possibly `src/alignment.rs`, see above).
+  - Tests: byte ranges of the content tokens tile the source with no gaps or overlaps; specials stay `None`; a tokenizer family that returns no mapping still renders.
+  - Risk: low. No new dependency; don't add `trustformers-debug`, copy its small three-format pattern if a renderer is wanted.
+- [x] Delete unused hangul dependency — **done, verified 2026-08-18**: `rg hangul trustformers-tokenizers/Cargo.toml` finds nothing; `cargo tree -i hangul` would report not-found. This item was still open in this file despite the removal already having landed (CHANGELOG 0.2.0).
 - [ ] Automatic tokenizer repair/optimization
 
 ### Housekeeping
 - [ ] Add a `python/tests/` suite (referenced in older docs but never created)
-- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
+- This guide-writing item was previously also listed here as a third copy; collapsed into the single entry above (search "tokenizer-selection" in this file) rather than tracked three times, per the 2026-08-18 documentation pass.
 
 ---
 
@@ -457,7 +451,7 @@ Reference docs live under `docs/migration/`:
 
 ### Code Standards
 - **Use trustformers-core/scirs2-core abstractions only** (no external deps directly — enforced via `trustformers-core::tokenizer_backend` for the upstream `tokenizers` crate)
-- **File size limit:** <2000 lines per file — currently satisfied; largest file is `src/gpu_tokenization.rs` at 1,616 lines (verified 2026-07-01)
+- **File size limit:** <2000 lines per file — currently satisfied; largest file is `src/advanced_vocab_intelligence/avi_analyzer.rs` at 1,539 lines (`wc -l`, verified 2026-08-18; `gpu_tokenization.rs`, previously cited as largest at 1,616 lines, is now 865 lines)
 - **Error handling:** Use `Result<T, TrustformersError>`
 - **Testing:** Comprehensive test coverage required
 - **Naming:** snake_case for all identifiers
@@ -481,9 +475,9 @@ cargo clippy -p trustformers-tokenizers --all-features -- -D warnings
 
 ---
 
-**Last Updated:** 2026-07-02
-**Version:** 0.1.4
+**Last Updated:** 2026-07-09
+**Version:** 0.2.1
 **Status:** Stable
-**Test Coverage:** ~500 tests in this crate, 100% pass rate (workspace: 18,102 passed / 0 failed / 119 skipped)
-**Public API:** ~1,339 items
-**SLoC:** 51,372
+**Test Coverage:** 620 tests in this crate as of 2026-08-18, 619 passing (see "Test Metrics" above for the 1 current, real failure — a hygiene gate catching an orphaned root-manifest entry, not a bug in this crate)
+**Public API:** ~1,341 items (not re-counted this pass)
+**SLoC:** 45,325 (`tokei`, 2026-08-18)

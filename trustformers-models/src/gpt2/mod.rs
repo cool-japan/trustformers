@@ -117,6 +117,11 @@ pub mod tasks;
 #[cfg(test)]
 mod tests;
 
+/// Metal GPU tests that really execute on the GPU (see the module docs for why that
+/// distinction needed its own file).
+#[cfg(all(test, target_os = "macos", feature = "metal"))]
+mod metal_tests;
+
 pub use config::Gpt2Config;
 pub use generation::GenerativeModel;
 pub use model::{Gpt2LMHeadModel, Gpt2Model};

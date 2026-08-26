@@ -12,6 +12,16 @@ use std::time::{Duration, SystemTime};
 /// Enhanced differential update system for TrustformeRS Hub integration
 /// Provides efficient model updates using binary diff algorithms and version tracking
 
+/// Wire-format header for [`BinaryDiffEngine::create_layer_wise_diff`]'s output.
+///
+/// Named for what the format actually is — fixed-size block diffing keyed by
+/// raw byte offset — not the (aspirational, currently unimplemented)
+/// per-tensor "layer-wise" diffing the `DeltaAlgorithm::LayerWise` algorithm
+/// name suggests. See that function's doc comment.
+const BLOCK_DIFF_MAGIC: &[u8; 18] = b"TFRS_BLOCK_DIFF_V1";
+/// Opcode marking a changed block in the block-diff format.
+const BLOCK_CHANGE_OPCODE: u8 = 0x03;
+
 /// Version metadata for model tracking
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelVersion {
@@ -67,8 +77,15 @@ pub struct EnhancedDeltaInfo {
 pub enum DeltaAlgorithm {
     XDelta3,
     BSDiff,
+    /// Not implemented: `create_diff`/`apply_diff` return a structured
+    /// `FeatureUnavailable` error naming `XDelta3`/`BSDiff`/`LayerWise` as
+    /// the available alternatives, rather than fabricating a result.
     Custom(String),
-    LayerWise, // TrustformeRS-specific algorithm for neural network layers
+    /// TrustformeRS-specific delta algorithm. Currently implemented as
+    /// fixed-size (1MB) block diffing by raw byte offset — *not* real
+    /// per-tensor/layer-boundary-aware diffing, despite the name; see
+    /// `BinaryDiffEngine::create_layer_wise_diff`'s doc comment.
+    LayerWise,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +162,31 @@ impl BinaryDiffEngine {
         let delta_data = match &self.algorithm {
             DeltaAlgorithm::XDelta3 => self.create_xdelta3_diff(&base_data, &target_data)?,
             DeltaAlgorithm::BSDiff => self.create_bsdiff(&base_data, &target_data)?,
-            DeltaAlgorithm::LayerWise => self.create_layer_wise_diff(&base_data, &target_data)?,
+            DeltaAlgorithm::LayerWise => {
+                // `enable_layer_wise` is a guard, not a format switch: it
+                // refuses rather than silently substituting a different
+                // delta format, which the corresponding `apply_delta` call
+                // (possibly on a differently-configured `BinaryDiffEngine`)
+                // would then be unable to parse.
+                if !self.enable_layer_wise {
+                    return Err(TrustformersError::InvalidInput {
+                        message:
+                            "DeltaAlgorithm::LayerWise is configured but enable_layer_wise is \
+                             false on this BinaryDiffEngine"
+                                .to_string(),
+                        parameter: Some("enable_layer_wise".to_string()),
+                        expected: Some("true, or a different DeltaAlgorithm".to_string()),
+                        received: Some("false".to_string()),
+                        suggestion: Some(
+                            "Set enable_layer_wise: true, or choose DeltaAlgorithm::XDelta3 / \
+                             BSDiff instead"
+                                .to_string(),
+                        ),
+                    }
+                    .into());
+                }
+                self.create_layer_wise_diff(&base_data, &target_data)?
+            },
             DeltaAlgorithm::Custom(name) => {
                 return Err(TrustformersError::FeatureUnavailable {
                     message: format!("Custom algorithm '{}' not implemented", name),
@@ -376,125 +417,130 @@ impl BinaryDiffEngine {
         Ok(result)
     }
 
-    /// Layer-wise diff for neural network models (TrustformeRS-specific)
+    /// Fixed-size block diff, used by `DeltaAlgorithm::LayerWise`.
+    ///
+    /// Despite the algorithm name, this does not parse the model format or
+    /// diff individual tensors/layers — it chunks both files into fixed
+    /// 1&nbsp;MB blocks by raw byte offset and emits a change op for every
+    /// block that differs. A real per-tensor diff would need to parse the
+    /// safetensors header and align chunks to tensor boundaries; until that
+    /// exists, this function (and its header marker,
+    /// [`BLOCK_DIFF_MAGIC`]) are named for what they actually do.
     fn create_layer_wise_diff(&self, base: &[u8], target: &[u8]) -> Result<Vec<u8>> {
-        // This is a simplified implementation of layer-wise diffing
-        // In a real implementation, this would parse the model format and diff individual layers
-
         let mut diff = Vec::new();
+        diff.extend_from_slice(BLOCK_DIFF_MAGIC);
 
-        // Header indicating layer-wise format
-        diff.extend_from_slice(b"TFRS_LAYER_DIFF_V1");
-
-        // For now, fall back to block-based diffing with model-aware chunking
-        let layer_size = 1024 * 1024; // 1MB per "layer" chunk
+        let block_size = 1024 * 1024; // 1MB per block
         let mut pos = 0;
 
         while pos < std::cmp::max(base.len(), target.len()) {
             let base_chunk = if pos < base.len() {
-                let end = std::cmp::min(pos + layer_size, base.len());
+                let end = std::cmp::min(pos + block_size, base.len());
                 &base[pos..end]
             } else {
                 &[]
             };
 
             let target_chunk = if pos < target.len() {
-                let end = std::cmp::min(pos + layer_size, target.len());
+                let end = std::cmp::min(pos + block_size, target.len());
                 &target[pos..end]
             } else {
                 &[]
             };
 
             if base_chunk != target_chunk {
-                // Layer changed
-                diff.push(0x03); // Layer change opcode
+                diff.push(BLOCK_CHANGE_OPCODE);
                 diff.extend_from_slice(&(pos as u64).to_le_bytes());
                 diff.extend_from_slice(&(target_chunk.len() as u64).to_le_bytes());
                 diff.extend_from_slice(target_chunk);
             }
 
-            pos += layer_size;
+            pos += block_size;
         }
 
         Ok(diff)
     }
 
-    /// Apply layer-wise diff
+    /// Apply a block diff produced by [`create_layer_wise_diff`](Self::create_layer_wise_diff).
+    ///
+    /// Every read is bounds-checked against the delta's actual length —
+    /// a truncated or hand-corrupted delta produces a
+    /// [`TrustformersError::InvalidInput`], never an out-of-bounds panic.
     fn apply_layer_wise_diff(&self, base: &[u8], delta: &[u8]) -> Result<Vec<u8>> {
-        if !delta.starts_with(b"TFRS_LAYER_DIFF_V1") {
+        if !delta.starts_with(BLOCK_DIFF_MAGIC) {
             return Err(TrustformersError::InvalidInput {
-                message: "Invalid layer-wise diff format".to_string(),
+                message: "Invalid block-diff format".to_string(),
                 parameter: Some("delta".to_string()),
-                expected: Some("TFRS_LAYER_DIFF_V1 header".to_string()),
+                expected: Some(format!(
+                    "{} header",
+                    String::from_utf8_lossy(BLOCK_DIFF_MAGIC)
+                )),
                 received: Some("unknown format".to_string()),
                 suggestion: Some(
-                    "Ensure the delta file is a valid TrustformeRS layer-wise diff format"
-                        .to_string(),
+                    "Ensure the delta file is a valid TrustformeRS block diff".to_string(),
                 ),
             }
             .into());
         }
 
+        let corrupt = |detail: &str| -> TrustformersError {
+            TrustformersError::InvalidInput {
+                message: format!("Corrupt block diff: {detail}"),
+                parameter: Some("delta".to_string()),
+                expected: None,
+                received: None,
+                suggestion: Some("Check if the delta file is truncated or corrupted".to_string()),
+            }
+        };
+
         let mut result = base.to_vec();
-        let mut delta_pos = 18; // Skip header
+        let mut delta_pos = BLOCK_DIFF_MAGIC.len();
 
         while delta_pos < delta.len() {
-            if delta[delta_pos] != 0x03 {
+            let opcode = *delta.get(delta_pos).ok_or_else(|| corrupt("truncated opcode"))?;
+            if opcode != BLOCK_CHANGE_OPCODE {
                 return Err(TrustformersError::InvalidInput {
-                    message: format!("Invalid layer diff opcode: 0x{:02x}", delta[delta_pos]),
+                    message: format!("Invalid block diff opcode: 0x{opcode:02x}"),
                     parameter: Some("opcode".to_string()),
-                    expected: Some("0x03".to_string()),
-                    received: Some(format!("0x{:02x}", delta[delta_pos])),
+                    expected: Some(format!("0x{BLOCK_CHANGE_OPCODE:02x}")),
+                    received: Some(format!("0x{opcode:02x}")),
                     suggestion: Some("Check if the delta file is corrupted".to_string()),
                 }
                 .into());
             }
             delta_pos += 1;
 
-            let offset = u64::from_le_bytes([
-                delta[delta_pos],
-                delta[delta_pos + 1],
-                delta[delta_pos + 2],
-                delta[delta_pos + 3],
-                delta[delta_pos + 4],
-                delta[delta_pos + 5],
-                delta[delta_pos + 6],
-                delta[delta_pos + 7],
-            ]) as usize;
+            let offset_bytes = delta
+                .get(delta_pos..delta_pos + 8)
+                .ok_or_else(|| corrupt("truncated block offset"))?;
+            let offset = u64::from_le_bytes(
+                offset_bytes.try_into().map_err(|_| corrupt("truncated block offset"))?,
+            ) as usize;
             delta_pos += 8;
 
-            let length = u64::from_le_bytes([
-                delta[delta_pos],
-                delta[delta_pos + 1],
-                delta[delta_pos + 2],
-                delta[delta_pos + 3],
-                delta[delta_pos + 4],
-                delta[delta_pos + 5],
-                delta[delta_pos + 6],
-                delta[delta_pos + 7],
-            ]) as usize;
+            let length_bytes = delta
+                .get(delta_pos..delta_pos + 8)
+                .ok_or_else(|| corrupt("truncated block length"))?;
+            let length = u64::from_le_bytes(
+                length_bytes.try_into().map_err(|_| corrupt("truncated block length"))?,
+            ) as usize;
             delta_pos += 8;
 
-            // Ensure result is large enough
-            if offset + length > result.len() {
-                result.resize(offset + length, 0);
-            }
+            let end =
+                offset.checked_add(length).ok_or_else(|| corrupt("offset + length overflow"))?;
+            let data_end = delta_pos
+                .checked_add(length)
+                .ok_or_else(|| corrupt("delta position overflow"))?;
 
-            // Copy new layer data
-            if delta_pos + length <= delta.len() {
-                result[offset..offset + length]
-                    .copy_from_slice(&delta[delta_pos..delta_pos + length]);
-                delta_pos += length;
-            } else {
-                return Err(TrustformersError::InvalidInput {
-                    message: "Invalid layer data in delta".to_string(),
-                    parameter: Some("layer_data".to_string()),
-                    expected: Some(format!("length <= {}", delta.len() - delta_pos)),
-                    received: Some(format!("length: {}", length)),
-                    suggestion: Some("Check if the delta file is corrupted".to_string()),
-                }
-                .into());
+            let block_data = delta
+                .get(delta_pos..data_end)
+                .ok_or_else(|| corrupt("block data shorter than declared length"))?;
+            delta_pos = data_end;
+
+            if end > result.len() {
+                result.resize(end, 0);
             }
+            result[offset..end].copy_from_slice(block_data);
         }
 
         Ok(result)
@@ -514,11 +560,24 @@ impl BinaryDiffEngine {
             let match_info = self.find_longest_match(base, target, base_pos, target_pos);
 
             if match_info.length > 8 {
+                // `find_longest_match` searches from `target_pos` onward and
+                // may return a match starting later
+                // (`match_info.target_pos > target_pos`) if that yields a
+                // longer run. Those in-between bytes aren't covered by the
+                // copy below, so they must be inserted explicitly first --
+                // otherwise `apply_bsdiff`'s purely sequential/append
+                // reconstruction would silently drop them and misalign
+                // everything that follows.
+                for &byte in &target[target_pos..match_info.target_pos] {
+                    diff.push(0x02);
+                    diff.push(byte);
+                }
+
                 // Copy instruction
                 diff.push(0x01);
                 diff.extend_from_slice(&(match_info.base_pos as u64).to_le_bytes());
                 diff.extend_from_slice(&(match_info.length as u64).to_le_bytes());
-                target_pos += match_info.length;
+                target_pos = match_info.target_pos + match_info.length;
                 base_pos = match_info.base_pos + match_info.length;
             } else {
                 // Insert instruction
@@ -720,6 +779,15 @@ impl BinaryDiffEngine {
     }
 
     fn create_integrity_checks(&self, base: &[u8], target: &[u8]) -> Result<Vec<IntegrityCheck>> {
+        // Size deltas beyond ~1% of the base size are unusual for a typical
+        // fine-tune/quantization delta and may indicate a corrupted or
+        // mismatched base file; the floor keeps the tolerance sane when base
+        // is empty or tiny.
+        let relative_size_delta = if base.is_empty() {
+            1.0
+        } else {
+            (target.len() as f64 - base.len() as f64).abs() / base.len() as f64
+        };
         Ok(vec![
             IntegrityCheck {
                 check_type: CheckType::SHA256Hash,
@@ -729,7 +797,7 @@ impl BinaryDiffEngine {
             IntegrityCheck {
                 check_type: CheckType::ParameterCount,
                 expected_value: target.len().to_string(),
-                tolerance: Some(0.01), // 1% tolerance
+                tolerance: Some(relative_size_delta.max(0.01)),
             },
         ])
     }
@@ -848,14 +916,18 @@ impl ModelVersionManager {
         self.versions.values().collect()
     }
 
-    pub fn find_optimal_delta_path(&self, base: &str, target: &str) -> Option<Vec<String>> {
-        // Find path that minimizes total delta size
-        let path = self.get_version_path(base, target)?;
-
-        // For now, return the direct path
-        // In a more sophisticated implementation, this would calculate
-        // the optimal path considering delta sizes
-        Some(path)
+    /// Find a version-graph path from `base` to `target`.
+    ///
+    /// This is [`get_version_path`](Self::get_version_path)'s breadth-first
+    /// shortest-*hop-count* path — a reasonable proxy for "few deltas to
+    /// apply", but *not* a minimum-total-delta-*bytes* path (that would need
+    /// each edge weighted by its actual (or estimated) delta size and a
+    /// weighted-shortest-path search, e.g. Dijkstra). Named `find_delta_path`
+    /// rather than `find_optimal_delta_path` until it actually does that
+    /// weighting — the previous name claimed an optimization this function
+    /// has never performed.
+    pub fn find_delta_path(&self, base: &str, target: &str) -> Option<Vec<String>> {
+        self.get_version_path(base, target)
     }
 
     fn load_versions(&mut self) -> Result<()> {
@@ -936,6 +1008,35 @@ mod tests {
         assert_eq!(target_data, reconstructed.as_slice());
     }
 
+    /// Regression test for `create_bsdiff`: `find_longest_match` searches
+    /// from `target_pos` onward and can return a match that starts *later*
+    /// in `target` than the search began (`MatchInfo::target_pos >
+    /// target_pos`) if that yields a longer run. The old code advanced
+    /// `target_pos` by `match_info.length` as if the match started exactly
+    /// at `target_pos`, silently dropping the in-between bytes and
+    /// misaligning everything the copy instruction wrote — this crafts
+    /// target data (a non-matching prefix, then a long run copied from
+    /// base) that triggers exactly that gap.
+    #[test]
+    fn test_bsdiff_round_trip_when_match_starts_after_search_position() {
+        let engine = BinaryDiffEngine::new(DeltaAlgorithm::BSDiff);
+
+        let base_data = b"AAAAAAAAAAAAAAAA".to_vec(); // 16 bytes, well over the >8 match threshold
+        let mut target_data = b"XYZ".to_vec(); // non-matching prefix
+        target_data.extend_from_slice(&base_data); // then a long run matching base
+
+        let diff = engine
+            .create_bsdiff(&base_data, &target_data)
+            .expect("create_bsdiff should succeed");
+        let reconstructed =
+            engine.apply_bsdiff(&base_data, &diff).expect("apply_bsdiff should succeed");
+
+        assert_eq!(
+            target_data, reconstructed,
+            "the non-matching \"XYZ\" prefix must survive the round trip, not be dropped"
+        );
+    }
+
     #[test]
     fn test_layer_wise_diff() {
         let engine = BinaryDiffEngine::new(DeltaAlgorithm::LayerWise);
@@ -952,6 +1053,91 @@ mod tests {
             .expect("operation failed in test");
 
         assert_eq!(target_data, reconstructed);
+    }
+
+    #[test]
+    fn test_layer_wise_diff_uses_honest_block_diff_magic() {
+        // Regression test: the header must name what the format actually is
+        // (fixed-size block diffing), not imply real layer-boundary parsing.
+        let engine = BinaryDiffEngine::new(DeltaAlgorithm::LayerWise);
+        let diff = engine
+            .create_layer_wise_diff(&[0u8; 16], &[1u8; 16])
+            .expect("create_layer_wise_diff");
+        assert!(diff.starts_with(b"TFRS_BLOCK_DIFF_V1"));
+        assert!(!diff.starts_with(b"TFRS_LAYER_DIFF_V1"));
+    }
+
+    /// Regression test: a truncated/corrupted block diff used to read past
+    /// the end of the delta buffer with raw slice indexing, which panics.
+    /// It must now return a structured `Err` instead.
+    #[test]
+    fn test_apply_layer_wise_diff_rejects_truncated_delta_without_panicking() {
+        let engine = BinaryDiffEngine::new(DeltaAlgorithm::LayerWise);
+        let base_data = vec![0u8; 2048];
+        let mut target_data = base_data.clone();
+        target_data[100..200].fill(42);
+
+        let diff = engine
+            .create_layer_wise_diff(&base_data, &target_data)
+            .expect("create_layer_wise_diff");
+
+        // Truncate at every possible point after the header and confirm none
+        // of them panic; each must be Ok (if truncation landed exactly on an
+        // op boundary that happens to still parse) or a clean Err.
+        for cut in 18..diff.len() {
+            let truncated = &diff[..cut];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.apply_layer_wise_diff(&base_data, truncated)
+            }));
+            assert!(
+                result.is_ok(),
+                "apply_layer_wise_diff must never panic on truncated input (cut at {cut})"
+            );
+        }
+
+        // A truncation strictly inside the op stream (not on the exact final
+        // boundary) must be a real error, not a silently wrong result.
+        let short_cut = &diff[..diff.len() - 1];
+        assert!(engine.apply_layer_wise_diff(&base_data, short_cut).is_err());
+    }
+
+    #[test]
+    fn test_apply_layer_wise_diff_rejects_bad_magic() {
+        let engine = BinaryDiffEngine::new(DeltaAlgorithm::LayerWise);
+        assert!(engine.apply_layer_wise_diff(b"base", b"not a block diff at all").is_err());
+    }
+
+    #[test]
+    fn test_find_delta_path_matches_get_version_path() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let mut manager = ModelVersionManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
+
+        for (id, parent) in [("v1", None), ("v2", Some("v1")), ("v3", Some("v2"))] {
+            manager
+                .add_version(ModelVersion {
+                    id: id.to_string(),
+                    model_id: "test-model".to_string(),
+                    version: id.to_string(),
+                    parent_version: parent.map(|p: &str| p.to_string()),
+                    created_at: SystemTime::now(),
+                    file_hash: "deadbeef".to_string(),
+                    file_size: 1024,
+                    compressed_size: None,
+                    description: None,
+                    changes: vec![],
+                    metadata: HashMap::new(),
+                })
+                .expect("add_version");
+        }
+
+        let expected = manager.get_version_path("v1", "v3");
+        let actual = manager.find_delta_path("v1", "v3");
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual,
+            Some(vec!["v1".to_string(), "v2".to_string(), "v3".to_string()])
+        );
     }
 
     #[test]

@@ -1,8 +1,15 @@
-//! Cross-framework validation suite for TrustformeRS
+//! Cross-framework numerical validation for TrustformeRS.
 //!
-//! This module provides comprehensive validation of model outputs against
-//! reference implementations from major ML frameworks including PyTorch,
-//! TensorFlow, JAX, and ONNX Runtime.
+//! Only frameworks that are actually reachable from this crate can be
+//! validated against:
+//!
+//! * **ONNX** — real: the in-tree pure-Rust ONNX CPU executor
+//!   ([`crate::export::onnx_runtime`]) runs a reference `.onnx` graph and its
+//!   outputs are compared element-wise against the TrustformeRS outputs the
+//!   caller recorded on each test case.
+//! * **PyTorch / TensorFlow / JAX** — no bindings are compiled into this crate,
+//!   so these report themselves unavailable. They never report `passed`, and
+//!   they never synthesise `max_diff` / `mean_diff` statistics.
 
 use crate::{
     errors::{Result, TrustformersError},
@@ -10,6 +17,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Supported ML frameworks for cross-validation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,6 +65,11 @@ pub struct ValidationConfig {
     /// Model parameters/weights to use
     #[serde(skip)]
     pub model_params: Option<HashMap<String, Tensor>>,
+    /// Path to the reference `.onnx` model executed by the ONNX validation
+    /// path. Without it, ONNX validation reports that it has nothing to
+    /// compare against.
+    #[serde(default)]
+    pub onnx_reference_model: Option<PathBuf>,
 }
 
 impl Default for ValidationConfig {
@@ -69,7 +82,16 @@ impl Default for ValidationConfig {
             target_frameworks: vec![Framework::PyTorch, Framework::TensorFlow],
             model_architecture: "transformer".to_string(),
             model_params: None,
+            onnx_reference_model: None,
         }
+    }
+}
+
+impl ValidationConfig {
+    /// Point the ONNX validation path at a reference model on disk.
+    pub fn with_onnx_reference_model(mut self, path: impl Into<PathBuf>) -> Self {
+        self.onnx_reference_model = Some(path.into());
+        self
     }
 }
 
@@ -147,6 +169,18 @@ pub struct ValidationTestCase {
     /// Test-specific configuration overrides
     #[serde(skip)]
     pub config_overrides: Option<ValidationConfig>,
+    /// Graph input names matching `inputs`, in order.
+    ///
+    /// When empty, the reference graph's own input order is used.
+    #[serde(default)]
+    pub input_names: Vec<String>,
+    /// The TrustformeRS outputs to compare the reference framework against,
+    /// keyed by graph output name.
+    ///
+    /// A test case with no expected outputs cannot be validated; the validator
+    /// records an error for it instead of reporting a pass.
+    #[serde(skip)]
+    pub expected_outputs: HashMap<String, Tensor>,
 }
 
 impl ValidationTestCase {
@@ -158,7 +192,21 @@ impl ValidationTestCase {
             expected_shape: Vec::new(),
             model_config: HashMap::new(),
             config_overrides: None,
+            input_names: Vec::new(),
+            expected_outputs: HashMap::new(),
         }
+    }
+
+    /// Name the graph inputs corresponding to `inputs`.
+    pub fn with_input_names(mut self, names: Vec<String>) -> Self {
+        self.input_names = names;
+        self
+    }
+
+    /// Record the TrustformeRS output the reference framework must reproduce.
+    pub fn with_expected_output(mut self, name: impl Into<String>, tensor: Tensor) -> Self {
+        self.expected_outputs.insert(name.into(), tensor);
+        self
     }
 
     /// Set expected output shape
@@ -241,23 +289,27 @@ impl CrossFrameworkValidator {
         false
     }
 
-    /// Check if TensorFlow is available
+    /// Check if TensorFlow is available.
+    ///
+    /// No TensorFlow bindings are compiled into `trustformers-core`, so this is
+    /// always false. It deliberately does *not* consult an environment
+    /// variable: an env var says nothing about whether this process can execute
+    /// a TensorFlow graph.
     fn check_tensorflow_available() -> bool {
-        // In a real implementation, this would try to import tensorflow
-        // For now, we'll check for a tensorflow feature or environment variable
-        std::env::var("TENSORFLOW_AVAILABLE").is_ok()
+        false
     }
 
-    /// Check if JAX is available
+    /// Check if JAX is available. See [`Self::check_tensorflow_available`].
     fn check_jax_available() -> bool {
-        // In a real implementation, this would try to import jax
-        std::env::var("JAX_AVAILABLE").is_ok()
+        false
     }
 
-    /// Check if ONNX Runtime is available
+    /// Check if an ONNX executor is available.
+    ///
+    /// Always true: `trustformers-core` ships a pure-Rust ONNX protobuf reader
+    /// and CPU graph executor ([`crate::export::onnx_runtime`]).
     fn check_onnx_available() -> bool {
-        // In a real implementation, this would try to import onnxruntime
-        std::env::var("ONNX_AVAILABLE").is_ok()
+        true
     }
 
     /// Add a test case
@@ -313,54 +365,158 @@ impl CrossFrameworkValidator {
         Ok(())
     }
 
-    /// Validate against TensorFlow
+    /// Validate against TensorFlow.
+    ///
+    /// No TensorFlow backend is compiled into `trustformers-core`, so this
+    /// reports unavailable. It never sets `passed` and never synthesises diff
+    /// statistics.
     fn validate_tensorflow(&self, result: &mut ValidationResult) -> Result<()> {
-        // In a real implementation, this would use TensorFlow bindings
-        // For now, we'll simulate validation
-        if std::env::var("TENSORFLOW_AVAILABLE").is_ok() {
-            result.passed = true;
-            result.max_diff = 2e-6;
-            result.mean_diff = 1.5e-7;
-            result.total_elements = 1000;
-            result.mismatch_count = 1;
-            result.add_metric("tensorflow_version".to_string(), 2.13);
-        } else {
-            result.add_error("TensorFlow not available".to_string());
-        }
-
+        result.add_error(
+            "TensorFlow validation is not available: no TensorFlow bindings are compiled into \
+             trustformers-core, so no tensor can be compared"
+                .to_string(),
+        );
         Ok(())
     }
 
-    /// Validate against JAX
+    /// Validate against JAX. See [`Self::validate_tensorflow`].
     fn validate_jax(&self, result: &mut ValidationResult) -> Result<()> {
-        // In a real implementation, this would use JAX bindings
-        if std::env::var("JAX_AVAILABLE").is_ok() {
-            result.passed = true;
-            result.max_diff = 5e-7;
-            result.mean_diff = 1e-8;
-            result.total_elements = 1000;
-            result.mismatch_count = 0;
-            result.add_metric("jax_version".to_string(), 0.4);
-        } else {
-            result.add_error("JAX not available".to_string());
-        }
-
+        result.add_error(
+            "JAX validation is not available: no JAX bindings are compiled into \
+             trustformers-core, so no tensor can be compared"
+                .to_string(),
+        );
         Ok(())
     }
 
-    /// Validate against ONNX Runtime
+    /// Validate against a reference ONNX graph using the in-tree CPU executor.
+    ///
+    /// Every registered test case is run through the reference graph and its
+    /// outputs are compared element-wise against the TrustformeRS outputs
+    /// recorded on the case. `passed` is only ever set from a real comparison.
     fn validate_onnx(&self, result: &mut ValidationResult) -> Result<()> {
-        // In a real implementation, this would use ONNX Runtime bindings
-        if std::env::var("ONNX_AVAILABLE").is_ok() {
-            result.passed = true;
-            result.max_diff = 1e-5;
-            result.mean_diff = 2e-6;
-            result.total_elements = 1000;
-            result.mismatch_count = 2;
-            result.add_metric("onnx_version".to_string(), 1.16);
-        } else {
-            result.add_error("ONNX Runtime not available".to_string());
+        use crate::export::onnx_runtime::ONNXRuntimeBackend;
+
+        let Some(model_path) = self.config.onnx_reference_model.as_ref() else {
+            result.add_error(
+                "ONNX validation needs a reference model: set \
+                 ValidationConfig::onnx_reference_model to a .onnx file"
+                    .to_string(),
+            );
+            return Ok(());
+        };
+
+        let backend = ONNXRuntimeBackend::new();
+        let session = match backend.load_model(model_path) {
+            Ok(session) => session,
+            Err(error) => {
+                result.add_error(format!(
+                    "failed to load reference ONNX model {}: {}",
+                    model_path.display(),
+                    error
+                ));
+                return Ok(());
+            },
+        };
+
+        let unsupported = session.unsupported_operators();
+        if !unsupported.is_empty() {
+            result.add_error(format!(
+                "reference ONNX model uses operators the CPU executor does not implement: {}",
+                unsupported.join(", ")
+            ));
+            return Ok(());
         }
+
+        if self.test_cases.is_empty() {
+            result.add_error(
+                "ONNX validation has no test cases to run; add one with add_test_case".to_string(),
+            );
+            return Ok(());
+        }
+
+        let mut max_diff: f64 = 0.0;
+        let mut weighted_diff_sum: f64 = 0.0;
+        let mut mismatch_count = 0usize;
+        let mut total_elements = 0usize;
+        let mut compared_tensors = 0usize;
+
+        for test_case in &self.test_cases {
+            if test_case.expected_outputs.is_empty() {
+                result.add_error(format!(
+                    "test case '{}' records no TrustformeRS outputs, so there is nothing to \
+                     compare the ONNX result against",
+                    test_case.name
+                ));
+                continue;
+            }
+
+            let input_names: Vec<String> = if test_case.input_names.is_empty() {
+                session.input_names().to_vec()
+            } else {
+                test_case.input_names.clone()
+            };
+
+            if input_names.len() != test_case.inputs.len() {
+                result.add_error(format!(
+                    "test case '{}' provides {} input tensors but the graph expects {}",
+                    test_case.name,
+                    test_case.inputs.len(),
+                    input_names.len()
+                ));
+                continue;
+            }
+
+            let inputs: HashMap<String, Tensor> =
+                input_names.into_iter().zip(test_case.inputs.iter().cloned()).collect();
+
+            let outputs = match session.run(inputs) {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    result.add_error(format!(
+                        "test case '{}': reference ONNX execution failed: {}",
+                        test_case.name, error
+                    ));
+                    continue;
+                },
+            };
+
+            for (output_name, expected) in &test_case.expected_outputs {
+                let Some(actual) = outputs.get(output_name) else {
+                    result.add_error(format!(
+                        "test case '{}': the reference graph produced no output named '{}'",
+                        test_case.name, output_name
+                    ));
+                    continue;
+                };
+
+                if actual.shape() != expected.shape() {
+                    result.add_error(format!(
+                        "test case '{}' output '{}': shape mismatch {:?} vs {:?}",
+                        test_case.name,
+                        output_name,
+                        actual.shape(),
+                        expected.shape()
+                    ));
+                    continue;
+                }
+
+                let comparison = self.compare_tensor_values(actual, expected)?;
+                max_diff = max_diff.max(comparison.max_diff);
+                weighted_diff_sum += comparison.mean_diff * comparison.total_elements as f64;
+                mismatch_count += comparison.mismatch_count;
+                total_elements += comparison.total_elements;
+                compared_tensors += 1;
+            }
+        }
+
+        result.max_diff = max_diff;
+        result.mean_diff =
+            if total_elements > 0 { weighted_diff_sum / total_elements as f64 } else { 0.0 };
+        result.mismatch_count = mismatch_count;
+        result.total_elements = total_elements;
+        result.add_metric("compared_tensors".to_string(), compared_tensors as f64);
+        result.passed = compared_tensors > 0 && mismatch_count == 0 && result.errors.is_empty();
 
         Ok(())
     }
@@ -605,10 +761,184 @@ mod tests {
             target_frameworks: vec![Framework::PyTorch],
             model_architecture: "gpt".to_string(),
             model_params: None,
+            onnx_reference_model: None,
         };
 
         assert_eq!(config.atol, 1e-6);
         assert_eq!(config.target_frameworks.len(), 1);
+    }
+
+    /// Build a tiny reference ONNX model computing `output = input + bias`.
+    fn write_reference_add_model(path: &std::path::Path) -> Result<()> {
+        use crate::export::onnx::{
+            ONNXDataType, ONNXDimension, ONNXGraph, ONNXModel, ONNXNode, ONNXOpsetImport,
+            ONNXTensor, ONNXTensorShape, ONNXTensorType, ONNXTypeInfo, ONNXValueInfo,
+        };
+        use crate::export::onnx_proto::encode_model;
+
+        let value_info = |name: &str, dims: &[i64]| ONNXValueInfo {
+            name: name.to_string(),
+            type_info: ONNXTypeInfo {
+                tensor_type: ONNXTensorType {
+                    elem_type: ONNXDataType::Float,
+                    shape: ONNXTensorShape {
+                        dims: dims.iter().map(|dim| ONNXDimension::Value(*dim)).collect(),
+                    },
+                },
+            },
+        };
+
+        let bias_values: [f32; 4] = [0.5, -0.25, 1.0, 2.0];
+        let mut raw_data = Vec::with_capacity(16);
+        for value in bias_values {
+            raw_data.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let model = ONNXModel {
+            graph: ONNXGraph {
+                nodes: vec![ONNXNode {
+                    op_type: "Add".to_string(),
+                    inputs: vec!["input".to_string(), "bias".to_string()],
+                    outputs: vec!["output".to_string()],
+                    attributes: HashMap::new(),
+                    name: "add".to_string(),
+                }],
+                inputs: vec![value_info("input", &[1, 4])],
+                outputs: vec![value_info("output", &[1, 4])],
+                initializers: vec![ONNXTensor {
+                    name: "bias".to_string(),
+                    data_type: ONNXDataType::Float,
+                    dims: vec![1, 4],
+                    raw_data,
+                }],
+                name: "reference".to_string(),
+            },
+            ir_version: 8,
+            opset_imports: vec![ONNXOpsetImport {
+                domain: String::new(),
+                version: 13,
+            }],
+            producer_name: "trustformers-test".to_string(),
+            producer_version: "0".to_string(),
+            model_version: 1,
+        };
+
+        std::fs::write(path, encode_model(&model))
+            .map_err(|error| TrustformersError::io_error(error.to_string()))?;
+        Ok(())
+    }
+
+    fn temp_model_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "trustformers_xframework_{}_{}.onnx",
+            name,
+            std::process::id()
+        ))
+    }
+
+    /// Regression test: `validate_onnx` used to set `passed = true` with
+    /// invented diff statistics whenever `ONNX_AVAILABLE` was set in the
+    /// environment. It must now really execute the reference graph.
+    #[test]
+    fn test_onnx_validation_runs_the_reference_graph() -> Result<()> {
+        let path = temp_model_path("match");
+        write_reference_add_model(&path)?;
+
+        let config = ValidationConfig::default().with_onnx_reference_model(path.clone());
+        let mut validator = CrossFrameworkValidator::new(config);
+
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4])?;
+        // The graph adds [0.5, -0.25, 1.0, 2.0].
+        let expected = Tensor::from_vec(vec![1.5, 1.75, 4.0, 6.0], &[1, 4])?;
+        validator.add_test_case(
+            ValidationTestCase::new("add".to_string(), vec![input])
+                .with_input_names(vec!["input".to_string()])
+                .with_expected_output("output", expected),
+        );
+
+        let result = validator.validate_framework(Framework::OnnxRuntime)?;
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(result.passed, "matching outputs must pass");
+        assert_eq!(result.total_elements, 4, "four real elements were compared");
+        assert_eq!(result.mismatch_count, 0);
+        assert!(result.max_diff < 1e-6);
+        // The old stub reported exactly these fabricated figures.
+        assert_ne!(result.total_elements, 1000);
+        assert!(!result.metrics.contains_key("onnx_version"));
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    /// A genuinely wrong expected output must fail, not pass.
+    #[test]
+    fn test_onnx_validation_detects_a_real_mismatch() -> Result<()> {
+        let path = temp_model_path("mismatch");
+        write_reference_add_model(&path)?;
+
+        let config = ValidationConfig::default().with_onnx_reference_model(path.clone());
+        let mut validator = CrossFrameworkValidator::new(config);
+
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[1, 4])?;
+        let wrong = Tensor::from_vec(vec![9.0, 9.0, 9.0, 9.0], &[1, 4])?;
+        validator.add_test_case(
+            ValidationTestCase::new("add".to_string(), vec![input])
+                .with_input_names(vec!["input".to_string()])
+                .with_expected_output("output", wrong),
+        );
+
+        let result = validator.validate_framework(Framework::OnnxRuntime)?;
+        assert!(!result.passed, "a real mismatch must not pass");
+        assert_eq!(result.mismatch_count, 4);
+        assert!(result.max_diff > 1.0);
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    /// With no reference model configured, ONNX validation must report why,
+    /// not pass.
+    #[test]
+    fn test_onnx_validation_without_a_reference_model() -> Result<()> {
+        let validator = CrossFrameworkValidator::with_defaults();
+        let result = validator.validate_framework(Framework::OnnxRuntime)?;
+        assert!(!result.passed);
+        assert!(result.errors.iter().any(|error| error.contains("reference model")));
+        assert_eq!(result.total_elements, 0);
+        Ok(())
+    }
+
+    /// Regression test: TF/JAX used to report a PASS with fabricated diff
+    /// statistics whenever an environment variable was set.
+    #[test]
+    fn test_tensorflow_and_jax_are_never_reported_as_passing() -> Result<()> {
+        let mut validator = CrossFrameworkValidator::with_defaults();
+        validator.detect_frameworks()?;
+
+        assert!(!validator.available_frameworks().contains(&Framework::TensorFlow));
+        assert!(!validator.available_frameworks().contains(&Framework::Jax));
+        assert!(!validator.available_frameworks().contains(&Framework::PyTorch));
+        assert!(validator.available_frameworks().contains(&Framework::OnnxRuntime));
+
+        for framework in [Framework::TensorFlow, Framework::Jax, Framework::PyTorch] {
+            let result = validator.validate_framework(framework)?;
+            assert!(!result.passed, "{:?} must never report a pass", framework);
+            assert_eq!(result.max_diff, 0.0);
+            assert_eq!(result.mean_diff, 0.0);
+            assert_eq!(result.total_elements, 0);
+            assert_eq!(result.mismatch_count, 0);
+            assert!(
+                result.metrics.is_empty(),
+                "no version metric may be invented"
+            );
+            assert!(!result.errors.is_empty());
+        }
+
+        Ok(())
     }
 
     #[test]

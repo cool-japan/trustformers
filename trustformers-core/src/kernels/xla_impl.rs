@@ -3,19 +3,24 @@
 
 //! XLA (Accelerated Linear Algebra) backend implementation for TrustformeRS
 //!
-//! This module provides integration with Google's XLA compiler for optimized
-//! execution of tensor operations across various hardware backends including
-//! CPUs, GPUs, and TPUs.
-
-#![allow(unused_variables)] // XLA backend implementation
+//! This module models the client/computation/buffer API surface (device
+//! configuration, computation caching, buffer handles) that a real
+//! integration with Google's XLA compiler would expose. It does **not**
+//! link or execute a real XLA runtime: `--features xla` has zero
+//! dependencies (`xla = []` in `Cargo.toml`), the `extern "C"` FFI
+//! declarations further down are permanently disabled with `cfg(any())`,
+//! and every public method that would need actual XLA compilation or
+//! execution returns a structured [`HardwareResult`] error naming exactly
+//! what is missing ("no XLA runtime is linked") instead of fabricating
+//! output tensors, device counts, or timings. See the `HONESTY NOTE` above
+//! the `extern "C"` block for the full rationale and what wiring a real
+//! backend would require.
 
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ffi::CString;
-use std::ptr;
 use std::sync::Arc;
 
 /// XLA computation backend
@@ -35,10 +40,15 @@ pub struct XlaBackend {
 #[derive(Debug)]
 pub struct XlaClient {
     /// XLA platform (CPU, GPU, TPU)
+    #[allow(dead_code)]
     platform: XlaPlatform,
     /// Device ordinal
+    #[allow(dead_code)]
     device_ordinal: i32,
-    /// Client handle
+    /// Client handle. Never non-null in practice: `XlaClient::new` always
+    /// errors before constructing one (see the `extern "C"` honesty note
+    /// above).
+    #[allow(dead_code)]
     handle: *mut XlaClientHandle,
     /// Device memory allocator
     #[allow(dead_code)]
@@ -102,7 +112,10 @@ pub struct XlaComputation {
 /// XLA executable handle
 #[derive(Debug)]
 pub struct XlaExecutable {
-    /// Executable handle
+    /// Executable handle. Never constructed with a real handle: nothing
+    /// builds an `XlaExecutable` anymore (`XlaClient::compile` always
+    /// errors first).
+    #[allow(dead_code)]
     handle: *mut XlaExecutableHandle,
     /// Platform
     #[allow(dead_code)]
@@ -179,9 +192,13 @@ pub struct XlaAllocator {
 /// XLA buffer for tensor data
 #[derive(Debug)]
 pub struct XlaBuffer {
-    /// Buffer handle
+    /// Buffer handle. Never constructed with a real handle: nothing builds
+    /// an `XlaBuffer` anymore (`XlaBackend::create_input_buffers` always
+    /// errors first).
+    #[allow(dead_code)]
     handle: *mut XlaBufferHandle,
     /// Shape specification
+    #[allow(dead_code)]
     shape: XlaShapeSpec,
     /// Device ordinal
     #[allow(dead_code)]
@@ -191,9 +208,26 @@ pub struct XlaBuffer {
     size_bytes: usize,
 }
 
-// Foreign function interface declarations for XLA runtime
+// Foreign function interface declarations for XLA runtime.
+//
+// HONESTY NOTE: these symbols are declared but nothing in this workspace
+// provides them - there is no `-sys` crate, no `#[link(name = "...")]`
+// attribute, and `build.rs` links only `framework=Accelerate` on macOS.
+// `--features xla` has zero dependencies (`xla = []` in Cargo.toml), so any
+// real XLA runtime call here would be an unresolved symbol at final link
+// time (independent of the fact that `XlaShapeSpec` containing a `Vec` is
+// also not FFI-safe, noted below). This block (and every call site) is
+// therefore gated behind `cfg(any())` - permanently disabled - so the crate
+// never tries to link against a runtime that was never provided. Every
+// public method that used to call into it now returns a structured error
+// instead of silently returning fabricated data (zeroed/`[1,1]`-shaped
+// output "tensors", invented device counts, ...). Wiring a real backend
+// means adding a genuine `-sys` binding crate, a `#[link(...)]` target, a
+// `build.rs` probe, FFI-safe shape types, and replacing the `cfg(any())`
+// gate below with a real feature check.
 // Note: XlaShapeSpec contains Vec which is not FFI-safe. These are placeholder
 // declarations that would need proper C-compatible types in production use.
+#[cfg(any())]
 #[allow(improper_ctypes)]
 extern "C" {
     fn xla_client_create(platform: i32, device_ordinal: i32) -> *mut XlaClientHandle;
@@ -439,71 +473,42 @@ impl XlaBackend {
         Ok(())
     }
 
-    // Private helper methods
-    fn create_input_buffers(&self, inputs: &[Tensor]) -> HardwareResult<Vec<XlaBuffer>> {
-        let mut buffers = Vec::new();
-        for (i, tensor) in inputs.iter().enumerate() {
-            let shape = XlaShapeSpec {
-                element_type: DataType::F32, // Simplified for now
-                dimensions: tensor.shape().iter().map(|&d| d as i64).collect(),
-                layout: None,
-            };
-
-            let buffer = XlaBuffer {
-                handle: unsafe {
-                    xla_buffer_create(
-                        self.client.handle,
-                        tensor.data()?.as_ptr(),
-                        &shape,
-                        self.device_config.device_ordinal,
-                    )
-                },
-                shape,
-                device_ordinal: self.device_config.device_ordinal,
-                size_bytes: tensor.size_bytes(),
-            };
-
-            buffers.push(buffer);
-        }
-        Ok(buffers)
+    // Private helper methods.
+    //
+    // `create_input_buffers`/`buffers_to_tensors` used to call
+    // `xla_buffer_create`/`xla_buffer_to_host` (unresolved symbols, see the
+    // `extern "C"` block above) and are unreachable in practice now
+    // (`XlaBackend::new` -> `XlaClient::new` always errors before any
+    // `XlaBackend` exists to call them on), so they honestly error instead.
+    fn create_input_buffers(&self, _inputs: &[Tensor]) -> HardwareResult<Vec<XlaBuffer>> {
+        Err(compute_error(
+            "xla_operation",
+            "XLA buffer allocation is not available: no XLA runtime is linked",
+        ))
     }
 
-    fn buffers_to_tensors(&self, buffers: Vec<XlaBuffer>) -> HardwareResult<Vec<Tensor>> {
-        let mut tensors = Vec::new();
-        for buffer in buffers {
-            let size = buffer.shape.dimensions.iter().product::<i64>() as usize;
-            let mut data = vec![0.0f32; size];
-
-            unsafe {
-                let result = xla_buffer_to_host(buffer.handle, data.as_mut_ptr(), size);
-                if result != 0 {
-                    return Err(compute_error(
-                        "xla_operation",
-                        "Failed to copy buffer to host",
-                    ));
-                }
-            }
-
-            let shape: Vec<usize> = buffer.shape.dimensions.iter().map(|&d| d as usize).collect();
-            let tensor = Tensor::from_vec(data, &shape)?;
-            tensors.push(tensor);
-        }
-        Ok(tensors)
+    fn buffers_to_tensors(&self, _buffers: Vec<XlaBuffer>) -> HardwareResult<Vec<Tensor>> {
+        Err(compute_error(
+            "xla_operation",
+            "XLA buffer readback is not available: no XLA runtime is linked",
+        ))
     }
 
+    /// Real HLO output-shape inference (parsing the HLO text's `ROOT`
+    /// instruction and computing its resulting shape) is not implemented;
+    /// this used to silently return a fabricated `[1, 1]` shape regardless
+    /// of the real output shape. Unreachable in practice now
+    /// (`compile_operation` errors via `self.client.compile(...)?` before
+    /// reaching this), so this honestly errors rather than guessing.
     fn infer_output_shapes(
         &self,
-        hlo_text: &str,
+        _hlo_text: &str,
         _input_shapes: &[XlaShapeSpec],
     ) -> HardwareResult<Vec<XlaShapeSpec>> {
-        // Simplified output shape inference
-        // In a real implementation, this would parse the HLO and compute output shapes
-        let output_shape = XlaShapeSpec {
-            element_type: DataType::F32,
-            dimensions: vec![1, 1], // Placeholder
-            layout: None,
-        };
-        Ok(vec![output_shape])
+        Err(compute_error(
+            "xla_operation",
+            "XLA output shape inference is not implemented",
+        ))
     }
 
     fn estimate_flops(&self, hlo_text: &str) -> u64 {
@@ -525,112 +530,47 @@ impl XlaBackend {
 }
 
 impl XlaClient {
-    fn new(platform: XlaPlatform, device_ordinal: i32) -> HardwareResult<Self> {
-        let platform_id = match platform {
-            XlaPlatform::CPU => 0,
-            XlaPlatform::GPU => 1,
-            XlaPlatform::TPU => 2,
-            XlaPlatform::Custom(id) => id as i32,
-        };
-
-        let handle = unsafe { xla_client_create(platform_id, device_ordinal) };
-        if handle.is_null() {
-            return Err(compute_error(
-                "xla_operation",
-                "Failed to create XLA client",
-            ));
-        }
-
-        let allocator = XlaAllocator {
-            platform,
-            total_memory: match platform {
-                XlaPlatform::CPU => 32 * 1024 * 1024 * 1024,      // 32GB
-                XlaPlatform::GPU => 24 * 1024 * 1024 * 1024,      // 24GB
-                XlaPlatform::TPU => 32 * 1024 * 1024 * 1024,      // 32GB
-                XlaPlatform::Custom(_) => 8 * 1024 * 1024 * 1024, // 8GB
-            },
-            used_memory: 0,
-            fragmentation: 0.0,
-        };
-
-        Ok(Self {
-            platform,
-            device_ordinal,
-            handle,
-            allocator,
-        })
+    /// Always errors: no XLA runtime is linked into this build (see the
+    /// `extern "C"` block above, permanently gated with `cfg(any())`).
+    /// Previously this called `xla_client_create`, an unresolved symbol,
+    /// and on a null return (which is all it could ever be) still built an
+    /// `XlaAllocator` advertising a fabricated per-platform memory size.
+    fn new(_platform: XlaPlatform, _device_ordinal: i32) -> HardwareResult<Self> {
+        Err(compute_error(
+            "xla_operation",
+            "XLA backend is not available: no XLA runtime is linked into this build (the \
+             `xla` feature has no real backend binding yet)",
+        ))
     }
 
+    /// Always errors (see `XlaClient::new`): no XLA compiler is linked.
+    /// Unreachable in practice since `Self` can never be constructed, kept
+    /// honest in its own right rather than left calling an unresolved
+    /// symbol.
     fn compile(
         &self,
-        hlo_text: &str,
-        input_shapes: &[XlaShapeSpec],
+        _hlo_text: &str,
+        _input_shapes: &[XlaShapeSpec],
     ) -> HardwareResult<Arc<XlaExecutable>> {
-        let hlo_cstring = CString::new(hlo_text)
-            .map_err(|_| compute_error("xla_operation", "Invalid HLO text"))?;
-
-        let executable_handle = unsafe {
-            xla_compile_computation(
-                self.handle,
-                hlo_cstring.as_ptr(),
-                input_shapes.as_ptr(),
-                input_shapes.len(),
-            )
-        };
-
-        if executable_handle.is_null() {
-            return Err(compute_error(
-                "xla_operation",
-                "Failed to compile XLA computation",
-            ));
-        }
-
-        Ok(Arc::new(XlaExecutable {
-            handle: executable_handle,
-            platform: self.platform,
-            device_ordinal: self.device_ordinal,
-        }))
+        Err(compute_error(
+            "xla_operation",
+            "XLA compilation is not available: no XLA runtime is linked",
+        ))
     }
 
+    /// Always errors (see `XlaClient::new`). Previously this returned a
+    /// buffer shaped `[1, 1]` regardless of the real output shape whenever
+    /// the (unresolved) `xla_execute` call happened to leave a non-null
+    /// handle behind.
     fn execute(
         &self,
-        executable: &XlaExecutable,
-        inputs: &[XlaBuffer],
+        _executable: &XlaExecutable,
+        _inputs: &[XlaBuffer],
     ) -> HardwareResult<Vec<XlaBuffer>> {
-        let input_handles: Vec<*mut XlaBufferHandle> = inputs.iter().map(|b| b.handle).collect();
-        let mut output_handles = vec![ptr::null_mut(); 1]; // Simplified: assume single output
-
-        let result = unsafe {
-            xla_execute(
-                executable.handle,
-                input_handles.as_ptr(),
-                input_handles.len(),
-                output_handles.as_mut_ptr(),
-                output_handles.len(),
-            )
-        };
-
-        if result != 0 {
-            return Err(compute_error("xla_operation", "XLA execution failed"));
-        }
-
-        let mut outputs = Vec::new();
-        for handle in output_handles {
-            if !handle.is_null() {
-                outputs.push(XlaBuffer {
-                    handle,
-                    shape: XlaShapeSpec {
-                        element_type: DataType::F32,
-                        dimensions: vec![1, 1], // Placeholder
-                        layout: None,
-                    },
-                    device_ordinal: self.device_ordinal,
-                    size_bytes: 4, // Placeholder
-                });
-            }
-        }
-
-        Ok(outputs)
+        Err(compute_error(
+            "xla_operation",
+            "XLA execution is not available: no XLA runtime is linked",
+        ))
     }
 }
 
@@ -667,21 +607,17 @@ impl Default for XlaDeviceConfig {
 
 impl Drop for XlaClient {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                xla_client_destroy(self.handle);
-            }
-        }
+        // No real XLA runtime is linked into this build, and `XlaClient`
+        // can never be constructed with a non-null `handle` anymore
+        // (`XlaClient::new` always errors first), so there is nothing to
+        // destroy here.
     }
 }
 
 impl Drop for XlaBuffer {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
-            unsafe {
-                xla_buffer_destroy(self.handle);
-            }
-        }
+        // Likewise: `XlaBuffer` is never constructed with a real handle
+        // (see `XlaBackend::create_input_buffers`), so nothing to destroy.
     }
 }
 
@@ -689,52 +625,43 @@ impl Drop for XlaBuffer {
 pub mod utils {
     use super::*;
 
-    /// Check if XLA is available on the system
+    /// Check if XLA is available on the system.
+    ///
+    /// Always `false`: no XLA runtime is linked into this build (see the
+    /// `extern "C"` block gated at the top of this module). Previously
+    /// this called `xla_get_platform_count`, an unresolved symbol.
     pub fn is_xla_available() -> bool {
-        unsafe { xla_get_platform_count() > 0 }
+        false
     }
 
-    /// Get available XLA platforms
+    /// Get available XLA platforms.
+    ///
+    /// Always empty: no XLA runtime is linked into this build, so there is
+    /// no real platform to enumerate. Previously this called
+    /// `xla_get_platform_count` (an unresolved symbol) and fabricated a
+    /// `CPU`/`GPU`/`TPU`/`Custom` platform for every unit it claimed to
+    /// find - a phantom-device pattern this must not reproduce.
     pub fn get_available_platforms() -> Vec<XlaPlatform> {
-        let mut platforms = Vec::new();
-        let platform_count = unsafe { xla_get_platform_count() };
-
-        for i in 0..platform_count {
-            let platform = match i {
-                0 => XlaPlatform::CPU,
-                1 => XlaPlatform::GPU,
-                2 => XlaPlatform::TPU,
-                _ => XlaPlatform::Custom(i as u32),
-            };
-            platforms.push(platform);
-        }
-
-        platforms
+        Vec::new()
     }
 
-    /// Get device count for a platform
-    pub fn get_device_count(platform: XlaPlatform) -> i32 {
-        let platform_id = match platform {
-            XlaPlatform::CPU => 0,
-            XlaPlatform::GPU => 1,
-            XlaPlatform::TPU => 2,
-            XlaPlatform::Custom(id) => id as i32,
-        };
-
-        unsafe { xla_get_device_count(platform_id) }
+    /// Get device count for a platform.
+    ///
+    /// Always `0`: no XLA runtime is linked into this build. Previously
+    /// called `xla_get_device_count`, an unresolved symbol.
+    pub fn get_device_count(_platform: XlaPlatform) -> i32 {
+        0
     }
 
-    /// Synchronize device execution
-    pub fn synchronize_device(device_ordinal: i32) -> HardwareResult<()> {
-        let result = unsafe { xla_synchronize_device(device_ordinal) };
-        if result != 0 {
-            Err(compute_error(
-                "xla_operation",
-                "Device synchronization failed",
-            ))
-        } else {
-            Ok(())
-        }
+    /// Synchronize device execution.
+    ///
+    /// Always errors: no XLA runtime is linked into this build. Previously
+    /// called `xla_synchronize_device`, an unresolved symbol.
+    pub fn synchronize_device(_device_ordinal: i32) -> HardwareResult<()> {
+        Err(compute_error(
+            "xla_operation",
+            "XLA device synchronization is not available: no XLA runtime is linked",
+        ))
     }
 
     /// Create optimized HLO for common operations
@@ -838,5 +765,31 @@ mod tests {
         assert!(hlo.contains("convolution"));
         assert!(hlo.contains("window"));
         assert!(hlo.contains("dim_labels"));
+    }
+
+    /// Regression test: `XlaBackend::new()` (via `XlaClient::new`) used to
+    /// "succeed" by calling `xla_client_create` (an unresolved extern
+    /// symbol with no providing library). It must now honestly report the
+    /// backend as unavailable.
+    #[test]
+    fn test_xla_backend_new_errors_no_real_runtime() {
+        let result = XlaBackend::new(XlaDeviceConfig::default());
+        assert!(result.is_err(), "must not fabricate a working XLA backend");
+    }
+
+    /// Regression test: `is_xla_available` must not claim an XLA runtime is
+    /// present when none is linked into this build.
+    #[test]
+    fn test_is_xla_available_is_honest() {
+        assert!(!utils::is_xla_available());
+    }
+
+    /// Regression test: platform/device enumeration must report no phantom
+    /// platforms or devices on a machine with no real XLA runtime.
+    #[test]
+    fn test_xla_enumeration_reports_no_phantom_platforms() {
+        assert!(utils::get_available_platforms().is_empty());
+        assert_eq!(utils::get_device_count(XlaPlatform::CPU), 0);
+        assert_eq!(utils::get_device_count(XlaPlatform::GPU), 0);
     }
 }

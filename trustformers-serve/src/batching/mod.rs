@@ -2,15 +2,22 @@
 //!
 //! This module implements intelligent request batching to maximize throughput
 //! while maintaining low latency for inference requests.
-
-// Allow dead code for batching infrastructure under development
-#![allow(dead_code)]
+//!
+//! ## Removed in 0.2.1: the module-wide `#![allow(dead_code)]`
+//!
+//! The blanket allow at the top of this module was hiding 6 warnings. Every one was a
+//! private item that nothing read: the fields have been removed together with
+//! the constructor arguments that fed them. The lint is enabled now, so the
+//! next unread field is reported instead of accumulating.
 
 pub mod aggregator;
 pub mod config;
 pub mod metrics;
+pub mod model_executor;
 pub mod processor;
 pub mod scheduler;
+/// Length-bucketed batching for generation requests with uneven prompt lengths.
+pub mod variable_length;
 
 pub use aggregator::{
     AdaptiveBatchingStrategy, AggregatorStats, BatchAggregator, BatchingStrategy,
@@ -19,7 +26,15 @@ pub use aggregator::{
     RequestId, SequencePackingStrategy, SequenceState,
 };
 
-pub use processor::{BatchExecutor, BatchProcessor, ProcessingError, ProcessingStats};
+pub use processor::{
+    BatchExecutor, BatchModel, BatchProcessor, DefaultBatchExecutor, EmbeddingModel,
+    ModelBatchExecutor, ProcessingError, ProcessingStats, Tokenizer, NO_MODEL_CONFIGURED,
+};
+
+pub use model_executor::{
+    gpt2_text_executor, untrained_byte_gpt2_executor, ByteTokenizer, Gpt2BatchModel,
+    HuggingFaceTokenizer,
+};
 
 pub use scheduler::{
     BatchScheduler, PriorityQueue, SchedulerStats, SchedulingPolicy, TimeoutPolicy,
@@ -27,6 +42,10 @@ pub use scheduler::{
 
 pub use metrics::{
     BatchSizeOptimizer, BatchingMetrics, LatencyTracker, MetricsCollector, ThroughputMonitor,
+};
+
+pub use variable_length::{
+    BatcherStats, PaddedBatch, SequenceItem, VariableLengthBatchConfig, VariableLengthBatcher,
 };
 
 pub use config::{
@@ -48,8 +67,20 @@ pub struct DynamicBatchingService {
 }
 
 impl DynamicBatchingService {
-    /// Create a new dynamic batching service
+    /// Create a new dynamic batching service without a model.
+    ///
+    /// Requests submitted to such a service are answered with an explicit
+    /// [`ProcessingOutput::Error`](aggregator::ProcessingOutput::Error); use
+    /// [`DynamicBatchingService::with_executor`] to install a real executor.
     pub fn new(config: BatchingConfig) -> Self {
+        Self::with_executor(
+            config,
+            Arc::new(processor::DefaultBatchExecutor::new()) as Arc<dyn BatchExecutor>,
+        )
+    }
+
+    /// Create a dynamic batching service backed by a caller-supplied executor.
+    pub fn with_executor(config: BatchingConfig, executor: Arc<dyn BatchExecutor>) -> Self {
         let metrics = Arc::new(MetricsCollector::new());
 
         Self {
@@ -57,11 +88,19 @@ impl DynamicBatchingService {
                 config.clone(),
                 metrics.clone(),
             ))),
-            processor: Arc::new(BatchProcessor::new(config.clone())),
+            processor: Arc::new(BatchProcessor::with_executor(config.clone(), executor)),
             scheduler: Arc::new(BatchScheduler::new(config.clone())),
             metrics,
             config,
         }
+    }
+
+    /// Whether a real model is wired into the executor.
+    ///
+    /// Serving-state probes report `NOT_SERVING` / `503` when this is `false`
+    /// rather than pretending the service can answer inference requests.
+    pub fn has_model(&self) -> bool {
+        self.processor.executor().has_model()
     }
 
     /// Start the batching service
@@ -134,17 +173,43 @@ impl DynamicBatchingService {
 
                 if let Some(batch) = batch {
                     let batch_id = batch.id;
+                    let request_ids: Vec<RequestId> =
+                        batch.requests.iter().map(|r| r.id.clone()).collect();
+
                     // Process batch
-                    if let Ok(results) = processor.process_batch(batch).await {
-                        // Send results back to waiting callers (using direct channel access)
-                        let mut channels = response_channels.lock().await;
-                        for (request_id, result) in results {
-                            if let Some(tx) = channels.remove(&request_id) {
-                                let _ = tx.send(result);
+                    match processor.process_batch(batch).await {
+                        Ok(results) => {
+                            // Send results back to waiting callers (direct channel access)
+                            let mut channels = response_channels.lock().await;
+                            for (request_id, result) in results {
+                                if let Some(tx) = channels.remove(&request_id) {
+                                    let _ = tx.send(result);
+                                }
                             }
-                        }
-                        drop(channels);
-                        tracing::debug!("Processed batch {}", batch_id);
+                            drop(channels);
+                            tracing::debug!("Processed batch {}", batch_id);
+                        },
+                        Err(e) => {
+                            // Every pending caller must be answered. Dropping the
+                            // batch here would leave them blocked until their own
+                            // timeout with no explanation.
+                            tracing::error!("Batch {} failed: {}", batch_id, e);
+                            let message = e.to_string();
+                            let mut channels = response_channels.lock().await;
+                            for request_id in request_ids {
+                                if let Some(tx) = channels.remove(&request_id) {
+                                    let _ = tx.send(ProcessingResult {
+                                        request_id: request_id.clone(),
+                                        output: aggregator::ProcessingOutput::Error(
+                                            message.clone(),
+                                        ),
+                                        latency_ms: 0,
+                                        batch_id,
+                                    });
+                                }
+                            }
+                            drop(channels);
+                        },
                     }
                 }
 
@@ -239,4 +304,82 @@ pub struct MetricsSummary {
     pub throughput_rps: f32,
     pub queue_depth: usize,
     pub optimization_suggestions: Vec<String>,
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use crate::batching::aggregator::{ProcessingOutput, RequestInput};
+    use crate::batching::config::Priority;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    fn text_request(text: &str) -> Request {
+        Request {
+            id: RequestId::new(),
+            input: RequestInput::Text {
+                text: text.to_string(),
+                max_length: Some(4),
+            },
+            priority: Priority::Normal,
+            submitted_at: Instant::now(),
+            deadline: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Regression: the model-less executor once answered every request with
+    /// `"Processed: {input}"`, an echo indistinguishable from a real completion.
+    ///
+    /// This closes the loop at the level a caller actually reaches:
+    /// [`DynamicBatchingService::new`] is the only public way to build the stack
+    /// without supplying an executor, and it must yield a structured
+    /// "no model configured" error rather than fabricated output.
+    #[tokio::test]
+    async fn service_without_a_model_reports_a_structured_error() {
+        let service = DynamicBatchingService::new(BatchingConfig::default());
+        assert!(!service.has_model());
+        service.start().await.expect("service starts");
+
+        let result = service
+            .submit_request(text_request("Hello, world!"))
+            .await
+            .expect("the caller must be answered, not left to time out");
+
+        match result.output {
+            ProcessingOutput::Error(message) => {
+                assert_eq!(message, NO_MODEL_CONFIGURED);
+            },
+            other => panic!("expected a structured error, got {other:?}"),
+        }
+    }
+
+    /// The same stack backed by a real (untrained) GPT-2 must produce genuine
+    /// decoded model output — proving the error above is a missing model, not a
+    /// missing code path.
+    #[tokio::test]
+    async fn service_with_a_real_model_produces_model_output() {
+        let executor = untrained_byte_gpt2_executor(1, 16, 4).expect("tiny GPT-2 must build");
+        let service = DynamicBatchingService::with_executor(
+            BatchingConfig::default(),
+            Arc::new(executor) as Arc<dyn BatchExecutor>,
+        );
+        assert!(service.has_model());
+        service.start().await.expect("service starts");
+
+        let result = service
+            .submit_request(text_request("Hi"))
+            .await
+            .expect("a model-backed service must answer");
+
+        match result.output {
+            ProcessingOutput::Text(text) => {
+                assert!(
+                    !text.starts_with("Processed: "),
+                    "the executor must not echo the prompt, got {text:?}"
+                );
+            },
+            other => panic!("expected decoded model output, got {other:?}"),
+        }
+    }
 }

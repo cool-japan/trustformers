@@ -4,7 +4,7 @@
 //! and chat-format helpers compatible with the InternLM ChatML template.
 
 use crate::internlm2::config::InternLm2Config;
-use crate::internlm2::model::{InternLm2Error, InternLm2Model};
+use crate::internlm2::model::{InternLm2Error, InternLm2Linear, InternLm2Model};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CausalLM head
@@ -14,21 +14,38 @@ use crate::internlm2::model::{InternLm2Error, InternLm2Model};
 pub struct InternLm2ForCausalLM {
     /// Underlying InternLM-2 base model.
     pub model: InternLm2Model,
-    /// LM-head projection weight: `[vocab_size × hidden_size]` (zero-init placeholder).
+    /// LM-head projection weight, row-major `[vocab_size, hidden_size]`.
     pub lm_head_weight: Vec<f32>,
 }
 
 impl InternLm2ForCausalLM {
-    /// Create a new causal-LM model with zero-initialised weights.
+    /// Create a new causal-LM model.
+    ///
+    /// The head starts from a deterministic pseudo-random draw (a zero head would
+    /// make every logit zero and greedy decoding would always return token 0);
+    /// [`set_lm_head_weight`](Self::set_lm_head_weight) installs real weights.
     pub fn new(config: InternLm2Config) -> Self {
         let v = config.vocab_size;
         let h = config.hidden_size;
+        let lm_head_weight = InternLm2Linear::new(v, h, 0x11EA_D000).weight().to_vec();
         let model = InternLm2Model::new(config);
-        let lm_head_weight = vec![0.0_f32; v * h];
         Self {
             model,
             lm_head_weight,
         }
+    }
+
+    /// Replace the LM-head weight (`vocab_size * hidden_size` values, row-major).
+    pub fn set_lm_head_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        let expected = self.model.config.vocab_size * self.model.config.hidden_size;
+        if weight.len() != expected {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "LM head must have {expected} values, got {}",
+                weight.len()
+            )));
+        }
+        self.lm_head_weight = weight;
+        Ok(())
     }
 
     /// Compute logits over the vocabulary for each position.
@@ -41,7 +58,6 @@ impl InternLm2ForCausalLM {
         let v = self.model.config.vocab_size;
 
         // Linear projection: logits[pos][vocab] = Σ_i hidden[pos][i] * lm_head[vocab][i]
-        // With zero lm_head_weight the logits will be zero; tests can verify the shape.
         let mut logits = vec![0.0_f32; seq_len * v];
         for pos in 0..seq_len {
             let h_slice = &hidden[pos * h..(pos + 1) * h];
@@ -228,7 +244,7 @@ mod tests {
         let seq_len = 4;
         let attn = InternLm2Attention::new(cfg, 0);
         let input = vec![0.5_f32; seq_len * h];
-        let out = attn.forward(&input, seq_len);
+        let out = attn.forward(&input, seq_len).expect("attention forward");
         assert_eq!(
             out.len(),
             seq_len * h,
@@ -256,7 +272,7 @@ mod tests {
         let h = cfg.hidden_size;
         let mlp = InternLm2MLP::new(&cfg);
         let input = vec![1.0_f32; h];
-        let out = mlp.forward(&input);
+        let out = mlp.forward(&input).expect("mlp forward");
         assert_eq!(out.len(), h, "MLP output must match hidden_size");
     }
 
@@ -270,7 +286,7 @@ mod tests {
         use crate::internlm2::model::InternLm2DecoderLayer;
         let layer = InternLm2DecoderLayer::new(cfg, 0);
         let input = vec![0.1_f32; seq_len * h];
-        let out = layer.forward(&input, seq_len);
+        let out = layer.forward(&input, seq_len).expect("layer forward");
         assert_eq!(out.len(), seq_len * h);
     }
 
@@ -319,6 +335,55 @@ mod tests {
         for tok in &generated {
             assert!(*tok < 128, "generated tokens must be within vocab");
         }
+    }
+
+    // ── 12b. Logits are real ─────────────────────────────────────────────────
+
+    /// A zero LM head produces all-zero logits, which makes greedy decoding
+    /// degenerate to token 0 whatever the input. The head must be real.
+    #[test]
+    fn test_internlm2_logits_are_not_degenerate() {
+        let cfg = tiny_config();
+        let v = cfg.vocab_size;
+        let lm = InternLm2ForCausalLM::new(cfg);
+        let logits = lm.forward(&[1u32, 2, 3]).expect("forward");
+
+        let first_row = &logits[..v];
+        let max = first_row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min = first_row.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            (max - min).abs() > 1e-6,
+            "logits must vary across the vocabulary (max {max}, min {min})"
+        );
+        for value in &logits {
+            assert!(value.is_finite(), "logit {value} must be finite");
+        }
+    }
+
+    #[test]
+    fn test_internlm2_logits_depend_on_input_ids() {
+        let cfg = tiny_config();
+        let lm = InternLm2ForCausalLM::new(cfg);
+        let a = lm.forward(&[1u32, 2]).expect("forward a");
+        let b = lm.forward(&[5u32, 6]).expect("forward b");
+        let diff = a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(diff > 1e-6, "logits must depend on the prompt");
+    }
+
+    #[test]
+    fn test_internlm2_set_lm_head_weight_validates_length() {
+        let cfg = tiny_config();
+        let (v, h) = (cfg.vocab_size, cfg.hidden_size);
+        let mut lm = InternLm2ForCausalLM::new(cfg);
+
+        // A zero head must produce zero logits — proof the head is actually used.
+        lm.set_lm_head_weight(vec![0.0f32; v * h]).expect("load head");
+        let logits = lm.forward(&[1u32, 2]).expect("forward");
+        for value in &logits {
+            assert!(value.abs() < 1e-6, "zero head must give zero logits");
+        }
+
+        assert!(lm.set_lm_head_weight(vec![0.0f32; 3]).is_err());
     }
 
     // ── 13. Chat format ──────────────────────────────────────────────────────

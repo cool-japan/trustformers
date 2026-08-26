@@ -43,13 +43,12 @@ impl fmt::Display for EpError {
             EpError::InvalidNumRanks(msg) => write!(f, "invalid num_ep_ranks: {msg}"),
             EpError::InvalidNumExperts(msg) => write!(f, "invalid num_experts: {msg}"),
             EpError::InvalidHiddenSize(msg) => write!(f, "invalid hidden_size: {msg}"),
-            EpError::ExpertIndexOutOfRange { index, num_experts } => write!(
-                f,
-                "expert index {index} is out of range [0, {num_experts})"
-            ),
+            EpError::ExpertIndexOutOfRange { index, num_experts } => {
+                write!(f, "expert index {index} is out of range [0, {num_experts})")
+            },
             EpError::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {expected}, got {got}")
-            }
+            },
         }
     }
 }
@@ -78,11 +77,7 @@ pub struct ExpertParallelConfig {
 impl ExpertParallelConfig {
     /// Create a new `ExpertParallelConfig` with default `max_tokens_per_expert = 64`.
     pub fn new(num_experts: usize, num_ep_ranks: usize, hidden_size: usize) -> Self {
-        let experts_per_rank = if num_ep_ranks > 0 {
-            num_experts / num_ep_ranks
-        } else {
-            0
-        };
+        let experts_per_rank = num_experts.checked_div(num_ep_ranks).unwrap_or(0);
         Self {
             num_experts,
             num_ep_ranks,
@@ -109,7 +104,7 @@ impl ExpertParallelConfig {
                 "hidden_size must be ≥ 1".to_string(),
             ));
         }
-        if self.num_experts % self.num_ep_ranks != 0 {
+        if !self.num_experts.is_multiple_of(self.num_ep_ranks) {
             return Err(EpError::ExpertsDivisibility {
                 num_experts: self.num_experts,
                 num_ep_ranks: self.num_ep_ranks,
@@ -141,10 +136,7 @@ impl AllToAllPlan {
             .iter()
             .enumerate()
             .flat_map(|(src, row)| {
-                row.iter()
-                    .enumerate()
-                    .filter(move |&(dst, _)| dst != src)
-                    .map(|(_, &cnt)| cnt)
+                row.iter().enumerate().filter(move |&(dst, _)| dst != src).map(|(_, &cnt)| cnt)
             })
             .sum()
     }
@@ -169,11 +161,7 @@ impl AllToAllPlan {
             .iter()
             .enumerate()
             .map(|(src, row)| {
-                row.iter()
-                    .enumerate()
-                    .filter(|&(dst, _)| dst != src)
-                    .map(|(_, &c)| c)
-                    .sum()
+                row.iter().enumerate().filter(|&(dst, _)| dst != src).map(|(_, &c)| c).sum()
             })
             .collect();
 
@@ -233,20 +221,16 @@ impl AllToAllCommunication {
         num_ranks: usize,
         num_experts: usize,
     ) -> AllToAllPlan {
-        let experts_per_rank = if num_ranks > 0 {
-            (num_experts + num_ranks - 1) / num_ranks // ceiling division
-        } else {
-            1
-        };
+        // Ceiling division; a zero rank count degenerates to one expert per rank.
+        let experts_per_rank = if num_ranks > 0 { num_experts.div_ceil(num_ranks) } else { 1 };
 
         let mut send_counts = vec![vec![0usize; num_ranks]; num_ranks];
 
         for &expert in assignments {
-            let dst_rank = if experts_per_rank > 0 {
-                (expert / experts_per_rank).min(num_ranks.saturating_sub(1))
-            } else {
-                0
-            };
+            let dst_rank = expert
+                .checked_div(experts_per_rank)
+                .map(|rank| rank.min(num_ranks.saturating_sub(1)))
+                .unwrap_or(0);
             // Tokens originate at rank 0 in this simulation
             send_counts[0][dst_rank] += 1;
         }
@@ -291,11 +275,8 @@ impl AllToAllCommunication {
 
         let total_bytes: usize = rank_send_bytes.iter().sum();
         let max_bytes_any_rank = *rank_send_bytes.iter().max().unwrap_or(&0);
-        let mean_bytes_per_rank = if num_ranks > 0 {
-            total_bytes as f32 / num_ranks as f32
-        } else {
-            0.0
-        };
+        let mean_bytes_per_rank =
+            if num_ranks > 0 { total_bytes as f32 / num_ranks as f32 } else { 0.0 };
 
         let bandwidth_utilization = if num_ranks > 0 && max_bytes_any_rank > 0 {
             total_bytes as f32 / (num_ranks as f32 * max_bytes_any_rank as f32)
@@ -488,7 +469,12 @@ mod tests {
         let plan = AllToAllCommunication::plan_all_to_all(&assignments, 2, 4);
         let vol = AllToAllCommunication::simulate_communication_volume(&plan, 8);
 
-        assert_eq!(vol.total_bytes, 4 * 8 * 4, "expected 128 bytes, got {}", vol.total_bytes);
+        assert_eq!(
+            vol.total_bytes,
+            4 * 8 * 4,
+            "expected 128 bytes, got {}",
+            vol.total_bytes
+        );
     }
 
     #[test]
@@ -578,6 +564,9 @@ mod tests {
         let plan = AllToAllCommunication::plan_all_to_all(&assignments, 2, 4);
         // No cross-rank traffic → total_moved = 0 → ratio = 1.0 by convention
         let ratio = plan.max_imbalance_ratio();
-        assert_eq!(ratio, 1.0, "all-local routing should yield ratio 1.0, got {ratio}");
+        assert_eq!(
+            ratio, 1.0,
+            "all-local routing should yield ratio 1.0, got {ratio}"
+        );
     }
 }

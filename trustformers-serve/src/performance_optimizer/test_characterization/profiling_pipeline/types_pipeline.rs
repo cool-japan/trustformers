@@ -564,14 +564,10 @@ pub enum ValidationStatus {
 }
 /// Profile cache manager (placeholder)
 #[derive(Debug)]
-pub struct ProfileCacheManager {
-    config: Arc<CacheConfig>,
-}
+pub struct ProfileCacheManager {}
 impl ProfileCacheManager {
     async fn new(_config: CacheConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     async fn get_cached_result(&self, _test_id: &str) -> Result<Option<ProfilingResult>> {
         Ok(None)
@@ -678,14 +674,10 @@ pub struct StageMetrics {
 }
 /// Profiling validation engine (placeholder)
 #[derive(Debug)]
-pub struct ProfilingValidationEngine {
-    config: Arc<ValidationConfig>,
-}
+pub struct ProfilingValidationEngine {}
 impl ProfilingValidationEngine {
     async fn new(_config: ValidationConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     async fn validate_results(
         &self,
@@ -1040,14 +1032,10 @@ pub enum ProfilingStageType {
 }
 /// Profiling metrics collector (placeholder)
 #[derive(Debug)]
-pub struct ProfilingMetricsCollector {
-    config: Arc<MetricsConfig>,
-}
+pub struct ProfilingMetricsCollector {}
 impl ProfilingMetricsCollector {
     async fn new(_config: MetricsConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(_config),
-        })
+        Ok(Self {})
     }
     async fn shutdown(&self) -> Result<()> {
         Ok(())

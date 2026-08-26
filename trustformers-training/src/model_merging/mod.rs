@@ -48,7 +48,9 @@ pub struct ModelWeights {
 
 impl ModelWeights {
     pub fn new() -> Self {
-        Self { layers: HashMap::new() }
+        Self {
+            layers: HashMap::new(),
+        }
     }
 
     pub fn add_layer(&mut self, name: impl Into<String>, weights: Vec<f64>) {
@@ -72,7 +74,10 @@ impl ModelWeights {
         let mut deltas = HashMap::new();
         for name in self.layer_names() {
             let self_w = &self.layers[name];
-            let base_w = base.layers.get(name).ok_or_else(|| MergeError::LayerMismatch(name.to_string()))?;
+            let base_w = base
+                .layers
+                .get(name)
+                .ok_or_else(|| MergeError::LayerMismatch(name.to_string()))?;
             if self_w.len() != base_w.len() {
                 return Err(MergeError::ShapeMismatch {
                     layer: name.to_string(),
@@ -104,7 +109,9 @@ pub struct TaskVector {
 impl TaskVector {
     /// Scale all delta values by `factor`.
     pub fn scale(&self, factor: f64) -> Self {
-        let deltas = self.deltas.iter()
+        let deltas = self
+            .deltas
+            .iter()
             .map(|(k, v)| (k.clone(), v.iter().map(|x| x * factor).collect()))
             .collect();
         Self { deltas }
@@ -115,7 +122,10 @@ impl TaskVector {
         let mut deltas = HashMap::new();
         for name in sorted_keys(&self.deltas) {
             let a = &self.deltas[name];
-            let b = other.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.to_string()))?;
+            let b = other
+                .deltas
+                .get(name)
+                .ok_or_else(|| MergeError::LayerMismatch(name.to_string()))?;
             if a.len() != b.len() {
                 return Err(MergeError::ShapeMismatch {
                     layer: name.to_string(),
@@ -123,7 +133,10 @@ impl TaskVector {
                     b: b.len(),
                 });
             }
-            deltas.insert(name.to_string(), a.iter().zip(b.iter()).map(|(x, y)| x + y).collect());
+            deltas.insert(
+                name.to_string(),
+                a.iter().zip(b.iter()).map(|(x, y)| x + y).collect(),
+            );
         }
         Ok(Self { deltas })
     }
@@ -132,7 +145,8 @@ impl TaskVector {
     pub fn apply_to(&self, base: &ModelWeights) -> Result<ModelWeights, MergeError> {
         let mut result = ModelWeights::new();
         for (name, delta) in &self.deltas {
-            let base_w = base.layers.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
+            let base_w =
+                base.layers.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
             if base_w.len() != delta.len() {
                 return Err(MergeError::ShapeMismatch {
                     layer: name.clone(),
@@ -186,7 +200,9 @@ impl ModelMerger {
             names
         };
 
-        let mut result_tv = TaskVector { deltas: HashMap::new() };
+        let mut result_tv = TaskVector {
+            deltas: HashMap::new(),
+        };
 
         for name in &layer_names {
             let va = ta.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
@@ -228,9 +244,8 @@ impl ModelMerger {
         }
 
         // 1. Compute task vectors
-        let task_vectors: Vec<TaskVector> = models.iter()
-            .map(|m| m.task_vector(base))
-            .collect::<Result<Vec<_>, _>>()?;
+        let task_vectors: Vec<TaskVector> =
+            models.iter().map(|m| m.task_vector(base)).collect::<Result<Vec<_>, _>>()?;
 
         let layer_names: Vec<String> = {
             let mut names: Vec<String> = task_vectors[0].deltas.keys().cloned().collect();
@@ -238,11 +253,16 @@ impl ModelMerger {
             names
         };
 
-        let mut merged_tv = TaskVector { deltas: HashMap::new() };
+        let mut merged_tv = TaskVector {
+            deltas: HashMap::new(),
+        };
 
         for name in &layer_names {
-            let vecs: Vec<&Vec<f64>> = task_vectors.iter()
-                .map(|tv| tv.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone())))
+            let vecs: Vec<&Vec<f64>> = task_vectors
+                .iter()
+                .map(|tv| {
+                    tv.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
             let param_len = vecs[0].len();
@@ -308,17 +328,24 @@ impl ModelMerger {
             1 // keep all
         };
 
-        let mut dare_tv = TaskVector { deltas: HashMap::new() };
+        let mut dare_tv = TaskVector {
+            deltas: HashMap::new(),
+        };
 
         for name in &layer_names {
-            let delta = tv.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
-            let kept: Vec<f64> = delta.iter().enumerate().map(|(i, &v)| {
-                if drop_rate == 0.0 || (stride > 0 && i % stride == 0) {
-                    v * rescale_factor
-                } else {
-                    0.0
-                }
-            }).collect();
+            let delta =
+                tv.deltas.get(name).ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
+            let kept: Vec<f64> = delta
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    if drop_rate == 0.0 || (stride > 0 && i % stride == 0) {
+                        v * rescale_factor
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
             dare_tv.deltas.insert(name.clone(), kept);
         }
 
@@ -328,7 +355,10 @@ impl ModelMerger {
     // ── Linear ───────────────────────────────────────────────────────────────
 
     /// Merge models using a simple weighted average.
-    pub fn merge_linear(models: &[&ModelWeights], weights: &[f64]) -> Result<ModelWeights, MergeError> {
+    pub fn merge_linear(
+        models: &[&ModelWeights],
+        weights: &[f64],
+    ) -> Result<ModelWeights, MergeError> {
         if models.is_empty() {
             return Err(MergeError::EmptyModels);
         }
@@ -360,13 +390,18 @@ impl ModelMerger {
         let mut result = ModelWeights::new();
 
         for name in &layer_names {
-            let param_len = models[0].layers.get(name)
-                .ok_or_else(|| MergeError::LayerMismatch(name.clone()))?.len();
+            let param_len = models[0]
+                .layers
+                .get(name)
+                .ok_or_else(|| MergeError::LayerMismatch(name.clone()))?
+                .len();
 
             let mut combined = vec![0.0f64; param_len];
 
             for (model, &w) in models.iter().zip(norm_weights.iter()) {
-                let layer = model.layers.get(name)
+                let layer = model
+                    .layers
+                    .get(name)
                     .ok_or_else(|| MergeError::LayerMismatch(name.clone()))?;
                 if layer.len() != param_len {
                     return Err(MergeError::ShapeMismatch {
@@ -402,19 +437,17 @@ impl ModelMerger {
                     return Err(MergeError::EmptyModels);
                 }
                 Self::merge_slerp(base, models[0], models[1], *t)
-            }
+            },
             MergeMethod::Ties { density, lambda } => {
                 Self::merge_ties(base, models, *density, *lambda)
-            }
+            },
             MergeMethod::Dare { drop_rate, rescale } => {
                 if models.is_empty() {
                     return Err(MergeError::EmptyModels);
                 }
                 Self::merge_dare(base, models[0], *drop_rate, *rescale)
-            }
-            MergeMethod::Linear { weights } => {
-                Self::merge_linear(models, weights)
-            }
+            },
+            MergeMethod::Linear { weights } => Self::merge_linear(models, weights),
         }
     }
 }
@@ -497,33 +530,48 @@ fn trim_by_density(v: &[f64], density: f64) -> Vec<f64> {
 /// For each parameter position, elect the sign with the greatest summed absolute value.
 /// Returns +1.0 or -1.0 per position.
 fn elect_signs(trimmed: &[Vec<f64>], param_len: usize) -> Vec<f64> {
-    (0..param_len).map(|i| {
-        let pos_mass: f64 = trimmed.iter()
-            .map(|v| if *v.get(i).unwrap_or(&0.0) > 0.0 { v[i].abs() } else { 0.0 })
-            .sum();
-        let neg_mass: f64 = trimmed.iter()
-            .map(|v| if *v.get(i).unwrap_or(&0.0) < 0.0 { v[i].abs() } else { 0.0 })
-            .sum();
-        if pos_mass >= neg_mass { 1.0 } else { -1.0 }
-    }).collect()
+    (0..param_len)
+        .map(|i| {
+            let pos_mass: f64 = trimmed
+                .iter()
+                .map(|v| if *v.get(i).unwrap_or(&0.0) > 0.0 { v[i].abs() } else { 0.0 })
+                .sum();
+            let neg_mass: f64 = trimmed
+                .iter()
+                .map(|v| if *v.get(i).unwrap_or(&0.0) < 0.0 { v[i].abs() } else { 0.0 })
+                .sum();
+            if pos_mass >= neg_mass {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+        .collect()
 }
 
 /// Average contributions that agree with the elected sign.
 fn merge_same_sign(trimmed: &[Vec<f64>], elected_signs: &[f64], param_len: usize) -> Vec<f64> {
-    (0..param_len).map(|i| {
-        let sign = *elected_signs.get(i).unwrap_or(&1.0);
-        let same_sign: Vec<f64> = trimmed.iter()
-            .filter_map(|v| {
-                let x = *v.get(i).unwrap_or(&0.0);
-                if x * sign > 0.0 { Some(x) } else { None }
-            })
-            .collect();
-        if same_sign.is_empty() {
-            0.0
-        } else {
-            same_sign.iter().sum::<f64>() / same_sign.len() as f64
-        }
-    }).collect()
+    (0..param_len)
+        .map(|i| {
+            let sign = *elected_signs.get(i).unwrap_or(&1.0);
+            let same_sign: Vec<f64> = trimmed
+                .iter()
+                .filter_map(|v| {
+                    let x = *v.get(i).unwrap_or(&0.0);
+                    if x * sign > 0.0 {
+                        Some(x)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if same_sign.is_empty() {
+                0.0
+            } else {
+                same_sign.iter().sum::<f64>() / same_sign.len() as f64
+            }
+        })
+        .collect()
 }
 
 // ─── Standalone public free functions ────────────────────────────────────────
@@ -599,22 +647,24 @@ pub fn safe_slerp(
 
     // Zero-vector: fall back to lerp
     if norm_a < eps64 || norm_b < eps64 {
-        let out = weights_a.iter().zip(weights_b.iter())
+        let out = weights_a
+            .iter()
+            .zip(weights_b.iter())
             .map(|(&a, &b)| ((1.0 - t64) * a as f64 + t64 * b as f64) as f32)
             .collect();
         return Ok(out);
     }
 
-    let dot: f64 = weights_a.iter().zip(weights_b.iter())
-        .map(|(&a, &b)| a as f64 * b as f64)
-        .sum();
+    let dot: f64 = weights_a.iter().zip(weights_b.iter()).map(|(&a, &b)| a as f64 * b as f64).sum();
 
     let cos_omega = (dot / (norm_a * norm_b)).clamp(-1.0, 1.0);
     let omega = cos_omega.acos();
 
     if omega.abs() < eps64 {
         // Nearly parallel: lerp fallback
-        let out = weights_a.iter().zip(weights_b.iter())
+        let out = weights_a
+            .iter()
+            .zip(weights_b.iter())
             .map(|(&a, &b)| ((1.0 - t64) * a as f64 + t64 * b as f64) as f32)
             .collect();
         return Ok(out);
@@ -624,7 +674,9 @@ pub fn safe_slerp(
     let w_a = ((1.0 - t64) * omega).sin() / sin_omega;
     let w_b = (t64 * omega).sin() / sin_omega;
 
-    let out = weights_a.iter().zip(weights_b.iter())
+    let out = weights_a
+        .iter()
+        .zip(weights_b.iter())
         .map(|(&a, &b)| (w_a * a as f64 + w_b * b as f64) as f32)
         .collect();
     Ok(out)
@@ -643,7 +695,10 @@ pub struct TiesConfig {
 
 impl Default for TiesConfig {
     fn default() -> Self {
-        Self { top_k_fraction: 0.2, lambda: 1.0 }
+        Self {
+            top_k_fraction: 0.2,
+            lambda: 1.0,
+        }
     }
 }
 
@@ -664,7 +719,10 @@ pub fn ties_trim(task_vector: &[f32], _base_vector: &[f32], top_k_fraction: f32)
     abs_sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let threshold = abs_sorted[keep_k - 1];
 
-    task_vector.iter().map(|&v| if v.abs() >= threshold { v } else { 0.0 }).collect()
+    task_vector
+        .iter()
+        .map(|&v| if v.abs() >= threshold { v } else { 0.0 })
+        .collect()
 }
 
 /// Step 2 of TIES — elect consensus sign per parameter position.
@@ -676,15 +734,23 @@ pub fn ties_elect_sign(task_vectors: &[Vec<f32>]) -> Vec<f32> {
         return Vec::new();
     }
     let param_len = task_vectors[0].len();
-    (0..param_len).map(|i| {
-        let pos_mass: f32 = task_vectors.iter()
-            .map(|v| if v.get(i).copied().unwrap_or(0.0) > 0.0 { v[i].abs() } else { 0.0 })
-            .sum();
-        let neg_mass: f32 = task_vectors.iter()
-            .map(|v| if v.get(i).copied().unwrap_or(0.0) < 0.0 { v[i].abs() } else { 0.0 })
-            .sum();
-        if pos_mass >= neg_mass { 1.0 } else { -1.0 }
-    }).collect()
+    (0..param_len)
+        .map(|i| {
+            let pos_mass: f32 = task_vectors
+                .iter()
+                .map(|v| if v.get(i).copied().unwrap_or(0.0) > 0.0 { v[i].abs() } else { 0.0 })
+                .sum();
+            let neg_mass: f32 = task_vectors
+                .iter()
+                .map(|v| if v.get(i).copied().unwrap_or(0.0) < 0.0 { v[i].abs() } else { 0.0 })
+                .sum();
+            if pos_mass >= neg_mass {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+        .collect()
 }
 
 /// Step 3 of TIES — disjoint merge: average only parameters whose sign agrees
@@ -694,20 +760,27 @@ pub fn ties_disjoint_merge(task_vectors: &[Vec<f32>], elected_signs: &[f32]) -> 
         return Vec::new();
     }
     let param_len = elected_signs.len();
-    (0..param_len).map(|i| {
-        let sign = *elected_signs.get(i).unwrap_or(&1.0);
-        let agreeing: Vec<f32> = task_vectors.iter()
-            .filter_map(|v| {
-                let x = v.get(i).copied().unwrap_or(0.0);
-                if x * sign > 0.0 { Some(x) } else { None }
-            })
-            .collect();
-        if agreeing.is_empty() {
-            0.0
-        } else {
-            agreeing.iter().sum::<f32>() / agreeing.len() as f32
-        }
-    }).collect()
+    (0..param_len)
+        .map(|i| {
+            let sign = *elected_signs.get(i).unwrap_or(&1.0);
+            let agreeing: Vec<f32> = task_vectors
+                .iter()
+                .filter_map(|v| {
+                    let x = v.get(i).copied().unwrap_or(0.0);
+                    if x * sign > 0.0 {
+                        Some(x)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if agreeing.is_empty() {
+                0.0
+            } else {
+                agreeing.iter().sum::<f32>() / agreeing.len() as f32
+            }
+        })
+        .collect()
 }
 
 /// Full TIES merge pipeline on flat weight slices.
@@ -740,7 +813,8 @@ pub fn ties_merge_slices(
     let dummy_base = vec![0.0f32; base.len()];
 
     // Step 1: trim each task vector
-    let trimmed: Vec<Vec<f32>> = task_vectors.iter()
+    let trimmed: Vec<Vec<f32>> = task_vectors
+        .iter()
         .map(|tv| ties_trim(tv, &dummy_base, config.top_k_fraction))
         .collect();
 
@@ -751,7 +825,9 @@ pub fn ties_merge_slices(
     let merged_delta = ties_disjoint_merge(&trimmed, &elected_signs);
 
     // Apply to base with lambda scaling
-    let result: Vec<f32> = base.iter().zip(merged_delta.iter())
+    let result: Vec<f32> = base
+        .iter()
+        .zip(merged_delta.iter())
         .map(|(&b, &d)| b + config.lambda * d)
         .collect();
 
@@ -773,7 +849,11 @@ pub struct DareConfig {
 
 impl Default for DareConfig {
     fn default() -> Self {
-        Self { drop_rate: 0.9, rescale: true, seed: 0 }
+        Self {
+            drop_rate: 0.9,
+            rescale: true,
+            seed: 0,
+        }
     }
 }
 
@@ -792,15 +872,19 @@ pub fn dare_sparsify(task_vector: &[f32], config: &DareConfig) -> Vec<f32> {
         1.0
     };
 
-    task_vector.iter().enumerate().map(|(i, &v)| {
-        let h = fnv1a_dare(config.seed, i);
-        let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
-        if unit < config.drop_rate as f64 {
-            0.0
-        } else {
-            v * rescale
-        }
-    }).collect()
+    task_vector
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let h = fnv1a_dare(config.seed, i);
+            let unit = (h >> 11) as f64 / (1u64 << 53) as f64;
+            if unit < config.drop_rate as f64 {
+                0.0
+            } else {
+                v * rescale
+            }
+        })
+        .collect()
 }
 
 /// Full DARE merge: apply sparsified delta to base.
@@ -939,12 +1023,18 @@ mod tests {
         let at_t1 = ModelMerger::merge_slerp(&base, &ma, &mb, 1.0).unwrap();
 
         // t=0 → weight of model_a → [3,0,0]
-        assert!((at_t0.layers["w"][0] - 3.0).abs() < 1e-8, "t=0 should reproduce model_a");
+        assert!(
+            (at_t0.layers["w"][0] - 3.0).abs() < 1e-8,
+            "t=0 should reproduce model_a"
+        );
         assert!(at_t0.layers["w"][1].abs() < 1e-8);
 
         // t=1 → weight of model_b → [0,4,0]
         assert!(at_t1.layers["w"][0].abs() < 1e-8);
-        assert!((at_t1.layers["w"][1] - 4.0).abs() < 1e-8, "t=1 should reproduce model_b");
+        assert!(
+            (at_t1.layers["w"][1] - 4.0).abs() < 1e-8,
+            "t=1 should reproduce model_b"
+        );
     }
 
     // 9. merge_ties with density=1.0 keeps all parameters
@@ -976,7 +1066,10 @@ mod tests {
 
         let result = ModelMerger::merge_ties(&base, &[&m1, &m2, &m3], 1.0, 1.0).unwrap();
         // Positive mass: 10+8=18, negative mass: 1 → positive sign elected
-        assert!(result.layers["w"][0] > 0.0, "majority positive sign should win");
+        assert!(
+            result.layers["w"][0] > 0.0,
+            "majority positive sign should win"
+        );
     }
 
     // 11. merge_dare with drop_rate=0.0 keeps all parameters unchanged
@@ -998,9 +1091,15 @@ mod tests {
         // rescale_factor = 1/(1-0.5) = 2.0
         let result = ModelMerger::merge_dare(&base, &model, 0.5, true).unwrap();
         let w = &result.layers["w"];
-        assert!((w[0] - 2.0).abs() < 1e-10, "kept param at idx 0 should be rescaled");
+        assert!(
+            (w[0] - 2.0).abs() < 1e-10,
+            "kept param at idx 0 should be rescaled"
+        );
         assert!(w[1].abs() < 1e-10, "dropped param at idx 1 should be 0");
-        assert!((w[2] - 2.0).abs() < 1e-10, "kept param at idx 2 should be rescaled");
+        assert!(
+            (w[2] - 2.0).abs() < 1e-10,
+            "kept param at idx 2 should be rescaled"
+        );
         assert!(w[3].abs() < 1e-10, "dropped param at idx 3 should be 0");
     }
 
@@ -1048,7 +1147,9 @@ mod tests {
         let m1 = single_layer("w", vec![0.0, 0.0]);
         let m2 = single_layer("w", vec![2.0, 4.0]);
         let base = single_layer("w", vec![0.0, 0.0]); // unused for linear
-        let merger = ModelMerger::new(MergeMethod::Linear { weights: vec![1.0, 1.0] });
+        let merger = ModelMerger::new(MergeMethod::Linear {
+            weights: vec![1.0, 1.0],
+        });
         let result = merger.merge(&base, &[&m1, &m2]).unwrap();
         assert!((result.layers["w"][0] - 1.0).abs() < 1e-10);
         assert!((result.layers["w"][1] - 2.0).abs() < 1e-10);
@@ -1107,7 +1208,11 @@ mod tests {
         // vectors are parallel, omega≈0 → lerp
         let result = safe_slerp(&a, &b, 0.5, 1e-6).expect("ok");
         // lerp(0.5, [2,0], [4,0]) = [3, 0]
-        assert!((result[0] - 3.0).abs() < 1e-5, "lerp fallback: {}", result[0]);
+        assert!(
+            (result[0] - 3.0).abs() < 1e-5,
+            "lerp fallback: {}",
+            result[0]
+        );
     }
 
     // 23. ties_trim keeps top-k fraction by magnitude
@@ -1127,25 +1232,23 @@ mod tests {
     // 24. ties_elect_sign majority positive
     #[test]
     fn test_ties_elect_sign_majority_positive() {
-        let tvs = vec![
-            vec![5.0f32],
-            vec![-1.0f32],
-            vec![3.0f32],
-        ];
+        let tvs = vec![vec![5.0f32], vec![-1.0f32], vec![3.0f32]];
         let signs = ties_elect_sign(&tvs);
-        assert!((signs[0] - 1.0).abs() < 1e-6, "majority positive should elect +1");
+        assert!(
+            (signs[0] - 1.0).abs() < 1e-6,
+            "majority positive should elect +1"
+        );
     }
 
     // 25. ties_elect_sign majority negative
     #[test]
     fn test_ties_elect_sign_majority_negative() {
-        let tvs = vec![
-            vec![-10.0f32],
-            vec![1.0f32],
-            vec![-2.0f32],
-        ];
+        let tvs = vec![vec![-10.0f32], vec![1.0f32], vec![-2.0f32]];
         let signs = ties_elect_sign(&tvs);
-        assert!((signs[0] - (-1.0)).abs() < 1e-6, "majority negative should elect -1");
+        assert!(
+            (signs[0] - (-1.0)).abs() < 1e-6,
+            "majority negative should elect -1"
+        );
     }
 
     // 26. ties_disjoint_merge averages only same-sign contributions
@@ -1159,22 +1262,34 @@ mod tests {
         let elected = vec![1.0f32]; // positive sign elected
         let merged = ties_disjoint_merge(&tvs, &elected);
         // Average of [6, 4] = 5
-        assert!((merged[0] - 5.0).abs() < 1e-5, "disjoint merge should avg same-sign: {}", merged[0]);
+        assert!(
+            (merged[0] - 5.0).abs() < 1e-5,
+            "disjoint merge should avg same-sign: {}",
+            merged[0]
+        );
     }
 
     // 27. ties_merge_slices pipeline correctness
     #[test]
     fn test_ties_merge_slices_pipeline() {
         let base = vec![0.0f32; 2];
-        let task_vectors = vec![
-            vec![4.0f32, -2.0],
-            vec![6.0f32, -3.0],
-        ];
-        let cfg = TiesConfig { top_k_fraction: 1.0, lambda: 1.0 };
+        let task_vectors = vec![vec![4.0f32, -2.0], vec![6.0f32, -3.0]];
+        let cfg = TiesConfig {
+            top_k_fraction: 1.0,
+            lambda: 1.0,
+        };
         let result = ties_merge_slices(&base, &task_vectors, &cfg).expect("ok");
         // Both positive at pos 0: avg = 5.0; both negative at pos 1: avg = -2.5
-        assert!((result[0] - 5.0).abs() < 1e-5, "pos 0 should be 5, got {}", result[0]);
-        assert!((result[1] - (-2.5)).abs() < 1e-5, "pos 1 should be -2.5, got {}", result[1]);
+        assert!(
+            (result[0] - 5.0).abs() < 1e-5,
+            "pos 0 should be 5, got {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - (-2.5)).abs() < 1e-5,
+            "pos 1 should be -2.5, got {}",
+            result[1]
+        );
     }
 
     // 28. ties_merge_slices empty returns error
@@ -1190,7 +1305,11 @@ mod tests {
     #[test]
     fn test_dare_sparsify_no_drop() {
         let tv = vec![1.0f32, 2.0, 3.0, 4.0];
-        let cfg = DareConfig { drop_rate: 0.0, rescale: false, seed: 0 };
+        let cfg = DareConfig {
+            drop_rate: 0.0,
+            rescale: false,
+            seed: 0,
+        };
         let sparse = dare_sparsify(&tv, &cfg);
         assert_eq!(sparse, tv, "drop_rate=0 should keep all elements");
     }
@@ -1201,14 +1320,27 @@ mod tests {
         // Use seed that we know drops/keeps specific positions (we test invariant not positions)
         let n = 1000usize;
         let tv = vec![1.0f32; n];
-        let cfg = DareConfig { drop_rate: 0.5, rescale: true, seed: 0 };
-        let cfg_no_rescale = DareConfig { drop_rate: 0.5, rescale: false, seed: 0 };
+        let cfg = DareConfig {
+            drop_rate: 0.5,
+            rescale: true,
+            seed: 0,
+        };
+        let cfg_no_rescale = DareConfig {
+            drop_rate: 0.5,
+            rescale: false,
+            seed: 0,
+        };
         let sparse = dare_sparsify(&tv, &cfg);
         let sparse_no = dare_sparsify(&tv, &cfg_no_rescale);
         // For each kept element (non-zero in no_rescale), rescaled version should be 2x
         for (&r, &no) in sparse.iter().zip(sparse_no.iter()) {
             if no.abs() > 1e-7 {
-                assert!((r - 2.0 * no).abs() < 1e-5, "rescaled {} should be 2x no-rescale {}", r, no);
+                assert!(
+                    (r - 2.0 * no).abs() < 1e-5,
+                    "rescaled {} should be 2x no-rescale {}",
+                    r,
+                    no
+                );
             }
         }
     }
@@ -1218,10 +1350,19 @@ mod tests {
     fn test_dare_merge_slices_no_drop_equals_finetuned() {
         let base = vec![1.0f32, 2.0, 3.0];
         let fine = vec![2.0f32, 4.0, 6.0];
-        let cfg = DareConfig { drop_rate: 0.0, rescale: false, seed: 0 };
+        let cfg = DareConfig {
+            drop_rate: 0.0,
+            rescale: false,
+            seed: 0,
+        };
         let result = dare_merge_slices(&base, &fine, &cfg).expect("ok");
         for (&r, &f) in result.iter().zip(fine.iter()) {
-            assert!((r - f).abs() < 1e-6, "no-drop should equal finetuned: {} vs {}", r, f);
+            assert!(
+                (r - f).abs() < 1e-6,
+                "no-drop should equal finetuned: {} vs {}",
+                r,
+                f
+            );
         }
     }
 
@@ -1240,7 +1381,11 @@ mod tests {
     fn test_dare_merge_slices_drop_rate_1_error() {
         let base = vec![0.0f32; 3];
         let fine = vec![1.0f32; 3];
-        let cfg = DareConfig { drop_rate: 1.0, rescale: false, seed: 0 };
+        let cfg = DareConfig {
+            drop_rate: 1.0,
+            rescale: false,
+            seed: 0,
+        };
         let err = dare_merge_slices(&base, &fine, &cfg).unwrap_err();
         assert!(matches!(err, MergeError::InvalidWeight(_)));
     }
@@ -1249,7 +1394,11 @@ mod tests {
     #[test]
     fn test_dare_sparsify_deterministic() {
         let tv: Vec<f32> = (0..100).map(|i| i as f32 * 0.1).collect();
-        let cfg = DareConfig { drop_rate: 0.7, rescale: true, seed: 42 };
+        let cfg = DareConfig {
+            drop_rate: 0.7,
+            rescale: true,
+            seed: 42,
+        };
         let r1 = dare_sparsify(&tv, &cfg);
         let r2 = dare_sparsify(&tv, &cfg);
         assert_eq!(r1, r2, "dare_sparsify must be deterministic");
@@ -1260,10 +1409,16 @@ mod tests {
     fn test_ties_merge_slices_lambda_zero_returns_base() {
         let base = vec![1.0f32, 2.0, 3.0];
         let task_vectors = vec![vec![5.0f32, 10.0, 15.0]];
-        let cfg = TiesConfig { top_k_fraction: 1.0, lambda: 0.0 };
+        let cfg = TiesConfig {
+            top_k_fraction: 1.0,
+            lambda: 0.0,
+        };
         let result = ties_merge_slices(&base, &task_vectors, &cfg).expect("ok");
         for (&r, &b) in result.iter().zip(base.iter()) {
-            assert!((r - b).abs() < 1e-6, "lambda=0 should return base unchanged");
+            assert!(
+                (r - b).abs() < 1e-6,
+                "lambda=0 should return base unchanged"
+            );
         }
     }
 }

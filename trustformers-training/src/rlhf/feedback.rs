@@ -3,6 +3,127 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
 
+/// Number of equal-width bins [`FeedbackAggregation::MajorityVote`] discretises `[0, 1]` into.
+///
+/// Five matches the Likert scale that human raters are normally given, and is the same scale
+/// [`crate::rlhf::trainer`] normalises its ratings against.
+pub const MAJORITY_VOTE_BINS: usize = 5;
+
+/// Arithmetic mean of a non-empty slice; `0.0` for an empty one.
+fn mean(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f32>() / values.len() as f32
+}
+
+/// Population standard deviation (divisor `n`), used to define the consensus band.
+fn population_std(values: &[f32]) -> f32 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let m = mean(values);
+    let variance = values.iter().map(|&v| (v - m) * (v - m)).sum::<f32>() / values.len() as f32;
+    variance.sqrt()
+}
+
+/// Median of a slice: the central order statistic, averaging the two central values when the
+/// count is even. Non-finite entries sort last so they cannot corrupt the ordering silently.
+fn median(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+/// `Σ wᵢ rᵢ / Σ wᵢ` over one item's annotator group.
+///
+/// `item` is only used to make the error message locate the offending row.
+fn weighted_mean(values: &[f32], weights: &[f32], item: usize) -> Result<f32> {
+    if values.len() != weights.len() {
+        return Err(anyhow!(
+            "item {item}: {} ratings but {} weights",
+            values.len(),
+            weights.len()
+        ));
+    }
+    if let Some(bad) = weights.iter().find(|w| **w < 0.0 || !w.is_finite()) {
+        return Err(anyhow!(
+            "item {item}: feedback weight {bad} is negative or not finite; a weighted mean \
+             is only defined for non-negative finite weights"
+        ));
+    }
+    let total: f32 = weights.iter().sum();
+    if total <= 0.0 {
+        return Err(anyhow!(
+            "item {item}: feedback weights sum to {total}; the weighted mean is undefined"
+        ));
+    }
+    Ok(values.iter().zip(weights).map(|(&v, &w)| v * w).sum::<f32>() / total)
+}
+
+/// One-sigma trimmed mean — the "raters that agree" for a continuous rating scale.
+///
+/// Annotators more than one population standard deviation from the group mean are treated as
+/// outliers and dropped; the mean of the survivors is the consensus. A group whose ratings all
+/// coincide has zero spread and is returned unchanged.
+fn consensus(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let centre = mean(values);
+    let spread = population_std(values);
+    if spread <= f32::EPSILON {
+        return centre;
+    }
+    let kept: Vec<f32> = values.iter().copied().filter(|v| (v - centre).abs() <= spread).collect();
+    if kept.is_empty() {
+        // Unreachable for a finite group (the value nearest the mean always survives), but a
+        // fallback keeps the function total rather than dividing by zero.
+        return centre;
+    }
+    mean(&kept)
+}
+
+/// Modal-bin vote over [`MAJORITY_VOTE_BINS`] equal bins of `[0, 1]`.
+///
+/// The winning bin is the one holding the most ratings; ties go to the bin containing the
+/// group's median, and failing that to the lower bin index. The reported value is the mean of
+/// the ratings that fell in the winning bin, so the result stays on the rating scale instead of
+/// snapping to a bin centre.
+fn majority_vote(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let bin_of = |value: f32| -> usize {
+        let scaled = (value.clamp(0.0, 1.0) * MAJORITY_VOTE_BINS as f32) as usize;
+        scaled.min(MAJORITY_VOTE_BINS - 1)
+    };
+
+    let mut counts = [0usize; MAJORITY_VOTE_BINS];
+    for &value in values {
+        counts[bin_of(value)] += 1;
+    }
+
+    let median_bin = bin_of(median(values));
+    let best_count = counts.iter().copied().max().unwrap_or(0);
+    let winner = if counts[median_bin] == best_count {
+        median_bin
+    } else {
+        counts.iter().position(|&c| c == best_count).unwrap_or(median_bin)
+    };
+
+    let members: Vec<f32> = values.iter().copied().filter(|&v| bin_of(v) == winner).collect();
+    mean(&members)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackConfig {
     pub max_feedback_length: usize,
@@ -131,7 +252,8 @@ impl FeedbackProcessor {
         }
 
         // Aggregate ratings based on configuration
-        let aggregated_ratings = self.aggregate_ratings(&batch.ratings)?;
+        let aggregated_ratings =
+            self.aggregate_ratings(&batch.ratings, batch_size, batch.weights.as_ref())?;
 
         // Compute quality scores
         let quality_scores = self.compute_quality_scores(batch)?;
@@ -151,27 +273,111 @@ impl FeedbackProcessor {
         })
     }
 
-    fn aggregate_ratings(&self, ratings: &Tensor) -> Result<Tensor> {
-        // For now, just return the input ratings as-is to preserve shape
-        match self.config.feedback_aggregation {
-            FeedbackAggregation::Mean => Ok(ratings.clone()),
-            FeedbackAggregation::Median => {
-                // Simplified median approximation using input ratings for now
-                Ok(ratings.clone())
-            },
-            FeedbackAggregation::WeightedMean => {
-                // Simplified weighted mean using input ratings for now
-                Ok(ratings.clone())
-            },
-            FeedbackAggregation::Consensus => {
-                // Simplified consensus using input ratings for now
-                Ok(ratings.clone())
-            },
-            FeedbackAggregation::MajorityVote => {
-                // Simplified majority vote using input ratings for now
-                Ok(ratings.clone())
-            },
+    /// Collapse each item's annotator ratings into a single rating per item.
+    ///
+    /// # Layout contract
+    ///
+    /// `ratings` is read as a flat, **item-major** buffer of `batch_size * annotators`
+    /// values: entries `[i * annotators, (i + 1) * annotators)` are the ratings that the
+    /// annotators gave item `i`. The common single-annotator case (`annotators == 1`) is
+    /// exactly the `[batch_size]` tensor callers already pass. The returned tensor always
+    /// has shape `[batch_size]`.
+    ///
+    /// # Aggregators
+    ///
+    /// Every arm below computes a genuinely different statistic of the group — this used to
+    /// be five arms all returning `ratings.clone()`:
+    ///
+    /// * [`FeedbackAggregation::Mean`] — arithmetic mean.
+    /// * [`FeedbackAggregation::Median`] — order statistic; the mean of the two central
+    ///   values for an even number of annotators.
+    /// * [`FeedbackAggregation::WeightedMean`] — `Σ wᵢ rᵢ / Σ wᵢ`. Per-annotator weights are
+    ///   used when `weights.len() == ratings.len()`. When `weights.len() == batch_size` the
+    ///   item's single weight is shared by all of its annotators and cancels out, so the
+    ///   result *is* the arithmetic mean — that is the exact value of the weighted mean, not
+    ///   a substitution. Absent weights mean uniform weights, likewise exactly the mean.
+    /// * [`FeedbackAggregation::Consensus`] — one-sigma trimmed mean: annotators further than
+    ///   one population standard deviation from the group mean are dropped as outliers and
+    ///   the remainder is averaged, which is what "the raters that agree" means for a
+    ///   continuous scale.
+    /// * [`FeedbackAggregation::MajorityVote`] — the ratings are binned into
+    ///   [`MAJORITY_VOTE_BINS`] equal Likert-style bins over `[0, 1]`, the modal bin wins
+    ///   (ties broken towards the bin containing the median, then towards the lower bin) and
+    ///   the mean of that bin's ratings is returned.
+    ///
+    /// # Errors
+    ///
+    /// * `batch_size` is zero, or `ratings` is empty.
+    /// * `ratings.len()` is not a whole multiple of `batch_size` (ragged annotator groups
+    ///   cannot be sliced unambiguously).
+    /// * a supplied weight vector has a length other than `ratings.len()` or `batch_size`.
+    /// * the weights of some item sum to zero or are negative, which leaves the weighted
+    ///   mean undefined.
+    fn aggregate_ratings(
+        &self,
+        ratings: &Tensor,
+        batch_size: usize,
+        weights: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        if batch_size == 0 {
+            return Err(anyhow!("cannot aggregate ratings for an empty batch"));
         }
+        let values = ratings.to_vec_f32()?;
+        if values.is_empty() {
+            return Err(anyhow!(
+                "cannot aggregate an empty ratings tensor for a batch of {batch_size} items"
+            ));
+        }
+        if !values.len().is_multiple_of(batch_size) {
+            return Err(anyhow!(
+                "ratings tensor of {} values does not split evenly across {batch_size} items; \
+                 every item must carry the same number of annotator ratings",
+                values.len()
+            ));
+        }
+        let annotators = values.len() / batch_size;
+
+        // Per-annotator weights, expanded to `values.len()` so the same slicing works for the
+        // per-item and per-annotator layouts alike.
+        let per_annotator_weights: Option<Vec<f32>> = match weights {
+            None => None,
+            Some(tensor) => {
+                let raw = tensor.to_vec_f32()?;
+                if raw.len() == values.len() {
+                    Some(raw)
+                } else if raw.len() == batch_size {
+                    // One weight per item: constant within each group, so it cancels in the
+                    // ratio. Expanded rather than special-cased so the arithmetic is uniform.
+                    Some(raw.iter().flat_map(|&w| std::iter::repeat_n(w, annotators)).collect())
+                } else {
+                    return Err(anyhow!(
+                        "feedback weights of length {} match neither the ratings length {} \
+                         nor the batch size {batch_size}",
+                        raw.len(),
+                        values.len()
+                    ));
+                }
+            },
+        };
+
+        let mut aggregated = Vec::with_capacity(batch_size);
+        for item in 0..batch_size {
+            let start = item * annotators;
+            let group = &values[start..start + annotators];
+            let value = match self.config.feedback_aggregation {
+                FeedbackAggregation::Mean => mean(group),
+                FeedbackAggregation::Median => median(group),
+                FeedbackAggregation::WeightedMean => match &per_annotator_weights {
+                    None => mean(group),
+                    Some(all) => weighted_mean(group, &all[start..start + annotators], item)?,
+                },
+                FeedbackAggregation::Consensus => consensus(group),
+                FeedbackAggregation::MajorityVote => majority_vote(group),
+            };
+            aggregated.push(value);
+        }
+
+        Ok(Tensor::from_vec(aggregated, &[batch_size])?)
     }
 
     fn compute_quality_scores(&self, batch: &FeedbackBatch) -> Result<Tensor> {
@@ -276,11 +482,7 @@ impl FeedbackProcessor {
         })
     }
 
-    fn compute_rating_weights(&self, ratings: &Tensor) -> Result<Tensor> {
-        // Simplified implementation using mean for now
-        Ok(ratings.mean()?)
-    }
-
+    #[allow(dead_code)]
     fn compute_rating_std(&self, ratings: &Tensor) -> Result<Tensor> {
         // Sample standard deviation reduced to a single scalar tensor of shape [1].
         let std = self.compute_rating_std_single(ratings)?;
@@ -705,5 +907,180 @@ mod tests {
         }
         let stats = processor.get_statistics();
         assert_eq!(stats.human_feedback_count, 5);
+    }
+
+    // ── aggregate_ratings: real statistics, not five copies of the input ──────
+
+    fn processor_with(aggregation: FeedbackAggregation) -> FeedbackProcessor {
+        FeedbackProcessor::new(FeedbackConfig {
+            feedback_aggregation: aggregation,
+            ..FeedbackConfig::default()
+        })
+    }
+
+    /// Two items, three annotators each: `[0.1, 0.2, 0.9]` and `[0.4, 0.5, 0.6]`.
+    fn three_annotator_ratings() -> Result<Tensor> {
+        Ok(Tensor::from_vec(vec![0.1, 0.2, 0.9, 0.4, 0.5, 0.6], &[6])?)
+    }
+
+    #[test]
+    fn test_aggregate_ratings_collapses_annotator_groups() -> Result<()> {
+        // Regression: every arm returned `ratings.clone()`, so the output kept the raw
+        // annotator layout (shape [6]) instead of one rating per item (shape [2]).
+        let processor = processor_with(FeedbackAggregation::Mean);
+        let aggregated = processor.aggregate_ratings(&three_annotator_ratings()?, 2, None)?;
+        assert_eq!(
+            aggregated.shape(),
+            &[2],
+            "aggregation must yield one rating per item"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_mean_is_hand_computed() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::Mean);
+        let got = processor
+            .aggregate_ratings(&three_annotator_ratings()?, 2, None)?
+            .to_vec_f32()?;
+        // (0.1 + 0.2 + 0.9) / 3 = 0.4 ; (0.4 + 0.5 + 0.6) / 3 = 0.5
+        assert!((got[0] - 0.4).abs() < 1e-5, "mean item0 = {}", got[0]);
+        assert!((got[1] - 0.5).abs() < 1e-5, "mean item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_median_is_the_order_statistic() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::Median);
+        let got = processor
+            .aggregate_ratings(&three_annotator_ratings()?, 2, None)?
+            .to_vec_f32()?;
+        // median{0.1, 0.2, 0.9} = 0.2 — and crucially NOT the mean 0.4.
+        assert!((got[0] - 0.2).abs() < 1e-5, "median item0 = {}", got[0]);
+        assert!((got[1] - 0.5).abs() < 1e-5, "median item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_median_averages_two_central_values() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::Median);
+        // One item, four annotators: sorted {0.1, 0.2, 0.6, 0.8} → (0.2 + 0.6) / 2 = 0.4
+        let ratings = Tensor::from_vec(vec![0.8, 0.1, 0.6, 0.2], &[4])?;
+        let got = processor.aggregate_ratings(&ratings, 1, None)?.to_vec_f32()?;
+        assert!(
+            (got[0] - 0.4).abs() < 1e-5,
+            "even-count median = {}",
+            got[0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_consensus_drops_the_outlier() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::Consensus);
+        let got = processor
+            .aggregate_ratings(&three_annotator_ratings()?, 2, None)?
+            .to_vec_f32()?;
+        // item0: mean 0.4, population std = sqrt(0.38 / 3) ≈ 0.3559. The 0.9 rater is 0.5 away
+        // and is trimmed; consensus = mean{0.1, 0.2} = 0.15.
+        assert!((got[0] - 0.15).abs() < 1e-4, "consensus item0 = {}", got[0]);
+        // item1: std ≈ 0.0816, so only the 0.5 rater survives.
+        assert!((got[1] - 0.5).abs() < 1e-4, "consensus item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_majority_vote_picks_the_modal_bin() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::MajorityVote);
+        // item0 {0.05, 0.15, 0.95}: bins 0, 0, 4 → modal bin 0 → mean{0.05, 0.15} = 0.10
+        // item1 {0.45, 0.55, 0.65}: bins 2, 2, 3 → modal bin 2 → mean{0.45, 0.55} = 0.50
+        let ratings = Tensor::from_vec(vec![0.05, 0.15, 0.95, 0.45, 0.55, 0.65], &[6])?;
+        let got = processor.aggregate_ratings(&ratings, 2, None)?.to_vec_f32()?;
+        assert!((got[0] - 0.10).abs() < 1e-4, "majority item0 = {}", got[0]);
+        assert!((got[1] - 0.50).abs() < 1e-4, "majority item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_weighted_mean_uses_per_annotator_weights() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::WeightedMean);
+        // Two items, two annotators: ratings {0.0, 1.0} both times, mirrored weights.
+        let ratings = Tensor::from_vec(vec![0.0, 1.0, 0.0, 1.0], &[4])?;
+        let weights = Tensor::from_vec(vec![3.0, 1.0, 1.0, 3.0], &[4])?;
+        let got = processor.aggregate_ratings(&ratings, 2, Some(&weights))?.to_vec_f32()?;
+        // (0*3 + 1*1) / 4 = 0.25 and (0*1 + 1*3) / 4 = 0.75 — both differ from the mean 0.5.
+        assert!((got[0] - 0.25).abs() < 1e-5, "weighted item0 = {}", got[0]);
+        assert!((got[1] - 0.75).abs() < 1e-5, "weighted item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_per_item_weights_reduce_to_the_mean() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::WeightedMean);
+        let ratings = Tensor::from_vec(vec![0.0, 1.0, 0.2, 0.4], &[4])?;
+        // One weight per item: constant inside each group, so it cancels exactly.
+        let weights = Tensor::from_vec(vec![7.0, 0.5], &[2])?;
+        let got = processor.aggregate_ratings(&ratings, 2, Some(&weights))?.to_vec_f32()?;
+        assert!((got[0] - 0.5).abs() < 1e-5, "item0 = {}", got[0]);
+        assert!((got[1] - 0.3).abs() < 1e-5, "item1 = {}", got[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregation_modes_disagree_on_a_skewed_group() -> Result<()> {
+        // The core regression: the five arms were byte-identical, so this could not fail.
+        let ratings = three_annotator_ratings()?;
+        let mean_out = processor_with(FeedbackAggregation::Mean)
+            .aggregate_ratings(&ratings, 2, None)?
+            .to_vec_f32()?;
+        let median_out = processor_with(FeedbackAggregation::Median)
+            .aggregate_ratings(&ratings, 2, None)?
+            .to_vec_f32()?;
+        let consensus_out = processor_with(FeedbackAggregation::Consensus)
+            .aggregate_ratings(&ratings, 2, None)?
+            .to_vec_f32()?;
+        assert!(
+            (mean_out[0] - median_out[0]).abs() > 1e-3,
+            "mean {} and median {} must differ on a skewed group",
+            mean_out[0],
+            median_out[0]
+        );
+        assert!(
+            (mean_out[0] - consensus_out[0]).abs() > 1e-3,
+            "mean {} and consensus {} must differ on a skewed group",
+            mean_out[0],
+            consensus_out[0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_aggregate_ratings_rejects_ragged_and_degenerate_input() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::Mean);
+        // 5 ratings cannot split evenly across 2 items.
+        let ragged = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4, 0.5], &[5])?;
+        assert!(
+            processor.aggregate_ratings(&ragged, 2, None).is_err(),
+            "ragged annotator groups must be an error, not a silent reshape"
+        );
+        // Weights that match neither layout.
+        let ratings = Tensor::from_vec(vec![0.1, 0.2], &[2])?;
+        let bad_weights = Tensor::from_vec(vec![1.0, 1.0, 1.0], &[3])?;
+        assert!(processor.aggregate_ratings(&ratings, 2, Some(&bad_weights)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_weighted_mean_rejects_zero_and_negative_weights() -> Result<()> {
+        let processor = processor_with(FeedbackAggregation::WeightedMean);
+        let ratings = Tensor::from_vec(vec![0.1, 0.2], &[2])?;
+        let zeros = Tensor::from_vec(vec![0.0, 0.0], &[2])?;
+        assert!(
+            processor.aggregate_ratings(&ratings, 1, Some(&zeros)).is_err(),
+            "an all-zero weight vector leaves the weighted mean undefined"
+        );
+        let negative = Tensor::from_vec(vec![-1.0, 2.0], &[2])?;
+        assert!(processor.aggregate_ratings(&ratings, 1, Some(&negative)).is_err());
+        Ok(())
     }
 }

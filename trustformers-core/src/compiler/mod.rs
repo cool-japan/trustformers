@@ -345,22 +345,14 @@ impl CompilerOptimizer {
             let result = self.jit_compiler.compile(graph)?;
             Ok(result)
         } else {
-            // Fallback to basic compilation
-            let stats = CompilationStats {
-                compilation_time_ms: 0,
-                original_ops: graph.nodes.len(),
-                optimized_ops: graph.nodes.len(),
-                fused_kernels: 0,
-                performance_gain: 1.0,
-                memory_reduction: 0.0,
-                applied_passes: vec!["basic".to_string()],
-            };
-
-            Ok(CompilationResult {
-                compiled_code: vec![0u8; 64], // Placeholder
-                stats,
-                metadata: HashMap::new(),
-            })
+            // With JIT disabled there is no compiler to produce code. Returning
+            // 64 zero bytes labelled `compiled_code` (with a 1.0 performance
+            // gain) presented nothing as a successful compilation.
+            Err(TrustformersError::not_implemented(
+                "graph compilation requires JIT to be enabled in CompilerConfig; no \
+                 ahead-of-time compiler is available"
+                    .to_string(),
+            ))
         }
     }
 
@@ -631,7 +623,7 @@ impl ComputationGraph {
             }
         }
 
-        // Check for cycles (simplified)
+        // Check for cycles
         if self.has_cycles() {
             return Err(invalid_input("Graph contains cycles"));
         }
@@ -639,7 +631,7 @@ impl ComputationGraph {
         Ok(())
     }
 
-    /// Check if the graph has cycles (simplified DFS)
+    /// Check if the graph has cycles: standard visited + recursion-stack DFS.
     fn has_cycles(&self) -> bool {
         let mut visited = vec![false; self.nodes.len()];
         let mut rec_stack = vec![false; self.nodes.len()];
@@ -774,6 +766,32 @@ pub enum RecommendationPriority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: with JIT disabled, `compile_graph` returned
+    /// `compiled_code: vec![0u8; 64]` with a `performance_gain: 1.0` — 64 zero
+    /// bytes presented as a successful compilation.
+    #[test]
+    fn test_compile_graph_without_jit_is_refused() {
+        let config = CompilerConfig {
+            enable_jit: false,
+            ..CompilerConfig::default()
+        };
+        let mut compiler = CompilerOptimizer::new(config).expect("compiler construction failed");
+
+        let graph = ComputationGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        let error = compiler
+            .compile_graph(graph)
+            .expect_err("no compiler is available, so nothing can be compiled");
+        assert!(
+            error.to_string().contains("JIT"),
+            "the error must say why: {error}"
+        );
+    }
 
     #[test]
     fn test_compiler_config_default() {

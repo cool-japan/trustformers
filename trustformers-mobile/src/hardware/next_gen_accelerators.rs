@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{unsupported_operation, Result};
 use trustformers_core::tensor::Tensor;
 
 #[derive(Debug, Clone)]
@@ -106,7 +106,11 @@ pub struct DevicePerformance {
     pub average_latency_ms: f32,
     pub throughput_ops_sec: u64,
     pub energy_efficiency: f32,
-    pub accuracy_score: f32,
+    /// Numerical accuracy of this device's output against a reference
+    /// computation, when one has actually been measured. `None` -- not a
+    /// fabricated constant -- until a caller supplies a real comparison; this
+    /// engine has no ground truth of its own to score itself against.
+    pub accuracy_score: Option<f32>,
     pub stability_rating: f32,
     pub last_updated: Instant,
 }
@@ -232,124 +236,84 @@ impl NextGenAcceleratorManager {
         Ok(())
     }
 
+    /// Detect a real Apple Neural Engine by querying the iOS `sysctl`
+    /// `hw.model`. Returns `Ok(None)` on every platform where this cannot be
+    /// verified -- including non-iOS builds and iOS builds on a model this
+    /// function does not recognise -- rather than fabricating a device.
+    ///
+    /// The TOPS/bandwidth figures below are Apple's own published
+    /// specifications for the matched model family, not invented numbers;
+    /// they are only ever attached to a device this function has actually
+    /// confirmed exists.
     fn detect_apple_neural_engine_v2(&self) -> Result<Option<AcceleratorDevice>> {
-        // In production, this would query iOS system APIs
-        // For simulation, create a representative device
         #[cfg(target_os = "ios")]
         {
             use std::process::Command;
 
-            // Check for A17 Pro or M3+ chips
-            let output = Command::new("sysctl").arg("hw.model").output();
+            let output = Command::new("sysctl").arg("-n").arg("hw.model").output();
 
             if let Ok(output) = output {
-                let model = String::from_utf8_lossy(&output.stdout);
-                if model.contains("iPhone16") || model.contains("iPad") {
-                    return Ok(Some(AcceleratorDevice {
-                        device_id: "apple_ne_v2_0".to_string(),
-                        device_type: NextGenDevice::AppleNeuralEngineV2 {
-                            cores: 16,
-                            ops_per_second: 35_800_000_000_000, // 35.8 TOPS
-                            memory_bandwidth_gbps: 273.0,
-                            version: "Neural Engine V2".to_string(),
-                        },
-                        is_available: true,
-                        current_utilization: 0.0,
-                        temperature_celsius: 35.0,
-                        power_consumption_mw: 2000.0,
-                        performance_tier: PerformanceTier::Ultra,
-                    }));
+                if output.status.success() {
+                    let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    // iPhone16,x is the A17 Pro generation (16-core Neural
+                    // Engine, Apple's published 35.8 TOPS figure); this is
+                    // the only family this detector currently recognises.
+                    // A model outside that family is a real, honest "no
+                    // match" -- not a reason to guess.
+                    if model.starts_with("iPhone16") {
+                        return Ok(Some(AcceleratorDevice {
+                            device_id: format!("apple_ne_v2_{model}"),
+                            device_type: NextGenDevice::AppleNeuralEngineV2 {
+                                cores: 16,
+                                ops_per_second: 35_800_000_000_000, // 35.8 TOPS
+                                memory_bandwidth_gbps: 273.0,
+                                version: "Neural Engine V2".to_string(),
+                            },
+                            is_available: true,
+                            current_utilization: 0.0,
+                            temperature_celsius: 35.0,
+                            power_consumption_mw: 2000.0,
+                            performance_tier: PerformanceTier::Ultra,
+                        }));
+                    }
                 }
             }
         }
 
-        // Fallback simulation for development
-        Ok(Some(AcceleratorDevice {
-            device_id: "apple_ne_v2_sim".to_string(),
-            device_type: NextGenDevice::AppleNeuralEngineV2 {
-                cores: 16,
-                ops_per_second: 35_800_000_000_000,
-                memory_bandwidth_gbps: 273.0,
-                version: "Neural Engine V2 (Simulated)".to_string(),
-            },
-            is_available: true,
-            current_utilization: 0.0,
-            temperature_celsius: 35.0,
-            power_consumption_mw: 2000.0,
-            performance_tier: PerformanceTier::Ultra,
-        }))
+        // Every other platform (including iOS builds on an unrecognised
+        // model): honestly report "not detected" rather than a simulated
+        // device. A previous revision fell through to exactly that
+        // simulation unconditionally, so a plain Linux/x86_64 build
+        // reported a 35.8 TOPS Apple Neural Engine.
+        Ok(None)
     }
 
+    /// No portable, unprivileged way exists from this pure-Rust crate to
+    /// query Qualcomm's Hexagon NPU (that requires the vendor's
+    /// `libSNPE`/`QNN` SDK, an off-by-default native dependency this crate
+    /// does not link). Honestly report "not detected" rather than fabricate
+    /// a device -- the prior revision returned a hardcoded Hexagon NPU V75
+    /// unconditionally, on every platform, with no check at all.
     fn detect_qualcomm_ai_engine(&self) -> Result<Option<AcceleratorDevice>> {
-        // Simulate Snapdragon 8 Gen 3 or newer detection
-        Ok(Some(AcceleratorDevice {
-            device_id: "qcom_aie_2_0".to_string(),
-            device_type: NextGenDevice::QualcommAIEngine2 {
-                hexagon_version: "Hexagon NPU V75".to_string(),
-                tops: 45.0, // 45 TOPS
-                memory_subsystem: "LPDDR5X-4200".to_string(),
-                power_efficiency: 22.5, // TOPS per watt
-            },
-            is_available: true,
-            current_utilization: 0.0,
-            temperature_celsius: 40.0,
-            power_consumption_mw: 2200.0,
-            performance_tier: PerformanceTier::Ultra,
-        }))
+        Ok(None)
     }
 
+    /// See [`Self::detect_qualcomm_ai_engine`]: no vendor SDK is linked, so
+    /// this honestly reports "not detected".
     fn detect_samsung_npu(&self) -> Result<Option<AcceleratorDevice>> {
-        // Simulate Exynos 2400 or newer detection
-        Ok(Some(AcceleratorDevice {
-            device_id: "samsung_npu_2024".to_string(),
-            device_type: NextGenDevice::SamsungExynosNPU {
-                generation: "Exynos 2400".to_string(),
-                compute_units: 14,
-                ai_score: 28500,
-                thermal_design_power: 2.1,
-            },
-            is_available: true,
-            current_utilization: 0.0,
-            temperature_celsius: 38.0,
-            power_consumption_mw: 2100.0,
-            performance_tier: PerformanceTier::High,
-        }))
+        Ok(None)
     }
 
+    /// See [`Self::detect_qualcomm_ai_engine`]: no vendor SDK is linked, so
+    /// this honestly reports "not detected".
     fn detect_mediatek_apu(&self) -> Result<Option<AcceleratorDevice>> {
-        // Simulate Dimensity 9300+ detection
-        Ok(Some(AcceleratorDevice {
-            device_id: "mtk_apu_7_0".to_string(),
-            device_type: NextGenDevice::MediaTekAPU7 {
-                apu_version: "APU 790".to_string(),
-                int8_tops: 33.0,
-                fp16_tops: 16.5,
-                mixed_precision_support: true,
-            },
-            is_available: true,
-            current_utilization: 0.0,
-            temperature_celsius: 42.0,
-            power_consumption_mw: 1900.0,
-            performance_tier: PerformanceTier::High,
-        }))
+        Ok(None)
     }
 
+    /// See [`Self::detect_qualcomm_ai_engine`]: no vendor SDK is linked, so
+    /// this honestly reports "not detected".
     fn detect_google_tensor(&self) -> Result<Option<AcceleratorDevice>> {
-        // Simulate Google Tensor G4+ detection
-        Ok(Some(AcceleratorDevice {
-            device_id: "google_tensor_g4p".to_string(),
-            device_type: NextGenDevice::GoogleTensorG4Plus {
-                tpu_cores: 8,
-                ml_compute_score: 32000,
-                tensor_ops_per_watt: 25.0,
-                custom_ops_support: true,
-            },
-            is_available: true,
-            current_utilization: 0.0,
-            temperature_celsius: 36.0,
-            power_consumption_mw: 1800.0,
-            performance_tier: PerformanceTier::Ultra,
-        }))
+        Ok(None)
     }
 
     pub fn execute_task(&self, task: ComputeTask) -> Result<ComputeResult> {
@@ -480,23 +444,13 @@ impl NextGenAcceleratorManager {
     ) -> Result<ComputeResult> {
         let start_execution = Instant::now();
 
-        let output_tensor = match &device.device_type {
-            NextGenDevice::AppleNeuralEngineV2 { .. } => {
-                self.execute_apple_neural_engine(&task.input_tensor, &task.operation_type)?
-            },
-            NextGenDevice::QualcommAIEngine2 { .. } => {
-                self.execute_qualcomm_ai_engine(&task.input_tensor, &task.operation_type)?
-            },
-            NextGenDevice::SamsungExynosNPU { .. } => {
-                self.execute_samsung_npu(&task.input_tensor, &task.operation_type)?
-            },
-            NextGenDevice::MediaTekAPU7 { .. } => {
-                self.execute_mediatek_apu(&task.input_tensor, &task.operation_type)?
-            },
-            NextGenDevice::GoogleTensorG4Plus { .. } => {
-                self.execute_google_tensor(&task.input_tensor, &task.operation_type)?
-            },
-        };
+        // See the design note above `execute_real_operation`: every device
+        // variant runs the same real CPU kernels, since no vendor NPU SDK is
+        // linked in this pure-Rust crate. `device.device_type` is not
+        // matched on here for that reason; `device.device_id` below is
+        // still the record of which device `select_optimal_device` chose.
+        let output_tensor =
+            self.execute_real_operation(&task.input_tensor, &task.operation_type)?;
 
         let execution_time = start_execution.elapsed();
 
@@ -509,193 +463,121 @@ impl NextGenAcceleratorManager {
                 &task.operation_type,
                 execution_time,
             )?,
-            accuracy_score: 0.95, // Placeholder
+            accuracy_score: None,
             memory_used_bytes: task.input_tensor.size() * std::mem::size_of::<f32>(),
         })
     }
 
-    fn execute_apple_neural_engine(
-        &self,
-        input: &Tensor,
-        op_type: &OperationType,
-    ) -> Result<Tensor> {
-        // Apple Neural Engine V2 optimized execution
+    // Every `execute_*` method below dispatches to the same real CPU tensor
+    // kernels in `trustformers_core`, regardless of which vendor's device
+    // was "selected" for the task. This is an intentional, documented
+    // limitation, not a simplification of real behaviour: this crate is
+    // pure Rust with no vendor NPU SDK linked (see the module-level design
+    // note above `detect_qualcomm_ai_engine`), so there is no actual
+    // Hexagon/Exynos/APU/Tensor backend to route to. The previous
+    // implementation gave each vendor a distinct-looking but equally fake
+    // per-element formula (`value * 1.8 + 0.05` for "Hexagon",
+    // `(value * 1.5).tanh()` for "Samsung", etc.) with a `thread::sleep` to
+    // fabricate plausible latency -- cosmetically different numbers with no
+    // more computational basis than each other. Running the identical real
+    // computation on every path is strictly more honest than that, and the
+    // `device_id` on the returned `ComputeResult` still records which
+    // (real-or-simulated) device was "selected" by `select_optimal_device`,
+    // so a caller inspecting results can still see the routing decision.
+
+    /// Execute `task`'s real operation on `input` -- an actual matmul,
+    /// softmax-normalised attention, or elementwise activation via
+    /// `trustformers_core::Tensor`, not a sleep plus a per-element formula.
+    ///
+    /// `Convolution2D` and `Pooling` return a structured
+    /// `UnsupportedOperation` error: `trustformers_core::Tensor` has no
+    /// conv/pool kernel to delegate to, and fabricating one here (as the
+    /// previous implementation did, with `value.tanh()` standing in for an
+    /// entire convolution) is exactly the kind of fake result this pass
+    /// exists to remove.
+    fn execute_real_operation(&self, input: &Tensor, op_type: &OperationType) -> Result<Tensor> {
         match op_type {
-            OperationType::MatrixMultiplication => self.neural_engine_matrix_multiply(input),
-            OperationType::Convolution2D => self.neural_engine_convolution(input),
-            OperationType::Attention => self.neural_engine_attention(input),
-            _ => self.neural_engine_generic_op(input),
+            OperationType::MatrixMultiplication => Self::real_matrix_multiply(input),
+            OperationType::Attention => Self::real_attention(input),
+            OperationType::Activation => input.relu(),
+            OperationType::LayerNormalization => input.layer_norm(-1, 1e-5),
+            OperationType::Convolution2D | OperationType::Pooling => Err(unsupported_operation(
+                format!("{op_type:?}"),
+                "NextGenAcceleratorManager::execute_real_operation (trustformers_core::Tensor \
+                     has no convolution/pooling kernel to delegate to; this engine refuses to \
+                     fabricate one rather than return a fake result labelled as accelerator \
+                     output)",
+            )),
+            OperationType::Embedding | OperationType::CustomOp(_) => {
+                // No architecture-specific meaning to apply (an embedding
+                // lookup needs an index tensor and a table this `Tensor`-in
+                // `Tensor`-out API does not carry; a custom op is, by
+                // definition, not something this dispatcher can know how to
+                // execute) -- returning the input unchanged would look like
+                // a no-op accelerator result, which is exactly the
+                // indistinguishable-from-broken behaviour this pass exists
+                // to eliminate. Refuse instead.
+                Err(unsupported_operation(
+                    format!("{op_type:?}"),
+                    "NextGenAcceleratorManager::execute_real_operation (no real, unambiguous CPU \
+                     kernel exists for this operation type in this Tensor-in/Tensor-out API)",
+                ))
+            },
         }
     }
 
-    fn neural_engine_matrix_multiply(&self, input: &Tensor) -> Result<Tensor> {
-        // Optimized matrix multiplication for Neural Engine
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Simulate realistic neural engine computation time (10-50 microseconds)
-        let computation_time =
-            std::time::Duration::from_micros(10 + (input_data.len() % 40) as u64);
-        std::thread::sleep(computation_time);
-
-        // Simulate highly optimized matrix ops with more realistic computation
-        for &value in input_data.iter() {
-            let processed = value * 2.0 + 0.1;
-            result.push(processed.tanh()); // Add activation for realism
-        }
-
+    /// A real matrix multiply. `ComputeTask` carries a single `Tensor`
+    /// (no separate weight operand), so this squares the input against
+    /// itself when its trailing two dimensions are compatible (`input @
+    /// input`, or `input @ input^T` when they are not, which is always
+    /// shape-compatible for any 2D-or-higher tensor) -- a real, deterministic
+    /// GEMM, not a per-element formula standing in for one.
+    fn real_matrix_multiply(input: &Tensor) -> Result<Tensor> {
         let shape = input.shape();
-        Tensor::from_vec(result, &shape)
+        if shape.len() < 2 {
+            return Err(trustformers_core::TrustformersError::shape_error(format!(
+                "MatrixMultiplication requires a tensor of rank >= 2, got shape {shape:?}"
+            )));
+        }
+        let last = shape[shape.len() - 1];
+        let second_last = shape[shape.len() - 2];
+        if last == second_last {
+            input.matmul(input)
+        } else {
+            let transposed = input.transpose(shape.len() - 2, shape.len() - 1)?;
+            input.matmul(&transposed)
+        }
     }
 
-    fn neural_engine_convolution(&self, input: &Tensor) -> Result<Tensor> {
-        // Neural Engine optimized convolution
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Simulate realistic convolution computation time (15-60 microseconds)
-        let computation_time =
-            std::time::Duration::from_micros(15 + (input_data.len() % 45) as u64);
-        std::thread::sleep(computation_time);
-
-        for &value in input_data.iter() {
-            result.push(value.tanh()); // Activation + convolution simulation
-        }
-
+    /// Real scaled-dot-product-style self-attention: `softmax(x @ x^T /
+    /// sqrt(d)) @ x`, over the tensor's last two dimensions -- an actual
+    /// attention computation (softmax normalisation included), not a
+    /// mean-subtract-and-tanh stand-in.
+    fn real_attention(input: &Tensor) -> Result<Tensor> {
         let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn neural_engine_attention(&self, input: &Tensor) -> Result<Tensor> {
-        // Neural Engine attention optimization
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Simulate realistic attention computation time (20-70 microseconds)
-        let computation_time =
-            std::time::Duration::from_micros(20 + (input_data.len() % 50) as u64);
-        std::thread::sleep(computation_time);
-
-        // Simulate attention computation
-        let sum: f32 = input_data.iter().sum();
-        let mean = sum / input_data.len() as f32;
-
-        for &value in input_data.iter() {
-            result.push((value - mean).tanh());
+        if shape.len() < 2 {
+            return Err(trustformers_core::TrustformersError::shape_error(format!(
+                "Attention requires a tensor of rank >= 2, got shape {shape:?}"
+            )));
         }
+        let d_k = shape[shape.len() - 1] as f32;
+        let scale = 1.0 / d_k.sqrt().max(f32::EPSILON);
 
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
+        let keys_t = input.transpose(shape.len() - 2, shape.len() - 1)?;
+        let scores = input.matmul(&keys_t)?;
+        let scaled_scores = scores.mul_scalar(scale)?;
+        let attention_weights = scaled_scores.softmax(-1)?;
+        attention_weights.matmul(input)
     }
 
-    fn neural_engine_generic_op(&self, input: &Tensor) -> Result<Tensor> {
-        // Generic Neural Engine operation
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Simulate realistic generic operation time (12-40 microseconds)
-        let computation_time =
-            std::time::Duration::from_micros(12 + (input_data.len() % 28) as u64);
-        std::thread::sleep(computation_time);
-
-        for &value in input_data.iter() {
-            result.push(value.tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn execute_qualcomm_ai_engine(
-        &self,
-        input: &Tensor,
-        op_type: &OperationType,
-    ) -> Result<Tensor> {
-        // Qualcomm Hexagon NPU execution
-        match op_type {
-            OperationType::MatrixMultiplication => self.hexagon_matrix_ops(input),
-            OperationType::Attention => self.hexagon_attention_ops(input),
-            _ => self.hexagon_generic_ops(input),
-        }
-    }
-
-    fn hexagon_matrix_ops(&self, input: &Tensor) -> Result<Tensor> {
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Hexagon vector processing simulation
-        for &value in input_data.iter() {
-            result.push(value * 1.8 + 0.05); // Efficient vector ops
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn hexagon_attention_ops(&self, input: &Tensor) -> Result<Tensor> {
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        // Hexagon optimized attention
-        for &value in input_data.iter() {
-            result.push((value * 0.9).tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn hexagon_generic_ops(&self, input: &Tensor) -> Result<Tensor> {
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        for &value in input_data.iter() {
-            result.push(value.tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn execute_samsung_npu(&self, input: &Tensor, _op_type: &OperationType) -> Result<Tensor> {
-        // Samsung Exynos NPU execution
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        for &value in input_data.iter() {
-            result.push((value * 1.5).tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn execute_mediatek_apu(&self, input: &Tensor, _op_type: &OperationType) -> Result<Tensor> {
-        // MediaTek APU execution
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        for &value in input_data.iter() {
-            result.push((value * 1.3 + 0.02).tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
-    fn execute_google_tensor(&self, input: &Tensor, _op_type: &OperationType) -> Result<Tensor> {
-        // Google Tensor TPU execution
-        let input_data = input.data()?;
-        let mut result = Vec::with_capacity(input_data.len());
-
-        for &value in input_data.iter() {
-            result.push((value * 1.7).tanh());
-        }
-
-        let shape = input.shape();
-        Tensor::from_vec(result, &shape)
-    }
-
+    /// Real energy estimate: `power_consumption_mw` is the device's real
+    /// (or, for a simulated-fallback device, documented-simulated) idle/base
+    /// draw; the `1.5x` execution multiplier and `energy = power * time`
+    /// integration are the standard first-order approximation used
+    /// elsewhere in this crate's power modelling (see
+    /// `thermal_power::ThermalPowerManager`), applied to the real measured
+    /// `execution_time` this call actually took -- not a synthetic sleep
+    /// duration.
     fn estimate_power_consumption(
         &self,
         device: &AcceleratorDevice,
@@ -720,14 +602,23 @@ impl NextGenAcceleratorManager {
                 average_latency_ms: 0.0,
                 throughput_ops_sec: 0,
                 energy_efficiency: 0.0,
-                accuracy_score: 0.0,
+                accuracy_score: None,
                 stability_rating: 1.0,
                 last_updated: Instant::now(),
             });
 
             let latency_ms = execution_time.as_millis() as f32;
             performance.average_latency_ms = (performance.average_latency_ms + latency_ms) / 2.0;
-            performance.accuracy_score = (performance.accuracy_score + result.accuracy_score) / 2.0;
+            // Only average in a real measurement; a `None` from `result`
+            // (currently every result, since this engine never measures
+            // accuracy against a reference) must not silently become 0.0
+            // and drag a real future measurement toward a fabricated floor.
+            performance.accuracy_score = match (performance.accuracy_score, result.accuracy_score) {
+                (Some(prev), Some(new)) => Some((prev + new) / 2.0),
+                (Some(prev), None) => Some(prev),
+                (None, Some(new)) => Some(new),
+                (None, None) => None,
+            };
             performance.energy_efficiency =
                 result.memory_used_bytes as f32 / result.power_consumed_mw;
             performance.last_updated = Instant::now();
@@ -741,6 +632,22 @@ impl NextGenAcceleratorManager {
             devices.clone()
         } else {
             Vec::new()
+        }
+    }
+
+    /// Register a device directly, bypassing platform detection.
+    ///
+    /// Test-only: this crate has no vendor NPU SDK linked (see the design
+    /// note above `detect_qualcomm_ai_engine`), so on a host that is not a
+    /// matching iOS device, real `discover_devices()` honestly finds zero
+    /// devices -- there is nothing to detect. Tests that exercise
+    /// `execute_task`/`calculate_device_score` need *some* device to route
+    /// to; this makes that dependency explicit rather than relying on
+    /// fabricated detection to conveniently populate `available_devices`.
+    #[cfg(test)]
+    fn register_device_for_testing(&self, device: AcceleratorDevice) {
+        if let Ok(mut devices) = self.available_devices.lock() {
+            devices.push(device);
         }
     }
 
@@ -888,7 +795,13 @@ pub struct ComputeResult {
     pub execution_time_us: u64,
     pub device_id: String,
     pub power_consumed_mw: f32,
-    pub accuracy_score: f32,
+    /// Numerical accuracy of `output_tensor` against a reference
+    /// computation. Always `None`: this engine has no reference output to
+    /// compare against, so it does not report a confidence number it has
+    /// not actually measured (the previous implementation reported a
+    /// constant `0.95` regardless of what -- or how fake -- the computation
+    /// was).
+    pub accuracy_score: Option<f32>,
     pub memory_used_bytes: usize,
 }
 
@@ -896,24 +809,86 @@ pub struct ComputeResult {
 mod tests {
     use super::*;
 
+    /// On this test host (a plain macOS/Linux CI machine, not a matching
+    /// iOS device, and never a Qualcomm/Samsung/MediaTek/Google NPU host
+    /// since this crate links no vendor SDK for any of them) real device
+    /// discovery must find *zero* devices. This is the direct regression
+    /// test for the P0 finding: the previous implementation fabricated an
+    /// Apple/Qualcomm/Samsung/MediaTek/Google accelerator unconditionally
+    /// on every platform, so this same assertion would have failed against
+    /// that code (`devices.is_empty()` would have been false, with 5
+    /// invented devices).
     #[test]
-    fn test_next_gen_accelerator_manager() {
+    fn test_discover_devices_is_honestly_empty_on_this_host() {
         let config = NextGenHardwareConfig::default();
         let manager = NextGenAcceleratorManager::new(config);
 
         let devices = manager.get_device_status();
-        assert!(!devices.is_empty());
-
-        // Test that we have at least one device
-        let first_device = &devices[0];
-        assert!(!first_device.device_id.is_empty());
+        assert!(
+            devices.is_empty(),
+            "no vendor NPU SDK is linked and this host is not a matching iOS device, so real \
+             discovery must report zero devices, not fabricate one; got: {devices:?}"
+        );
     }
 
+    /// `execute_task` against a registered device must fail cleanly with no
+    /// device available rather than silently succeeding with fabricated
+    /// output -- there is nothing to route the task to.
     #[test]
-    fn test_task_execution() {
+    fn test_task_execution_errors_with_no_devices() {
         let config = NextGenHardwareConfig::default();
         let manager = NextGenAcceleratorManager::new(config);
+        assert!(
+            manager.get_device_status().is_empty(),
+            "precondition: no devices registered"
+        );
 
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("input tensor");
+        let task = ComputeTask {
+            task_id: "test_task".to_string(),
+            input_tensor: input,
+            operation_type: OperationType::MatrixMultiplication,
+            priority: TaskPriority::Normal,
+            deadline: None,
+            power_budget: None,
+        };
+
+        let result = manager.execute_task(task);
+        assert!(
+            result.is_err(),
+            "no devices are available, so execution must not fabricate success"
+        );
+    }
+
+    /// A registered device (bypassing platform detection, see
+    /// `register_device_for_testing`'s doc comment) must execute a *real*
+    /// matmul: `[[1,2],[3,4]] @ [[1,2],[3,4]]^T` (the input is square, so
+    /// `real_matrix_multiply` multiplies it by itself) has a known, exact
+    /// expected result. The previous implementation's
+    /// `neural_engine_matrix_multiply` produced `(value * 2.0 + 0.1).tanh()`
+    /// per element instead -- a completely different, shape-preserving but
+    /// numerically fabricated output -- so this exact-value assertion would
+    /// have failed against that code even though both "succeed".
+    #[test]
+    fn test_task_execution_runs_real_matmul() {
+        let config = NextGenHardwareConfig::default();
+        let manager = NextGenAcceleratorManager::new(config);
+        manager.register_device_for_testing(AcceleratorDevice {
+            device_id: "test_device".to_string(),
+            device_type: NextGenDevice::AppleNeuralEngineV2 {
+                cores: 16,
+                ops_per_second: 1,
+                memory_bandwidth_gbps: 1.0,
+                version: "test".to_string(),
+            },
+            is_available: true,
+            current_utilization: 0.0,
+            temperature_celsius: 25.0,
+            power_consumption_mw: 100.0,
+            performance_tier: PerformanceTier::Basic,
+        });
+
+        // Square, so `real_matrix_multiply` computes `input @ input`.
         let input =
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Failed to create tensor");
         let task = ComputeTask {
@@ -925,12 +900,64 @@ mod tests {
             power_budget: None,
         };
 
-        let result = manager.execute_task(task);
-        assert!(result.is_ok());
+        let compute_result =
+            manager.execute_task(task).expect("execute_task with a registered device");
+        assert_eq!(compute_result.device_id, "test_device");
+        // No accuracy figure has actually been measured against a
+        // reference, so this must be `None`, not a fabricated constant
+        // (the previous implementation reported a flat 0.95 always).
+        assert_eq!(compute_result.accuracy_score, None);
 
-        let compute_result = result.expect("operation failed in test");
-        assert!(compute_result.execution_time_us > 0);
-        assert!(!compute_result.device_id.is_empty());
+        // [[1,2],[3,4]] @ [[1,2],[3,4]] = [[1*1+2*3, 1*2+2*4], [3*1+4*3, 3*2+4*4]]
+        //                                = [[7, 10], [15, 22]]
+        let output = compute_result.output_tensor.data().expect("output data");
+        let expected = [7.0f32, 10.0, 15.0, 22.0];
+        for (got, want) in output.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "expected {expected:?}, got {output:?}"
+            );
+        }
+    }
+
+    /// `Convolution2D` has no real kernel to delegate to in this crate's
+    /// `Tensor` API and must error -- not silently return `value.tanh()`
+    /// labelled as a convolution result, as the previous implementation did.
+    #[test]
+    fn test_task_execution_rejects_unsupported_convolution() {
+        let config = NextGenHardwareConfig::default();
+        let manager = NextGenAcceleratorManager::new(config);
+        manager.register_device_for_testing(AcceleratorDevice {
+            device_id: "test_device".to_string(),
+            device_type: NextGenDevice::AppleNeuralEngineV2 {
+                cores: 16,
+                ops_per_second: 1,
+                memory_bandwidth_gbps: 1.0,
+                version: "test".to_string(),
+            },
+            is_available: true,
+            current_utilization: 0.0,
+            temperature_celsius: 25.0,
+            power_consumption_mw: 100.0,
+            performance_tier: PerformanceTier::Basic,
+        });
+
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("input tensor");
+        let task = ComputeTask {
+            task_id: "conv_task".to_string(),
+            input_tensor: input,
+            operation_type: OperationType::Convolution2D,
+            priority: TaskPriority::Normal,
+            deadline: None,
+            power_budget: None,
+        };
+
+        let result = manager.execute_task(task);
+        assert!(
+            result.is_err(),
+            "Convolution2D has no real kernel in this Tensor API and must be a structured \
+             error, not a fabricated per-element formula"
+        );
     }
 
     #[test]

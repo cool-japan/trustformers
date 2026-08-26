@@ -7,16 +7,29 @@ use std::{collections::HashMap, time::Duration};
 // Import types from sibling modules
 use super::config::{ReportConfig, TestPerformanceMonitoringConfig};
 
+/// Where generated reports would live, and how long they would be kept.
+///
+/// Nothing in this crate writes a report to disk, so this is configuration
+/// held ready for a storage backend rather than a store with contents. See
+/// [`Self::get_report`].
 #[derive(Debug)]
 pub struct ReportStorage {
-    storage_path: String,
+    /// Directory reports would be written to.
+    storage_path: std::path::PathBuf,
+    /// How long a written report would be kept.
     retention_policy: Duration,
 }
 
 impl ReportStorage {
+    /// Default report directory: a `trustformers-serve-reports` folder under
+    /// the platform temporary directory. Never a hardcoded absolute path.
+    fn default_storage_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("trustformers-serve-reports")
+    }
+
     pub fn new(config: &TestPerformanceMonitoringConfig) -> Self {
         Self {
-            storage_path: "/tmp/reports".to_string(),
+            storage_path: Self::default_storage_path(),
             retention_policy: config.retention_period,
         }
     }
@@ -26,25 +39,39 @@ impl ReportStorage {
             config.auto_generate_interval.unwrap_or_else(|| Duration::from_secs(24 * 3600));
 
         Self {
-            storage_path: "/tmp/reports".to_string(),
+            storage_path: Self::default_storage_path(),
             retention_policy,
         }
     }
 
-    /// Get a report by ID
-    /// TODO: Implement actual report retrieval from storage
+    /// The directory reports would be written to.
+    pub fn storage_path(&self) -> &std::path::Path {
+        &self.storage_path
+    }
+
+    /// How long a stored report would be retained.
+    pub fn retention_policy(&self) -> Duration {
+        self.retention_policy
+    }
+
+    /// Look up a stored report.
+    ///
+    /// Always fails: nothing writes reports to [`Self::storage_path`], so no
+    /// id can be resolved.
+    ///
+    /// 0.2.1: this used to return `Ok` with a `Report` whose every field was
+    /// the literal string `"stub"` -- `report_id: "stub"`, `content: "Stub
+    /// report"` -- for *any* id. `ReportingSystem::export_report` handed that
+    /// to callers as a retrieved report.
     pub async fn get_report(
         &self,
-        _report_id: &str,
+        report_id: &str,
     ) -> Result<crate::test_performance_monitoring::reporting::Report, anyhow::Error> {
-        Ok(crate::test_performance_monitoring::reporting::Report {
-            report_id: "stub".to_string(),
-            test_id: "stub".to_string(),
-            report_type: crate::test_performance_monitoring::reporting::ReportType::Summary,
-            content: "Stub report".to_string(),
-            generated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        })
+        Err(anyhow::anyhow!(
+            "report {report_id} cannot be retrieved: this build has no report store, and \
+             nothing has ever been written to {}",
+            self.storage_path.display()
+        ))
     }
 }
 

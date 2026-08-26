@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Chunked Response Streaming
 //!
 //! Provides chunked HTTP response streaming for efficient data transfer
@@ -36,6 +33,14 @@ pub struct ChunkStream {
 }
 
 impl ChunkStream {
+    /// The configuration this stream was built with.
+    ///
+    /// 0.2.1: the `config` field was stored and never read, so the whole
+    /// [`ChunkConfig`] was invisible to callers after construction.
+    pub fn config(&self) -> &ChunkConfig {
+        &self.config
+    }
+
     /// Create a new chunk stream
     pub fn new(config: ChunkConfig, stream_id: Uuid) -> Self {
         let (tx, rx) = mpsc::channel(config.buffer_size);

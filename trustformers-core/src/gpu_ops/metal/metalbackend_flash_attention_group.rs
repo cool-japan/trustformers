@@ -64,10 +64,28 @@ impl MetalBackend {
         num_heads: usize,
         head_dim: usize,
     ) -> Result<BufferId> {
-        // Validate inputs
-        if head_dim > 256 {
+        // Validate inputs. `head_dim` bounds the kernel's per-thread `float output[256]`
+        // accumulator, so exceeding it would corrupt thread-private memory; the other
+        // checks reject degenerate dispatches that would otherwise read past the
+        // operand buffers. `q_seq_len` needs no alignment guard: the kernel masks its
+        // tail lanes with a predicate and every thread still reaches every
+        // `threadgroup_barrier`.
+        if head_dim == 0 || head_dim > 256 {
             return Err(TrustformersError::hardware_error(
-                &format!("Head dimension {} exceeds maximum 256", head_dim),
+                &format!(
+                    "flash_attention_with_cache: head_dim must be in 1..=256 (kernel \
+                     accumulator limit), got {}",
+                    head_dim
+                ),
+                "flash_attention_with_cache",
+            ));
+        }
+        if batch_size == 0 || num_heads == 0 || q_seq_len == 0 || kv_seq_len == 0 {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "flash_attention_with_cache: dimensions must be non-zero, got \
+                     batch={batch_size} heads={num_heads} q_seq={q_seq_len} kv_seq={kv_seq_len}"
+                ),
                 "flash_attention_with_cache",
             ));
         }
@@ -76,6 +94,28 @@ impl MetalBackend {
         let q_buffer = self.get_persistent_buffer(q_heads_id)?;
         let k_buffer = self.get_persistent_buffer(k_heads_id)?;
         let v_buffer = self.get_persistent_buffer(v_heads_id)?;
+
+        // The kernel indexes Q/K/V by the declared shapes; reject any buffer that is
+        // too small rather than letting the GPU read past the allocation.
+        let elem = std::mem::size_of::<f32>();
+        let q_elems = batch_size * num_heads * q_seq_len * head_dim;
+        let kv_elems = batch_size * num_heads * kv_seq_len * head_dim;
+        for (label, buffer, needed) in [
+            ("Q", &q_buffer, q_elems),
+            ("K", &k_buffer, kv_elems),
+            ("V", &v_buffer, kv_elems),
+        ] {
+            let have = buffer.length() as usize / elem;
+            if have < needed {
+                return Err(TrustformersError::shape_error(format!(
+                    "flash_attention_with_cache: {label} buffer holds {have} floats but the \
+                     declared shape needs {needed}"
+                )));
+            }
+        }
+
+        // The operands may still be the target of an asynchronously committed kernel.
+        self.flush()?;
 
         // Calculate output size: [batch, num_heads, q_seq_len, head_dim]
         let output_size = batch_size * num_heads * q_seq_len * head_dim;

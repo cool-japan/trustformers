@@ -306,50 +306,68 @@ impl NNAPIEngine {
 
     // Private implementation methods
 
+    /// Real Android device/NNAPI enumeration requires either JNI calls into
+    /// `android.os.Build`/`ConnectivityManager` (needing a live `JavaVM`,
+    /// which is not available yet -- `NNAPIEngine::new` calls this before
+    /// `init_with_jvm` ever runs) or the NDK C API's
+    /// `ANeuralNetworks_getDeviceCount`/`ANeuralNetworks_getDevice` family
+    /// (see `crate::android::nnapi`, which binds those for real, and
+    /// `crate::android::engine::AndroidInferenceEngine::detect_nnapi_devices`,
+    /// which calls them). Neither is reachable from a bare constructor with
+    /// no JVM/context, so this reports an honestly-empty/unknown profile
+    /// rather than the fabricated "Google Pixel, API 30, Vulkan, OpenGL ES
+    /// 3.2, one CPU device" reading a previous revision returned
+    /// unconditionally, for every device, real or not.
     fn detect_device_info() -> Result<AndroidDeviceInfo> {
-        // This would use Android APIs to detect device information
-        // For now, return a placeholder
         Ok(AndroidDeviceInfo {
-            android_api_level: 30,
-            manufacturer: "Google".to_string(),
-            device_model: "Pixel".to_string(),
-            available_devices: vec![NNAPIDeviceInfo {
-                name: "CPU".to_string(),
-                device_type: NNAPIDeviceType::CPU,
-                version: "1.0".to_string(),
-                supported_operations: vec!["CONV_2D".to_string(), "FULLY_CONNECTED".to_string()],
-                performance_info: NNAPIPerformanceInfo {
-                    exec_time: 1.0,
-                    power_usage: 1.0,
-                    memory_bandwidth_mbps: 1000,
-                    compute_throughput_ops: 1000000,
-                },
-            }],
-            total_memory_mb: 4096,
-            available_memory_mb: 2048,
-            has_vulkan: true,
-            opengl_es_version: "3.2".to_string(),
+            android_api_level: 0,
+            manufacturer: "Unknown".to_string(),
+            device_model: "Unknown".to_string(),
+            available_devices: Vec::new(),
+            total_memory_mb: 0,
+            available_memory_mb: 0,
+            has_vulkan: false,
+            opengl_es_version: "Unknown".to_string(),
         })
     }
 
     fn init_nnapi_context(&self) -> Result<()> {
-        // Initialize NNAPI context through JNI
+        // Nothing to honestly fail on yet: no NNAPI object has been created
+        // through this engine at this point (that happens in
+        // `create_nnapi_model`, called from `load_model`, which is the
+        // method that now reports the real gap -- see its doc comment).
         Ok(())
     }
 
+    /// Building a real `ANeuralNetworksModel` operand graph from
+    /// `_model_data` (parsing the checkpoint and emitting NNAPI operands
+    /// and operations for each layer) is not implemented. This is the same
+    /// gap documented on
+    /// `crate::android::engine::AndroidInferenceEngine::nnapi_inference`,
+    /// this crate's other NNAPI entry point: real execution needs a
+    /// tensor-op-to-NNAPI-operand compiler that does not exist yet, and a
+    /// per-element placeholder formula standing in for it would be
+    /// indistinguishable from real accelerator output while computing
+    /// nothing accelerator-specific at all. Reporting the gap honestly here
+    /// means `load_model` fails at the point it actually cannot proceed,
+    /// instead of returning a fabricated handle that lets `execute` later
+    /// "succeed" with an empty result map.
     fn create_nnapi_model(&self, _model_data: &[u8]) -> Result<usize> {
-        // Create NNAPI model from data
-        Ok(1) // Placeholder handle
+        Err(TrustformersError::not_implemented(
+            "NNAPI operand-graph model construction from checkpoint data".to_string(),
+        )
+        .into())
     }
 
     fn compile_model(&self, _model_handle: usize) -> Result<usize> {
-        // Compile NNAPI model for target devices
-        Ok(1) // Placeholder compilation handle
+        Err(TrustformersError::not_implemented("NNAPI model compilation".to_string()).into())
     }
 
     fn create_execution(&self) -> Result<usize> {
-        // Create NNAPI execution instance
-        Ok(1) // Placeholder execution handle
+        Err(
+            TrustformersError::not_implemented("NNAPI execution instance creation".to_string())
+                .into(),
+        )
     }
 
     fn set_input_tensors(
@@ -357,18 +375,18 @@ impl NNAPIEngine {
         _execution_handle: usize,
         _input: &HashMap<String, Tensor>,
     ) -> Result<()> {
-        // Set input tensors for execution
-        Ok(())
+        Err(TrustformersError::not_implemented("NNAPI input tensor binding".to_string()).into())
     }
 
     fn prepare_output_tensors(&self) -> Result<Vec<String>> {
-        // Prepare output tensor placeholders
-        Ok(vec!["output".to_string()])
+        Err(
+            TrustformersError::not_implemented("NNAPI output tensor preparation".to_string())
+                .into(),
+        )
     }
 
     fn execute_inference(&self, _execution_handle: usize) -> Result<()> {
-        // Execute NNAPI inference
-        Ok(())
+        Err(TrustformersError::not_implemented("NNAPI inference execution".to_string()).into())
     }
 
     fn get_output_tensors(
@@ -376,12 +394,13 @@ impl NNAPIEngine {
         _execution_handle: usize,
         _output_names: Vec<String>,
     ) -> Result<HashMap<String, Tensor>> {
-        // Get output tensors from execution
-        Ok(HashMap::new())
+        Err(TrustformersError::not_implemented("NNAPI output tensor retrieval".to_string()).into())
     }
 
     fn cleanup_execution(&self, _execution_handle: usize) -> Result<()> {
-        // Cleanup execution resources
+        // `create_execution` always fails first (see above), so no
+        // execution instance is ever actually created through this engine
+        // today; nothing to honestly fail on cleaning up.
         Ok(())
     }
 
@@ -604,7 +623,7 @@ pub extern "system" fn Java_com_trustformers_NNAPIEngine_createEngine(
 #[cfg(all(target_os = "android", feature = "nnapi"))]
 #[no_mangle]
 pub extern "system" fn Java_com_trustformers_NNAPIEngine_loadModel(
-    _env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     engine_ptr: jlong,
     model_data: jbyteArray,
@@ -615,9 +634,15 @@ pub extern "system" fn Java_com_trustformers_NNAPIEngine_loadModel(
 
     let engine = unsafe { &mut *(engine_ptr as *mut NNAPIEngine) };
 
-    // Convert Java byte array to Rust slice
-    // This is a simplified implementation - real implementation would handle JNI properly
-    let model_bytes = vec![0u8; 1024]; // Placeholder
+    // Real conversion of the Java byte array to the actual model bytes --
+    // matching `crate::android::jni`'s established pattern for this JNI
+    // binding version. The previous implementation ignored `model_data`
+    // entirely and passed `vec![0u8; 1024]` of zeros to `load_model`
+    // regardless of what the Java caller actually sent.
+    let model_bytes = match env.convert_byte_array(model_data) {
+        Ok(bytes) => bytes,
+        Err(_) => return 0,
+    };
 
     match engine.load_model(&model_bytes) {
         Ok(_) => 1,
@@ -721,5 +746,40 @@ mod tests {
         assert_eq!(nnapi_config.max_concurrent_executions, 1);
         assert!(nnapi_config.allow_relaxed_computation);
         assert!(!nnapi_config.use_memory_mapping);
+    }
+
+    /// Regression test for the P0 finding: `NNAPIEngine::execute` used to
+    /// chain `create_nnapi_model`/`compile_model`/.../`get_output_tensors`
+    /// placeholders that all unconditionally returned `Ok`, so
+    /// `load_model` (and, downstream, `execute`) "succeeded" on every call
+    /// without ever building or running a real NNAPI graph. Real
+    /// operand-graph compilation is not implemented, so this must now fail
+    /// honestly instead.
+    #[cfg(all(target_os = "android", feature = "nnapi"))]
+    #[test]
+    fn test_load_model_reports_honest_failure_rather_than_fake_success() {
+        let config = NNAPIConfig::default();
+        let mut engine = NNAPIEngine::new(config).expect("engine construction itself is real");
+
+        let result = engine.load_model(b"irrelevant bytes -- no compiler exists to read them yet");
+        assert!(
+            result.is_err(),
+            "load_model must not report success when no operand-graph compiler exists to have \
+             actually compiled anything"
+        );
+    }
+
+    /// Regression test for the P0 finding: `detect_device_info` fabricated
+    /// a "Google Pixel, API 30" reading unconditionally, for any device.
+    #[cfg(all(target_os = "android", feature = "nnapi"))]
+    #[test]
+    fn test_detect_device_info_does_not_fabricate_a_specific_device() {
+        let info = NNAPIEngine::detect_device_info().expect("detect_device_info");
+        assert_eq!(info.manufacturer, "Unknown");
+        assert_eq!(info.device_model, "Unknown");
+        assert!(
+            info.available_devices.is_empty(),
+            "must not fabricate a CPU/GPU/NPU device entry"
+        );
     }
 }

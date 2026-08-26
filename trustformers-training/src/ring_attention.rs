@@ -73,6 +73,15 @@ pub struct RingAttentionBlock {
     pub sequence_chunk: (usize, usize), // (start, end)
     /// Key-value pairs from previous devices
     pub received_kv: Vec<RingKVPair>,
+    /// This device's own key chunk, flattened `[chunk_len * head_dim]`.
+    ///
+    /// Populated by [`RingAttentionManager::set_local_kv`]. The ring rotates
+    /// *these* values; nothing is synthesised.
+    #[serde(default)]
+    pub local_keys: Vec<f32>,
+    /// This device's own value chunk, flattened `[chunk_len * head_dim]`.
+    #[serde(default)]
+    pub local_values: Vec<f32>,
     /// Communication buffer for ring transfers
     pub comm_buffer: Option<Vec<f32>>,
     /// Attention computation statistics
@@ -180,6 +189,8 @@ impl RingAttentionManager {
                 device_rank: rank,
                 sequence_chunk: (start_pos, end_pos),
                 received_kv: Vec::with_capacity(config.num_devices),
+                local_keys: Vec::new(),
+                local_values: Vec::new(),
                 comm_buffer: Some(vec![0.0; buffer_size]),
                 attention_stats: RingAttentionStats::default(),
             };
@@ -411,26 +422,6 @@ impl RingAttentionManager {
         Ok(scaled_scores)
     }
 
-    /// Apply causal masking to attention scores
-    fn apply_causal_mask(&self, scores: Tensor, device: &RingAttentionBlock) -> CoreResult<Tensor> {
-        // Create causal mask based on sequence positions
-        let (start_pos, _) = device.sequence_chunk;
-        let seq_len = scores.shape()[1]; // Assuming [batch, seq_len, seq_len]
-
-        // For causal masking, positions can only attend to previous positions
-        let masked_scores = scores;
-
-        // Apply large negative value to future positions
-        for i in 0..seq_len {
-            for _j in (i + start_pos + 1)..seq_len {
-                // This would require tensor indexing operations
-                // masked_scores[batch][i][j] = -1e9;
-            }
-        }
-
-        Ok(masked_scores)
-    }
-
     /// Apply causal masking to attention scores for ring attention
     fn apply_causal_mask_simple(
         &self,
@@ -553,89 +544,116 @@ impl RingAttentionManager {
         Ok(output)
     }
 
-    /// Rotate key-value pairs to next device in the ring
-    fn rotate_kv_pairs(&mut self) -> Result<()> {
-        let num_devices = self.config.num_devices;
-
-        match self.communication_pattern {
-            RingCommunicationPattern::Unidirectional => {
-                // Simple ring rotation: device i sends to device (i+1) % num_devices
-                for i in 0..num_devices {
-                    let next_device = (i + 1) % num_devices;
-
-                    // Simulate KV transfer
-                    let kv_pair = RingKVPair {
-                        keys: vec![0.0; self.config.chunk_size * self.config.head_dim],
-                        values: vec![0.0; self.config.chunk_size * self.config.head_dim],
-                        source_rank: i,
-                        position_range: self.devices[i].sequence_chunk,
-                        attention_mask: None,
-                    };
-
-                    self.devices[next_device].received_kv.push(kv_pair);
-
-                    // Update communication statistics
-                    let comm_volume = self.config.chunk_size * self.config.head_dim * 2 * 4; // float32
-                    self.devices[i].attention_stats.communication_volume += comm_volume as u64;
-                }
-            },
-            RingCommunicationPattern::Bidirectional => {
-                // Bidirectional ring: communicate in both directions
-                self.rotate_kv_unidirectional()?;
-                self.rotate_kv_reverse()?;
-            },
-            _ => {
-                // Other patterns can be implemented here
-                self.rotate_kv_unidirectional()?;
-            },
+    /// Load this device's key/value chunk.
+    ///
+    /// `keys` and `values` must have the same length; the ring rotation moves
+    /// exactly these buffers between devices.
+    pub fn set_local_kv(
+        &mut self,
+        device_rank: usize,
+        keys: Vec<f32>,
+        values: Vec<f32>,
+    ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(anyhow::anyhow!(
+                "keys ({}) and values ({}) must have the same length",
+                keys.len(),
+                values.len()
+            ));
         }
-
+        let device = self.devices.get_mut(device_rank).ok_or_else(|| {
+            anyhow::anyhow!(
+                "device rank {device_rank} is out of range for {} devices",
+                self.config.num_devices
+            )
+        })?;
+        device.local_keys = keys;
+        device.local_values = values;
         Ok(())
     }
 
-    /// Helper for unidirectional KV rotation
+    /// This device's currently loaded key/value chunk.
+    pub fn local_kv(&self, device_rank: usize) -> Option<(&[f32], &[f32])> {
+        self.devices
+            .get(device_rank)
+            .map(|device| (device.local_keys.as_slice(), device.local_values.as_slice()))
+    }
+
+    /// Take a snapshot of every device's local key/value chunk.
+    ///
+    /// Rotation reads from this snapshot so that a device forwarding data does
+    /// not observe values another device wrote in the same step.
+    fn snapshot_local_kv(&self) -> Result<Vec<(Vec<f32>, Vec<f32>)>> {
+        self.devices
+            .iter()
+            .map(|device| {
+                if device.local_keys.is_empty() || device.local_values.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "device {} has no local key/value chunk loaded; call \
+                         RingAttentionManager::set_local_kv before rotating",
+                        device.device_rank
+                    ));
+                }
+                Ok((device.local_keys.clone(), device.local_values.clone()))
+            })
+            .collect()
+    }
+
+    /// Rotate key-value pairs to the neighbouring device(s) in the ring.
+    fn rotate_kv_pairs(&mut self) -> Result<()> {
+        match self.communication_pattern {
+            RingCommunicationPattern::Bidirectional => {
+                self.rotate_kv_unidirectional()?;
+                self.rotate_kv_reverse()?;
+                Ok(())
+            },
+            // Unidirectional is the base rotation; hierarchical and adaptive
+            // patterns differ only in how the ring is grouped, and both reduce
+            // to a single forward hop at this level.
+            _ => self.rotate_kv_unidirectional(),
+        }
+    }
+
+    /// Forward ring rotation: device `i` sends its own K/V chunk to device
+    /// `(i + 1) % num_devices`.
+    ///
+    /// The transferred payload is the *source device's actual* key/value data.
+    /// An earlier revision fabricated `sin`/`cos` sequences here and discarded
+    /// the real chunk, so the attention computation downstream operated on
+    /// synthetic data.
     fn rotate_kv_unidirectional(&mut self) -> Result<()> {
         let num_devices = self.config.num_devices;
+        let snapshot = self.snapshot_local_kv()?;
 
         // Clear previous received KV pairs
         for device in &mut self.devices {
             device.received_kv.clear();
         }
 
-        // Perform ring rotation: device i sends to device (i+1) % num_devices
         for i in 0..num_devices {
             let next_device = (i + 1) % num_devices;
-            let current_device = &self.devices[i];
+            let (mut keys, mut values) = snapshot[i].clone();
 
-            // Create KV pair with actual data (simplified for demonstration)
-            let kv_size = self.config.chunk_size * self.config.head_dim;
-            let mut keys = vec![0.0f32; kv_size];
-            let mut values = vec![0.0f32; kv_size];
-
-            // Simulate actual key/value data with some variation
-            for j in 0..kv_size {
-                keys[j] = (i as f32 + j as f32 * 0.001).sin();
-                values[j] = (i as f32 + j as f32 * 0.001).cos();
-            }
-
-            // Apply compression if enabled
-            if self.config.compression_enabled {
-                self.compress_kv_data(&mut keys, &mut values)?;
-            }
+            // Apply compression if enabled. `comm_volume` is the number of
+            // bytes that really travel, so enabling compression is visible in
+            // the statistics instead of being a silent no-op.
+            let comm_volume = if self.config.compression_enabled {
+                self.compress_kv_data(&mut keys, &mut values)?
+            } else {
+                Self::uncompressed_kv_bytes(keys.len())
+            };
 
             let kv_pair = RingKVPair {
                 keys,
                 values,
                 source_rank: i,
-                position_range: current_device.sequence_chunk,
+                position_range: self.devices[i].sequence_chunk,
                 attention_mask: None,
             };
 
-            // Send to next device in ring
             self.devices[next_device].received_kv.push(kv_pair);
 
-            // Update communication statistics
-            let comm_volume = kv_size * 2 * 4; // keys + values, 4 bytes per float32
+            self.devices[i].attention_stats.communication_volume += comm_volume as u64;
             if let Some(stats) = self.performance_stats.get_mut(&i) {
                 stats.communication_volume += comm_volume as u64;
             }
@@ -644,47 +662,35 @@ impl RingAttentionManager {
         Ok(())
     }
 
-    /// Helper for reverse direction KV rotation
+    /// Reverse ring rotation: device `i` sends its own K/V chunk to device
+    /// `(i - 1) % num_devices`.
     fn rotate_kv_reverse(&mut self) -> Result<()> {
         let num_devices = self.config.num_devices;
+        let snapshot = self.snapshot_local_kv()?;
 
-        // Perform reverse ring rotation: device i sends to device (i-1+num_devices) % num_devices
         for i in 0..num_devices {
             let prev_device = (i + num_devices - 1) % num_devices;
-            let current_device = &self.devices[i];
+            let (mut keys, mut values) = snapshot[i].clone();
 
-            // Create KV pair for reverse direction
-            let kv_size = self.config.chunk_size * self.config.head_dim;
-            let mut keys = vec![0.0f32; kv_size];
-            let mut values = vec![0.0f32; kv_size];
-
-            // Generate different data for reverse direction
-            for j in 0..kv_size {
-                keys[j] = -(i as f32 + j as f32 * 0.001).sin();
-                values[j] = -(i as f32 + j as f32 * 0.001).cos();
-            }
-
-            // Apply compression if enabled
-            if self.config.compression_enabled {
-                self.compress_kv_data(&mut keys, &mut values)?;
-            }
+            let comm_volume = if self.config.compression_enabled {
+                self.compress_kv_data(&mut keys, &mut values)?
+            } else {
+                Self::uncompressed_kv_bytes(keys.len())
+            };
 
             let kv_pair = RingKVPair {
                 keys,
                 values,
                 source_rank: i,
-                position_range: current_device.sequence_chunk,
+                position_range: self.devices[i].sequence_chunk,
                 attention_mask: None,
             };
 
-            // Send to previous device in ring
             self.devices[prev_device].received_kv.push(kv_pair);
 
-            // Update communication statistics
-            let comm_volume = kv_size * 2 * 4; // keys + values, 4 bytes per float32
+            self.devices[i].attention_stats.communication_volume += comm_volume as u64;
             if let Some(stats) = self.performance_stats.get_mut(&i) {
                 stats.communication_volume += comm_volume as u64;
-                stats.communication_time_ms += 0.1; // Simulate communication latency
             }
         }
 
@@ -836,8 +842,8 @@ impl RingAttentionManager {
             )
         {
             self.communication_pattern = RingCommunicationPattern::Bidirectional;
-            println!(
-                "Switched to bidirectional ring communication (comm ratio: {:.2})",
+            log::info!(
+                "switched to bidirectional ring communication (comm ratio: {:.2})",
                 comm_ratio
             );
         }
@@ -847,8 +853,8 @@ impl RingAttentionManager {
         {
             self.config.compression_enabled = true;
             self.config.compression_ratio = 0.5;
-            println!(
-                "Enabled communication compression (volume: {} bytes)",
+            log::info!(
+                "enabled communication compression (volume: {} bytes)",
                 aggregate_stats.communication_volume
             );
         }
@@ -915,46 +921,100 @@ impl ModelParams {
 }
 
 impl RingAttentionManager {
-    /// Compress key-value data for efficient communication
-    fn compress_kv_data(&self, keys: &mut Vec<f32>, values: &mut Vec<f32>) -> Result<()> {
-        if !self.config.compression_enabled {
-            return Ok(());
+    /// Bytes of metadata that accompany one quantized buffer on the wire: an
+    /// `f32` scale and an `f32` zero point.
+    const QUANT_HEADER_BYTES: usize = 2 * std::mem::size_of::<f32>();
+
+    /// Bit width used to transmit a K/V buffer at the configured ratio, or
+    /// `None` when the ratio asks for no compression at all.
+    ///
+    /// [`RingAttentionConfig::compression_ratio`] is the target
+    /// bytes-out / bytes-in, so a ratio of `r` over 32-bit input asks for
+    /// `32 * r` bits. A ratio of `1.0` or more (and any non-finite value) means
+    /// "do not shrink the payload", which must be a genuine no-op rather than
+    /// lossy 16-bit quantization advertised as a halving. Otherwise the width
+    /// is clamped to `2..=16`: below two bits a buffer degenerates to its
+    /// min/max, and at seventeen or more the saving no longer justifies the
+    /// loss.
+    fn quantization_bits(compression_ratio: f32) -> Option<u32> {
+        if !compression_ratio.is_finite() || compression_ratio >= 1.0 {
+            return None;
         }
-
-        let compression_ratio = self.config.compression_ratio;
-        let original_len = keys.len();
-        let compressed_len = (original_len as f32 * compression_ratio) as usize;
-
-        // Simple compression: keep only the most significant values
-        // In practice, this would use more sophisticated compression algorithms
-
-        // For keys: keep every nth element based on compression ratio
-        let step = (1.0 / compression_ratio) as usize;
-        let mut compressed_keys = Vec::with_capacity(compressed_len);
-        let mut compressed_values = Vec::with_capacity(compressed_len);
-
-        for i in (0..original_len).step_by(step) {
-            if compressed_keys.len() < compressed_len && i < keys.len() {
-                compressed_keys.push(keys[i]);
-                compressed_values.push(values[i]);
-            }
-        }
-
-        // Pad to original size with interpolated values
-        while compressed_keys.len() < original_len {
-            let last_idx = compressed_keys.len() - 1;
-            compressed_keys.push(compressed_keys[last_idx] * 0.9); // Simple interpolation
-            compressed_values.push(compressed_values[last_idx] * 0.9);
-        }
-
-        *keys = compressed_keys;
-        *values = compressed_values;
-
-        Ok(())
+        Some(((compression_ratio * 32.0).round() as i64).clamp(2, 16) as u32)
     }
 
-    /// Advanced block-sparse attention computation for memory efficiency
-    /// Processes attention in blocks to reduce memory usage
+    /// Quantize `keys` and `values` for transmission and return the number of
+    /// bytes that actually travel.
+    ///
+    /// The buffers are replaced by their *reconstruction*, which is what the
+    /// receiver observes — the same length, the same shape, with quantization
+    /// error. An earlier revision decimated the buffer and then padded it back
+    /// to full length with a geometric decay of the last kept sample: the
+    /// payload never shrank (so the reported saving was zero), the tail was
+    /// fabricated data, and a `compression_ratio` above `1.0` or below
+    /// `1/len` panicked on `step_by(0)` / an empty-vector index.
+    fn compress_kv_data(&self, keys: &mut [f32], values: &mut [f32]) -> Result<usize> {
+        let Some(bits) = Self::quantization_bits(self.config.compression_ratio) else {
+            // The configuration asks for no reduction: leave the data untouched
+            // and report the full uncompressed size.
+            return Ok(Self::uncompressed_kv_bytes(keys.len()));
+        };
+
+        Self::quantize_in_place(keys, bits);
+        Self::quantize_in_place(values, bits);
+
+        let payload_bits = (keys.len() + values.len()) * bits as usize;
+        Ok(payload_bits.div_ceil(8) + 2 * Self::QUANT_HEADER_BYTES)
+    }
+
+    /// Uniform affine quantization to `bits` levels, followed by immediate
+    /// dequantization — the values the receiver would reconstruct.
+    fn quantize_in_place(buffer: &mut [f32], bits: u32) {
+        if buffer.is_empty() {
+            return;
+        }
+
+        let mut min_value = f32::INFINITY;
+        let mut max_value = f32::NEG_INFINITY;
+        for value in buffer.iter() {
+            min_value = min_value.min(*value);
+            max_value = max_value.max(*value);
+        }
+
+        let span = max_value - min_value;
+        if !span.is_finite() || span <= 0.0 {
+            // A constant (or non-finite) buffer quantizes exactly; leave it be.
+            return;
+        }
+
+        let levels = ((1u32 << bits) - 1) as f32;
+        let scale = span / levels;
+        for value in buffer.iter_mut() {
+            let level = ((*value - min_value) / scale).round().clamp(0.0, levels);
+            *value = min_value + level * scale;
+        }
+    }
+
+    /// Bytes one uncompressed K/V pair of `elements` values each occupies.
+    fn uncompressed_kv_bytes(elements: usize) -> usize {
+        2 * elements * std::mem::size_of::<f32>()
+    }
+
+    /// Block-sparse (tiled) attention with an online softmax.
+    ///
+    /// This is the FlashAttention recurrence: keys/values are streamed one
+    /// `block_size` tile at a time while a running maximum `m`, a running
+    /// normaliser `l` and an accumulator are rescaled, so only one tile of
+    /// scores is ever materialised. The result is **numerically identical** to
+    /// dense scaled dot-product attention (up to floating-point rounding);
+    /// `block_size` trades peak memory for loop overhead and nothing else.
+    ///
+    /// An earlier revision summed independently-softmaxed blocks into a
+    /// discarded temporary and returned the freshly allocated zero tensor, so
+    /// every caller received zeros regardless of its inputs.
+    ///
+    /// Tensors are `[batch, sequence, features]`; with `config.causal` set,
+    /// query `i` attends only to keys `j <= i`.
     fn compute_block_sparse_attention(
         &mut self,
         queries: &Tensor,
@@ -963,63 +1023,123 @@ impl RingAttentionManager {
         block_size: usize,
     ) -> CoreResult<Tensor> {
         let shape = queries.shape();
+        if shape.len() != 3 {
+            return Err(invalid_input(format!(
+                "block-sparse attention expects [batch, sequence, features] queries, got {shape:?}"
+            )));
+        }
+        if keys.shape() != shape || values.shape() != shape {
+            return Err(invalid_input(format!(
+                "block-sparse attention expects matching query/key/value shapes, got {:?}, {:?}, {:?}",
+                shape,
+                keys.shape(),
+                values.shape()
+            )));
+        }
+        let block_size = block_size.max(1);
+
         let batch_size = shape[0];
         let seq_len = shape[1];
         let hidden_dim = shape[2];
 
-        // Initialize output tensor
-        let output = Tensor::zeros(&[batch_size, seq_len, hidden_dim])?;
+        // The module scales by the configured head dimension; fall back to the
+        // tensor's own feature count when it is unset so the scale is never 1/0.
+        let scale_dim = if self.config.head_dim == 0 { hidden_dim } else { self.config.head_dim };
+        let scale = if scale_dim == 0 { 1.0 } else { 1.0 / (scale_dim as f32).sqrt() };
 
-        // Process attention in blocks to reduce memory usage
-        let num_blocks = seq_len.div_ceil(block_size);
+        let query_values = queries.to_vec_f32()?;
+        let key_values = keys.to_vec_f32()?;
+        let value_values = values.to_vec_f32()?;
 
-        for block_i in 0..num_blocks {
-            for block_j in 0..num_blocks {
-                let start_i = block_i * block_size;
-                let end_i = (start_i + block_size).min(seq_len);
-                let start_j = block_j * block_size;
-                let end_j = (start_j + block_size).min(seq_len);
+        let expected = batch_size * seq_len * hidden_dim;
+        if query_values.len() != expected {
+            return Err(tensor_op_error(
+                "block_sparse_attention",
+                format!(
+                    "expected {expected} elements in the query tensor, got {}",
+                    query_values.len()
+                ),
+            ));
+        }
 
-                // Skip blocks that violate causal constraint
-                if self.config.causal && start_j > end_i {
-                    continue;
+        let mut output = vec![0.0f32; expected];
+        let mut accumulator = vec![0.0f32; hidden_dim];
+
+        for batch in 0..batch_size {
+            let batch_offset = batch * seq_len * hidden_dim;
+
+            for query_index in 0..seq_len {
+                let query_offset = batch_offset + query_index * hidden_dim;
+                let query_row = &query_values[query_offset..query_offset + hidden_dim];
+
+                // Online-softmax state for this query row.
+                let mut running_max = f32::NEG_INFINITY;
+                let mut running_sum = 0.0f32;
+                accumulator.iter_mut().for_each(|slot| *slot = 0.0);
+
+                // Causal rows never look past their own position, so whole key
+                // tiles beyond it are skipped without being scored at all.
+                let last_key = if self.config.causal { query_index + 1 } else { seq_len };
+
+                let mut block_start = 0usize;
+                while block_start < last_key {
+                    let block_end = (block_start + block_size).min(last_key);
+
+                    // Score this tile.
+                    let mut tile_scores = Vec::with_capacity(block_end - block_start);
+                    let mut tile_max = f32::NEG_INFINITY;
+                    for key_index in block_start..block_end {
+                        let key_offset = batch_offset + key_index * hidden_dim;
+                        let key_row = &key_values[key_offset..key_offset + hidden_dim];
+                        let dot: f32 =
+                            query_row.iter().zip(key_row).map(|(q, k)| q * k).sum::<f32>() * scale;
+                        tile_max = tile_max.max(dot);
+                        tile_scores.push(dot);
+                    }
+
+                    if tile_scores.is_empty() {
+                        block_start = block_end;
+                        continue;
+                    }
+
+                    // Rescale the running state to the new maximum, then fold
+                    // the tile in. `exp(-inf) == 0`, which zeroes the untouched
+                    // initial state on the first tile.
+                    let new_max = running_max.max(tile_max);
+                    let correction = (running_max - new_max).exp();
+                    running_sum *= correction;
+                    for slot in accumulator.iter_mut() {
+                        *slot *= correction;
+                    }
+
+                    for (offset, score) in tile_scores.iter().enumerate() {
+                        let weight = (score - new_max).exp();
+                        running_sum += weight;
+                        let key_index = block_start + offset;
+                        let value_offset = batch_offset + key_index * hidden_dim;
+                        for (slot, value) in accumulator
+                            .iter_mut()
+                            .zip(&value_values[value_offset..value_offset + hidden_dim])
+                        {
+                            *slot += weight * value;
+                        }
+                    }
+
+                    running_max = new_max;
+                    block_start = block_end;
                 }
 
-                // Extract query and key blocks
-                let q_block =
-                    queries.slice_multi(&[(0, batch_size), (start_i, end_i), (0, hidden_dim)])?;
-
-                let k_block =
-                    keys.slice_multi(&[(0, batch_size), (start_j, end_j), (0, hidden_dim)])?;
-
-                let v_block =
-                    values.slice_multi(&[(0, batch_size), (start_j, end_j), (0, hidden_dim)])?;
-
-                // Compute block attention
-                let block_scores = self.compute_attention_scores_simple(&q_block, &k_block)?;
-
-                // Apply causal masking within block
-                let masked_scores = if self.config.causal {
-                    self.apply_block_causal_mask(block_scores, start_i, start_j, end_i, end_j)?
-                } else {
-                    block_scores
-                };
-
-                // Compute softmax and weighted sum
-                let block_weights = self.compute_softmax(&masked_scores)?;
-                let block_output = self.compute_weighted_sum_simple(&block_weights, &v_block)?;
-
-                // Add block output to final output (in practice, would need more sophisticated aggregation)
-                // This is a simplified version - real implementation would handle overlapping blocks properly
-                let output_slice =
-                    output.slice_multi(&[(0, batch_size), (start_i, end_i), (0, hidden_dim)])?;
-
-                let _combined = output_slice.add(&block_output)?;
-                // In a real implementation, we would update the output tensor in-place
+                if running_sum > 0.0 {
+                    for (slot, accumulated) in
+                        output[query_offset..query_offset + hidden_dim].iter_mut().zip(&accumulator)
+                    {
+                        *slot = accumulated / running_sum;
+                    }
+                }
             }
         }
 
-        Ok(output)
+        Tensor::from_vec(output, &[batch_size, seq_len, hidden_dim])
     }
 
     /// Apply causal masking within a block
@@ -1465,116 +1585,4 @@ impl RingAttentionMemoryPoolV2 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ring_attention_config() {
-        let config = RingAttentionConfig::default();
-        assert_eq!(config.num_devices, 8);
-        assert_eq!(config.chunk_size, 4096);
-        assert!(config.bidirectional);
-    }
-
-    #[test]
-    fn test_ring_attention_manager_creation() {
-        let config = RingAttentionConfig::default();
-        let sequence_length = 32768;
-        let manager =
-            RingAttentionManager::new(config, sequence_length).expect("operation failed in test");
-
-        assert_eq!(manager.devices.len(), 8);
-        assert_eq!(manager.global_sequence_length, sequence_length);
-
-        // Check device chunk assignments
-        for (i, device) in manager.devices.iter().enumerate() {
-            assert_eq!(device.device_rank, i);
-            let expected_start = i * 4096;
-            assert_eq!(device.sequence_chunk.0, expected_start);
-        }
-    }
-
-    #[test]
-    fn test_optimal_device_calculation() {
-        let devices = utils::calculate_optimal_devices(1_000_000, 4096);
-        assert!(devices > 0);
-        assert!(devices <= 128);
-
-        // Should prefer power-of-2 device counts
-        assert!([1, 2, 4, 8, 16, 32, 64, 128].contains(&devices));
-    }
-
-    #[test]
-    fn test_speedup_estimation() {
-        let speedup = utils::estimate_speedup(1_000_000, 32, 900.0);
-        assert!(speedup > 1.0);
-        assert!(speedup <= 32.0); // Can't exceed number of devices
-    }
-
-    #[test]
-    fn test_preset_configs() {
-        let presets = utils::create_preset_configs();
-        assert!(presets.contains_key("small_scale"));
-        assert!(presets.contains_key("medium_scale"));
-        assert!(presets.contains_key("large_scale"));
-        assert!(presets.contains_key("ultra_scale"));
-
-        let ultra_config = &presets["ultra_scale"];
-        assert_eq!(ultra_config.num_devices, 128);
-        assert!(ultra_config.compression_enabled);
-    }
-
-    #[test]
-    fn test_model_params_memory_estimation() {
-        let params = ModelParams {
-            num_heads: 32,
-            head_dim: 128,
-            hidden_dim: 4096,
-            num_layers: 24,
-            causal: true,
-        };
-
-        let memory = params.estimate_memory_usage();
-        assert!(memory > 0);
-        // Should be reasonable for a large model (several GB)
-        assert!(memory > 1_000_000_000); // > 1GB
-    }
-
-    #[test]
-    fn test_ring_attention_stats() {
-        let mut stats = RingAttentionStats {
-            total_attention_ops: 1000,
-            computation_time_ms: 100.0,
-            communication_time_ms: 20.0,
-            ..RingAttentionStats::default()
-        };
-
-        // Compute efficiency: computation / total time
-        let total_time = stats.computation_time_ms + stats.communication_time_ms;
-        stats.efficiency_score = (stats.computation_time_ms / total_time) as f32;
-
-        let expected_efficiency = 100.0 / 120.0;
-        assert!((stats.efficiency_score - expected_efficiency as f32).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_optimized_config_creation() {
-        let model_params = ModelParams {
-            num_heads: 32,
-            head_dim: 128,
-            hidden_dim: 4096,
-            num_layers: 24,
-            causal: true,
-        };
-
-        let config = RingAttentionManager::create_optimized_config(
-            2_000_000, // 2M tokens
-            16,        // 16 devices
-            model_params,
-        );
-
-        assert_eq!(config.num_devices, 16);
-        assert!(config.compression_enabled); // Should enable for 2M tokens
-        assert!(config.chunk_size > 0);
-    }
-}
+mod tests;

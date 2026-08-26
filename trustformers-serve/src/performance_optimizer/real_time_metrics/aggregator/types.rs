@@ -11,21 +11,17 @@ use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 
-use super::functions::{
-    AggregationResultPublisher, CompressionAlgorithm, DataValidator, OutlierDetector,
-    QualityScorer, StatisticalProcessor,
-};
+use super::functions::StatisticalProcessor;
 
 /// Window-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,33 +37,10 @@ pub struct WindowConfig {
 ///
 /// Real-time streaming aggregation with backpressure handling,
 /// flow control, and adaptive processing capabilities.
-pub struct StreamingAggregator {
-    /// Input stream receiver
-    input_receiver: Arc<Mutex<Option<mpsc::Receiver<TimestampedMetrics>>>>,
-    /// Processing buffer
-    processing_buffer: Arc<Mutex<VecDeque<TimestampedMetrics>>>,
-    /// Stream statistics
-    stream_stats: Arc<StreamStatistics>,
-    /// Backpressure controller
-    backpressure_controller: Arc<BackpressureController>,
-    /// Flow control manager
-    flow_controller: Arc<FlowController>,
-    /// Streaming configuration
-    config: Arc<RwLock<StreamingConfig>>,
-    /// Processing workers
-    workers: Arc<Mutex<Vec<StreamingWorker>>>,
-}
+pub struct StreamingAggregator {}
 impl StreamingAggregator {
     async fn new() -> Result<Self> {
-        Ok(Self {
-            input_receiver: Arc::new(Mutex::new(None)),
-            processing_buffer: Arc::new(Mutex::new(VecDeque::new())),
-            stream_stats: Arc::new(StreamStatistics::default()),
-            backpressure_controller: Arc::new(BackpressureController::default()),
-            flow_controller: Arc::new(FlowController::default()),
-            config: Arc::new(RwLock::new(StreamingConfig::default())),
-            workers: Arc::new(Mutex::new(Vec::new())),
-        })
+        Ok(Self {})
     }
     async fn start(&self) -> Result<()> {
         Ok(())
@@ -77,36 +50,20 @@ impl StreamingAggregator {
     }
 }
 /// Window manager for multi-window coordination
-pub struct WindowManager {
-    windows: Arc<RwLock<BTreeMap<Duration, Arc<AggregationWindow>>>>,
-    window_groups: Arc<RwLock<HashMap<String, Vec<Duration>>>>,
-    coordination_config: Arc<RwLock<CoordinationConfig>>,
-}
+pub struct WindowManager {}
 impl WindowManager {
     async fn new() -> Result<Self> {
-        Ok(Self {
-            windows: Arc::new(RwLock::new(BTreeMap::new())),
-            window_groups: Arc::new(RwLock::new(HashMap::new())),
-            coordination_config: Arc::new(RwLock::new(CoordinationConfig::default())),
-        })
+        Ok(Self {})
     }
     async fn initialize(&self, _windows: &[Duration]) -> Result<()> {
         Ok(())
     }
 }
 /// Processing pipeline for data flow management
-pub struct ProcessingPipeline {
-    stages: Arc<Mutex<Vec<Box<dyn PipelineStage + Send + Sync>>>>,
-    stage_metrics: Arc<Mutex<HashMap<String, StageMetrics>>>,
-    pipeline_config: Arc<RwLock<PipelineConfig>>,
-}
+pub struct ProcessingPipeline {}
 impl ProcessingPipeline {
     async fn new() -> Result<Self> {
-        Ok(Self {
-            stages: Arc::new(Mutex::new(Vec::new())),
-            stage_metrics: Arc::new(Mutex::new(HashMap::new())),
-            pipeline_config: Arc::new(RwLock::new(PipelineConfig::default())),
-        })
+        Ok(Self {})
     }
     async fn initialize(&self) -> Result<()> {
         Ok(())
@@ -726,8 +683,6 @@ pub struct AggregationWindow {
     data_points: Arc<RwLock<VecDeque<TimestampedMetrics>>>,
     /// Window statistics
     pub statistics: Arc<RwLock<WindowStatistics>>,
-    /// Window start time
-    start_time: Arc<RwLock<DateTime<Utc>>>,
     /// Last update timestamp
     last_update: Arc<RwLock<DateTime<Utc>>>,
     /// Window full indicator
@@ -740,25 +695,21 @@ pub struct AggregationWindow {
     stats_cache: Arc<RwLock<Option<StatisticalSummary>>>,
     /// Trend analysis cache
     trend_cache: Arc<RwLock<Option<TrendAnalysis>>>,
-    /// Window-specific configuration
-    window_config: WindowConfig,
 }
 impl AggregationWindow {
     /// Create a new aggregation window
-    pub async fn new(duration: Duration, config: WindowConfig) -> Result<Self> {
+    pub async fn new(duration: Duration, _config: WindowConfig) -> Result<Self> {
         let capacity = Self::calculate_capacity(duration);
         Ok(Self {
             duration,
             data_points: Arc::new(RwLock::new(VecDeque::with_capacity(capacity))),
             statistics: Arc::new(RwLock::new(WindowStatistics::default())),
-            start_time: Arc::new(RwLock::new(Utc::now())),
             last_update: Arc::new(RwLock::new(Utc::now())),
             is_full: Arc::new(AtomicBool::new(false)),
             capacity,
             quality_score: Arc::new(AtomicF32::new(1.0)),
             stats_cache: Arc::new(RwLock::new(None)),
             trend_cache: Arc::new(RwLock::new(None)),
-            window_config: config,
         })
     }
     /// Add a data point to the window
@@ -872,7 +823,9 @@ impl AggregationWindow {
             std_dev,
             min,
             max,
-            outlier_count: 0,
+            // Until 0.2.1 this was a hardcoded 0, so every window reported
+            // "no outliers" whatever the samples looked like.
+            outlier_count: count_outliers(&throughputs, mean, std_dev),
             mean_throughput: mean,
             throughput_std_dev: std_dev,
             mean_latency,
@@ -884,41 +837,6 @@ impl AggregationWindow {
             distribution_analysis: self.calculate_distribution_analysis(&throughputs)?,
             efficiency_trend,
             variability_coefficient,
-        })
-    }
-    fn calculate_throughput_statistics(&self, values: &[f64]) -> Result<ThroughputStatistics> {
-        if values.is_empty() {
-            return Ok(ThroughputStatistics::default());
-        }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_values.len().is_multiple_of(2) {
-            (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
-                / 2.0
-        } else {
-            sorted_values[sorted_values.len() / 2]
-        };
-        let variance =
-            values.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64;
-        let std_dev = variance.sqrt();
-        let min = sorted_values.first().copied().unwrap_or(0.0);
-        let max = sorted_values.last().copied().unwrap_or(0.0);
-        let percentiles = self.calculate_percentiles_f64(&sorted_values);
-        let skewness = self.calculate_skewness(values, mean, std_dev);
-        let kurtosis = self.calculate_kurtosis(values, mean, std_dev);
-        let coefficient_of_variation = if mean != 0.0 { std_dev / mean } else { 0.0 };
-        Ok(ThroughputStatistics {
-            mean,
-            median,
-            std_dev,
-            min,
-            max,
-            percentiles,
-            variance,
-            skewness,
-            kurtosis,
-            coefficient_of_variation,
         })
     }
     fn calculate_latency_statistics(&self, values: &[Duration]) -> Result<LatencyStatistics> {
@@ -954,38 +872,6 @@ impl AggregationWindow {
             percentiles,
             variance,
             tail_latency,
-        })
-    }
-    fn calculate_utilization_statistics(&self, values: &[f32]) -> Result<UtilizationStatistics> {
-        if values.is_empty() {
-            return Ok(UtilizationStatistics::default());
-        }
-        let mean = values.iter().sum::<f32>() / values.len() as f32;
-        let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_values.len().is_multiple_of(2) {
-            (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
-                / 2.0
-        } else {
-            sorted_values[sorted_values.len() / 2]
-        };
-        let variance =
-            values.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / values.len() as f32;
-        let std_dev = variance.sqrt();
-        let min = sorted_values.first().copied().unwrap_or(0.0);
-        let max = sorted_values.last().copied().unwrap_or(0.0);
-        let peak_usage = max;
-        let percentiles = self.calculate_percentiles_f32(&sorted_values);
-        let utilization_efficiency = if max > 0.0 { mean / max } else { 0.0 };
-        Ok(UtilizationStatistics {
-            mean,
-            median,
-            std_dev,
-            min,
-            max,
-            percentiles,
-            peak_usage,
-            utilization_efficiency,
         })
     }
     async fn calculate_quality_metrics(
@@ -1161,31 +1047,7 @@ impl AggregationWindow {
     fn calculate_outlier_percentage(&self, _data_points: &VecDeque<TimestampedMetrics>) -> f32 {
         0.0
     }
-    fn calculate_percentiles_f64(&self, sorted_values: &[f64]) -> HashMap<u8, f64> {
-        let mut percentiles = HashMap::new();
-        let percentile_values = [25, 50, 75, 90, 95, 99];
-        for &p in &percentile_values {
-            if !sorted_values.is_empty() {
-                let index =
-                    ((p as f64 / 100.0) * (sorted_values.len() - 1) as f64).round() as usize;
-                percentiles.insert(p, sorted_values[index.min(sorted_values.len() - 1)]);
-            }
-        }
-        percentiles
-    }
     fn calculate_percentiles_duration(&self, sorted_values: &[Duration]) -> HashMap<u8, Duration> {
-        let mut percentiles = HashMap::new();
-        let percentile_values = [25, 50, 75, 90, 95, 99];
-        for &p in &percentile_values {
-            if !sorted_values.is_empty() {
-                let index =
-                    ((p as f64 / 100.0) * (sorted_values.len() - 1) as f64).round() as usize;
-                percentiles.insert(p, sorted_values[index.min(sorted_values.len() - 1)]);
-            }
-        }
-        percentiles
-    }
-    fn calculate_percentiles_f32(&self, sorted_values: &[f32]) -> HashMap<u8, f32> {
         let mut percentiles = HashMap::new();
         let percentile_values = [25, 50, 75, 90, 95, 99];
         for &p in &percentile_values {
@@ -1213,52 +1075,19 @@ impl AggregationWindow {
         }
         tail_latency
     }
-    fn calculate_skewness(&self, values: &[f64], mean: f64, std_dev: f64) -> f64 {
-        if std_dev == 0.0 || values.len() < 3 {
-            return 0.0;
-        }
-        let n = values.len() as f64;
-        let sum_cubed_deviations =
-            values.iter().map(|&x| ((x - mean) / std_dev).powi(3)).sum::<f64>();
-        sum_cubed_deviations / n
-    }
-    fn calculate_kurtosis(&self, values: &[f64], mean: f64, std_dev: f64) -> f64 {
-        if std_dev == 0.0 || values.len() < 4 {
-            return 0.0;
-        }
-        let n = values.len() as f64;
-        let sum_fourth_deviations =
-            values.iter().map(|&x| ((x - mean) / std_dev).powi(4)).sum::<f64>();
-        (sum_fourth_deviations / n) - 3.0
-    }
 }
 /// Quality control and data validation system
 ///
 /// Comprehensive quality control system for validating incoming data,
 /// detecting outliers, and maintaining data quality scores.
 pub struct QualityController {
-    /// Quality scoring algorithms
-    quality_scorers: Arc<Mutex<Vec<Box<dyn QualityScorer + Send + Sync>>>>,
-    /// Data validators
-    data_validators: Arc<Mutex<Vec<Box<dyn DataValidator + Send + Sync>>>>,
-    /// Outlier detection algorithms
-    outlier_detectors: Arc<Mutex<Vec<Box<dyn OutlierDetector + Send + Sync>>>>,
     /// Quality configuration
     config: Arc<RwLock<QualityConfig>>,
-    /// Quality history for trend analysis
-    quality_history: Arc<Mutex<VecDeque<QualityAssessment>>>,
-    /// Data anomaly tracker
-    anomaly_tracker: Arc<AnomalyTracker>,
 }
 impl QualityController {
     async fn new() -> Result<Self> {
         Ok(Self {
-            quality_scorers: Arc::new(Mutex::new(Vec::new())),
-            data_validators: Arc::new(Mutex::new(Vec::new())),
-            outlier_detectors: Arc::new(Mutex::new(Vec::new())),
             config: Arc::new(RwLock::new(QualityConfig::default())),
-            quality_history: Arc::new(Mutex::new(VecDeque::new())),
-            anomaly_tracker: Arc::new(AnomalyTracker::default()),
         })
     }
     async fn assess_quality(&self, _metrics: &TimestampedMetrics) -> Result<QualityAssessment> {
@@ -1295,27 +1124,10 @@ impl AggregatorMetrics {
 ///
 /// Publishes aggregation results to downstream systems with configurable
 /// delivery guarantees and error handling.
-pub struct ResultPublisher {
-    /// Result publishers
-    publishers: Arc<Mutex<Vec<Box<dyn AggregationResultPublisher + Send + Sync>>>>,
-    /// Publishing configuration
-    config: Arc<RwLock<PublishingConfig>>,
-    /// Publishing statistics
-    stats: Arc<PublishingStatistics>,
-    /// Result formatter
-    formatter: Arc<ResultFormatter>,
-    /// Delivery queue
-    delivery_queue: Arc<Mutex<VecDeque<FormattedResult>>>,
-}
+pub struct ResultPublisher {}
 impl ResultPublisher {
     async fn new() -> Result<Self> {
-        Ok(Self {
-            publishers: Arc::new(Mutex::new(Vec::new())),
-            config: Arc::new(RwLock::new(PublishingConfig::default())),
-            stats: Arc::new(PublishingStatistics::new()),
-            formatter: Arc::new(ResultFormatter::new()),
-            delivery_queue: Arc::new(Mutex::new(VecDeque::new())),
-        })
+        Ok(Self {})
     }
     async fn start(&self) -> Result<()> {
         Ok(())
@@ -1325,17 +1137,22 @@ impl ResultPublisher {
     }
 }
 /// Data compressor for historical storage
-pub struct DataCompressor {
-    compression_algorithms: Arc<Mutex<Vec<Box<dyn CompressionAlgorithm + Send + Sync>>>>,
-    compression_config: Arc<RwLock<CompressionConfig>>,
-    compression_stats: Arc<CompressionStatistics>,
-}
+pub struct DataCompressor {}
 impl DataCompressor {
     async fn new() -> Result<Self> {
-        Ok(Self {
-            compression_algorithms: Arc::new(Mutex::new(Vec::new())),
-            compression_config: Arc::new(RwLock::new(CompressionConfig::default())),
-            compression_stats: Arc::new(CompressionStatistics::new()),
-        })
+        Ok(Self {})
     }
+}
+
+/// Samples further than three standard deviations from the mean.
+///
+/// The three-sigma rule is a stated convention, not a measurement; what is
+/// measured is how many of the window's own samples fall outside it. A window
+/// with no dispersion has no outliers by this rule.
+fn count_outliers(values: &[f64], mean: f64, std_dev: f64) -> usize {
+    if std_dev <= 0.0 {
+        return 0;
+    }
+    let limit = 3.0 * std_dev;
+    values.iter().filter(|value| (**value - mean).abs() > limit).count()
 }

@@ -273,12 +273,21 @@ impl AdaptiveBatchOptimizer {
         avg_throughput: f64,
         avg_memory: f64,
     ) -> f64 {
-        // Normalize metrics to 0-1 scale
-        let latency_score = if p95_latency <= self.config.target_latency_ms {
+        // Normalize metrics to 0-1 scale. Weighted mostly on p95 (tail
+        // latency matters most for SLA compliance), with the average as a
+        // secondary signal so a bimodal distribution with a deceptively low
+        // p95 but poor average can't score perfectly.
+        let p95_score = if p95_latency <= self.config.target_latency_ms {
             1.0 // Perfect score for meeting target
         } else {
             (self.config.target_latency_ms / p95_latency).max(0.1) // Penalty for exceeding target
         };
+        let avg_score = if avg_latency <= self.config.target_latency_ms {
+            1.0
+        } else {
+            (self.config.target_latency_ms / avg_latency).max(0.1)
+        };
+        let latency_score = p95_score * 0.7 + avg_score * 0.3;
 
         // Throughput score (higher is better)
         let throughput_score = (avg_throughput / 100.0).min(1.0); // Normalize to 100 RPS baseline
@@ -440,13 +449,6 @@ mod tests {
             cpu_utilization: 0.6,
             gpu_utilization: 0.7,
             timestamp: SystemTime::now(),
-        }
-    }
-
-    fn populate_optimizer(optimizer: &AdaptiveBatchOptimizer, batch_size: usize, n: usize) {
-        for _ in 0..n {
-            let sample = make_sample(batch_size, 60.0, 50.0, 256.0);
-            optimizer.record_sample(sample).expect("record_sample should succeed");
         }
     }
 

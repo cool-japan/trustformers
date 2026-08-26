@@ -516,17 +516,103 @@ impl WeightAnalyzer {
         // Excess kurtosis
     }
 
-    /// Compute entropy of data (simplified)
-    fn compute_entropy(data: &[f32]) -> f32 {
-        // Simplified entropy computation
-        // In practice, this would discretize the data and compute proper entropy
-        let std_dev = {
-            let mean = data.iter().sum::<f32>() / data.len() as f32;
-            let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
-            variance.sqrt()
-        };
+    /// Number of equal-width buckets used to discretise weights before
+    /// computing their entropy.
+    const ENTROPY_BINS: usize = 64;
 
-        // Higher std_dev implies higher entropy (roughly)
-        std_dev.log2().max(0.0)
+    /// Shannon entropy, in bits, of the weight distribution discretised into
+    /// [`Self::ENTROPY_BINS`] equal-width buckets over the data's finite range.
+    ///
+    /// Bounded by `log2(ENTROPY_BINS)` = 6 bits: `0` when every weight lands in
+    /// one bucket (a constant or degenerate layer), maximal when the weights
+    /// spread uniformly across the range.
+    ///
+    /// This previously returned `log2(std_dev)`, which is not an entropy: it is
+    /// unbounded above, goes negative for any `std_dev < 1` (and was then
+    /// clamped to `0`, so every layer with sub-unit weight spread -- i.e. almost
+    /// every trained layer -- reported exactly zero entropy), and is invariant
+    /// to the SHAPE of the distribution, which is the only thing entropy
+    /// measures.
+    fn compute_entropy(data: &[f32]) -> f32 {
+        let finite: Vec<f32> = data.iter().copied().filter(|x| x.is_finite()).collect();
+        if finite.is_empty() {
+            return 0.0;
+        }
+        let min = finite.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if (max - min).abs() < f32::EPSILON {
+            // All weights identical: one occupied bucket, zero entropy.
+            return 0.0;
+        }
+
+        let bins = Self::ENTROPY_BINS;
+        let width = (max - min) / bins as f32;
+        let mut counts = vec![0usize; bins];
+        for &value in &finite {
+            let idx = (((value - min) / width).floor() as isize).clamp(0, bins as isize - 1);
+            counts[idx as usize] += 1;
+        }
+
+        let total = finite.len() as f32;
+        counts
+            .iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| {
+                let p = c as f32 / total;
+                -p * p.log2()
+            })
+            .sum()
+    }
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::*;
+
+    /// `compute_entropy` used to return `log2(std_dev)`, which is negative for
+    /// any spread below 1.0 (then clamped to 0), unbounded above, and blind to
+    /// the shape of the distribution.
+    #[test]
+    fn entropy_is_zero_for_a_constant_layer() {
+        let weights = vec![0.25_f32; 512];
+        assert_eq!(WeightAnalyzer::compute_entropy(&weights), 0.0);
+    }
+
+    #[test]
+    fn entropy_is_maximal_for_a_uniform_spread() {
+        // 64 values, one per bucket: entropy = log2(64) = 6 bits.
+        let weights: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let entropy = WeightAnalyzer::compute_entropy(&weights);
+        assert!(
+            (entropy - 6.0).abs() < 1e-4,
+            "expected log2(64) = 6, got {entropy}"
+        );
+    }
+
+    #[test]
+    fn entropy_separates_concentrated_from_spread_distributions() {
+        // Both have the SAME tiny std_dev scale, so the old log2(std_dev)
+        // implementation reported 0.0 for each; real entropy tells them apart.
+        let concentrated: Vec<f32> = (0..256).map(|i| if i < 250 { 0.0 } else { 0.001 }).collect();
+        let spread: Vec<f32> = (0..256).map(|i| (i % 64) as f32 * 0.0001).collect();
+        let e_concentrated = WeightAnalyzer::compute_entropy(&concentrated);
+        let e_spread = WeightAnalyzer::compute_entropy(&spread);
+        assert!(
+            e_spread > e_concentrated,
+            "spread ({e_spread}) must exceed concentrated ({e_concentrated})"
+        );
+        assert!(
+            e_concentrated > 0.0,
+            "two occupied buckets is non-zero entropy"
+        );
+        assert!(e_spread <= 6.0 + 1e-6, "bounded by log2(ENTROPY_BINS)");
+    }
+
+    #[test]
+    fn entropy_ignores_non_finite_weights() {
+        let weights = vec![f32::NAN, 0.0, 1.0, f32::INFINITY];
+        let entropy = WeightAnalyzer::compute_entropy(&weights);
+        assert!(entropy > 0.0 && entropy.is_finite(), "got {entropy}");
+        assert_eq!(WeightAnalyzer::compute_entropy(&[f32::NAN]), 0.0);
     }
 }

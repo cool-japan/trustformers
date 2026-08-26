@@ -84,36 +84,45 @@ pub struct PerformanceResults {
     pub throughput: ThroughputMeasurements,
 }
 
-/// Performance metrics for individual layers
+/// Measured performance of one profiled unit of work.
+///
+/// Without layer-level instrumentation the profiler measures whole forward
+/// passes, so `layer_name` identifies the profiled input and `layer_type` says
+/// what was measured. Fields with no measurement source are `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerPerformance {
     /// Layer name/identifier
     pub layer_name: String,
     /// Layer type (attention, mlp, etc.)
     pub layer_type: String,
-    /// Forward pass time
+    /// Measured wall-clock time of the forward pass
     pub forward_time: Duration,
-    /// Memory usage
-    pub memory_usage_mb: f64,
-    /// FLOPS (floating point operations per second)
+    /// Resident-set growth observed across the measurement, in MB.
+    ///
+    /// `None` when the platform cannot report process memory. This is a *delta*
+    /// of the process RSS, not an allocation trace, so it can legitimately be 0.
+    pub memory_usage_mb: Option<f64>,
+    /// FLOPS (floating point operations per second). `None`: not instrumented.
     pub flops: Option<f64>,
-    /// Utilization percentage
+    /// Utilization percentage. `None`: not instrumented.
     pub utilization_percent: Option<f32>,
 }
 
 /// Overall model performance metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverallPerformance {
-    /// Total inference time
+    /// Total measured inference time
     pub total_inference_time: Duration,
-    /// Tokens per second
+    /// Tokens processed per second, derived from the measured time and the real
+    /// token count of the profiled inputs.
     pub tokens_per_second: f32,
-    /// Total FLOPS
+    /// Total FLOPS. `None`: not instrumented.
     pub total_flops: Option<f64>,
-    /// Peak memory usage
-    pub peak_memory_mb: f64,
-    /// Average memory usage
-    pub average_memory_mb: f64,
+    /// Highest process RSS observed during profiling, in MB (`None` when the
+    /// platform cannot report it).
+    pub peak_memory_mb: Option<f64>,
+    /// Mean process RSS observed during profiling, in MB.
+    pub average_memory_mb: Option<f64>,
 }
 
 /// Memory usage analysis
@@ -123,10 +132,11 @@ pub struct MemoryAnalysis {
     pub by_layer_type: HashMap<String, f64>,
     /// Memory usage by tensor type
     pub by_tensor_type: HashMap<String, f64>,
-    /// Memory efficiency score (0-100)
-    pub efficiency_score: f32,
-    /// Memory fragmentation percentage
-    pub fragmentation_percent: f32,
+    /// Memory efficiency score (0-100). `None`: needs allocator instrumentation
+    /// this profiler does not have.
+    pub efficiency_score: Option<f32>,
+    /// Memory fragmentation percentage. `None`: needs allocator instrumentation.
+    pub fragmentation_percent: Option<f32>,
 }
 
 /// Throughput measurements

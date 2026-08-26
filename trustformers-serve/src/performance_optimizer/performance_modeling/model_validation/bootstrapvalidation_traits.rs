@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::performance_optimizer::performance_modeling::types::{
-    DistributionInfo, DistributionType, PerformancePredictor, PredictionRequest, ResidualAnalysis,
-    TestDataStatistics, ValidationConfig, ValidationDetails, ValidationMetric, ValidationResult,
+    PerformancePredictor, PredictionRequest, ValidationConfig, ValidationMetric, ValidationResult,
 };
 use crate::performance_optimizer::types::PerformanceDataPoint;
 
 use super::functions::{MetricCalculator, ValidationStrategy};
+use super::residuals::measured_details;
 use super::types::{BootstrapValidation, MAECalculator, RMSECalculator, RSquaredCalculator};
 
 #[async_trait]
@@ -87,38 +87,7 @@ impl ValidationStrategy for BootstrapValidation {
             metrics,
             cv_scores: bootstrap_scores,
             confidence: average_score.clamp(0.0, 1.0),
-            details: ValidationDetails {
-                test_samples: all_predictions.len(),
-                test_statistics: TestDataStatistics {
-                    mean_target: if !all_actuals.is_empty() {
-                        all_actuals.iter().sum::<f64>() as f32 / all_actuals.len() as f32
-                    } else {
-                        0.0
-                    },
-                    target_std: 1.0,
-                    feature_correlations: HashMap::new(),
-                    distribution_info: DistributionInfo {
-                        distribution_type: DistributionType::Normal,
-                        parameters: HashMap::new(),
-                        normality_p_value: 0.5,
-                    },
-                },
-                prediction_errors: if !all_predictions.is_empty() {
-                    all_predictions
-                        .iter()
-                        .zip(all_actuals.iter())
-                        .map(|(p, a)| (p - a) as f32)
-                        .collect()
-                } else {
-                    Vec::new()
-                },
-                residual_analysis: ResidualAnalysis {
-                    autocorrelation: 0.1,
-                    heteroscedasticity_p_value: 0.5,
-                    normality_p_value: 0.5,
-                    outliers: Vec::new(),
-                },
-            },
+            details: measured_details(&all_predictions, &all_actuals),
             validated_at: Utc::now(),
         })
     }

@@ -82,6 +82,22 @@ impl ConfigurationManager {
     }
 
     /// Migrate configuration from one version to another
+    ///
+    /// Finds a path of registered [`Migration`]s from `from_version` to
+    /// `to_version` via breadth-first search over the migration graph
+    /// (nodes are version strings, edges are registered migrations), then
+    /// applies every migration on that path, in order. Any chain length is
+    /// supported -- e.g. `1.0.0 -> 3.0.0` succeeds when only the direct
+    /// `1.0.0 -> 2.0.0` and `2.0.0 -> 3.0.0` migrations are registered, with
+    /// no direct `1.0.0 -> 3.0.0` migration -- and the result does not
+    /// depend on the order migrations were registered in (see
+    /// `Self::find_migration_path`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no migrations are registered for `config_type`
+    /// at all, or if no path from `from_version` to `to_version` exists in
+    /// the registered migration graph.
     pub fn migrate_config(
         &self,
         config_type: &str,
@@ -89,40 +105,76 @@ impl ConfigurationManager {
         from_version: &str,
         to_version: &str,
     ) -> Result<serde_json::Value> {
-        if let Some(migrations) = self.migration_registry.get(config_type) {
-            let mut current_config = config.clone();
-            let mut current_version = from_version.to_string();
+        let migrations = self
+            .migration_registry
+            .get(config_type)
+            .ok_or_else(|| anyhow!("No migrations registered for config type: {}", config_type))?;
 
-            // Find migration path
-            for migration in migrations {
-                if migration.from_version == current_version
-                    && (migration.to_version == to_version
-                        || self.is_version_on_path(&migration.to_version, to_version, migrations))
-                {
-                    current_config = migration.apply(&current_config)?;
-                    current_version = migration.to_version.clone();
+        if from_version == to_version {
+            return Ok(config.clone());
+        }
 
-                    if current_version == to_version {
-                        break;
-                    }
-                }
-            }
-
-            if current_version == to_version {
-                Ok(current_config)
-            } else {
-                Err(anyhow!(
+        let path =
+            Self::find_migration_path(migrations, from_version, to_version).ok_or_else(|| {
+                anyhow!(
                     "No migration path found from {} to {}",
                     from_version,
                     to_version
-                ))
-            }
-        } else {
-            Err(anyhow!(
-                "No migrations registered for config type: {}",
-                config_type
-            ))
+                )
+            })?;
+
+        let mut current_config = config.clone();
+        for migration in path {
+            current_config = migration.apply(&current_config)?;
         }
+        Ok(current_config)
+    }
+
+    /// Breadth-first search over `migrations`'s implicit graph (nodes are
+    /// version strings, edges are individual [`Migration`]s) for the
+    /// shortest sequence of migrations that gets from `from_version` to
+    /// `to_version`.
+    ///
+    /// This replaces a single linear pass over `migrations` that only found
+    /// a multi-hop path when the `Vec` happened to already be ordered to
+    /// match the path being walked (registering the migrations for a
+    /// `1.0.0 -> 2.0.0 -> 3.0.0` chain as `[2.0.0->3.0.0, 1.0.0->2.0.0]`
+    /// instead of `[1.0.0->2.0.0, 2.0.0->3.0.0]` made that old code report
+    /// "no migration path found" even though one plainly exists). BFS finds
+    /// any path regardless of registration order, and the `visited` set
+    /// keeps a cycle in the migration graph (e.g. a migration that maps a
+    /// version back to an earlier one) from causing an infinite search.
+    fn find_migration_path<'a>(
+        migrations: &'a [Migration],
+        from_version: &'a str,
+        to_version: &str,
+    ) -> Option<Vec<&'a Migration>> {
+        let mut visited: HashSet<&str> = HashSet::new();
+        visited.insert(from_version);
+        // Each queue entry is (version reached, migrations taken to reach it).
+        let mut queue: std::collections::VecDeque<(&str, Vec<&'a Migration>)> =
+            std::collections::VecDeque::new();
+        queue.push_back((from_version, Vec::new()));
+
+        while let Some((current_version, path)) = queue.pop_front() {
+            for migration in migrations {
+                if migration.from_version != current_version {
+                    continue;
+                }
+                if migration.to_version == to_version {
+                    let mut full_path = path;
+                    full_path.push(migration);
+                    return Some(full_path);
+                }
+                if visited.insert(migration.to_version.as_str()) {
+                    let mut next_path = path.clone();
+                    next_path.push(migration);
+                    queue.push_back((migration.to_version.as_str(), next_path));
+                }
+            }
+        }
+
+        None
     }
 
     /// Get configuration recommendations
@@ -146,7 +198,7 @@ impl ConfigurationManager {
             serde_json::from_str(&content)?
         } else {
             // Try YAML format
-            serde_yaml::from_str(&content)?
+            serde_yaml_ng::from_str(&content)?
         };
 
         let validation_result = self.validate_config(config_type, &config);
@@ -169,7 +221,7 @@ impl ConfigurationManager {
     ) -> Result<()> {
         let content = match format {
             ConfigFormat::Json => serde_json::to_string_pretty(config)?,
-            ConfigFormat::Yaml => serde_yaml::to_string(config)?,
+            ConfigFormat::Yaml => serde_yaml_ng::to_string(config)?,
         };
 
         std::fs::write(path, content)?;
@@ -232,11 +284,6 @@ impl ConfigurationManager {
         // Register common migrations
         self.register_migration("training".to_string(), create_training_migration_v1_to_v2());
         self.register_migration("model".to_string(), create_model_migration_v1_to_v2());
-    }
-
-    fn is_version_on_path(&self, version: &str, target: &str, migrations: &[Migration]) -> bool {
-        // Simplified version path checking - in real implementation would use proper version comparison
-        migrations.iter().any(|m| m.from_version == version && m.to_version == target)
     }
 
     fn set_nested_value(
@@ -449,24 +496,49 @@ impl ConfigValidator {
 
             // Check conditional requirements
             for conditional in &schema.conditional_requirements {
-                if self.evaluate_condition(&conditional.condition, config_map) {
-                    for required_field in &conditional.required_fields {
-                        if !config_map.contains_key(required_field) {
-                            result.errors.push(ValidationError {
-                                field: Some(required_field.clone()),
-                                error_type: ValidationErrorType::ConditionalRequirementNotMet,
-                                message: format!(
-                                    "Field '{}' is required when {}",
-                                    required_field, conditional.condition
-                                ),
-                                severity: ValidationSeverity::Error,
-                                suggestion: Some(
-                                    "Add the conditionally required field".to_string(),
-                                ),
-                            });
-                            result.is_valid = false;
+                match crate::config_condition::evaluate(&conditional.condition, config_map) {
+                    Ok(true) => {
+                        for required_field in &conditional.required_fields {
+                            if !config_map.contains_key(required_field) {
+                                result.errors.push(ValidationError {
+                                    field: Some(required_field.clone()),
+                                    error_type: ValidationErrorType::ConditionalRequirementNotMet,
+                                    message: format!(
+                                        "Field '{}' is required when {}",
+                                        required_field, conditional.condition
+                                    ),
+                                    severity: ValidationSeverity::Error,
+                                    suggestion: Some(
+                                        "Add the conditionally required field".to_string(),
+                                    ),
+                                });
+                                result.is_valid = false;
+                            }
                         }
-                    }
+                    },
+                    Ok(false) => {},
+                    Err(err) => {
+                        // A malformed condition is a schema authoring bug,
+                        // not "the condition is unmet" -- surfacing it as a
+                        // validation error means it gets caught the first
+                        // time the schema is exercised, rather than the
+                        // conditional requirement silently never firing.
+                        result.errors.push(ValidationError {
+                            field: None,
+                            error_type: ValidationErrorType::InvalidCondition,
+                            message: format!(
+                                "Conditional requirement has an invalid condition: {err}"
+                            ),
+                            severity: ValidationSeverity::Error,
+                            suggestion: Some(
+                                "Fix the `condition` string in the schema's \
+                                 `conditional_requirements` (see `config_condition` module docs \
+                                 for the supported grammar)"
+                                    .to_string(),
+                            ),
+                        });
+                        result.is_valid = false;
+                    },
                 }
             }
         } else {
@@ -589,29 +661,6 @@ impl ConfigValidator {
             },
         }
     }
-
-    fn evaluate_condition(
-        &self,
-        condition: &str,
-        config: &serde_json::Map<String, serde_json::Value>,
-    ) -> bool {
-        // Simplified condition evaluation - real implementation would have a proper parser
-        if condition.contains("==") {
-            let parts: Vec<&str> = condition.split("==").collect();
-            if parts.len() == 2 {
-                let field = parts[0].trim();
-                let expected_value = parts[1].trim().trim_matches('"');
-
-                if let Some(actual_value) = config.get(field) {
-                    if let Some(actual_str) = actual_value.as_str() {
-                        return actual_str == expected_value;
-                    }
-                }
-            }
-        }
-
-        false
-    }
 }
 
 /// Validation result
@@ -649,6 +698,11 @@ pub enum ValidationErrorType {
     ConditionalRequirementNotMet,
     InvalidFormat,
     UnknownConfigType,
+    /// A [`ConditionalRequirement::condition`] string failed to parse or
+    /// evaluate (see [`crate::config_condition`]) -- e.g. an unknown
+    /// operator, an unterminated string, or ordering a non-numeric value.
+    /// Surfaced instead of silently treating the condition as never met.
+    InvalidCondition,
 }
 
 /// Validation severity levels
@@ -1412,199 +1466,5 @@ fn create_model_migration_v1_to_v2() -> Migration {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_configuration_manager_creation() {
-        let manager = ConfigurationManager::new();
-        assert!(manager.schema_registry.contains_key("training"));
-        assert!(manager.schema_registry.contains_key("model"));
-        assert!(manager.schema_registry.contains_key("conversational"));
-    }
-
-    #[test]
-    fn test_validation_success() {
-        let manager = ConfigurationManager::new();
-        let config = serde_json::json!({
-            "num_epochs": 5,
-            "batch_size": 32,
-            "learning_rate": 2e-5
-        });
-
-        let result = manager.validate_config("training", &config);
-        assert!(result.is_valid);
-        assert!(result.errors.is_empty());
-    }
-
-    #[test]
-    fn test_validation_missing_required_field() {
-        let manager = ConfigurationManager::new();
-        let config = serde_json::json!({
-            "num_epochs": 5,
-            "batch_size": 32
-            // missing learning_rate
-        });
-
-        let result = manager.validate_config("training", &config);
-        assert!(!result.is_valid);
-        assert_eq!(result.errors.len(), 1);
-        assert!(matches!(
-            result.errors[0].error_type,
-            ValidationErrorType::MissingRequiredField
-        ));
-    }
-
-    #[test]
-    fn test_validation_type_mismatch() {
-        let manager = ConfigurationManager::new();
-        let config = serde_json::json!({
-            "num_epochs": "not_a_number",
-            "batch_size": 32,
-            "learning_rate": 2e-5
-        });
-
-        let result = manager.validate_config("training", &config);
-        assert!(!result.is_valid);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| matches!(e.error_type, ValidationErrorType::TypeMismatch)));
-    }
-
-    #[test]
-    fn test_migration() {
-        let manager = ConfigurationManager::new();
-        let old_config = serde_json::json!({
-            "num_epochs": 5,
-            "batch_size": 32,
-            "learning_rate": 2e-5
-        });
-
-        let migrated = manager
-            .migrate_config("training", &old_config, "1.0.0", "2.0.0")
-            .expect("operation failed in test");
-
-        assert!(migrated.get("gradient_accumulation_steps").is_some());
-        assert!(migrated.get("warmup_steps").is_some());
-    }
-
-    #[test]
-    fn test_template_generation() {
-        let manager = ConfigurationManager::new();
-        let template = manager.generate_template("training").expect("temp file creation failed");
-
-        assert!(template.get("num_epochs").is_some());
-        assert!(template.get("batch_size").is_some());
-        assert!(template.get("learning_rate").is_some());
-    }
-
-    #[test]
-    fn test_config_comparison() {
-        let manager = ConfigurationManager::new();
-
-        let config1 = serde_json::json!({
-            "num_epochs": 5,
-            "batch_size": 32
-        });
-
-        let config2 = serde_json::json!({
-            "num_epochs": 10,
-            "learning_rate": 2e-5
-        });
-
-        let comparison = manager.compare_configs(&config1, &config2);
-
-        assert_eq!(comparison.modified_fields.len(), 1); // num_epochs changed
-        assert_eq!(comparison.added_fields.len(), 1); // learning_rate added
-        assert_eq!(comparison.removed_fields.len(), 1); // batch_size removed
-    }
-
-    #[test]
-    fn test_preset_creation() {
-        let manager = ConfigurationManager::new();
-
-        let config = manager
-            .create_from_preset(
-                "training",
-                "fast_development",
-                Some(HashMap::from([(
-                    "batch_size".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(16)),
-                )])),
-            )
-            .expect("operation failed in test");
-
-        assert_eq!(
-            config.get("num_epochs").expect("expected value not found"),
-            &serde_json::Value::Number(serde_json::Number::from(3))
-        );
-        assert_eq!(
-            config.get("batch_size").expect("expected value not found"),
-            &serde_json::Value::Number(serde_json::Number::from(16))
-        ); // overridden
-    }
-
-    #[test]
-    fn test_recommendations() {
-        let manager = ConfigurationManager::new();
-
-        let config = serde_json::json!({
-            "batch_size": 8,
-            "learning_rate": 1e-2 // Very high learning rate
-        });
-
-        let context = RecommendationContext {
-            hardware_info: HashMap::from([(
-                "gpu_memory_gb".to_string(),
-                serde_json::Value::Number(
-                    serde_json::Number::from_f64(16.0).expect("operation failed in test"),
-                ),
-            )]),
-            use_case: "production".to_string(),
-            performance_requirements: PerformanceRequirements {
-                max_latency_ms: None,
-                min_throughput: None,
-                memory_budget_gb: None,
-                power_budget_watts: None,
-            },
-            constraints: vec![],
-        };
-
-        let recommendations = manager.get_recommendations("training", &config, &context);
-
-        assert!(!recommendations.is_empty());
-        assert!(recommendations.iter().any(|r| r.field == "batch_size"));
-        assert!(recommendations.iter().any(|r| r.field == "learning_rate"));
-    }
-
-    #[test]
-    fn test_unknown_config_type() {
-        let manager = ConfigurationManager::new();
-        let config = serde_json::json!({"test": "value"});
-
-        let result = manager.validate_config("unknown_type", &config);
-        assert!(!result.is_valid);
-        assert!(matches!(
-            result.errors[0].error_type,
-            ValidationErrorType::UnknownConfigType
-        ));
-    }
-
-    #[test]
-    fn test_constraint_validation() {
-        let manager = ConfigurationManager::new();
-        let config = serde_json::json!({
-            "num_epochs": -1, // Violates minimum value constraint
-            "batch_size": 32,
-            "learning_rate": 2e-5
-        });
-
-        let result = manager.validate_config("training", &config);
-        assert!(!result.is_valid);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| matches!(e.error_type, ValidationErrorType::ConstraintViolation)));
-    }
-}
+#[path = "config_management_tests.rs"]
+mod tests;

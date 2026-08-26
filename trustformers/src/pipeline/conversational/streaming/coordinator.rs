@@ -8,7 +8,7 @@ use super::super::types::*;
 use super::types::*;
 use crate::error::{Result, TrustformersError};
 use async_stream::stream;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -112,6 +112,16 @@ impl StreamingCoordinator {
             quality_analyzer: QualityAnalyzer::new(),
             error_recovery: ErrorRecoveryManager::new(),
         }
+    }
+
+    /// This coordinator's quality analyzer (streaming performance metrics).
+    pub fn quality_analyzer(&self) -> &QualityAnalyzer {
+        &self.quality_analyzer
+    }
+
+    /// This coordinator's error-recovery manager.
+    pub fn error_recovery(&self) -> &ErrorRecoveryManager {
+        &self.error_recovery
     }
 
     /// Create a new streaming session

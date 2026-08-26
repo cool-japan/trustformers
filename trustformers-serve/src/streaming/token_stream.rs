@@ -1,6 +1,3 @@
-// Allow dead code for infrastructure under development
-#![allow(dead_code)]
-
 //! Token Streaming for LLM Generation
 //!
 //! Provides real-time token streaming capabilities for large language model
@@ -28,6 +25,14 @@ pub struct TokenStream {
 }
 
 impl TokenStream {
+    /// The configuration this stream was built with.
+    ///
+    /// 0.2.1: the `config` field was stored and never read, so the whole
+    /// [`TokenStreamConfig`] was invisible to callers after construction.
+    pub fn config(&self) -> &TokenStreamConfig {
+        &self.config
+    }
+
     /// Create a new token stream
     pub fn new(config: TokenStreamConfig, generation_id: Uuid) -> Self {
         let (tx, rx) = mpsc::channel(config.buffer_size);

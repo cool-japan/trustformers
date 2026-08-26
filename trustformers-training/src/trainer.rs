@@ -450,7 +450,7 @@ impl<M: Model> Trainer<M> {
 
         // Log gradient norm if needed
         if self.state.global_step.is_multiple_of(self.args.logging_steps) {
-            println!("Gradient norm: {:.4}", grad_norm);
+            tracing::debug!("Gradient norm: {:.4}", grad_norm);
         }
 
         // Apply gradients to model parameters if the model supports parameter access
@@ -642,7 +642,7 @@ impl<M: Model> Trainer<M> {
                 let should_stop = self.callbacks.iter().any(|callback| callback.should_stop());
 
                 if should_stop {
-                    println!("Early stopping triggered");
+                    tracing::info!("Early stopping triggered");
                     break;
                 }
 
@@ -732,7 +732,7 @@ impl<M: Model> Trainer<M> {
         let model_info_path = checkpoint_dir.join("model_info.json");
         if model_info_path.exists() {
             // Model info exists, but actual loading would require ModelSaveLoad implementation
-            println!(
+            tracing::warn!(
                 "Model checkpoint found but loading requires ModelSaveLoad trait implementation"
             );
         }
@@ -761,7 +761,9 @@ impl<M: Model> Trainer<M> {
 
         // Log that gradient computation occurred but parameters weren't updated
         if self.state.global_step.is_multiple_of(self.args.logging_steps) {
-            println!("Gradients computed but not applied - model needs ParameterAccess trait");
+            tracing::warn!(
+                "Gradients computed but not applied - model needs ParameterAccess trait"
+            );
         }
 
         Ok(())

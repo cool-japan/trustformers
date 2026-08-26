@@ -55,6 +55,15 @@ pub struct Profiler {
     memory_tracker: Arc<Mutex<MemoryTracker>>,
     gpu_profiler: Option<GpuProfiler>,
     io_monitor: IoMonitor,
+    /// Long-lived `sysinfo` handle kept solely so that process CPU usage has a
+    /// previous sample to be a delta against. `sysinfo` computes
+    /// `Process::cpu_usage` between two consecutive refreshes of the *same*
+    /// `System`; a freshly constructed one therefore always reports `0.0`.
+    cpu_sampler: sysinfo::System,
+    /// When [`Self::cpu_sampler`] last refreshed the process. A second sample
+    /// is only meaningful once at least [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]
+    /// has elapsed.
+    last_cpu_sample: Instant,
 }
 
 #[derive(Debug)]
@@ -88,6 +97,21 @@ impl LayerProfile {
     }
 }
 
+/// Refresh only this process's CPU accounting on `system`.
+///
+/// Factored out so [`Profiler::new`]'s priming sample and
+/// [`Profiler::sample_process_cpu_usage`]'s measuring sample are provably the
+/// same operation on the same `System` -- which is the whole requirement for
+/// `sysinfo`'s CPU delta to be meaningful.
+fn refresh_own_process_cpu(system: &mut sysinfo::System) {
+    let pid = sysinfo::Pid::from_u32(std::process::id());
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+    );
+}
+
 impl Profiler {
     /// Create a new profiler
     pub fn new(config: &DebugConfig) -> Self {
@@ -108,6 +132,12 @@ impl Profiler {
             memory_tracker: Arc::new(Mutex::new(MemoryTracker::new())),
             gpu_profiler: GpuProfiler::new().ok(),
             io_monitor: IoMonitor::new(),
+            cpu_sampler: {
+                let mut system = sysinfo::System::new();
+                refresh_own_process_cpu(&mut system);
+                system
+            },
+            last_cpu_sample: Instant::now(),
         }
     }
 
@@ -235,14 +265,25 @@ impl Profiler {
         });
     }
 
-    /// Take a memory usage snapshot
+    /// Take a real memory usage snapshot of this process via `sysinfo`.
+    ///
+    /// Every field used to be a hardcoded `0`, so the whole snapshot series
+    /// read as "this process never allocated anything".
     pub fn take_memory_snapshot(&mut self) {
-        // Simplified memory tracking - in practice would use system APIs
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        let process = system.process(pid);
+
         let snapshot = MemorySnapshot {
             timestamp: chrono::Utc::now(),
-            heap_allocated: 0, // Would get from system
-            heap_used: 0,
-            stack_size: 0,
+            process_rss_bytes: process.map(|p| p.memory() as usize),
+            process_virtual_bytes: process.map(|p| p.virtual_memory() as usize),
+            // No GPU driver is linked into this crate.
             gpu_allocated: None,
             gpu_used: None,
         };
@@ -457,32 +498,102 @@ impl Profiler {
         }
     }
 
-    /// Analyze CPU bottlenecks
+    /// Take the second half of a two-sample process CPU measurement.
+    ///
+    /// `sysinfo` derives `Process::cpu_usage` from the CPU time consumed
+    /// between two refreshes of the same `System`; the first sample was taken
+    /// in [`Profiler::new`]. Refreshing a brand-new `System` once -- what this
+    /// code used to do -- can only ever report `0.0`, because there is no
+    /// earlier sample to subtract.
+    ///
+    /// Returns `None` when less than [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]
+    /// has passed since the previous sample (the platform counters have not
+    /// advanced enough for the quotient to mean anything) or when the process
+    /// cannot be read at all. It never blocks the caller waiting for that
+    /// interval: the other in-repo sampling sites can afford
+    /// `thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)` because they are dedicated
+    /// samplers, whereas this one runs inside report generation.
+    fn sample_process_cpu_usage(&mut self) -> Option<f64> {
+        if self.last_cpu_sample.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            return None;
+        }
+        refresh_own_process_cpu(&mut self.cpu_sampler);
+        self.last_cpu_sample = Instant::now();
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        self.cpu_sampler.process(pid).map(|p| p.cpu_usage() as f64)
+    }
+
+    /// Analyse CPU bottlenecks from this profiler's own recorded layer
+    /// timings plus real process CPU usage from `sysinfo`.
+    ///
+    /// Hardware counters (context switches, cache misses, IPC, branch
+    /// mispredictions) are honestly `None`: reading them needs PMU access this
+    /// Pure-Rust crate does not have. They used to be published as the
+    /// constants 1000 / 500 / 2.5 / 100, alongside a fixed `hot_functions`
+    /// list naming `tensor_multiply` and `gradient_computation` regardless of
+    /// what had actually been profiled, and a fixed `bottleneck_score` of 0.6.
+    ///
+    /// Returns an empty vector when nothing has been profiled yet.
     pub fn analyze_cpu_bottlenecks(&mut self) -> Vec<CpuBottleneckAnalysis> {
-        // Simplified CPU bottleneck analysis
-        // In practice, this would use system profiling APIs
+        // Real per-layer totals from the recorded forward/backward times.
+        let mut totals: Vec<(String, Duration, usize)> = self
+            .layer_profiles
+            .values()
+            .map(|profile| {
+                let total: Duration = profile
+                    .forward_times()
+                    .iter()
+                    .chain(profile.backward_times().iter())
+                    .copied()
+                    .sum();
+                let calls = profile.forward_times().len() + profile.backward_times().len();
+                (profile.layer_name.clone(), total, calls)
+            })
+            .filter(|(_, _, calls)| *calls > 0)
+            .collect();
+
+        if totals.is_empty() {
+            return Vec::new();
+        }
+
+        totals.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
+        let grand_total: Duration = totals.iter().map(|(_, d, _)| *d).sum();
+        let grand_total_secs = grand_total.as_secs_f64();
+
+        let hot_functions: Vec<HotFunction> = totals
+            .iter()
+            .take(10)
+            .map(|(name, total, calls)| HotFunction {
+                function_name: name.clone(),
+                self_time_percentage: if grand_total_secs > 0.0 {
+                    total.as_secs_f64() / grand_total_secs * 100.0
+                } else {
+                    0.0
+                },
+                call_count: *calls,
+                avg_time_per_call: *total / (*calls).max(1) as u32,
+            })
+            .collect();
+
+        // Share of all recorded time spent in the single hottest layer.
+        let bottleneck_score = if grand_total_secs > 0.0 {
+            hot_functions.first().map(|f| f.self_time_percentage / 100.0)
+        } else {
+            None
+        };
+
+        let pid_raw = std::process::id();
+        let cpu_usage_percent = self.sample_process_cpu_usage();
+
         let analysis = CpuBottleneckAnalysis {
-            thread_id: 0, // Use 0 as placeholder since thread::current().id().as_u64() is unstable
-            cpu_usage: 0.75, // Simplified
-            context_switches: 1000,
-            cache_misses: 500,
-            instructions_per_cycle: 2.5,
-            branch_mispredictions: 100,
-            hot_functions: vec![
-                HotFunction {
-                    function_name: "tensor_multiply".to_string(),
-                    self_time_percentage: 25.0,
-                    call_count: 1000,
-                    avg_time_per_call: Duration::from_micros(250),
-                },
-                HotFunction {
-                    function_name: "gradient_computation".to_string(),
-                    self_time_percentage: 20.0,
-                    call_count: 500,
-                    avg_time_per_call: Duration::from_micros(400),
-                },
-            ],
-            bottleneck_score: 0.6,
+            process_id: pid_raw,
+            cpu_usage_percent,
+            context_switches: None,
+            cache_misses: None,
+            instructions_per_cycle: None,
+            branch_mispredictions: None,
+            hot_functions,
+            bottleneck_score,
         };
 
         self.cpu_bottleneck_analysis.push(analysis.clone());
@@ -757,9 +868,12 @@ impl Profiler {
             &self.memory_snapshots
         };
 
-        if recent_snapshots.len() >= 5 {
-            let initial_memory = recent_snapshots[0].heap_allocated;
-            let final_memory = recent_snapshots.last().map(|s| s.heap_allocated).unwrap_or(0);
+        // Only snapshots that carry a real RSS reading can show growth.
+        let measured: Vec<usize> =
+            recent_snapshots.iter().filter_map(|s| s.process_rss_bytes).collect();
+        if measured.len() >= 5 {
+            let initial_memory = measured[0];
+            let final_memory = measured.last().copied().unwrap_or(0);
 
             if final_memory > initial_memory * 2 {
                 let mut metrics = HashMap::new();
@@ -870,8 +984,15 @@ impl Profiler {
             return MemoryEfficiencyAnalysis::default();
         }
 
-        let memory_values: Vec<usize> =
-            self.memory_snapshots.iter().map(|snapshot| snapshot.heap_allocated).collect();
+        let memory_values: Vec<usize> = self
+            .memory_snapshots
+            .iter()
+            .filter_map(|snapshot| snapshot.process_rss_bytes)
+            .collect();
+        if memory_values.is_empty() {
+            // Snapshots exist but none carried a real reading.
+            return MemoryEfficiencyAnalysis::default();
+        }
 
         let max_memory = memory_values.iter().max().copied().unwrap_or(0);
         let min_memory = memory_values.iter().min().copied().unwrap_or(0);
@@ -1111,6 +1232,10 @@ macro_rules! profile_scope {
         let _timer = ScopedTimer::new($profiler, $name.to_string());
     };
 }
+
+#[cfg(test)]
+#[path = "../profiler_tests.rs"]
+mod profiler_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1460,13 +1585,137 @@ mod tests {
         assert_eq!(summary.total_bytes_transferred, 0);
     }
 
+    /// Rewritten for Wave 6c: this used to assert `hot_functions.len() == 2`,
+    /// which only held because the two entries were the hardcoded literals
+    /// `tensor_multiply` and `gradient_computation` -- present no matter what
+    /// (or whether anything) had been profiled.
     #[test]
-    fn test_profiler_analyze_cpu_bottlenecks() {
+    fn test_profiler_analyze_cpu_bottlenecks_reports_nothing_before_profiling() {
         let config = make_config();
         let mut profiler = Profiler::new(&config);
+        assert!(
+            profiler.analyze_cpu_bottlenecks().is_empty(),
+            "nothing has been profiled, so there is no bottleneck to report"
+        );
+    }
+
+    #[test]
+    fn test_profiler_analyze_cpu_bottlenecks_ranks_real_recorded_layers() {
+        let config = make_config();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution(
+            "slow_layer",
+            "linear",
+            Duration::from_millis(90),
+            None,
+            0,
+            0,
+        );
+        profiler.record_layer_execution(
+            "fast_layer",
+            "linear",
+            Duration::from_millis(10),
+            None,
+            0,
+            0,
+        );
+
         let result = profiler.analyze_cpu_bottlenecks();
-        assert!(!result.is_empty());
-        assert_eq!(result[0].hot_functions.len(), 2);
+        assert_eq!(result.len(), 1);
+        let analysis = &result[0];
+        assert_eq!(analysis.process_id, std::process::id());
+        assert_eq!(
+            analysis.hot_functions.len(),
+            2,
+            "exactly the two layers that were really recorded"
+        );
+        assert_eq!(
+            analysis.hot_functions[0].function_name, "slow_layer",
+            "hottest first"
+        );
+        assert!(
+            (analysis.hot_functions[0].self_time_percentage - 90.0).abs() < 1.0,
+            "90ms of 100ms is 90%, got {}",
+            analysis.hot_functions[0].self_time_percentage
+        );
+        assert!(
+            (analysis.bottleneck_score.expect("a score once something is profiled") - 0.9).abs()
+                < 0.01
+        );
+        // PMU counters are not readable from Pure Rust; they must be absent,
+        // not the old constants 1000 / 500 / 2.5 / 100.
+        assert_eq!(analysis.context_switches, None);
+        assert_eq!(analysis.cache_misses, None);
+        assert_eq!(analysis.instructions_per_cycle, None);
+        assert_eq!(analysis.branch_mispredictions, None);
+    }
+
+    /// Regression test for the single-refresh `sysinfo` bug: the previous
+    /// implementation built a fresh `System`, refreshed it once and read
+    /// `cpu_usage()`, which is a delta against a previous refresh that did not
+    /// exist -- so it could only ever report `Some(0.0)` no matter how much
+    /// CPU the process was burning.
+    #[test]
+    fn test_profiler_cpu_usage_is_a_real_two_sample_measurement() {
+        let config = make_config();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution("burner", "linear", Duration::from_millis(10), None, 0, 0);
+
+        // Burn CPU on this thread for longer than sysinfo's minimum sampling
+        // interval, then measure. Retried a few times so a scheduler hiccup on
+        // a loaded machine cannot fail the run; the old code failed all
+        // attempts by construction.
+        let mut observed = None;
+        for _ in 0..5 {
+            let burn_until = Instant::now() + sysinfo::MINIMUM_CPU_UPDATE_INTERVAL * 2;
+            let mut spin: u64 = 0;
+            while Instant::now() < burn_until {
+                spin = spin.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            }
+            assert_ne!(
+                spin,
+                u64::MAX,
+                "keep the busy loop from being optimised out"
+            );
+
+            let analysis = profiler.analyze_cpu_bottlenecks();
+            assert_eq!(analysis.len(), 1);
+            if let Some(cpu) = analysis[0].cpu_usage_percent {
+                if cpu > 0.0 {
+                    observed = Some(cpu);
+                    break;
+                }
+            }
+        }
+        let cpu = observed
+            .expect("a process that spent ~400ms in a busy loop must report non-zero CPU usage");
+        assert!(cpu.is_finite(), "got {cpu}");
+    }
+
+    /// The documented honest-absence half of the same contract: asked again
+    /// before the platform counters can have moved, the profiler reports
+    /// `None` rather than a meaningless quotient.
+    #[test]
+    fn test_profiler_cpu_usage_is_none_before_the_minimum_sampling_interval() {
+        let config = make_config();
+        let constructed_at = Instant::now();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution("layer", "linear", Duration::from_millis(1), None, 0, 0);
+        // Self-checking rather than clock-dependent: only assert the absence
+        // if the interval really was too short. A scheduler stall between
+        // `Profiler::new` and this call would otherwise flip the result on a
+        // loaded machine.
+        let before = Instant::now();
+        let analysis = profiler.analyze_cpu_bottlenecks();
+        let elapsed_since_construction = before.duration_since(constructed_at);
+        assert_eq!(analysis.len(), 1);
+        if elapsed_since_construction < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            assert_eq!(
+                analysis[0].cpu_usage_percent, None,
+                "only {elapsed_since_construction:?} has passed since the priming sample \
+                 taken in Profiler::new, which is below the minimum sampling interval"
+            );
+        }
     }
 
     #[test]

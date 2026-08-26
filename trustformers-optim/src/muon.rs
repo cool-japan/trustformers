@@ -42,6 +42,11 @@ pub struct MuonConfig {
     pub fallback_lr: f32,
     /// Fallback momentum for 1D parameters (default: 0.9)
     pub fallback_momentum: f32,
+    /// Use Nesterov look-ahead before orthogonalization (default: true).
+    ///
+    /// Jordan et al.'s reference implementation orthogonalizes `g + μ·m`; setting this
+    /// to `false` orthogonalizes the plain heavy-ball buffer `m`.
+    pub nesterov: bool,
     /// Weight decay coefficient (default: 0.0)
     pub weight_decay: f32,
     /// Whether to use orthogonalization (default: true)
@@ -57,6 +62,7 @@ impl Default for MuonConfig {
             min_dim_2d: 64,
             fallback_lr: 1e-3,
             fallback_momentum: 0.9,
+            nesterov: true,
             weight_decay: 0.0,
             use_orthogonal: true,
         }
@@ -104,6 +110,7 @@ impl Muon {
             min_dim_2d: 32, // Lower threshold for smaller models
             fallback_lr: 5e-4,
             fallback_momentum: 0.9,
+            nesterov: true,
             weight_decay: 0.0,
             use_orthogonal: true,
         };
@@ -119,6 +126,7 @@ impl Muon {
             min_dim_2d: 64,
             fallback_lr: 1e-3,
             fallback_momentum: 0.9,
+            nesterov: true,
             weight_decay: 1e-4,
             use_orthogonal: true,
         };
@@ -136,6 +144,7 @@ impl Muon {
             fallback_momentum: 0.95,
             weight_decay: 0.01,
             use_orthogonal: true,
+            nesterov: true,
         };
         Self::with_config(config)
     }
@@ -156,15 +165,47 @@ impl Muon {
         rows >= self.config.min_dim_2d && cols >= self.config.min_dim_2d
     }
 
-    /// Newton-Schulz iteration for matrix orthogonalization
-    /// Approximates the orthogonal polar factor of a matrix
+    /// Newton-Schulz orthogonalization of a matrix, in place.
+    ///
+    /// The iteration `X ← (3X − X Xᵀ X)/2` converges to the orthogonal polar factor
+    /// **only** while `‖X‖₂ < √3`; above that it is cubically expanding and diverges
+    /// to `inf`/`NaN` within a few steps. Jordan et al.'s reference implementation
+    /// therefore normalises first:
+    ///
+    /// ```text
+    /// X₀ = G / (‖G‖_F + ε)         // guarantees ‖X₀‖₂ ≤ 1
+    /// X   ← (3X − X Xᵀ X) / 2       // ns_steps times
+    /// out = X · ‖G‖_F               // restore the original scale
+    /// ```
+    ///
+    /// The Frobenius norm bounds the spectral norm from above, so this makes the
+    /// iteration unconditionally stable for any finite input.
     fn newton_schulz_orthogonalize(&self, matrix: &mut [Vec<f32>]) {
         if !self.config.use_orthogonal {
             return;
         }
 
         let rows = matrix.len();
+        if rows == 0 {
+            return;
+        }
         let cols = matrix[0].len();
+        if cols == 0 {
+            return;
+        }
+
+        // Normalise into the convergence basin of the iteration.
+        let frobenius: f32 =
+            matrix.iter().flat_map(|row| row.iter()).map(|v| v * v).sum::<f32>().sqrt();
+        if !frobenius.is_finite() || frobenius <= f32::MIN_POSITIVE {
+            return;
+        }
+        let inv_norm = 1.0 / (frobenius + 1e-7);
+        for row in matrix.iter_mut() {
+            for value in row.iter_mut() {
+                *value *= inv_norm;
+            }
+        }
 
         // Newton-Schulz iteration: X_{k+1} = X_k * (3I - X_k^T * X_k) / 2
         for _ in 0..self.config.ns_steps {
@@ -181,13 +222,9 @@ impl Muon {
             }
 
             // Compute 3I - X^T * X
-            for i in 0..cols {
-                for j in 0..cols {
-                    if i == j {
-                        xtx[i][j] = 3.0 - xtx[i][j];
-                    } else {
-                        xtx[i][j] = -xtx[i][j];
-                    }
+            for (i, row) in xtx.iter_mut().enumerate() {
+                for (j, value) in row.iter_mut().enumerate() {
+                    *value = if i == j { 3.0 - *value } else { -*value };
                 }
             }
 
@@ -208,6 +245,15 @@ impl Muon {
                 for j in 0..cols {
                     matrix[i][j] = new_matrix[i][j];
                 }
+            }
+        }
+
+        // Restore the original magnitude, and apply Jordan et al.'s aspect-ratio
+        // scaling so the update size does not depend on the matrix shape.
+        let aspect = (rows as f32 / cols as f32).max(1.0).sqrt();
+        for row in matrix.iter_mut() {
+            for value in row.iter_mut() {
+                *value *= frobenius * aspect;
             }
         }
     }
@@ -262,8 +308,16 @@ impl Muon {
             }
         }
 
-        // Create update matrix (copy of momentum for orthogonalization)
+        // Nesterov look-ahead: the reference Muon orthogonalizes
+        // `g + momentum · m` rather than the plain momentum buffer.
         let mut update_matrix = momentum.clone();
+        if self.config.nesterov {
+            for i in 0..rows {
+                for j in 0..cols {
+                    update_matrix[i][j] = grad_matrix[i][j] + self.config.momentum * momentum[i][j];
+                }
+            }
+        }
 
         // Apply Newton-Schulz orthogonalization
         self.newton_schulz_orthogonalize(&mut update_matrix);
@@ -345,11 +399,11 @@ impl Default for Muon {
 
 impl Optimizer for Muon {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        // Stable parameter identity (see `crate::param_id`), resolved before the
+        // mutable data borrow.
+        let param_id = self.state.param_key_for_tensor(parameter)?;
         let param_data = parameter.data_mut()?;
         let grad_data = grad.data()?;
-
-        // Generate unique parameter ID based on memory address
-        let param_id = format!("param_{:p}", param_data.as_ptr());
         let param_size = param_data.len();
 
         // Determine parameter shape
@@ -750,6 +804,7 @@ mod tests {
             fallback_momentum: 0.8,
             weight_decay: 1e-5,
             use_orthogonal: false,
+            nesterov: true,
         };
 
         let serialized = serde_json::to_string(&config).expect("Serialization failed");
@@ -759,5 +814,95 @@ mod tests {
         assert_relative_eq!(deserialized.learning_rate, config.learning_rate);
         assert_eq!(deserialized.ns_steps, config.ns_steps);
         assert_eq!(deserialized.use_orthogonal, config.use_orthogonal);
+    }
+}
+
+#[cfg(test)]
+mod newton_schulz_tests {
+    use super::*;
+
+    /// Regression: without the Frobenius normalization the iteration is cubically
+    /// expanding for any input with spectral norm above ~√3, so a gradient of ordinary
+    /// magnitude produced `inf`/`NaN` within a few steps and wrote it into the
+    /// parameters.
+    #[test]
+    fn orthogonalization_stays_finite_for_a_large_matrix() {
+        let optimizer = Muon::new();
+        // Frobenius norm 100 — far outside the raw iteration's convergence basin.
+        let mut matrix = vec![vec![25.0_f32; 4]; 4];
+
+        optimizer.newton_schulz_orthogonalize(&mut matrix);
+
+        for row in &matrix {
+            for value in row {
+                assert!(value.is_finite(), "orthogonalization diverged: {value}");
+            }
+        }
+    }
+
+    /// The output must be near-orthogonal up to the restored scale: for a rank-1
+    /// input the normalized iterate has singular values in {1, 0}, so `XᵀX/‖G‖²` has
+    /// unit trace.
+    #[test]
+    fn orthogonalization_normalizes_the_spectrum() {
+        let optimizer = Muon::new();
+        // A well-conditioned diagonal matrix with wildly different singular values.
+        let mut matrix = vec![
+            vec![100.0_f32, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.01],
+        ];
+        let frobenius: f32 =
+            matrix.iter().flat_map(|r| r.iter()).map(|v| v * v).sum::<f32>().sqrt();
+
+        optimizer.newton_schulz_orthogonalize(&mut matrix);
+
+        // After orthogonalization the largest singular value must be pulled towards
+        // the others: the ratio of the largest to the smallest diagonal entry must
+        // shrink dramatically from its initial 10 000.
+        let ratio = (matrix[0][0] / matrix[1][1]).abs();
+        assert!(ratio.is_finite(), "diverged");
+        assert!(ratio < 100.0, "spectrum was not equalised, ratio {ratio}");
+        // The scale must be restored, not left at the normalized magnitude.
+        let out_frobenius: f32 =
+            matrix.iter().flat_map(|r| r.iter()).map(|v| v * v).sum::<f32>().sqrt();
+        assert!(
+            out_frobenius > frobenius * 0.5,
+            "the original scale must be restored"
+        );
+    }
+
+    /// An empty matrix must not panic on `matrix[0].len()`.
+    #[test]
+    fn orthogonalization_handles_degenerate_shapes() {
+        let optimizer = Muon::new();
+        let mut empty: Vec<Vec<f32>> = Vec::new();
+        optimizer.newton_schulz_orthogonalize(&mut empty);
+
+        let mut no_columns: Vec<Vec<f32>> = vec![Vec::new(), Vec::new()];
+        optimizer.newton_schulz_orthogonalize(&mut no_columns);
+
+        let mut zeros = vec![vec![0.0_f32; 2]; 2];
+        optimizer.newton_schulz_orthogonalize(&mut zeros);
+        assert!(zeros.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    /// A realistic 2-D parameter update must stay finite end to end.
+    #[test]
+    fn muon_update_stays_finite_for_a_large_gradient() {
+        let mut optimizer = Muon::new();
+        let mut param = Tensor::from_vec(vec![0.1_f32; 64], &[8, 8]).expect("tensor");
+        let grad = Tensor::from_vec(vec![10.0_f32; 64], &[8, 8]).expect("grad");
+
+        for _ in 0..5 {
+            optimizer.update(&mut param, &grad).expect("update");
+        }
+
+        for value in param.data_f32().expect("data") {
+            assert!(
+                value.is_finite(),
+                "Muon wrote a non-finite parameter: {value}"
+            );
+        }
     }
 }

@@ -393,18 +393,23 @@ pub enum MemoryAccessPattern {
 }
 
 /// Memory block metadata
+///
+/// Note: NUMA placement (`NumaAllocationStrategy`) and access-pattern
+/// classification (`MemoryAccessPattern`) are not yet tracked per block —
+/// there is no allocator-side logic that reads them back, so a
+/// `numa_node`/`allocation_strategy`/`access_pattern` field here would only
+/// ever hold the constructor's hardcoded default. `allocated_at` was
+/// likewise recorded but never consulted (`last_accessed`, which the LRU/idle
+/// eviction logic below does read, already tracks recency). Both public enum
+/// types remain available for a future NUMA-aware allocator.
 #[derive(Debug)]
 struct MemoryBlock {
     ptr: NonNull<u8>,
     size: usize,
     layout: Layout,
-    allocated_at: Instant,
     last_accessed: Instant,
     is_free: bool,
     bucket_index: usize,
-    numa_node: Option<u32>,
-    allocation_strategy: NumaAllocationStrategy,
-    access_pattern: MemoryAccessPattern,
 }
 
 impl MemoryBlock {
@@ -427,18 +432,13 @@ impl MemoryBlock {
             recovery_actions: vec![],
         })?;
 
-        let now = Instant::now();
         Ok(Self {
             ptr,
             size,
             layout,
-            allocated_at: now,
-            last_accessed: now,
+            last_accessed: Instant::now(),
             is_free: true,
             bucket_index,
-            numa_node: None,
-            allocation_strategy: NumaAllocationStrategy::Local,
-            access_pattern: MemoryAccessPattern::Sequential,
         })
     }
 
@@ -998,28 +998,25 @@ pub struct MemoryUsage {
 }
 
 /// Thread-local memory pool manager
+/// Note: there is no per-thread caching yet — `with_pool` builds a fresh
+/// `MemoryPool` from `config` on every call. An actual `thread_local!`-backed
+/// cache was scaffolded here previously but had no consumer exercising it
+/// (nothing in this crate calls `with_pool`), so it was removed rather than
+/// kept as unread dead weight; wire a real `LocalKey`-backed cache back in
+/// once a caller needs the reuse.
 pub struct ThreadLocalMemoryPool {
-    pools: std::thread::LocalKey<std::cell::RefCell<Option<MemoryPool>>>,
     config: MemoryPoolConfig,
 }
 
 impl ThreadLocalMemoryPool {
     pub fn new(config: MemoryPoolConfig) -> Self {
-        std::thread_local! {
-            static POOL: std::cell::RefCell<Option<MemoryPool>> = const { std::cell::RefCell::new(None) };
-        }
-
-        Self {
-            pools: POOL,
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_pool<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&MemoryPool) -> Result<R>,
     {
-        // Create a pool instance directly to avoid lifetime issues
         let pool = MemoryPool::new(self.config.clone())?;
         f(&pool)
     }

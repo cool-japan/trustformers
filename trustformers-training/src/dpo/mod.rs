@@ -38,14 +38,17 @@ impl fmt::Display for DpoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DpoError::EmptyBatch => {
-                write!(f, "DPO batch is empty; at least one preference pair is required")
-            }
+                write!(
+                    f,
+                    "DPO batch is empty; at least one preference pair is required"
+                )
+            },
             DpoError::NumericalError(msg) => {
                 write!(f, "Numerical error in DPO computation: {}", msg)
-            }
+            },
             DpoError::InvalidConfig(msg) => {
                 write!(f, "Invalid DPO configuration: {}", msg)
-            }
+            },
         }
     }
 }
@@ -250,20 +253,20 @@ pub fn compute_dpo_loss(pairs: &[DpoPair], config: &DpoConfig) -> Result<DpoLoss
                     let eps = config.label_smoothing;
                     -(1.0 - eps) * log_sigmoid(scaled_h) - eps * log_sigmoid(-scaled_h)
                 }
-            }
+            },
             DpoLossType::Hinge => {
                 // max(0, 1 - β * h)
                 (1.0 - scaled_h).max(0.0)
-            }
+            },
             DpoLossType::Ipo => {
                 // (h - 1/(2β))^2
                 let target = 1.0 / (2.0 * config.beta);
                 (h - target).powi(2)
-            }
+            },
             DpoLossType::SigmoidWithShift { shift } => {
                 // -log σ(β * h - shift)
                 -log_sigmoid(scaled_h - shift)
-            }
+            },
         };
 
         let chosen_reward = config.beta * chosen_lr;
@@ -365,11 +368,7 @@ impl DpoRewardStats {
         }
 
         let mean_margin = margins.iter().sum::<f32>() / n as f32;
-        let var = margins
-            .iter()
-            .map(|m| (m - mean_margin).powi(2))
-            .sum::<f32>()
-            / n as f32;
+        let var = margins.iter().map(|m| (m - mean_margin).powi(2)).sum::<f32>() / n as f32;
         let std_margin = var.sqrt();
         let accuracy = correct as f32 / n as f32;
 
@@ -476,9 +475,7 @@ impl DpoTrainer {
     ///
     /// Returns `None` if no steps have been taken.
     pub fn reward_stats(&self) -> Option<(f32, f32)> {
-        self.history
-            .last()
-            .map(|r| (r.chosen_reward_mean, r.rejected_reward_mean))
+        self.history.last().map(|r| (r.chosen_reward_mean, r.rejected_reward_mean))
     }
 }
 
@@ -549,11 +546,18 @@ mod tests {
     #[test]
     fn test_dpo_loss_sigmoid_perfect() {
         // When chosen_log_ratio >> rejected_log_ratio the loss should be near 0
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         // chosen_log_ratio = 5.0, rejected_log_ratio = -5.0 → h = 10 → loss ≈ 0
         let pair = make_pair(0.0, -5.0, 0.0, 5.0);
         let result = compute_dpo_loss(&[pair], &cfg).expect("dpo loss failed");
-        assert!(result.loss < 1e-3, "expected near-zero loss, got {}", result.loss);
+        assert!(
+            result.loss < 1e-3,
+            "expected near-zero loss, got {}",
+            result.loss
+        );
         assert_eq!(result.reward_accuracy, 1.0);
     }
 
@@ -576,13 +580,27 @@ mod tests {
         // Label smoothing should increase the loss compared to standard DPO
         // when the model is very confident (large margin)
         let pair = make_pair(0.0, -10.0, 0.0, 10.0);
-        let cfg_no_smooth = DpoConfig { beta: 1.0, label_smoothing: 0.0, ..Default::default() };
-        let cfg_smooth = DpoConfig { beta: 1.0, label_smoothing: 0.1, ..Default::default() };
+        let cfg_no_smooth = DpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
+        let cfg_smooth = DpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.1,
+            ..Default::default()
+        };
 
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_no_smooth).expect("loss 1 failed");
+        let r1 =
+            compute_dpo_loss(std::slice::from_ref(&pair), &cfg_no_smooth).expect("loss 1 failed");
         let r2 = compute_dpo_loss(&[pair], &cfg_smooth).expect("loss 2 failed");
         // Smoothed loss should be higher (harder target)
-        assert!(r2.loss > r1.loss, "smoothed={} should > standard={}", r2.loss, r1.loss);
+        assert!(
+            r2.loss > r1.loss,
+            "smoothed={} should > standard={}",
+            r2.loss,
+            r1.loss
+        );
     }
 
     #[test]
@@ -596,7 +614,11 @@ mod tests {
         // chosen_lr = 10, rejected_lr = -10, h = 20
         let pair = make_pair(0.0, -10.0, 0.0, 10.0);
         let result = compute_dpo_loss(&[pair], &cfg).expect("hinge loss failed");
-        assert!((result.loss).abs() < 1e-5, "expected zero hinge loss, got {}", result.loss);
+        assert!(
+            (result.loss).abs() < 1e-5,
+            "expected zero hinge loss, got {}",
+            result.loss
+        );
     }
 
     #[test]
@@ -609,7 +631,11 @@ mod tests {
         };
         let pair = make_pair(-1.0, -1.0, -1.0, -1.0); // all log-ratios = 0
         let result = compute_dpo_loss(&[pair], &cfg).expect("hinge loss failed");
-        assert!((result.loss - 1.0).abs() < 1e-5, "expected 1.0, got {}", result.loss);
+        assert!(
+            (result.loss - 1.0).abs() < 1e-5,
+            "expected 1.0, got {}",
+            result.loss
+        );
     }
 
     #[test]
@@ -624,21 +650,29 @@ mod tests {
         };
         let pair = make_pair(0.0, -2.0, -1.0, -1.0); // chosen_lr=2, rejected_lr=0
         let result = compute_dpo_loss(&[pair], &cfg).expect("ipo loss failed");
-        assert!((result.loss - 1.0).abs() < 1e-5, "expected 1.0, got {}", result.loss);
+        assert!(
+            (result.loss - 1.0).abs() < 1e-5,
+            "expected 1.0, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_dpo_loss_sigmoid_with_shift() {
         // SigmoidWithShift: -log σ(β*h - shift)
         // β = 1, shift = 0 → same as Sigmoid
-        let cfg_standard = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg_standard = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         let cfg_shifted = DpoConfig {
             beta: 1.0,
             loss_type: DpoLossType::SigmoidWithShift { shift: 0.0 },
             ..Default::default()
         };
         let pair = make_pair(-1.0, -2.0, -2.0, -1.5);
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_standard).expect("standard failed");
+        let r1 =
+            compute_dpo_loss(std::slice::from_ref(&pair), &cfg_standard).expect("standard failed");
         let r2 = compute_dpo_loss(&[pair], &cfg_shifted).expect("shifted failed");
         assert!((r1.loss - r2.loss).abs() < 1e-5);
     }
@@ -649,9 +683,7 @@ mod tests {
     fn test_dpo_reward_accuracy_all_correct() {
         let cfg = DpoConfig::default();
         // Each pair: chosen_lr > rejected_lr
-        let pairs: Vec<DpoPair> = (0..4)
-            .map(|_| make_pair(0.0, -2.0, 0.0, 2.0))
-            .collect();
+        let pairs: Vec<DpoPair> = (0..4).map(|_| make_pair(0.0, -2.0, 0.0, 2.0)).collect();
         let result = compute_dpo_loss(&pairs, &cfg).expect("loss failed");
         assert!((result.reward_accuracy - 1.0).abs() < 1e-6);
     }
@@ -661,10 +693,10 @@ mod tests {
         let cfg = DpoConfig::default();
         // 2 correct, 2 incorrect
         let pairs = vec![
-            make_pair(0.0, -2.0, 0.0, 2.0),   // correct
-            make_pair(0.0, -2.0, 0.0, 2.0),   // correct
-            make_pair(0.0, 2.0, 0.0, -2.0),   // incorrect (chosen_lr=-2)
-            make_pair(0.0, 2.0, 0.0, -2.0),   // incorrect
+            make_pair(0.0, -2.0, 0.0, 2.0), // correct
+            make_pair(0.0, -2.0, 0.0, 2.0), // correct
+            make_pair(0.0, 2.0, 0.0, -2.0), // incorrect (chosen_lr=-2)
+            make_pair(0.0, 2.0, 0.0, -2.0), // incorrect
         ];
         let result = compute_dpo_loss(&pairs, &cfg).expect("loss failed");
         assert!((result.reward_accuracy - 0.5).abs() < 1e-5);
@@ -675,8 +707,8 @@ mod tests {
     #[test]
     fn test_dpo_reward_stats_from_pairs() {
         let pairs = vec![
-            make_pair(0.0, -1.0, 0.0, 1.0),  // chosen_lr=1, rejected_lr=-1
-            make_pair(0.0, -2.0, 0.0, 0.0),  // chosen_lr=2, rejected_lr=0
+            make_pair(0.0, -1.0, 0.0, 1.0), // chosen_lr=1, rejected_lr=-1
+            make_pair(0.0, -2.0, 0.0, 0.0), // chosen_lr=2, rejected_lr=0
         ];
         let beta = 0.5;
         let stats = DpoRewardStats::from_pairs(&pairs, beta);
@@ -732,9 +764,15 @@ mod tests {
 
     #[test]
     fn test_dpo_trainer_mean_loss() {
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         let mut trainer = DpoTrainer::new(cfg);
-        assert!((trainer.mean_loss()).abs() < 1e-8, "empty history should give 0");
+        assert!(
+            (trainer.mean_loss()).abs() < 1e-8,
+            "empty history should give 0"
+        );
 
         let pairs1 = vec![make_pair(0.0, -1.0, 0.0, 1.0)];
         let pairs2 = vec![make_pair(-1.0, -2.0, -2.0, -1.5)];
@@ -768,7 +806,10 @@ mod tests {
 
     #[test]
     fn test_dpo_trainer_reward_stats() {
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         let mut trainer = DpoTrainer::new(cfg);
         assert!(trainer.reward_stats().is_none());
 
@@ -777,7 +818,12 @@ mod tests {
         let stats = trainer.reward_stats();
         assert!(stats.is_some());
         let (chosen, rejected) = stats.expect("stats should be Some");
-        assert!(chosen > rejected, "chosen={} should > rejected={}", chosen, rejected);
+        assert!(
+            chosen > rejected,
+            "chosen={} should > rejected={}",
+            chosen,
+            rejected
+        );
     }
 
     // ── Additional DPO tests ─────────────────────────────────────────────
@@ -785,7 +831,11 @@ mod tests {
     #[test]
     fn test_dpo_loss_sigmoid_chosen_equals_rejected_gives_log_half() {
         // When chosen = rejected: h=0 → loss = -log σ(0) = -log(0.5) = log(2)
-        let cfg = DpoConfig { beta: 0.1, label_smoothing: 0.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.1,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
         // chosen_log_ratio = 0, rejected_log_ratio = 0 → h = 0
         let pair = make_pair(-1.0, -1.0, -1.0, -1.0);
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
@@ -793,21 +843,26 @@ mod tests {
         assert!(
             (result.loss - expected).abs() < 1e-5,
             "expected log(2)={}, got {}",
-            expected, result.loss
+            expected,
+            result.loss
         );
     }
 
     #[test]
     fn test_dpo_reward_margin_chosen_greater_than_rejected() {
         // When policy favors chosen: chosen_reward > rejected_reward
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         // chosen_lr = 2.0, rejected_lr = -1.0
         let pair = make_pair(0.0, -2.0, 0.0, 1.0);
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
         assert!(
             result.chosen_reward_mean > result.rejected_reward_mean,
             "chosen={} should > rejected={}",
-            result.chosen_reward_mean, result.rejected_reward_mean
+            result.chosen_reward_mean,
+            result.rejected_reward_mean
         );
         assert!(result.reward_margin_mean > 0.0, "margin should be positive");
     }
@@ -816,24 +871,43 @@ mod tests {
     fn test_dpo_label_smoothing_zero_matches_original() {
         // ε=0 should produce identical results to the standard sigmoid DPO
         let pair = make_pair(-1.0, -2.0, -2.0, -1.5);
-        let cfg_no_smooth = DpoConfig { beta: 0.5, label_smoothing: 0.0, ..Default::default() };
-        let cfg_smooth_zero = DpoConfig { beta: 0.5, label_smoothing: 0.0, ..Default::default() };
-        let r1 = compute_dpo_loss(&[pair.clone()], &cfg_no_smooth).expect("ok");
+        let cfg_no_smooth = DpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
+        let cfg_smooth_zero = DpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
+        let r1 = compute_dpo_loss(std::slice::from_ref(&pair), &cfg_no_smooth).expect("ok");
         let r2 = compute_dpo_loss(&[pair], &cfg_smooth_zero).expect("ok");
-        assert!((r1.loss - r2.loss).abs() < 1e-6, "losses should match: {} vs {}", r1.loss, r2.loss);
+        assert!(
+            (r1.loss - r2.loss).abs() < 1e-6,
+            "losses should match: {} vs {}",
+            r1.loss,
+            r2.loss
+        );
     }
 
     #[test]
     fn test_dpo_label_smoothing_positive_increases_min_loss() {
         // With ε > 0, even a "perfect" pair should have loss > 0
         let pair = make_pair(0.0, -100.0, 0.0, 100.0); // very large margin
-        let cfg = DpoConfig { beta: 1.0, label_smoothing: 0.2, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.2,
+            ..Default::default()
+        };
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
         // Min loss with ε=0.2: 0.2 * log(2) ≈ 0.1386
         let min_expected = 0.2 * (2.0_f32).ln();
         assert!(
             result.loss >= min_expected - 1e-3,
-            "smoothed loss {} should be >= {}", result.loss, min_expected
+            "smoothed loss {} should be >= {}",
+            result.loss,
+            min_expected
         );
     }
 
@@ -842,11 +916,19 @@ mod tests {
         // IPO: (h - 1/(2β))^2 = 0 when h = 1/(2β)
         let beta = 0.5_f32;
         let target = 1.0 / (2.0 * beta); // = 1.0
-        let cfg = DpoConfig { beta, loss_type: DpoLossType::Ipo, ..Default::default() };
+        let cfg = DpoConfig {
+            beta,
+            loss_type: DpoLossType::Ipo,
+            ..Default::default()
+        };
         // chosen_lr - rejected_lr = target → chosen_lr = target, rejected_lr = 0
         let pair = make_pair(0.0, -target, -0.0, 0.0); // chosen_lr=target, rejected_lr=0
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
-        assert!((result.loss).abs() < 1e-5, "IPO at target should be 0, got {}", result.loss);
+        assert!(
+            (result.loss).abs() < 1e-5,
+            "IPO at target should be 0, got {}",
+            result.loss
+        );
     }
 
     #[test]
@@ -860,7 +942,11 @@ mod tests {
         // h = 0.5 → 1 - 1.0*0.5 = 0.5
         let pair = make_pair(0.0, -0.5, -0.0, 0.0); // chosen_lr=0.5, rejected_lr=0 → h=0.5
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
-        assert!((result.loss - 0.5).abs() < 1e-5, "hinge loss={}", result.loss);
+        assert!(
+            (result.loss - 0.5).abs() < 1e-5,
+            "hinge loss={}",
+            result.loss
+        );
     }
 
     #[test]
@@ -874,40 +960,63 @@ mod tests {
         // h = 2.0 → 1 - 1.0*2.0 = -1 → max(0,-1) = 0
         let pair = make_pair(0.0, -2.0, -0.0, 0.0); // chosen_lr=2.0 → h=2.0
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
-        assert!((result.loss).abs() < 1e-5, "hinge should be 0, got {}", result.loss);
+        assert!(
+            (result.loss).abs() < 1e-5,
+            "hinge should be 0, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_dpo_high_beta_sharpens_preference() {
         // High β → loss more sensitive to margin differences
         let pair_small_margin = make_pair(0.0, -0.5, 0.0, 0.5); // h=1.0
-        let cfg_low_beta = DpoConfig { beta: 0.01, ..Default::default() };
-        let cfg_high_beta = DpoConfig { beta: 10.0, ..Default::default() };
-        let r_low = compute_dpo_loss(&[pair_small_margin.clone()], &cfg_low_beta).expect("ok");
+        let cfg_low_beta = DpoConfig {
+            beta: 0.01,
+            ..Default::default()
+        };
+        let cfg_high_beta = DpoConfig {
+            beta: 10.0,
+            ..Default::default()
+        };
+        let r_low =
+            compute_dpo_loss(std::slice::from_ref(&pair_small_margin), &cfg_low_beta).expect("ok");
         let r_high = compute_dpo_loss(&[pair_small_margin], &cfg_high_beta).expect("ok");
         // High beta → larger scaled_h → -log_sigmoid(large) → near 0
         // Low beta → smaller scaled_h → -log_sigmoid(small) → near log(2)
         assert!(
             r_low.loss > r_high.loss,
             "low beta loss {} should > high beta loss {}",
-            r_low.loss, r_high.loss
+            r_low.loss,
+            r_high.loss
         );
     }
 
     #[test]
     fn test_dpo_beta_zero_equivalent_gives_log_half() {
         // When β≈0: scaled_h ≈ 0 → loss ≈ -log σ(0) = log(2)
-        let cfg = DpoConfig { beta: 1e-8, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1e-8,
+            ..Default::default()
+        };
         let pair = make_pair(-1.0, -2.0, -0.5, 0.5); // non-trivial h
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
         let log2 = (2.0_f32).ln();
-        assert!((result.loss - log2).abs() < 1e-3, "near-zero beta loss={} expected log(2)={}", result.loss, log2);
+        assert!(
+            (result.loss - log2).abs() < 1e-3,
+            "near-zero beta loss={} expected log(2)={}",
+            result.loss,
+            log2
+        );
     }
 
     #[test]
     fn test_dpo_batch_loss_is_mean_of_individual_losses() {
         // Batch loss should equal the mean of individually computed losses
-        let cfg = DpoConfig { beta: 0.5, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.5,
+            ..Default::default()
+        };
         let pairs = vec![
             make_pair(-1.0, -2.0, -1.5, -1.8),
             make_pair(-0.5, -1.0, -0.8, -1.2),
@@ -917,31 +1026,46 @@ mod tests {
 
         let mut individual_sum = 0.0_f32;
         for pair in &pairs {
-            let r = compute_dpo_loss(&[pair.clone()], &cfg).expect("individual ok");
+            let r = compute_dpo_loss(std::slice::from_ref(pair), &cfg).expect("individual ok");
             individual_sum += r.loss;
         }
         let individual_mean = individual_sum / pairs.len() as f32;
-        assert!((batch_result.loss - individual_mean).abs() < 1e-5, "batch={} individual_mean={}", batch_result.loss, individual_mean);
+        assert!(
+            (batch_result.loss - individual_mean).abs() < 1e-5,
+            "batch={} individual_mean={}",
+            batch_result.loss,
+            individual_mean
+        );
     }
 
     #[test]
     fn test_dpo_accuracy_metric_fraction_chosen_greater() {
         // Accuracy = fraction where chosen_reward > rejected_reward
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         let pairs = vec![
-            make_pair(0.0, -2.0, 0.0, 2.0),  // chosen_lr=2 > rejected_lr=-2 ✓
-            make_pair(0.0, 2.0, 0.0, -2.0),  // chosen_lr=-2 < rejected_lr=2  ✗
-            make_pair(0.0, -1.0, 0.0, 1.0),  // chosen_lr=1 > rejected_lr=-1  ✓
-            make_pair(0.0, 1.0, 0.0, -1.0),  // chosen_lr=-1 < rejected_lr=1  ✗
+            make_pair(0.0, -2.0, 0.0, 2.0), // chosen_lr=2 > rejected_lr=-2 ✓
+            make_pair(0.0, 2.0, 0.0, -2.0), // chosen_lr=-2 < rejected_lr=2  ✗
+            make_pair(0.0, -1.0, 0.0, 1.0), // chosen_lr=1 > rejected_lr=-1  ✓
+            make_pair(0.0, 1.0, 0.0, -1.0), // chosen_lr=-1 < rejected_lr=1  ✗
         ];
         let result = compute_dpo_loss(&pairs, &cfg).expect("ok");
-        assert!((result.reward_accuracy - 0.5).abs() < 1e-5, "accuracy={}", result.reward_accuracy);
+        assert!(
+            (result.reward_accuracy - 0.5).abs() < 1e-5,
+            "accuracy={}",
+            result.reward_accuracy
+        );
     }
 
     #[test]
     fn test_dpo_numerical_stability_extreme_log_probs() {
         // Should not produce NaN with extreme but finite log probs
-        let cfg = DpoConfig { beta: 0.1, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.1,
+            ..Default::default()
+        };
         let pair = make_pair(-100.0, -200.0, -150.0, -50.0);
         let result = compute_dpo_loss(&[pair], &cfg);
         assert!(result.is_ok(), "should not error on extreme values");
@@ -957,23 +1081,34 @@ mod tests {
         // make_pair(policy_chosen, ref_chosen, policy_rejected, ref_rejected)
         let pair_ref_a = make_pair(-1.0, -0.5, -2.0, -0.3); // ref_chosen=-0.5, ref_rejected=-0.3
         let pair_ref_b = make_pair(-1.0, -5.0, -2.0, -3.0); // ref_chosen=-5.0, ref_rejected=-3.0, different refs
-        let cfg_free = DpoConfig { reference_free: true, beta: 0.5, ..Default::default() };
+        let cfg_free = DpoConfig {
+            reference_free: true,
+            beta: 0.5,
+            ..Default::default()
+        };
         let r_a = compute_dpo_loss(&[pair_ref_a], &cfg_free).expect("ok_a");
         let r_b = compute_dpo_loss(&[pair_ref_b], &cfg_free).expect("ok_b");
         // In reference-free mode: h = policy_chosen - policy_rejected = -1.0 - (-2.0) = 1.0 (same for both)
         assert!(
             (r_a.loss - r_b.loss).abs() < 1e-5,
             "reference-free: same policy log-probs but different refs → same loss: {} vs {}",
-            r_a.loss, r_b.loss
+            r_a.loss,
+            r_b.loss
         );
     }
 
     #[test]
     fn test_dpo_invalid_label_smoothing_returns_error() {
-        let cfg = DpoConfig { label_smoothing: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            label_smoothing: 1.0,
+            ..Default::default()
+        };
         let pair = make_pair(-1.0, -2.0, -1.5, -0.5);
         let result = compute_dpo_loss(&[pair], &cfg);
-        assert!(matches!(result, Err(DpoError::InvalidConfig(_))), "expected InvalidConfig error");
+        assert!(
+            matches!(result, Err(DpoError::InvalidConfig(_))),
+            "expected InvalidConfig error"
+        );
     }
 
     #[test]
@@ -983,7 +1118,11 @@ mod tests {
             .map(|_| make_pair(0.0, -1.0, 0.0, 1.0)) // margin = β*(1-(-1)) = 2β
             .collect();
         let stats = DpoRewardStats::from_pairs(&pairs, 0.5);
-        assert!(stats.std_margin < 1e-5, "std should be ~0 for identical margins, got {}", stats.std_margin);
+        assert!(
+            stats.std_margin < 1e-5,
+            "std should be ~0 for identical margins, got {}",
+            stats.std_margin
+        );
         assert_eq!(stats.accuracy, 1.0);
     }
 
@@ -998,9 +1137,15 @@ mod tests {
 
     #[test]
     fn test_dpo_trainer_mean_reward_accuracy() {
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         let mut trainer = DpoTrainer::new(cfg);
-        assert!((trainer.mean_reward_accuracy()).abs() < 1e-8, "empty gives 0");
+        assert!(
+            (trainer.mean_reward_accuracy()).abs() < 1e-8,
+            "empty gives 0"
+        );
 
         // All correct pair
         let correct = vec![make_pair(0.0, -2.0, 0.0, 2.0)];
@@ -1011,7 +1156,11 @@ mod tests {
         trainer.step(&incorrect).expect("step 2");
 
         // Mean accuracy over 2 steps: (1.0 + 0.0) / 2 = 0.5
-        assert!((trainer.mean_reward_accuracy() - 0.5).abs() < 1e-5, "mean_acc={}", trainer.mean_reward_accuracy());
+        assert!(
+            (trainer.mean_reward_accuracy() - 0.5).abs() < 1e-5,
+            "mean_acc={}",
+            trainer.mean_reward_accuracy()
+        );
     }
 
     // ── New extended tests ───────────────────────────────────────────────────
@@ -1039,7 +1188,10 @@ mod tests {
             policy_log_prob_rejected: long_lp,
             reference_log_prob_rejected: long_lp,
         };
-        let cfg = DpoConfig { beta, ..Default::default() };
+        let cfg = DpoConfig {
+            beta,
+            ..Default::default()
+        };
         let r_short = compute_dpo_loss(&[pair_short], &cfg).expect("ok");
         let r_long = compute_dpo_loss(&[pair_long], &cfg).expect("ok");
         // Both have h = 0 → same loss = log(2)
@@ -1052,20 +1204,29 @@ mod tests {
     fn test_reference_model_synchronization() {
         // When policy = reference model, log-ratios are 0, h = 0.
         // Loss = -log σ(0) = log(2)
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         // policy log-probs = reference log-probs → ratios = 0
         let pair = make_pair(-1.5, -1.5, -2.0, -2.0);
         let result = compute_dpo_loss(&[pair], &cfg).expect("ok");
         let expected = (2.0_f32).ln();
-        assert!((result.loss - expected).abs() < 1e-5,
-            "synchronized policy/ref should give log(2) loss, got {}", result.loss);
+        assert!(
+            (result.loss - expected).abs() < 1e-5,
+            "synchronized policy/ref should give log(2) loss, got {}",
+            result.loss
+        );
     }
 
     // Test: DPO with very long sequences (near max_length) — numerical stability
     #[test]
     fn test_dpo_long_sequence_numerical_stability() {
         // Simulate long sequences: sum of many small log-probs
-        let cfg = DpoConfig { beta: 0.1, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.1,
+            ..Default::default()
+        };
         // Policy log-prob: sum over 512 tokens of -0.01 each = -5.12
         let policy_chosen = -5.12_f32;
         let ref_chosen = -6.0_f32;
@@ -1084,7 +1245,14 @@ mod tests {
         let cfg = DpoConfig::default();
         let n = 8;
         let pairs: Vec<DpoPair> = (0..n)
-            .map(|i| make_pair(-(i as f32 * 0.1), -(i as f32 * 0.2), -(i as f32 * 0.3 + 0.5), -(i as f32 * 0.1)))
+            .map(|i| {
+                make_pair(
+                    -(i as f32 * 0.1),
+                    -(i as f32 * 0.2),
+                    -(i as f32 * 0.3 + 0.5),
+                    -(i as f32 * 0.1),
+                )
+            })
             .collect();
         let result = compute_dpo_loss(&pairs, &cfg).expect("ok");
         assert_eq!(result.num_pairs, n, "num_pairs should match batch size");
@@ -1094,7 +1262,10 @@ mod tests {
     // Test: gradient accumulation with DPO — splitting batch gives same mean loss
     #[test]
     fn test_gradient_accumulation_equivalent_to_full_batch() {
-        let cfg = DpoConfig { beta: 0.5, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.5,
+            ..Default::default()
+        };
         let pairs = vec![
             make_pair(-1.0, -1.5, -2.0, -1.0),
             make_pair(-0.5, -1.0, -1.5, -0.8),
@@ -1110,8 +1281,12 @@ mod tests {
         let r2 = compute_dpo_loss(&pairs[2..], &cfg).expect("micro 2 ok");
         let micro_mean = (r1.loss + r2.loss) / 2.0;
 
-        assert!((full_result.loss - micro_mean).abs() < 1e-5,
-            "grad accumulation: full={} micro_mean={}", full_result.loss, micro_mean);
+        assert!(
+            (full_result.loss - micro_mean).abs() < 1e-5,
+            "grad accumulation: full={} micro_mean={}",
+            full_result.loss,
+            micro_mean
+        );
     }
 
     // Test: DPO temperature sensitivity — higher beta amplifies margin effect
@@ -1119,12 +1294,22 @@ mod tests {
     fn test_dpo_temperature_sensitivity_higher_beta_lower_loss() {
         // When chosen is preferred: higher β → lower loss (margin amplified)
         let pair = make_pair(0.0, -3.0, 0.0, 3.0); // h = 6
-        let cfg_low = DpoConfig { beta: 0.01, ..Default::default() };
-        let cfg_high = DpoConfig { beta: 5.0, ..Default::default() };
-        let r_low = compute_dpo_loss(&[pair.clone()], &cfg_low).expect("ok");
+        let cfg_low = DpoConfig {
+            beta: 0.01,
+            ..Default::default()
+        };
+        let cfg_high = DpoConfig {
+            beta: 5.0,
+            ..Default::default()
+        };
+        let r_low = compute_dpo_loss(std::slice::from_ref(&pair), &cfg_low).expect("ok");
         let r_high = compute_dpo_loss(&[pair], &cfg_high).expect("ok");
-        assert!(r_high.loss < r_low.loss,
-            "higher beta reduces loss when chosen preferred: low={} high={}", r_low.loss, r_high.loss);
+        assert!(
+            r_high.loss < r_low.loss,
+            "higher beta reduces loss when chosen preferred: low={} high={}",
+            r_low.loss,
+            r_high.loss
+        );
     }
 
     // Test: offline DPO mode — reference log-probs are fixed, only policy updates
@@ -1149,17 +1334,27 @@ mod tests {
             policy_log_prob_rejected: ref_rejected,
             reference_log_prob_rejected: ref_rejected,
         };
-        let cfg = DpoConfig { beta, ..Default::default() };
+        let cfg = DpoConfig {
+            beta,
+            ..Default::default()
+        };
         let r_before = compute_dpo_loss(&[pair_before], &cfg).expect("ok");
         let r_after = compute_dpo_loss(&[pair_after], &cfg).expect("ok");
-        assert!(r_after.loss < r_before.loss,
-            "improving policy chosen log-prob reduces loss: before={} after={}", r_before.loss, r_after.loss);
+        assert!(
+            r_after.loss < r_before.loss,
+            "improving policy chosen log-prob reduces loss: before={} after={}",
+            r_before.loss,
+            r_after.loss
+        );
     }
 
     // Test: weight update direction — loss decreases when chosen log-prob improves
     #[test]
     fn test_weight_update_direction_loss_decreases() {
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         // Baseline: h = 0
         let pair_base = make_pair(-1.0, -1.0, -1.0, -1.0);
         let r_base = compute_dpo_loss(&[pair_base], &cfg).expect("ok");
@@ -1167,23 +1362,34 @@ mod tests {
         // After update: chosen log-ratio improves
         let pair_updated = make_pair(-0.5, -1.0, -1.0, -1.0); // chosen_lr = 0.5 now
         let r_updated = compute_dpo_loss(&[pair_updated], &cfg).expect("ok");
-        assert!(r_updated.loss < r_base.loss,
-            "improving chosen log-ratio should reduce loss: base={} updated={}", r_base.loss, r_updated.loss);
+        assert!(
+            r_updated.loss < r_base.loss,
+            "improving chosen log-ratio should reduce loss: base={} updated={}",
+            r_base.loss,
+            r_updated.loss
+        );
     }
 
     // Test: convergence on distinguishable pairs — loss decreases with large margin
     #[test]
     fn test_convergence_on_distinguishable_pairs() {
-        let cfg = DpoConfig { beta: 1.0, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 1.0,
+            ..Default::default()
+        };
         // Small margin
         let pair_small = make_pair(0.0, -0.1, 0.0, 0.1); // h = 0.2
-        // Large margin (well-converged)
+                                                         // Large margin (well-converged)
         let pair_large = make_pair(0.0, -5.0, 0.0, 5.0); // h = 10
 
         let r_small = compute_dpo_loss(&[pair_small], &cfg).expect("ok");
         let r_large = compute_dpo_loss(&[pair_large], &cfg).expect("ok");
-        assert!(r_large.loss < r_small.loss,
-            "well-separated pair should have lower loss: small_margin={} large_margin={}", r_small.loss, r_large.loss);
+        assert!(
+            r_large.loss < r_small.loss,
+            "well-separated pair should have lower loss: small_margin={} large_margin={}",
+            r_small.loss,
+            r_large.loss
+        );
     }
 
     // Test: robustness to noisy preferences (50/50 random labels) — loss ≈ log(2)
@@ -1191,7 +1397,10 @@ mod tests {
     fn test_robustness_to_noisy_preferences() {
         // When labels are random (50/50 correct), reward accuracy ≈ 0.5
         // and loss ≈ log(2) (uninformative signal)
-        let cfg = DpoConfig { beta: 0.01, ..Default::default() };
+        let cfg = DpoConfig {
+            beta: 0.01,
+            ..Default::default()
+        };
         // Mix of correct and incorrect pairs with near-zero margin
         let pairs = vec![
             make_pair(-1.0, -1.0, -1.0, -1.0), // h=0 (noisy)
@@ -1203,7 +1412,8 @@ mod tests {
         let log2 = (2.0_f32).ln();
         assert!(
             (result.loss - log2).abs() < 1e-4,
-            "noisy labels (h≈0) should give loss ≈ log(2)={log2}, got {}", result.loss
+            "noisy labels (h≈0) should give loss ≈ log(2)={log2}, got {}",
+            result.loss
         );
     }
 }

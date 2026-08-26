@@ -1,7 +1,6 @@
 use crate::automodel::AutoModelType;
 use crate::core::traits::{Model, Tokenizer};
 use crate::error::{Result, TrustformersError};
-use crate::models::bert::tasks::MaskedLMOutput;
 use crate::pipeline::{BasePipeline, FillMaskOutput, Pipeline, PipelineOutput};
 use crate::{AutoModel, AutoTokenizer};
 use serde::{Deserialize, Serialize};
@@ -145,165 +144,89 @@ impl FillMaskPipeline {
             )));
         }
 
-        // Enhanced implementation for fill-mask with actual model-based predictions
-        match &self.base.model.model_type {
+        let (tokenized, mask_position) = self.locate_mask(text)?;
+
+        // Every supported branch runs the checkpoint's real masked-LM head and
+        // reads the top-k of its own softmax over the tokenizer's vocabulary.
+        // Architectures without an MLM head cannot answer this question at all,
+        // so they get a structured error rather than an invented word list.
+        let logits = match &self.base.model.model_type {
             #[cfg(feature = "bert")]
-            AutoModelType::BertForMaskedLM(model) => {
-                // Tokenize input text
-                let tokenized = self.base.tokenizer.encode(text)?;
-
-                // Find mask token position
-                let mask_token_id =
-                    self.base.tokenizer.token_to_id(&self.mask_token).ok_or_else(|| {
-                        TrustformersError::invalid_input_simple(format!(
-                            "Mask token '{}' not found in tokenizer vocabulary",
-                            self.mask_token
-                        ))
-                    })?;
-
-                let mask_position =
-                    tokenized.input_ids.iter().position(|&id| id == mask_token_id).ok_or_else(
-                        || {
-                            TrustformersError::invalid_input_simple(
-                                "Mask token not found in tokenized input".to_string(),
-                            )
-                        },
-                    )?;
-
-                // Run model inference using TokenizedInput
-                let output = model.forward(tokenized)?;
-
-                // Get predictions for the mask position from model output
-                let predictions = self.extract_predictions_from_output(
-                    &output,
-                    mask_position,
-                    text,
-                    &self.mask_token,
-                    self.top_k,
-                )?;
-                Ok(predictions)
-            },
+            AutoModelType::BertForMaskedLM(model) => model.forward(tokenized)?.logits,
+            #[cfg(feature = "roberta")]
+            AutoModelType::RobertaForMaskedLM(model) => model.forward(tokenized)?.logits,
+            #[cfg(feature = "albert")]
+            AutoModelType::AlbertForMaskedLM(model) => model.forward(tokenized)?.logits,
             _ => {
-                // Fallback to context-aware prediction for unsupported models
-                let predictions = self.predict_masked_words(text, &self.mask_token, self.top_k);
-                Ok(predictions)
+                return Err(TrustformersError::feature_unavailable(
+                    format!(
+                        "the loaded model ({}) has no masked-language-modelling head, so it \
+                         cannot predict a token for '{}'. Load a *ForMaskedLM checkpoint \
+                         (BERT / RoBERTa / ALBERT).",
+                        crate::core::traits::Config::architecture(&self.base.model.config),
+                        self.mask_token
+                    ),
+                    "fill-mask",
+                ));
             },
-        }
+        };
+
+        self.extract_predictions_from_logits(
+            &logits,
+            mask_position,
+            text,
+            &self.mask_token,
+            self.top_k,
+        )
+    }
+
+    /// Tokenize `text` and locate the mask token inside the token stream.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tokenizer's vocabulary has no entry for the configured
+    /// mask token, or when the encoded sequence does not contain it.
+    fn locate_mask(&self, text: &str) -> Result<(crate::core::traits::TokenizedInput, usize)> {
+        let tokenized = self.base.tokenizer.encode(text)?;
+
+        let mask_token_id = self.base.tokenizer.token_to_id(&self.mask_token).ok_or_else(|| {
+            TrustformersError::invalid_input_simple(format!(
+                "Mask token '{}' not found in tokenizer vocabulary",
+                self.mask_token
+            ))
+        })?;
+
+        let mask_position =
+            tokenized.input_ids.iter().position(|&id| id == mask_token_id).ok_or_else(|| {
+                TrustformersError::invalid_input_simple(
+                    "Mask token not found in tokenized input".to_string(),
+                )
+            })?;
+
+        Ok((tokenized, mask_position))
     }
 
     fn fill_mask_batch(&self, texts: &[String]) -> Result<Vec<Vec<FillMaskOutput>>> {
         texts.iter().map(|text| self.fill_mask(text)).collect()
     }
 
-    /// Context-aware masked word prediction placeholder
-    fn predict_masked_words(
+    /// Slice the mask position out of a real `[batch, seq, vocab]` logits
+    /// tensor and turn it into ranked predictions.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tensor is not rank-3, when the mask position falls
+    /// outside the sequence, or when the tensor is shorter than its own shape
+    /// claims.
+    fn extract_predictions_from_logits(
         &self,
-        text: &str,
-        mask_token: &str,
-        top_k: usize,
-    ) -> Vec<FillMaskOutput> {
-        let context_lower = text.to_lowercase();
-        let mut predictions = Vec::new();
-
-        // Simple context-based word prediction
-        let candidates =
-            if context_lower.contains("the president") || context_lower.contains("government") {
-                vec![
-                    ("said", 0.85, 2056),
-                    ("announced", 0.75, 3293),
-                    ("declared", 0.65, 4729),
-                    ("stated", 0.55, 2847),
-                    ("confirmed", 0.45, 5671),
-                ]
-            } else if context_lower.contains("weather") || context_lower.contains("temperature") {
-                vec![
-                    ("is", 0.90, 2003),
-                    ("will", 0.80, 2097),
-                    ("was", 0.70, 2001),
-                    ("forecast", 0.60, 8912),
-                    ("remains", 0.50, 3892),
-                ]
-            } else if context_lower.contains("company") || context_lower.contains("business") {
-                vec![
-                    ("announced", 0.85, 3293),
-                    ("reported", 0.75, 2876),
-                    ("released", 0.65, 3421),
-                    ("launched", 0.55, 4892),
-                    ("developed", 0.45, 2847),
-                ]
-            } else if context_lower.contains("book")
-                || context_lower.contains("author")
-                || context_lower.contains("story")
-            {
-                vec![
-                    ("written", 0.80, 2734),
-                    ("published", 0.70, 4821),
-                    ("tells", 0.60, 5729),
-                    ("describes", 0.50, 6234),
-                    ("explores", 0.40, 7389),
-                ]
-            } else if context_lower.contains("scientist")
-                || context_lower.contains("research")
-                || context_lower.contains("study")
-            {
-                vec![
-                    ("discovered", 0.85, 4721),
-                    ("found", 0.75, 2089),
-                    ("revealed", 0.65, 5834),
-                    ("concluded", 0.55, 6723),
-                    ("investigated", 0.45, 8934),
-                ]
-            } else {
-                // Generic common words
-                vec![
-                    ("is", 0.70, 2003),
-                    ("was", 0.65, 2001),
-                    ("has", 0.60, 2038),
-                    ("will", 0.55, 2097),
-                    ("can", 0.50, 2064),
-                    ("said", 0.45, 2056),
-                    ("made", 0.40, 2081),
-                    ("very", 0.35, 2200),
-                ]
-            };
-
-        // Take top_k candidates
-        for (i, (word, score, token_id)) in candidates.iter().take(top_k).enumerate() {
-            let adjusted_score = score * (1.0 - i as f32 * 0.05); // Slight decay for ranking
-            predictions.push(FillMaskOutput {
-                sequence: text.replace(mask_token, word),
-                score: adjusted_score,
-                token: *token_id,
-                token_str: word.to_string(),
-            });
-        }
-
-        // If no predictions made, provide fallback
-        if predictions.is_empty() {
-            predictions.push(FillMaskOutput {
-                sequence: text.replace(mask_token, "something"),
-                score: 0.30,
-                token: 1234,
-                token_str: "something".to_string(),
-            });
-        }
-
-        predictions
-    }
-
-    /// Extract predictions from model output for the mask position
-    fn extract_predictions_from_output(
-        &self,
-        output: &MaskedLMOutput,
+        logits_tensor: &crate::Tensor,
         mask_position: usize,
         original_text: &str,
         mask_token: &str,
         top_k: usize,
     ) -> Result<Vec<FillMaskOutput>> {
-        // Get logits from the MaskedLMOutput
-        let logits_tensor = &output.logits;
         let logits_data = logits_tensor.data()?;
-        let vocab_size = self.base.tokenizer.vocab_size();
 
         // Ensure the tensor has the expected shape [batch_size, seq_len, vocab_size]
         let shape = logits_tensor.shape();
@@ -323,14 +246,17 @@ impl FillMaskPipeline {
             )));
         }
 
-        // Extract logits for the mask position
+        // Extract logits for the mask position (batch index 0)
         let start_idx = mask_position * vocab_len;
-        let end_idx = start_idx + vocab_size.min(vocab_len);
+        let end_idx = start_idx + vocab_len;
 
         if end_idx > logits_data.len() {
-            return Err(TrustformersError::runtime_error(
-                "Logits tensor size mismatch with expected dimensions".to_string(),
-            ));
+            return Err(TrustformersError::runtime_error(format!(
+                "Logits tensor holds {} values but shape {:?} requires at least {}",
+                logits_data.len(),
+                shape,
+                end_idx
+            )));
         }
 
         let mask_logits = &logits_data[start_idx..end_idx];
@@ -339,7 +265,15 @@ impl FillMaskPipeline {
         self.logits_to_predictions(mask_logits, original_text, mask_token, top_k)
     }
 
-    /// Convert logits to fill-mask predictions
+    /// Convert the model's own mask-position logits into ranked predictions.
+    ///
+    /// The probabilities are a softmax over the model's full output
+    /// distribution and the token ids/strings come from the loaded tokenizer's
+    /// vocabulary — nothing here is synthesised. Special tokens (`[CLS]`,
+    /// `<s>`, sub-word continuations, …) are dropped because they cannot stand
+    /// in for the mask in the returned sequence; the list is therefore allowed
+    /// to be shorter than `top_k`, and empty when the model puts all its mass
+    /// on special tokens.
     fn logits_to_predictions(
         &self,
         logits: &[f32],
@@ -356,31 +290,24 @@ impl FillMaskPipeline {
 
         prob_pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Take top_k predictions and convert to FillMaskOutput
-        let mut predictions = Vec::new();
-
-        for (prob, token_id) in prob_pairs.into_iter().take(top_k) {
-            if let Some(token_str) = self.base.tokenizer.id_to_token(token_id as u32) {
-                // Skip special tokens and very low probability tokens
-                if !self.is_special_token(&token_str) && prob > 0.001 {
-                    let sequence = original_text.replace(mask_token, &token_str);
-                    predictions.push(FillMaskOutput {
-                        sequence,
-                        score: prob,
-                        token: token_id as u32,
-                        token_str,
-                    });
-                }
+        // Rank first, then keep the top_k *usable* candidates.
+        let mut predictions = Vec::with_capacity(top_k);
+        for (prob, token_id) in prob_pairs {
+            if predictions.len() >= top_k {
+                break;
             }
-        }
-
-        // Ensure we have at least one prediction
-        if predictions.is_empty() {
+            let Some(token_str) = self.base.tokenizer.id_to_token(token_id as u32) else {
+                continue;
+            };
+            if self.is_special_token(&token_str) {
+                continue;
+            }
+            let sequence = original_text.replace(mask_token, &token_str);
             predictions.push(FillMaskOutput {
-                sequence: original_text.replace(mask_token, "unknown"),
-                score: 0.001,
-                token: 0,
-                token_str: "unknown".to_string(),
+                sequence,
+                score: prob,
+                token: token_id as u32,
+                token_str,
             });
         }
 
@@ -442,6 +369,118 @@ impl crate::pipeline::AsyncPipeline for FillMaskPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the removed keyword→word fallback table.
+    //
+    // The old `_ =>` arm answered any non-BERT model from a hardcoded list such
+    // as `("said", 0.85, 2056)`, with token ids that had nothing to do with the
+    // loaded tokenizer. Both tests below fail against that implementation.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "bert")]
+    fn tiny_vocab() -> std::collections::HashMap<String, u32> {
+        // `mask` rather than `[MASK]`: the WordPiece tokenizer under test
+        // lower-cases and splits on punctuation, so a bracketed token would not
+        // survive encoding. The pipeline's mask token is configured to match.
+        [
+            "[PAD]",
+            "[UNK]",
+            "[CLS]",
+            "[SEP]",
+            "mask",
+            "the",
+            "president",
+            "said",
+            "hello",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, w)| ((*w).to_string(), i as u32))
+        .collect()
+    }
+
+    #[cfg(feature = "bert")]
+    fn tiny_bert_config() -> crate::models::bert::BertConfig {
+        crate::models::bert::BertConfig {
+            vocab_size: 9,
+            hidden_size: 8,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 16,
+            max_position_embeddings: 32,
+            ..crate::models::bert::BertConfig::default()
+        }
+    }
+
+    /// A model without an MLM head must be refused outright.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn model_without_mlm_head_is_refused() {
+        let tokenizer = AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(
+            tiny_vocab(),
+            true,
+        ));
+        let model = AutoModel::from_config(crate::AutoConfig::Bert(tiny_bert_config()))
+            .expect("tiny bert should build");
+        let pipeline = FillMaskPipeline::new(model, tokenizer)
+            .expect("pipeline should build")
+            .with_mask_token("mask".to_string());
+
+        let Err(err) = pipeline.fill_mask("the president mask hello") else {
+            panic!("a headless encoder cannot fill a mask");
+        };
+        let message = err.to_string();
+        for fabricated in ["said", "announced", "declared", "stated", "confirmed"] {
+            assert!(
+                !message.contains(fabricated),
+                "the error must not carry the old keyword table: {message}"
+            );
+        }
+    }
+
+    /// Every prediction must be a real entry of the loaded vocabulary.
+    #[cfg(feature = "bert")]
+    #[test]
+    fn predictions_come_from_the_loaded_vocabulary() {
+        let vocab = tiny_vocab();
+        let vocab_size = vocab.len() as u32;
+        let tokenizer =
+            AutoTokenizer::WordPiece(crate::tokenizers::WordPieceTokenizer::new(vocab, true));
+        let config = tiny_bert_config();
+        let model = AutoModel::from_parts(
+            crate::AutoConfig::Bert(config.clone()),
+            crate::automodel::AutoModelType::BertForMaskedLM(
+                crate::models::bert::BertForMaskedLM::new(config).expect("MLM head should build"),
+            ),
+        );
+        let pipeline = FillMaskPipeline::new(model, tokenizer.clone())
+            .expect("pipeline should build")
+            .with_mask_token("mask".to_string())
+            .with_top_k(3);
+
+        let predictions = pipeline
+            .fill_mask("the president mask hello")
+            .expect("a real MLM head must answer");
+        for prediction in &predictions {
+            assert!(
+                prediction.token < vocab_size,
+                "token id {} is outside the {vocab_size}-entry vocabulary and therefore \
+                 cannot have come from the model",
+                prediction.token
+            );
+            assert_eq!(
+                tokenizer.id_to_token(prediction.token).as_deref(),
+                Some(prediction.token_str.as_str()),
+                "the reported string must be the vocabulary entry for the reported id"
+            );
+            assert!(
+                (0.0..=1.0).contains(&prediction.score),
+                "probabilities must come from a softmax: {}",
+                prediction.score
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // FillMaskProcessor::find_mask_positions

@@ -232,8 +232,10 @@ impl MobileTestingFramework {
             p99_latency_ms: p99_latency,
             throughput_fps: throughput,
             memory_usage_mb: memory_usage,
-            accuracy_metrics: self.create_mock_accuracy_metrics(),
-            power_stats: self.create_mock_power_stats(),
+            // A latency benchmark evaluates no labelled data and this crate
+            // reads no per-component power rail, so neither figure exists.
+            accuracy_metrics: None,
+            power_stats: None,
         })
     }
 
@@ -247,14 +249,20 @@ impl MobileTestingFramework {
             state.current_test = Some("Battery Test".to_string());
         }
 
-        // Use actual battery manager if available, otherwise fall back to mock data
-        let (initial_battery, use_real_battery_manager) =
-            if let Some(ref battery_manager) = self.battery_manager {
-                // Get actual battery level from battery manager using the newly implemented API
-                (battery_manager.get_current_battery_level(), true)
-            } else {
-                (0.85f32, false) // Mock initial battery level
-            };
+        // A battery test needs a measured starting level. Without one there is
+        // nothing to measure drain against, so report no results rather than
+        // inventing a level to subtract an invented drain from.
+        let Some(initial_battery) = self
+            .battery_manager
+            .as_ref()
+            .and_then(|manager| manager.get_current_battery_level())
+        else {
+            tracing::warn!(
+                "Skipping battery tests: no battery manager attached, or this device exposes \
+                 no readable battery gauge"
+            );
+            return Ok(results);
+        };
 
         let start_time = Instant::now();
         let mut total_inferences = 0;
@@ -273,36 +281,40 @@ impl MobileTestingFramework {
                 }
             }
 
-            // Sample power consumption - use thermal/power manager if available
-            let power_sample = if let Some(ref thermal_manager) = self.thermal_manager {
-                // Use actual power consumption from thermal manager using the newly implemented API
-                thermal_manager
-                    .get_current_power()
-                    .unwrap_or_else(|| self.estimate_power_consumption())
-            } else {
-                self.estimate_power_consumption()
-            };
-            power_samples.push(power_sample);
+            // Sample power draw only when the thermal/power manager actually
+            // measured one. A missing sample is skipped, never substituted.
+            if let Some(power_sample) =
+                self.thermal_manager.as_ref().and_then(|manager| manager.get_current_power())
+            {
+                power_samples.push(power_sample);
+            }
 
             // Wait for next inference
             tokio::time::sleep(inference_interval).await;
         }
 
-        let final_battery = if use_real_battery_manager {
-            // Get actual final battery level from battery manager using the newly implemented API
-            if let Some(ref battery_manager) = self.battery_manager {
-                battery_manager.get_current_battery_level()
-            } else {
-                initial_battery - 0.02f32 // Fallback
-            }
-        } else {
-            initial_battery - 0.02f32 // Mock battery drain
+        let Some(final_battery) = self
+            .battery_manager
+            .as_ref()
+            .and_then(|manager| manager.get_current_battery_level())
+        else {
+            tracing::warn!(
+                "Skipping battery test result: the battery gauge stopped reporting during the run"
+            );
+            return Ok(results);
         };
+
+        if power_samples.is_empty() {
+            tracing::warn!(
+                "Skipping battery test result: no power sample was measured during the run"
+            );
+            return Ok(results);
+        }
 
         let duration = start_time.elapsed();
 
         let avg_power = power_samples.iter().sum::<f32>() / power_samples.len() as f32;
-        let peak_power = power_samples.iter().fold(0.0f32, |acc, &x| acc.max(x));
+        let peak_power = power_samples.iter().fold(f32::MIN, |acc, &x| acc.max(x));
         let energy_consumed = avg_power * duration.as_secs_f32() / 3600.0; // Convert to mWh
         let energy_per_inference = if total_inferences > 0 {
             energy_consumed * 3.6 / total_inferences as f32 // Convert to mJ
@@ -493,11 +505,6 @@ impl MobileTestingFramework {
         while start_time.elapsed() < config.memory_stress_duration {
             // Simulate memory operations based on test type
             match test_type {
-                MemoryTestType::LeakDetection
-                    // Simulate potential memory leaks
-                    if start_time.elapsed().as_secs().is_multiple_of(10) => {
-                        leak_count += self.detect_memory_leaks();
-                    },
                 MemoryTestType::PressureTesting => {
                     // Apply memory pressure
                     let _pressure_data = self.apply_memory_pressure();
@@ -509,18 +516,27 @@ impl MobileTestingFramework {
                 _ => {},
             }
 
-            let current_memory = self.estimate_memory_usage();
-            memory_samples.push(current_memory);
-            peak_memory = peak_memory.max(current_memory);
+            if let Some(current_memory) = Self::process_resident_memory_mb() {
+                memory_samples.push(current_memory);
+                peak_memory = peak_memory.max(current_memory);
+            }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let avg_memory = if !memory_samples.is_empty() {
-            memory_samples.iter().sum::<usize>() / memory_samples.len()
-        } else {
-            0
-        };
+        if memory_samples.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "Memory test collected no resident-memory sample: `sysinfo` could not read this \
+                 process on the running platform"
+                    .into(),
+            )
+            .into());
+        }
+
+        let avg_memory = memory_samples.iter().sum::<usize>() / memory_samples.len();
+        if test_type == MemoryTestType::LeakDetection {
+            leak_count = Self::count_sustained_growth_signals(&memory_samples);
+        }
 
         Ok(MemoryTestResult {
             duration: start_time.elapsed(),
@@ -528,18 +544,12 @@ impl MobileTestingFramework {
             peak_memory_usage_mb: peak_memory,
             avg_memory_usage_mb: avg_memory,
             memory_leaks_detected: leak_count,
-            memory_stats: MemoryUsageStats {
-                total_allocated_mb: avg_memory,
-                peak_allocated_mb: peak_memory,
-                fragmentation_percent: 15.0, // Estimated
-                large_allocations: 10,
-                small_allocations: 100,
-            },
-            gc_stats: Some(HashMap::from([
-                ("gc_cycles".to_string(), 5.0),
-                ("gc_time_ms".to_string(), 50.0),
-            ])),
-            allocation_success_rate: 0.95,
+            // Fragmentation and allocation counts need allocator introspection
+            // the Rust global allocator does not expose; ART GC counters need a
+            // JNI call this crate does not make.
+            memory_stats: None,
+            gc_stats: None,
+            allocation_success_rate: None,
         })
     }
 
@@ -552,35 +562,45 @@ impl MobileTestingFramework {
             .expect("fixed test tensor dimensions are always valid")
     }
 
-    fn create_mock_accuracy_metrics(&self) -> AccuracyMetrics {
-        AccuracyMetrics {
-            top1_accuracy: 92.5,
-            top5_accuracy: 98.2,
-            f1_score: 0.925,
-            precision: 0.930,
-            recall: 0.920,
-            mean_average_precision: 0.890,
+    /// Resident set size of this process in MB, measured with `sysinfo`.
+    ///
+    /// `None` when `sysinfo` cannot see this process on the running platform.
+    /// Replaces an `estimate_memory_usage` that returned
+    /// `256 + random * 256` MB.
+    fn process_resident_memory_mb() -> Option<usize> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|process| (process.memory() / (1024 * 1024)) as usize)
+    }
+
+    /// Count sustained resident-memory growth signals across a real RSS
+    /// sample series.
+    ///
+    /// A signal is recorded when the mean of the final quarter of the samples
+    /// exceeds the mean of the first quarter by more than 10% -- memory that
+    /// went up during the run and never came back down. This is a heuristic
+    /// over measured data, not proof of a leak, and it replaces a
+    /// `detect_memory_leaks` that reported a leak on a 10% coin flip.
+    fn count_sustained_growth_signals(samples: &[usize]) -> usize {
+        let quarter = samples.len() / 4;
+        if quarter == 0 {
+            return 0;
         }
-    }
-
-    fn create_mock_power_stats(&self) -> PowerConsumptionStats {
-        PowerConsumptionStats {
-            cpu_power_mw: 300.0,
-            gpu_power_mw: 500.0,
-            memory_power_mw: 100.0,
-            total_power_mw: 900.0,
-            efficiency_score: 0.85,
+        let mean = |slice: &[usize]| slice.iter().sum::<usize>() as f64 / slice.len() as f64;
+        let first = mean(&samples[..quarter]);
+        let last = mean(&samples[samples.len() - quarter..]);
+        if first > 0.0 && last > first * 1.10 {
+            1
+        } else {
+            0
         }
-    }
-
-    fn estimate_power_consumption(&self) -> f32 {
-        // Simplified power estimation
-        450.0 + (rand::random::<f32>() - 0.5) * 100.0
-    }
-
-    fn estimate_memory_usage(&self) -> usize {
-        // Simplified memory usage estimation in MB
-        256 + ((rand::random::<f32>() * 256.0) as usize)
     }
 
     fn apply_cpu_stress(&self, stress_level: f32) -> Vec<thread::JoinHandle<()>> {
@@ -617,15 +637,6 @@ impl MobileTestingFramework {
             .collect()
     }
 
-    fn detect_memory_leaks(&self) -> usize {
-        // Simplified leak detection
-        if rand::random::<f32>() < 0.1 {
-            1
-        } else {
-            0
-        }
-    }
-
     fn apply_memory_pressure(&self) -> Vec<Vec<u8>> {
         // Apply memory pressure by allocating large chunks
         (0..5).map(|_| vec![0u8; 1024 * 1024]).collect()
@@ -634,29 +645,5 @@ impl MobileTestingFramework {
     fn stress_memory_allocation(&self) -> Vec<Vec<u8>> {
         // Stress the allocation system with many small allocations
         (0..1000).map(|i| vec![i as u8; 1024]).collect()
-    }
-}
-
-// Add simple random number generation for mock data
-mod rand {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static SEED: AtomicU32 = AtomicU32::new(42);
-
-    pub fn random<T>() -> T
-    where
-        T: From<f32>,
-    {
-        let current = SEED.load(Ordering::Relaxed);
-        let next = current.wrapping_mul(1664525).wrapping_add(1013904223);
-        SEED.store(next, Ordering::Relaxed);
-        T::from((next as f32) / (u32::MAX as f32))
-    }
-}
-
-// Add num_cpus mock
-mod num_cpus {
-    pub fn get() -> usize {
-        4 // Mock CPU count
     }
 }

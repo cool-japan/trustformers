@@ -1110,6 +1110,10 @@ macro_rules! debug_transformer {
 }
 
 #[cfg(test)]
+#[path = "neural_network_debugging_tests.rs"]
+mod neural_network_debugging_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use scirs2_core::ndarray::{ArrayD, IxDyn};

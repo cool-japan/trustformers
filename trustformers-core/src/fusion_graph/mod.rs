@@ -253,12 +253,7 @@ impl FusionGraph {
     /// Add a node to the graph and return its assigned ID.
     ///
     /// IDs are assigned monotonically from 0; the first node gets ID 0.
-    pub fn add_node(
-        &mut self,
-        name: &str,
-        node_type: NodeType,
-        inputs: Vec<usize>,
-    ) -> usize {
+    pub fn add_node(&mut self, name: &str, node_type: NodeType, inputs: Vec<usize>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         self.nodes.push(GraphNode::new(id, name, node_type, inputs));
@@ -512,9 +507,12 @@ mod tests {
         let _lin = g.add_node("linear", NodeType::Linear, vec![rn]);
         let patterns = LayerFusionPattern::standard_patterns();
         let groups = g.analyze_fusions(&patterns);
-        let found = groups
-            .iter()
-            .any(|grp| matches!(grp.fused_op, FusedOpType::LayerNormLinear | FusedOpType::RmsNormLinear));
+        let found = groups.iter().any(|grp| {
+            matches!(
+                grp.fused_op,
+                FusedOpType::LayerNormLinear | FusedOpType::RmsNormLinear
+            )
+        });
         assert!(!found, "ReLU+Linear should not match norm+linear patterns");
     }
 
@@ -566,7 +564,7 @@ mod tests {
             id
         };
         g.add_node_with_metadata(n0.clone()); // re-add n0 (order doesn't matter for flops sum)
-        // Total = 6_000 (both nodes)
+                                              // Total = 6_000 (both nodes)
         let fa_before = g.flop_analysis();
         assert_eq!(fa_before.total_flops, 6_000);
         assert_eq!(fa_before.num_fused_groups, 0);
@@ -645,7 +643,11 @@ mod tests {
         let q_proj = g.add_node("q_proj", NodeType::Linear, vec![rn1]);
         let k_proj = g.add_node("k_proj", NodeType::Linear, vec![rn1]);
         let v_proj = g.add_node("v_proj", NodeType::Linear, vec![rn1]);
-        let attn = g.add_node("attention", NodeType::Attention, vec![q_proj, k_proj, v_proj]);
+        let attn = g.add_node(
+            "attention",
+            NodeType::Attention,
+            vec![q_proj, k_proj, v_proj],
+        );
         let res2 = g.add_node("residual2", NodeType::Residual, vec![attn]);
         let rn2 = g.add_node("pre_ffn_norm", NodeType::RmsNorm, vec![res2]);
         let ffn = g.add_node("ffn_swiglu", NodeType::SwiGLU, vec![rn2]);
@@ -692,7 +694,10 @@ mod tests {
         let _id = g.add_node("only_rms", NodeType::RmsNorm, vec![]);
         let patterns = LayerFusionPattern::standard_patterns();
         let groups = g.analyze_fusions(&patterns);
-        assert!(groups.is_empty(), "single node should not match any pattern");
+        assert!(
+            groups.is_empty(),
+            "single node should not match any pattern"
+        );
     }
 
     /// Fork pattern: two Linear nodes share same RmsNorm parent (fan-out).
@@ -708,7 +713,10 @@ mod tests {
         let groups = g.analyze_fusions(&patterns);
         // rms → lin1 appears in sequential order → should match
         let has_rms_lin = groups.iter().any(|g| g.fused_op == FusedOpType::RmsNormLinear);
-        assert!(has_rms_lin, "fork fan-out should still detect RmsNorm+Linear");
+        assert!(
+            has_rms_lin,
+            "fork fan-out should still detect RmsNorm+Linear"
+        );
         let _ = lin1;
     }
 
@@ -719,7 +727,10 @@ mod tests {
         let a = g.add_node("layer_a", NodeType::RmsNorm, vec![]);
         let b = g.add_node("layer_b", NodeType::Linear, vec![a]);
         let dot = g.to_dot();
-        assert!(dot.starts_with("digraph fusion_graph"), "must open with digraph");
+        assert!(
+            dot.starts_with("digraph fusion_graph"),
+            "must open with digraph"
+        );
         assert!(dot.contains("layer_a"), "must contain node name");
         assert!(dot.contains("layer_b"), "must contain node name");
         assert!(dot.contains("->"), "must contain edge arrows");
@@ -739,7 +750,10 @@ mod tests {
         let dot = g.to_dot();
         // Fused nodes are grey; active nodes are lightblue.
         assert!(dot.contains("gray"), "fused node should appear gray");
-        assert!(dot.contains("lightblue"), "active node should appear lightblue");
+        assert!(
+            dot.contains("lightblue"),
+            "active node should appear lightblue"
+        );
     }
 
     /// Node activation tracking: fused flag set after apply_fusions.
@@ -751,11 +765,17 @@ mod tests {
         let patterns = LayerFusionPattern::standard_patterns();
         let groups = g.analyze_fusions(&patterns);
         // Before apply: no fused nodes
-        assert!(g.nodes().iter().all(|n| !n.fused), "no fused nodes before apply");
+        assert!(
+            g.nodes().iter().all(|n| !n.fused),
+            "no fused nodes before apply"
+        );
         g.apply_fusions(&groups);
         // After apply: the first node (RmsNorm) in the chain is fused
         let has_fused = g.nodes().iter().any(|n| n.fused);
-        assert!(has_fused, "at least one node should be fused after apply_fusions");
+        assert!(
+            has_fused,
+            "at least one node should be fused after apply_fusions"
+        );
     }
 
     /// Graph traversal: nodes() preserves insertion order (BFS-friendly).
@@ -781,8 +801,12 @@ mod tests {
         let _lin2 = g.add_node("lin2", NodeType::Linear, vec![rn2]);
         let patterns = LayerFusionPattern::standard_patterns();
         let groups = g.analyze_fusions(&patterns);
-        let rms_lin_count = groups.iter().filter(|g| g.fused_op == FusedOpType::RmsNormLinear).count();
-        assert!(rms_lin_count >= 2, "both RmsNorm+Linear chains must be detected, got {rms_lin_count}");
+        let rms_lin_count =
+            groups.iter().filter(|g| g.fused_op == FusedOpType::RmsNormLinear).count();
+        assert!(
+            rms_lin_count >= 2,
+            "both RmsNorm+Linear chains must be detected, got {rms_lin_count}"
+        );
     }
 
     /// Graph with no matching patterns gives empty groups.
@@ -794,7 +818,10 @@ mod tests {
         let _d = g.add_node("drop", NodeType::Dropout, vec![a]);
         let patterns = LayerFusionPattern::standard_patterns();
         let groups = g.analyze_fusions(&patterns);
-        assert!(groups.is_empty(), "Attention+Dropout should not match any standard pattern");
+        assert!(
+            groups.is_empty(),
+            "Attention+Dropout should not match any standard pattern"
+        );
     }
 
     /// FlopAnalysis speedup_estimate > 1.0 after fusion when nodes have flops.
@@ -811,8 +838,14 @@ mod tests {
         g.apply_fusions(&groups);
 
         let fa = g.flop_analysis();
-        assert!(fa.num_fused_groups > 0, "should have at least one fused group");
-        assert!(fa.speedup_estimate >= 1.0, "speedup must be >= 1.0 after fusion");
+        assert!(
+            fa.num_fused_groups > 0,
+            "should have at least one fused group"
+        );
+        assert!(
+            fa.speedup_estimate >= 1.0,
+            "speedup must be >= 1.0 after fusion"
+        );
     }
 
     /// FusedGroup flops_saved reflects sum of node flops (divided by 10).
@@ -828,7 +861,10 @@ mod tests {
         let groups = g.analyze_fusions(&patterns);
         // flops_saved = (1000 + 9000) / 10 = 1000
         assert!(!groups.is_empty(), "should match RmsNorm+Linear");
-        assert_eq!(groups[0].flops_saved, 1_000, "flops_saved = total_flops / 10");
+        assert_eq!(
+            groups[0].flops_saved, 1_000,
+            "flops_saved = total_flops / 10"
+        );
     }
 
     /// Join pattern (fan-in): Attention with multiple inputs, followed by a
@@ -858,7 +894,10 @@ mod tests {
         let groups = g.analyze_fusions(&patterns);
         g.apply_fusions(&groups);
         let stored = g.fused_groups();
-        assert!(!stored.is_empty(), "fused_groups slice should be non-empty after apply");
+        assert!(
+            !stored.is_empty(),
+            "fused_groups slice should be non-empty after apply"
+        );
         assert_eq!(stored[0].fused_op, FusedOpType::RmsNormLinear);
     }
 

@@ -544,24 +544,28 @@ impl Quantizer {
                 Self::dynamic_quantize(tensor)
             },
             QuantizationScheme::GPTQ => {
-                // GPTQ (Gradient-based Post-Training Quantization)
-                // For now, use standard INT4 quantization with optimized settings
-                // Full GPTQ implementation would require Hessian computation
-                if config.per_channel {
-                    Self::quantize_per_channel_int4(tensor, true, config.group_size)
-                } else {
-                    Self::quantize_per_tensor_int4(tensor, true)
-                }
+                // GPTQ needs the layer Hessian (accumulated from calibration
+                // activations), which this signature does not carry. Running
+                // plain round-to-nearest INT4 here and labelling the result
+                // `GPTQ` -- what this arm used to do -- reports an algorithm
+                // that never ran.
+                Err(TrustformersError::not_implemented(
+                    "GPTQ quantization through `Quantizer::quantize`: GPTQ requires the layer \
+                     Hessian from calibration data. Use `GPTQQuantizer::quantize(tensor, \
+                     Some(hessian))` or `quantization::gptq::gptq_quantize_layer` directly."
+                        .to_string(),
+                ))
             },
             QuantizationScheme::AWQ => {
-                // AWQ (Activation-aware Weight Quantization)
-                // For now, use standard INT4 quantization with symmetric mode
-                // Full AWQ implementation would use activation statistics
-                if config.per_channel {
-                    Self::quantize_per_channel_int4(tensor, true, config.group_size)
-                } else {
-                    Self::quantize_per_tensor_int4(tensor, true)
-                }
+                // AWQ needs per-input-channel activation statistics; without them
+                // there is nothing "activation aware" about the result.
+                Err(TrustformersError::not_implemented(
+                    "AWQ quantization through `Quantizer::quantize`: AWQ requires per-channel \
+                     activation statistics. Use `AWQQuantizer::set_activation_scales` + \
+                     `AWQQuantizer::quantize`, or `quantization::awq::awq_quantize_layer` \
+                     directly."
+                        .to_string(),
+                ))
             },
             QuantizationScheme::BnB8bit => {
                 // BitsAndBytes 8-bit quantization
@@ -823,8 +827,10 @@ impl Quantizer {
         samples: &[Tensor],
         config: &QuantizationConfig,
     ) -> Result<QuantizationConfig> {
-        // This is a simplified calibration - in practice, you'd run the model
-        // on representative data and collect activation statistics
+        // Derives the symmetric/asymmetric decision from the real min/max of the
+        // supplied samples. It calibrates the *data* it is given; running the
+        // model to collect activation statistics is the caller's job (see
+        // `quantization::calibration_toolkit` for the activation-driven path).
         let mut calibrated_config = config.clone();
 
         if let Some(sample_count) = config.calibration_samples {
@@ -858,7 +864,12 @@ impl Quantizer {
     }
 }
 
-/// GPTQ (Gradient-based Post-Training Quantization) implementation
+/// GPTQ (Gradient-based Post-Training Quantization) front-end.
+///
+/// Thin wrapper that maps a [`QuantizationConfig`] onto the real GPTQ algorithm
+/// in [`crate::quantization::gptq`]: sequential per-column quantization with
+/// Hessian-weighted error propagation. Use [`crate::quantization::gptq::gptq_dequantize`]
+/// to reconstruct the weights.
 pub struct GPTQQuantizer {
     config: QuantizationConfig,
 }
@@ -868,16 +879,72 @@ impl GPTQQuantizer {
         Self { config }
     }
 
-    /// Apply GPTQ quantization to a tensor
-    /// This is a simplified version - full GPTQ requires Hessian computation
-    pub fn quantize(&self, tensor: &Tensor, hessian: Option<&Tensor>) -> Result<QuantizedTensor> {
-        // For now, fall back to standard quantization
-        // In a full implementation, this would use the Hessian to minimize quantization error
-        Quantizer::quantize(tensor, &self.config)
+    /// Translate the generic quantization config into a GPTQ config.
+    fn gptq_config(&self) -> super::gptq::GptqConfig {
+        super::gptq::GptqConfig {
+            bits: match self.config.scheme {
+                QuantizationScheme::Int8 | QuantizationScheme::DynamicINT8 => 8,
+                _ => 4,
+            },
+            group_size: self.config.group_size.unwrap_or(128).max(1),
+            sym: self.config.symmetric,
+            ..super::gptq::GptqConfig::default()
+        }
+    }
+
+    /// Apply GPTQ quantization to a 2-D weight tensor.
+    ///
+    /// `hessian`, when supplied, must hold the Hessian diagonal with one entry
+    /// per weight column (the same ordering as the weight matrix). Without it
+    /// the algorithm still runs, but with an identity diagonal -- see
+    /// [`crate::quantization::gptq::gptq_quantize_layer`].
+    pub fn quantize(
+        &self,
+        tensor: &Tensor,
+        hessian: Option<&Tensor>,
+    ) -> Result<super::gptq::GptqQuantizedWeight> {
+        let shape = tensor.shape();
+        if shape.len() != 2 {
+            return Err(TrustformersError::shape_error(format!(
+                "GPTQ quantization expects a 2-D weight matrix, got shape {:?}",
+                shape
+            )));
+        }
+        let (rows, cols) = (shape[0], shape[1]);
+        let weight = tensor.to_vec_f32()?;
+
+        let hessian_values = match hessian {
+            Some(h) => {
+                let values = h.to_vec_f32()?;
+                if values.len() != cols {
+                    return Err(TrustformersError::shape_error(format!(
+                        "GPTQ Hessian diagonal must hold one entry per weight column ({}), got {}",
+                        cols,
+                        values.len()
+                    )));
+                }
+                Some(values)
+            },
+            None => None,
+        };
+
+        super::gptq::gptq_quantize_layer(
+            &weight,
+            rows,
+            cols,
+            hessian_values.as_deref(),
+            &self.gptq_config(),
+        )
+        .map_err(|e| TrustformersError::quantization_error(format!("GPTQ quantization: {e}")))
     }
 }
 
-/// AWQ (Activation-aware Weight Quantization) implementation
+/// AWQ (Activation-aware Weight Quantization) front-end.
+///
+/// Thin wrapper that maps a [`QuantizationConfig`] onto the real AWQ algorithm in
+/// [`crate::quantization::awq`]: per-input-channel scale search driven by
+/// activation statistics, followed by grouped INT quantization. Use
+/// [`crate::quantization::awq::awq_dequantize_layer`] to reconstruct the weights.
 pub struct AWQQuantizer {
     config: QuantizationConfig,
     activation_scales: Option<Vec<f32>>,
@@ -891,16 +958,69 @@ impl AWQQuantizer {
         }
     }
 
-    /// Set activation scales for weight quantization
+    /// Set per-input-channel activation scales for weight quantization.
+    ///
+    /// These are the mean absolute activations per input channel, as produced by
+    /// [`crate::quantization::awq::AwqActivationStats::from_activations`].
     pub fn set_activation_scales(&mut self, scales: Vec<f32>) {
         self.activation_scales = Some(scales);
     }
 
-    /// Apply AWQ quantization to a tensor
-    pub fn quantize(&self, tensor: &Tensor) -> Result<QuantizedTensor> {
-        // For now, fall back to standard quantization
-        // In a full implementation, this would use activation scales to improve quantization
-        Quantizer::quantize(tensor, &self.config)
+    /// Apply AWQ quantization to a 2-D weight tensor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no activation scales have been set: without them
+    /// the result would be ordinary round-to-nearest quantization wearing an AWQ
+    /// label.
+    pub fn quantize(&self, tensor: &Tensor) -> Result<super::awq::AwqQuantizedLayer> {
+        let shape = tensor.shape();
+        if shape.len() != 2 {
+            return Err(TrustformersError::shape_error(format!(
+                "AWQ quantization expects a 2-D weight matrix, got shape {:?}",
+                shape
+            )));
+        }
+        let (rows, cols) = (shape[0], shape[1]);
+
+        let scales = self.activation_scales.as_ref().ok_or_else(|| {
+            TrustformersError::not_implemented(
+                "AWQ quantization without activation statistics: call \
+                 `AWQQuantizer::set_activation_scales` with per-input-channel mean absolute \
+                 activations first."
+                    .to_string(),
+            )
+        })?;
+        if scales.len() != cols {
+            return Err(TrustformersError::shape_error(format!(
+                "AWQ activation scales must hold one entry per input channel ({}), got {}",
+                cols,
+                scales.len()
+            )));
+        }
+
+        let weight = tensor.to_vec_f32()?;
+        // The caller supplies per-channel mean absolute activations; without the
+        // full calibration tensors the max/std summaries are unknown, so they are
+        // seeded from the same means (they only widen the scale search range).
+        let stats = super::awq::AwqActivationStats {
+            channel_means: scales.clone(),
+            channel_maxes: scales.clone(),
+            channel_stds: vec![0.0; cols],
+            num_samples: 1,
+        };
+        let awq_config = super::awq::AwqConfig {
+            bits: match self.config.scheme {
+                QuantizationScheme::Int8 | QuantizationScheme::DynamicINT8 => 8,
+                _ => 4,
+            },
+            group_size: self.config.group_size.unwrap_or(128).max(1),
+            zero_point: !self.config.symmetric,
+            ..super::awq::AwqConfig::default()
+        };
+
+        super::awq::awq_quantize_layer(&weight, rows, cols, Some(&stats), &awq_config)
+            .map_err(|e| TrustformersError::quantization_error(format!("AWQ quantization: {e}")))
     }
 }
 
@@ -1427,6 +1547,9 @@ mod tests {
         Ok(())
     }
 
+    /// GPTQ now runs the real algorithm from `quantization::gptq` (sequential
+    /// per-column quantization with Hessian-weighted error propagation) instead
+    /// of relabelling round-to-nearest INT4 output as "GPTQ".
     #[test]
     fn test_gptq_quantizer() -> Result<()> {
         let tensor = Tensor::randn(&[16, 32])?;
@@ -1434,23 +1557,99 @@ mod tests {
         let gptq = GPTQQuantizer::new(config);
 
         let quantized = gptq.quantize(&tensor, None)?;
-        let dequantized = quantized.dequantize()?;
-        assert_eq!(dequantized.shape(), tensor.shape());
+        assert_eq!(quantized.rows, 16);
+        assert_eq!(quantized.cols, 32);
+
+        let dequantized = super::super::gptq::gptq_dequantize(&quantized)
+            .map_err(|e| TrustformersError::quantization_error(e.to_string()))?;
+        assert_eq!(dequantized.len(), 16 * 32);
+
+        // The reconstruction must track the source weights, not be constant.
+        let original = tensor.to_vec_f32()?;
+        let correlation = {
+            let n = original.len() as f64;
+            let mean_a = original.iter().map(|&v| v as f64).sum::<f64>() / n;
+            let mean_b = dequantized.iter().map(|&v| v as f64).sum::<f64>() / n;
+            let mut cov = 0.0;
+            let mut var_a = 0.0;
+            let mut var_b = 0.0;
+            for (&a, &b) in original.iter().zip(dequantized.iter()) {
+                let da = a as f64 - mean_a;
+                let db = b as f64 - mean_b;
+                cov += da * db;
+                var_a += da * da;
+                var_b += db * db;
+            }
+            cov / (var_a.sqrt() * var_b.sqrt())
+        };
+        assert!(
+            correlation > 0.9,
+            "GPTQ reconstruction should track the input (correlation {correlation})"
+        );
         Ok(())
     }
 
+    /// GPTQ must accept and use a real Hessian diagonal, and reject one of the
+    /// wrong length rather than silently ignoring it.
+    #[test]
+    fn test_gptq_quantizer_hessian_shape_is_validated() -> Result<()> {
+        let tensor = Tensor::randn(&[8, 16])?;
+        let gptq = GPTQQuantizer::new(QuantizationConfig::default());
+
+        let good_hessian = Tensor::from_vec(vec![1.0f32; 16], &[16])?;
+        assert!(gptq.quantize(&tensor, Some(&good_hessian)).is_ok());
+
+        let bad_hessian = Tensor::from_vec(vec![1.0f32; 5], &[5])?;
+        assert!(gptq.quantize(&tensor, Some(&bad_hessian)).is_err());
+        Ok(())
+    }
+
+    /// AWQ now runs the real activation-aware algorithm and refuses to run at
+    /// all without activation statistics (previously it silently fell back to
+    /// plain round-to-nearest and called the result AWQ).
     #[test]
     fn test_awq_quantizer() -> Result<()> {
         let tensor = Tensor::randn(&[16, 32])?;
         let config = QuantizationConfig::default();
         let mut awq = AWQQuantizer::new(config);
 
-        let scales = vec![1.0; 16];
-        awq.set_activation_scales(scales);
+        // Without activation scales AWQ is not AWQ: it must report that.
+        assert!(awq.quantize(&tensor).is_err());
 
+        // 32 input channels (columns), one scale each.
+        awq.set_activation_scales(vec![1.0; 32]);
         let quantized = awq.quantize(&tensor)?;
-        let dequantized = quantized.dequantize()?;
-        assert_eq!(dequantized.shape(), tensor.shape());
+        assert_eq!(quantized.rows, 16);
+        assert_eq!(quantized.cols, 32);
+
+        let dequantized = super::super::awq::awq_dequantize_layer(&quantized)
+            .map_err(|e| TrustformersError::quantization_error(e.to_string()))?;
+        assert_eq!(dequantized.len(), 16 * 32);
+
+        // A wrong-length scale vector must be reported, not ignored.
+        let mut mismatched = AWQQuantizer::new(QuantizationConfig::default());
+        mismatched.set_activation_scales(vec![1.0; 7]);
+        assert!(mismatched.quantize(&tensor).is_err());
+        Ok(())
+    }
+
+    /// `Quantizer::quantize` cannot perform GPTQ or AWQ (it has neither a
+    /// Hessian nor activation statistics), so it must say so instead of
+    /// silently performing round-to-nearest INT4.
+    #[test]
+    fn test_quantizer_rejects_calibration_only_schemes() -> Result<()> {
+        let tensor = Tensor::randn(&[8, 8])?;
+
+        for scheme in [QuantizationScheme::GPTQ, QuantizationScheme::AWQ] {
+            let config = QuantizationConfig {
+                scheme,
+                ..QuantizationConfig::default()
+            };
+            assert!(
+                Quantizer::quantize(&tensor, &config).is_err(),
+                "{scheme:?} must not silently degrade to round-to-nearest INT4"
+            );
+        }
         Ok(())
     }
 

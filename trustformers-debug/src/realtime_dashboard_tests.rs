@@ -107,7 +107,7 @@ fn test_anomaly_type_variants() {
         AnomalyType::Outlier,
     ];
     for v in &variants {
-        let _cloned = v.clone();
+        let _cloned = *v;
         let _debug = format!("{:?}", v);
     }
 }
@@ -122,7 +122,7 @@ fn test_trend_direction_variants() {
         TrendDirection::Stable,
     ];
     for v in &variants {
-        let _cloned = v.clone();
+        let _cloned = *v;
     }
 }
 
@@ -146,12 +146,12 @@ fn test_export_format_variants() {
 fn test_metric_data_point_construction() {
     let pt = MetricDataPoint {
         timestamp: 1234567890,
-        value: 3.14,
+        value: 42.5,
         label: "loss".to_string(),
         category: MetricCategory::Training,
     };
     assert_eq!(pt.label, "loss");
-    assert!((pt.value - 3.14).abs() < 1e-10);
+    assert!((pt.value - 42.5).abs() < 1e-10);
     assert_eq!(pt.category, MetricCategory::Training);
 }
 

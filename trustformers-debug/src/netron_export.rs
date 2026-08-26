@@ -130,7 +130,13 @@ pub struct NetronExporter {
 pub enum ExportFormat {
     /// JSON format (human-readable)
     Json,
-    /// ONNX-like binary format
+    /// Real ONNX protobuf.
+    ///
+    /// **Not implemented**: [`NetronExporter::export`] returns a structured
+    /// error for this variant. It is kept in the enum so the intent stays
+    /// expressible (and so selecting it is a compile-time-visible choice rather
+    /// than a silent fallback), but nothing in this crate can encode the ONNX
+    /// `ModelProto` protobuf schema.
     Onnx,
 }
 
@@ -330,10 +336,17 @@ impl NetronExporter {
                 fs::write(path, json)?;
             },
             ExportFormat::Onnx => {
-                // For now, export as JSON with .onnx extension
-                // A full ONNX protobuf implementation would require additional dependencies
-                let json = serde_json::to_string_pretty(&self.model)?;
-                fs::write(path, json)?;
+                // Refuse rather than write JSON bytes under an ONNX name. The
+                // previous implementation serialised `self.model` as JSON and
+                // wrote it to the caller's `.onnx` path, producing a file that
+                // no ONNX runtime, checker or Netron ONNX importer can open,
+                // while reporting success.
+                return Err(anyhow::anyhow!(
+                    "ExportFormat::Onnx is not implemented: writing a real .onnx file needs a \
+                     protobuf encoder for the ONNX ModelProto schema, which trustformers-debug \
+                     does not link. Use ExportFormat::Json -- Netron opens the JSON graph \
+                     directly."
+                ));
             },
         }
 
@@ -433,6 +446,32 @@ impl NetronExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onnx_export_refuses_instead_of_writing_json_under_an_onnx_name() {
+        let exporter = NetronExporter::new("m", "test model").with_format(ExportFormat::Onnx);
+        let path = std::env::temp_dir().join(format!("tfdbg_netron_{}.onnx", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let err = exporter.export(&path).expect_err("ONNX must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("not implemented"), "{msg}");
+        assert!(msg.contains("protobuf"), "must name what is missing: {msg}");
+        assert!(
+            !path.exists(),
+            "no file may be written for a refused format"
+        );
+    }
+
+    #[test]
+    fn json_export_still_writes_a_real_graph() {
+        let exporter = NetronExporter::new("m", "test model").with_format(ExportFormat::Json);
+        let path = std::env::temp_dir().join(format!("tfdbg_netron_{}.json", std::process::id()));
+        exporter.export(&path).expect("json export works");
+        let text = std::fs::read_to_string(&path).expect("written");
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert!(parsed.is_object());
+        let _ = std::fs::remove_file(&path);
+    }
     use std::env;
 
     #[test]
