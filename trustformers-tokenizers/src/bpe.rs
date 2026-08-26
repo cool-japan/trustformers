@@ -365,7 +365,7 @@ impl BPETokenizer {
     /// Normalize text for improved Unicode handling.
     ///
     /// Public for inspection and testing, like [`Self::pre_tokenize`]. It is a
-    /// projection of [`Self::aligned_normalize_text`], the single
+    /// projection of `Self::aligned_normalize_text`, the single
     /// implementation the encoder runs, so it can never describe a
     /// normalization the encoder does not perform.
     pub fn normalize_text(&self, text: &str) -> String {

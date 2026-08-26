@@ -1,7 +1,7 @@
 //! Extended LSTM (xLSTM) model.
 //!
-//! Puts the [`SLstmBlock`](crate::xlstm::SLstmBlock) and
-//! [`MLstmBlock`](crate::xlstm::MLstmBlock) recurrent cells into a pre-LayerNorm
+//! Puts the [`SLstmBlock`] and
+//! [`MLstmBlock`] recurrent cells into a pre-LayerNorm
 //! residual stack with a gated feed-forward network, an embedding table and a
 //! language-modelling head — every one of which holds real learned weights.
 //!
@@ -320,7 +320,7 @@ impl XLSTMForSequenceClassification {
 /// One xLSTM recurrent layer.
 ///
 /// Holds an sLSTM block, an mLSTM block, or (for
-/// [`XLSTMBlockType::Mixed`](crate::xlstm::XLSTMBlockType::Mixed)) both applied in
+/// [`XLSTMBlockType::Mixed`]) both applied in
 /// sequence. Layer normalisation and the feed-forward network live in
 /// [`XLSTMModel`], so this type's parameter count is exactly the recurrent cell.
 #[derive(Debug, Clone)]

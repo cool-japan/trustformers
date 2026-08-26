@@ -231,6 +231,14 @@ impl MetalGraph {
 }
 
 /// Error returned by every entry point when the real Metal path is unavailable.
+///
+/// Only the `#[cfg(not(all(target_os = "macos", feature = "metal")))]` fallback
+/// impls below call this, so it is gated the same way they are - mirroring how
+/// `map_gpu`/`map_core` at the bottom of this file are gated to the opposite
+/// (Metal-available) arm. Without this cfg, a build with Metal available (macOS +
+/// `--features metal`) compiles this function with zero call sites, since every
+/// caller lives in the mutually exclusive arm.
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
 fn metal_unavailable(operation: &str) -> TrustformersError {
     TrustformersError::feature_unavailable(
         format!(

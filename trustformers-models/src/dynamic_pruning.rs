@@ -1312,7 +1312,7 @@ impl PruningStatistics {
         report
     }
 
-    /// Write [`Self::report_string`] to stdout.
+    /// Write `Self::report_string` to stdout.
     ///
     /// This is an explicit, caller-initiated escape hatch for binaries and
     /// examples; nothing on the pruning path writes to stdout on its own.
@@ -1323,7 +1323,7 @@ impl PruningStatistics {
         println!("{}", self.report_string());
     }
 
-    /// Emit [`Self::report_string`] at `info` level through `tracing`.
+    /// Emit `Self::report_string` at `info` level through `tracing`.
     pub fn log_report(&self) {
         tracing::info!("{}", self.report_string());
     }

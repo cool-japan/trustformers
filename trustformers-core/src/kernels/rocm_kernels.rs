@@ -213,7 +213,7 @@ impl RocmKernel {
     }
 
     /// Matrix multiplication. Errors unless a real device is available
-    /// (see [`RocmKernel::ensure_device_available`]); never fabricates a
+    /// (see `RocmKernel::ensure_device_available`); never fabricates a
     /// result or silently leaves `c` untouched while returning `Ok`.
     pub fn matmul(
         &mut self,
@@ -252,7 +252,7 @@ impl RocmKernel {
     }
 
     /// Flash attention. Errors unless a real device is available (see
-    /// [`RocmKernel::ensure_device_available`]).
+    /// `RocmKernel::ensure_device_available`).
     pub fn flash_attention(
         &mut self,
         query: &Tensor,
@@ -294,7 +294,7 @@ impl RocmKernel {
     }
 
     /// Layer normalization. Errors unless a real device is available (see
-    /// [`RocmKernel::ensure_device_available`]).
+    /// `RocmKernel::ensure_device_available`).
     pub fn layer_norm(
         &mut self,
         input: &Tensor,
@@ -344,7 +344,7 @@ impl RocmKernel {
     }
 
     /// Fused GELU activation. Errors unless a real device is available
-    /// (see [`RocmKernel::ensure_device_available`]).
+    /// (see `RocmKernel::ensure_device_available`).
     pub fn fused_gelu(
         &mut self,
         input: &Tensor,
@@ -367,7 +367,7 @@ impl RocmKernel {
     }
 
     /// Reduce-sum. Errors unless a real device is available (see
-    /// [`RocmKernel::ensure_device_available`]).
+    /// `RocmKernel::ensure_device_available`).
     pub fn reduce_sum(
         &mut self,
         input: &Tensor,

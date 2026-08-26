@@ -1271,7 +1271,7 @@ impl CommandRForCausalLM {
         self.load_from_path_with_config(model_path, config)
     }
 
-    /// Load model weights with an explicit [`WeightLoadingConfig`].
+    /// Load model weights with an explicit [`WeightLoadingConfig`](crate::weight_loading::WeightLoadingConfig).
     pub fn load_from_path_with_config(
         &mut self,
         model_path: impl AsRef<std::path::Path>,

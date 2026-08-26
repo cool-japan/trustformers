@@ -21,10 +21,10 @@ use trustformers_core::tensor::Tensor;
 #[cfg(feature = "vision")]
 /// Pipeline for image-to-text tasks (image captioning, VQA).
 ///
-/// [`Self::process_image`] does real decoding/resize/normalization work, but
+/// `Self::process_image` does real decoding/resize/normalization work, but
 /// turning those pixels into text needs a trained vision-language decoder,
 /// which this workspace does not have wired in — see
-/// [`Self::generate_caption`] / [`Self::generate_with_prompt`], which
+/// `Self::generate_caption` / `Self::generate_with_prompt`, which
 /// honestly return [`TrustformersError::FeatureUnavailable`] rather than a
 /// fabricated caption.
 #[derive(Clone)]

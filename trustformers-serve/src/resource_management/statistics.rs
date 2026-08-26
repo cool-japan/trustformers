@@ -733,7 +733,7 @@ impl MetricsAggregator {
     /// Computes every configured [`AggregationMethod`] (plus every configured
     /// percentile) over the most recent `settings.rolling_window_size`
     /// entries of `utilization_history`, for each series
-    /// [`resource_utilization_series`] flattens out of it, and stores the
+    /// `resource_utilization_series` flattens out of it, and stores the
     /// result keyed by series name. Refuses only when there is nothing
     /// recorded at all; `record_utilization` always calls this with the entry
     /// it just pushed already included, so that case does not arise on the
@@ -832,7 +832,7 @@ impl AnomalyDetector {
 
     /// Detect anomalies in performance data using a three-sigma rule.
     ///
-    /// For each metric in [`KNOWN_METRICS`], computes the mean and sample
+    /// For each metric in `KNOWN_METRICS`, computes the mean and sample
     /// standard deviation over every finite recorded reading, then flags any
     /// reading more than three standard deviations from that mean. A metric
     /// with fewer than two finite readings, or with zero variance (nothing
@@ -1024,7 +1024,7 @@ impl BottleneckAnalyzer {
     /// Analyze performance bottlenecks, ranked by measured utilization.
     ///
     /// Compares the most recent snapshot's utilization of each resource in
-    /// [`KNOWN_METRICS`] (excluding `overall_efficiency`, a derived summary
+    /// `KNOWN_METRICS` (excluding `overall_efficiency`, a derived summary
     /// rather than a resource that can itself be exhausted) against
     /// [`BottleneckAnalysisConfig`]'s configured threshold for the matching
     /// [`BottleneckType`] (a resource with no dedicated threshold entry uses

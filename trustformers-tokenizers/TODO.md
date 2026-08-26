@@ -21,7 +21,7 @@ Python bindings.
 
 ## Current Status
 
-**Version:** 0.2.1 (unreleased) | **Date:** 2026-08-24 (SLoC and the migration-docs correction above refreshed; remainder largely last reviewed 2026-07-09) | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-08-24 (SLoC and the migration-docs correction above refreshed; remainder largely last reviewed 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** — 24 tokenizer types implemented and tested, 0 genuine stub/placeholder implementations

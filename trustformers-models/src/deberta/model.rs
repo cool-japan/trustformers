@@ -310,7 +310,7 @@ impl DebertaDisentangledSelfAttention {
     /// The signed, clamped relative distance matrix `δ(i, j) = i − j`.
     ///
     /// Exposed for inspection and testing; the attention logits are built from
-    /// [`Self::relative_bucket`], which maps the same distances onto rows of the
+    /// `Self::relative_bucket`, which maps the same distances onto rows of the
     /// learned embedding table.
     pub fn build_relative_position(&self, query_size: usize, key_size: usize) -> Array2<i32> {
         let mut relative_positions = Array2::zeros((query_size, key_size));

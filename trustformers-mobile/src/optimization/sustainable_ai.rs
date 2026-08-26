@@ -114,7 +114,7 @@ pub struct GridLocation {
 impl CarbonFootprintTracker {
     /// A commonly-cited global-average grid carbon intensity (gCO2/kWh;
     /// IEA-order-of-magnitude figure for the world electricity mix). Used
-    /// by [`Self::get_current_carbon_intensity`] only when no real
+    /// by `Self::get_current_carbon_intensity` only when no real
     /// [`CarbonIntensityProvider`] has been injected via
     /// [`Self::with_carbon_intensity_provider`] -- a single, clearly
     /// documented placeholder value, not a per-hour simulation dressed up
@@ -137,8 +137,8 @@ impl CarbonFootprintTracker {
     }
 
     /// Inject a real [`CarbonIntensityProvider`] (e.g. wired to a live
-    /// grid-data API) so [`Self::get_current_carbon_intensity`]/
-    /// [`Self::get_renewable_fraction`] report real, location-accurate
+    /// grid-data API) so `Self::get_current_carbon_intensity`/
+    /// `Self::get_renewable_fraction` report real, location-accurate
     /// figures instead of the honest-but-generic global-average fallback.
     pub fn with_carbon_intensity_provider(
         mut self,

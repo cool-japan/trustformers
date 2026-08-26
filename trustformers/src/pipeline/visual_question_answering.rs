@@ -11,7 +11,7 @@
 //!   `extract_patch_features`.
 //! * **Fusion arithmetic** — [`FusionModule`]'s concatenation, element-wise and
 //!   attention-style combinations.
-//! * **Ranking** — [`VqaProcessor::score_answers`] softmaxes and sorts real
+//! * **Ranking** — [`VisualQaPipeline::score_answers`] softmaxes and sorts real
 //!   logits.
 //!
 //! ## What is not available
@@ -21,7 +21,7 @@
 //! structured [`TrustformersError::FeatureUnavailable`]:
 //! [`VisualQuestionAnsweringPipeline::answer_question`], all four
 //! [`AnswerGenerator`] strategies, [`AttentionVisualizer::visualize_attention`],
-//! [`ReasoningEngine::generate_reasoning_chain`] and [`VqaPipeline::answer`].
+//! [`ReasoningEngine::generate_reasoning_chain`] and [`VisualQaPipeline::answer`].
 //!
 //! Previously those returned keyword-triggered answers ("what" → "An object or
 //! scene element", "how many" → "2", "is"/"are" → "Yes"), two hardcoded
@@ -29,7 +29,7 @@
 //! reasoning chain narrating steps that never ran. None of that survives.
 //!
 //! Use [`ImageProcessor::process_image`] and [`VqaProcessor`] to prepare inputs
-//! for a real model, and [`VqaProcessor::score_answers`] to rank its logits.
+//! for a real model, and [`VisualQaPipeline::score_answers`] to rank its logits.
 
 use crate::core::traits::{Model, Tokenizer};
 use crate::error::{Result, TrustformersError};
@@ -1188,7 +1188,7 @@ impl VisualQaPipeline {
     ///
     /// Use [`VqaProcessor::encode_question`],
     /// [`VqaProcessor::encode_image_features`] and
-    /// [`VqaPipeline::score_answers`] around your own model instead.
+    /// [`Self::score_answers`] around your own model instead.
     pub fn answer(
         &self,
         input: VqaInput,

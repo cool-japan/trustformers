@@ -656,7 +656,7 @@ fn block_layout(payload_size: usize) -> Option<(std::alloc::Layout, usize)> {
 }
 
 /// Allocate managed memory. Returns a pointer to `size` usable bytes,
-/// aligned to [`MAX_SUPPORTED_ALIGN`], or null on failure (zero/negative
+/// aligned to `MAX_SUPPORTED_ALIGN`, or null on failure (zero/negative
 /// size, arithmetic overflow, or allocator failure).
 #[no_mangle]
 pub extern "C" fn trustformers_allocate_managed_memory(size: c_int) -> *mut c_void {

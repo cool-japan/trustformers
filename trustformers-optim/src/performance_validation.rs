@@ -1482,7 +1482,7 @@ pub struct OptimizerBenchmarkResult {
     pub max_step_time: Duration,
     pub throughput: f64,
     /// The optimizer's real allocated state memory (bytes) at the end of
-    /// the run, from [`BenchmarkOptimizer::state_memory_bytes`]. `None`
+    /// the run, from `BenchmarkOptimizer::state_memory_bytes`. `None`
     /// when the optimizer kind exposes no such accessor (currently only
     /// `LAMB`). Despite the field's name this is a single end-of-run
     /// reading, not an average of varying samples: every optimizer kind

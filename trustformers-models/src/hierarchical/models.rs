@@ -85,7 +85,7 @@ impl HierarchicalTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision walked a
+    /// Always fails: see `checkpoint_unsupported`. A previous revision walked a
     /// safetensors file, printed the shape of every tensor it found and then
     /// returned `Ok(())` without assigning any of them, so a caller ended up
     /// running the randomly initialised model believing it held pretrained
@@ -130,7 +130,7 @@ impl Model for HierarchicalTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised
@@ -192,7 +192,7 @@ impl PyramidTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision called
+    /// Always fails: see `checkpoint_unsupported`. A previous revision called
     /// three private helpers whose entire bodies were `Ok(())` with a comment
     /// saying an implementation "would" load the weights, so the model kept its
     /// random initialisation while reporting a successful load.
@@ -229,7 +229,7 @@ impl Model for PyramidTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised
@@ -316,7 +316,7 @@ impl Model for TreeTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised
@@ -403,7 +403,7 @@ impl Model for NestedTransformer {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised
@@ -477,7 +477,7 @@ impl Model for HierarchicalForSequenceClassification {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised
@@ -537,7 +537,7 @@ impl Model for HierarchicalForLanguageModeling {
     ///
     /// # Errors
     ///
-    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// Always fails: see `checkpoint_unsupported`. A previous revision spooled
     /// the reader to a temporary file, printed
     /// `Weight loading fallback - weights successfully processed`, deleted the
     /// file and returned `Ok(())` — the model kept every randomly initialised

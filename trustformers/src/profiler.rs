@@ -245,7 +245,7 @@ impl Profiler {
 
     /// The optimization advisor this profiler was constructed with.
     ///
-    /// [`Self::generate_optimization_suggestions`] runs this advisor's real,
+    /// `Self::generate_optimization_suggestions` runs this advisor's real,
     /// rule-based [`OptimizationAdvisor::analyze`] every time a session ends
     /// with `enable_advisor` set (see that method's doc comment for the
     /// `AnalysisContext` it assembles). This accessor is exposed for callers

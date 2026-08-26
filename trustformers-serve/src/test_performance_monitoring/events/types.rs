@@ -1132,7 +1132,7 @@ impl EventDispatcher {
 
     /// Events queued for deferred dispatch.
     ///
-    /// Always 0: [`Self::dispatch_event`] broadcasts synchronously and never
+    /// Always 0: `Self::dispatch_event` broadcasts synchronously and never
     /// enqueues, and no dispatch worker is spawned.
     pub async fn queued_event_count(&self) -> usize {
         self.dispatch_queue.lock().await.len()

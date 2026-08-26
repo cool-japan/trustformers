@@ -175,7 +175,7 @@ impl SequencePacker {
     /// Unpack a packed sequence back to individual sequences.
     ///
     /// When the packed input carries an `offset_mapping` (see
-    /// [`Self::create_packed_sequence`]), each unpacked sequence gets back the
+    /// `Self::create_packed_sequence`), each unpacked sequence gets back the
     /// slice of it that belongs to that sequence — which is exactly the
     /// mapping the sequence had before packing, in its own source text's
     /// coordinates.

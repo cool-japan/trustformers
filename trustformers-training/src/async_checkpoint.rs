@@ -331,7 +331,7 @@ impl AsyncCheckpointer {
 
     /// Load a checkpoint from `path`, in whichever format it was written.
     ///
-    /// The format is detected from the file's leading bytes ([`BINARY_MAGIC`]), not from the
+    /// The format is detected from the file's leading bytes (`BINARY_MAGIC`), not from the
     /// extension or from any configuration, so a checkpointer configured for one format can
     /// still read files produced by another. The file is streamed through a `BufReader`
     /// rather than materialised as one `String`.

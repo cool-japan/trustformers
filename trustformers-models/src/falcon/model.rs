@@ -107,7 +107,7 @@ impl ALiBi {
     /// `i` and key position `j` is `-slope_h * (i - j)` — a linear penalty that
     /// grows with the query/key distance. Positions in the future (`j > i`) are
     /// left at `0.0`: causal masking is a separate, additive concern handled by
-    /// [`FalconAttention::create_causal_mask`], so this function contributes the
+    /// `FalconAttention::create_causal_mask`, so this function contributes the
     /// positional bias and nothing else.
     ///
     /// The leading singleton axis lets the result broadcast over the batch when

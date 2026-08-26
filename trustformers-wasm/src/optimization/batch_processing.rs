@@ -336,7 +336,7 @@ impl BatchProcessor {
 
     /// Process pending requests based on batching strategy, running each
     /// request through `model`'s real forward pass (see
-    /// [`Self::process_batch_inference`]).
+    /// `Self::process_batch_inference`).
     pub async fn process_batch(
         &mut self,
         model: &crate::model::WasmModel,

@@ -146,7 +146,7 @@ impl CurriculumScheduler {
     /// Create a new curriculum scheduler.
     ///
     /// Returns an error when the configuration is logically invalid (e.g. empty
-    /// dataset, initial percentile out of [0,1]).
+    /// dataset, initial percentile out of `[0,1]`).
     pub fn new(
         strategy: CurriculumStrategy,
         total_samples: usize,

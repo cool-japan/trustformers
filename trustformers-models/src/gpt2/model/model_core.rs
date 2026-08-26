@@ -561,7 +561,7 @@ impl Model for Gpt2Model {
 
     /// Load pretrained weights from a safetensors or PyTorch byte stream.
     ///
-    /// The stream is parsed by [`Checkpoint`] and bound through
+    /// The stream is parsed by [`Checkpoint`](crate::weight_loading::checkpoint::Checkpoint) and bound through
     /// [`Gpt2Model::load_weights_from_reader`], which maps HuggingFace's GPT-2
     /// names (including the `transformer.` prefix used by task checkpoints) and
     /// transposes the Conv1D weights that HF stores as `[in, out]`.
@@ -613,7 +613,7 @@ impl Model for Gpt2Model {
     ///
     /// # Weight layout
     ///
-    /// See [`Gpt2Block::collect_named_parameters`](super::model_blocks::Gpt2Block::collect_named_parameters):
+    /// See `Gpt2Block::collect_named_parameters`:
     /// the four `Conv1D`-derived projections per block are exposed in this
     /// crate's `[out, in]` layout, not HuggingFace's on-disk `[in, out]`.
     fn named_tensors(&self) -> Vec<(String, &Tensor)> {

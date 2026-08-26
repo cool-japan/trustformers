@@ -191,7 +191,7 @@ impl CustomFormatTokenizer {
 
     /// Register a handler for `NormalizationType::Custom(name)` rules.
     /// Without a registered handler, encountering that rule is a
-    /// configuration error (see [`Self::normalize_text`]) rather than a
+    /// configuration error (see `Self::normalize_text`) rather than a
     /// silent no-op.
     pub fn with_custom_normalizer(
         mut self,
@@ -204,7 +204,7 @@ impl CustomFormatTokenizer {
 
     /// Register a handler for `PreTokenizationType::Custom(name)` rules.
     /// Without a registered handler, encountering that rule is a
-    /// configuration error (see [`Self::pre_tokenize`]) rather than a
+    /// configuration error (see `Self::pre_tokenize`) rather than a
     /// silent no-op.
     pub fn with_custom_pre_tokenizer(
         mut self,

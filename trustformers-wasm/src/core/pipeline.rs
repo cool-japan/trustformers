@@ -122,7 +122,7 @@ impl TextGenerationPipeline {
     /// Run one real forward pass over `context_ids` and return the next
     /// token id (argmax or temperature/top-k sample, per
     /// [`GenerationConfig::do_sample`]). Rebuilds the input tensor from the
-    /// full context every call — no KV cache, matching [`Self::generate_ids`].
+    /// full context every call — no KV cache, matching `Self::generate_ids`.
     ///
     /// Exposed publicly (unlike the rest of this pipeline's step-by-step
     /// internals) so external incremental/streaming callers - such as
@@ -338,7 +338,7 @@ impl TextGenerationPipeline {
     /// Whether `token_id` is one of the recognized end-of-sequence token
     /// ids (simplified: common EOS ids across tokenizer families, not a
     /// per-tokenizer lookup). Exposed publicly, independent of
-    /// [`Self::should_stop`]'s length-based cutoff, so callers that manage
+    /// `Self::should_stop`'s length-based cutoff, so callers that manage
     /// their own generation-length budget (like
     /// [`crate::streaming_generation::StreamingGenerator`]) can check for
     /// a real end-of-text condition without being coupled to this

@@ -108,7 +108,7 @@ pub enum FusionStrategy {
     /// Weighted average with fixed per-modality weights
     WeightedAverage,
     /// Real dot-product cross-attention (the same formula
-    /// [`MultiModalPipeline::compute_attention_weights`] uses): each
+    /// `MultiModalPipeline::compute_attention_weights` uses): each
     /// modality attends over every other present modality and the
     /// attention-weighted combination is averaged across modality pairs.
     /// Not a *trained* attention head (this workspace has none wired into

@@ -2,7 +2,7 @@
 //!
 //! ## What is real here
 //!
-//! Query parsing ([`parse_phrases`], which splits a GroundingDINO-style prompt
+//! Query parsing (`parse_phrases`, which splits a GroundingDINO-style prompt
 //! on `.` and `,`) and the post-processing chain in
 //! [`VisualGroundingPipeline::postprocess`]: score thresholding, descending
 //! sort and truncation to `max_detections`.

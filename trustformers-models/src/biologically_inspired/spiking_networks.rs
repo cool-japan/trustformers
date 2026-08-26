@@ -601,7 +601,7 @@ pub fn update_adexp_dynamics(
 /// Hodgkin–Huxley dynamics with the full `m`/`h`/`n` gating ODEs.
 ///
 /// The equations are integrated with explicit Euler sub-steps of at most
-/// [`HH_MAX_SUBSTEP_MS`] milliseconds, which keeps the stiff sodium current
+/// `HH_MAX_SUBSTEP_MS` milliseconds, which keeps the stiff sodium current
 /// stable for the millisecond-scale `config.dt` used elsewhere. A spike is an
 /// upward crossing of 0 mV, so a single action potential is reported once.
 pub fn update_hh_dynamics(

@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** 1197 passed / 1 skipped / 0 failed as of 2026-08-25 (`cargo nextest run -p trustformers-optim --no-fail-fast`, independently re-run — see the 2026-08-25 honesty-pass addendum near the end of this file) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24 — up from 50,431 on 2026-07-09, not re-measured after the 2026-08-25 pass) | **Updated:** 2026-08-25 (production-hardening honesty pass on `performance_validation.rs`/`federated.rs`/`advanced_distributed_features.rs` — see addendum; earlier narrative largely unreviewed since 2026-07-09)
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** 1197 passed / 1 skipped / 0 failed as of 2026-08-25 (`cargo nextest run -p trustformers-optim --no-fail-fast`, independently re-run — see the 2026-08-25 honesty-pass addendum near the end of this file) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24 — up from 50,431 on 2026-07-09, not re-measured after the 2026-08-25 pass) | **Updated:** 2026-08-25 (production-hardening honesty pass on `performance_validation.rs`/`federated.rs`/`advanced_distributed_features.rs` — see addendum; earlier narrative largely unreviewed since 2026-07-09)
 
 ## Overview
 

@@ -133,7 +133,7 @@ impl VariableLengthBatcher {
     ///    **or** whose item count reached `max_batch_size`.
     ///
     /// For use with `drop_last: false`, partial buckets are also returned by
-    /// [`flush_all`].
+    /// [`flush_all`][VariableLengthBatcher::flush_all].
     pub fn next_batch(&mut self) -> Option<PaddedBatch> {
         for bucket_idx in 0..self.buckets.len() {
             if self.buckets[bucket_idx].is_empty() {

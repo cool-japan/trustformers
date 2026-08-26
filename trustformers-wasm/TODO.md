@@ -18,7 +18,7 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.2.1 (unreleased) | **Date:** 2026-08-24 (SLoC figure near the end of this file refreshed to 48,359 via `tokei`; this crate had no wave-4 work item, so the rest is unreviewed since 2026-07-09) | **Status:** Stable
+**Version:** 0.2.1 | **Date:** 2026-08-24 (SLoC figure near the end of this file refreshed to 48,359 via `tokei`; this crate had no wave-4 work item, so the rest is unreviewed since 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure

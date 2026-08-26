@@ -42,9 +42,10 @@ use super::types::{
 
 /// Enhanced download manager with parallel and resumable downloads
 ///
-/// Note: this does not yet route through [`CdnConfig`] or persist
-/// [`ResumeInfo`] — real resumable downloads work off the on-disk file's own
-/// `fs::metadata().len()` in `download_single_file_async`, and `RepoFile`
+/// Note: this does not yet route through [`CdnConfig`](super::types::CdnConfig) or
+/// persist [`ResumeInfo`](super::types::ResumeInfo) — real resumable downloads
+/// work off the on-disk file's own `fs::metadata().len()` in
+/// `download_single_file_async`, and `RepoFile`
 /// URLs are used as-is rather than being routed through a CDN's
 /// primary/fallback host list. `HubOptions::use_cdn` therefore does not yet
 /// change request routing; both types remain available (`CdnConfig`,
@@ -332,7 +333,7 @@ impl DownloadManager {
     /// Apply delta compression if available.
     ///
     /// The downloaded delta is a self-verifying TFDELTA1 file (see
-    /// [`crate::hub_delta_codec`]): [`apply_binary_delta`](Self::apply_binary_delta)
+    /// `crate::hub_delta_codec`): `apply_binary_delta`
     /// refuses to reconstruct anything unless both the base and the
     /// reconstructed target pass their embedded SHA-256 checks, so a
     /// mismatched or corrupted delta can never silently produce a bad model

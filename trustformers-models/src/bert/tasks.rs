@@ -377,7 +377,7 @@ impl Model for BertForMaskedLM {
 
     /// Publish the encoder under `bert.` plus the `cls.predictions.…` MLM head.
     ///
-    /// See [`BertLMHead::collect_named_parameters`] for why the decoder bias is
+    /// See `BertLMHead::collect_named_parameters` for why the decoder bias is
     /// published once, as `cls.predictions.bias`.
     fn named_tensors(&self) -> Vec<(String, &Tensor)> {
         let mut tensors = Vec::new();

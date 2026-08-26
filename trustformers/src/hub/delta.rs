@@ -44,7 +44,7 @@ pub struct DeltaInfo {
 /// match the supplied base, that is truncated or malformed, or that doesn't
 /// replay to the bytes it claims to, is a [`TrustformersError`] — never a
 /// silently corrupted result. This is what makes
-/// [`DownloadManager::apply_binary_delta`] safe: it is the only way this
+/// `DownloadManager::apply_binary_delta` safe: it is the only way this
 /// module ever produces reconstructed bytes.
 pub fn reconstruct_from_delta(base_data: &[u8], delta_data: &[u8]) -> Result<Vec<u8>> {
     crate::hub_delta_codec::apply_delta(base_data, delta_data).map_err(|message| {

@@ -153,7 +153,7 @@ impl ValidationReport {
         report
     }
 
-    /// Write [`Self::summary_report`] to stdout.
+    /// Write `Self::summary_report` to stdout.
     ///
     /// This is an explicit, caller-initiated escape hatch for binaries and
     /// examples; nothing on the validation path writes to stdout on its own.
@@ -164,7 +164,7 @@ impl ValidationReport {
         println!("{}", self.summary_report());
     }
 
-    /// Emit [`Self::summary_report`] at `info` level through `tracing`.
+    /// Emit `Self::summary_report` at `info` level through `tracing`.
     pub fn log_summary(&self) {
         tracing::info!("{}", self.summary_report());
     }

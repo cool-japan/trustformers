@@ -43,7 +43,7 @@ pub struct HostSnapshot {
 /// callers keep their current `HostSnapshot`-returning signature; a
 /// `total_memory_bytes == 0` reading is that failure; a real host is never
 /// reported that way. New callers that can represent absence directly
-/// should prefer [`measure_host_checked`], which returns `None` instead of
+/// should prefer `measure_host_checked`, which returns `None` instead of
 /// synthesizing a value.
 pub async fn measure_host_async() -> HostSnapshot {
     measure_host_checked().await.unwrap_or_else(|| HostSnapshot {
@@ -77,7 +77,7 @@ pub struct TimestampedSnapshot {
     pub sampled_at: Instant,
 }
 
-/// The refresh cadence [`get_stats`](super::functions::get_stats) starts
+/// The refresh cadence `get_stats` starts
 /// [`HostSampler`] with.
 pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 

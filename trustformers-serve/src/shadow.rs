@@ -1026,7 +1026,7 @@ fn truncate_for_report(rendered: &str) -> String {
 
 /// Structural similarity of two JSON values, in `[0, 1]`.
 ///
-/// See [`ShadowTestingService::calculate_similarity`] for the rules. Kept as a
+/// See `ShadowTestingService::calculate_similarity` for the rules. Kept as a
 /// free function so it can be exercised directly, without standing up a shadow
 /// testing service.
 pub fn json_similarity(a: &serde_json::Value, b: &serde_json::Value) -> f64 {

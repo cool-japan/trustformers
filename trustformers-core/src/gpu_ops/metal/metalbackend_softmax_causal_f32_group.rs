@@ -21,7 +21,7 @@ impl MetalBackend {
     /// This is a host-in / host-out entry point: the result is read straight out
     /// of the output `MTLBuffer` before returning, so the command buffer must be
     /// **waited on**, not merely committed. It previously used
-    /// [`commit_async`](Self::commit_async) and then read `contents()` on the
+    /// `commit_async` and then read `contents()` on the
     /// very next line, which raced the GPU and — because a freshly allocated
     /// `StorageModeShared` buffer starts zeroed — returned an all-zero attention
     /// weight matrix essentially every time. That is not merely a wrong number:

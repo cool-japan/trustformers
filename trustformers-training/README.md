@@ -4,11 +4,11 @@ Training infrastructure for TrustformeRS.
 
 ## Current State
 
-**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Updated:** 2026-08-24
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-08-24
 
 This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a core `Trainer`/`TrainingArguments` loop (plus a simpler `SimpleTrainer` builder API), mixed-precision/AMP, quantization-aware training, RLHF (PPO/DPO), few-shot and meta-learning, continual learning, hyperparameter optimization, a large data-pipeline/augmentation/curriculum system, and a family of distributed/parallel-training abstractions (tensor, sequence, 3D, expert and ring-attention parallelism, plus elastic and multi-cloud orchestration).
 
-- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (20,629 passed / 43 skipped / 0 failed workspace-wide, default features, 2026-08-24)
+- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (21,370 passed / 41 skipped / 0 failed workspace-wide, default features, 2026-08-26)
 - **1,673 public API items** (`pub fn`/`struct`/`enum`/`trait`, incl. impl-block methods) reachable from `lib.rs` as of 2026-07-09, not re-verified — the underlying compiled-file count (72 files) is stale, see below
 - **83,319 SLoC** for the whole crate (`tokei`, verified 2026-08-24). The 2026-07-09 "58,207 SLoC / 72 compiled files vs. 83,317 total / 101 files" split (see [Verification Notes](#verification-notes)) is not recomputed this pass: this wave split 2 of those 72 compiled files (`data_pipeline.rs`, `auto_parallelism.rs`) into 15 files, so the compiled-file count is higher than 72 today, exact number not recounted.
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder", searched case-insensitively) in the compiled source as of 2026-07-01, not re-verified
@@ -209,7 +209,7 @@ trustformers-training/
 
 ## Testing
 
-- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (20,629 passed / 43 skipped / 0 failed workspace-wide, default features, 2026-08-24)
+- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (21,370 passed / 41 skipped / 0 failed workspace-wide, default features, 2026-08-26)
 - Covers the training loop, distributed abstractions, mixed precision/QAT, RLHF (PPO/DPO), few-shot/continual learning, hyperparameter search (incl. `hpo`'s multi-objective Pareto-front search and auto-LR range tests), data pipeline, and the stability/monitoring stack
 - `examples/` contains illustrative programs, but at least one (`examples/basic_training/simple_classification.rs`) references types (`TrainerConfig`, `TrainingArgs`, `MetricResult`) that no longer match the current public API — see `TODO.md`
 

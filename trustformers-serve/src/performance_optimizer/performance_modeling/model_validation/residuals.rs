@@ -119,7 +119,7 @@ pub fn test_data_statistics(actuals: &[f64]) -> TestDataStatistics {
 ///   Kolmogorov p-value is conservative (a Lilliefors correction, which this
 ///   crate does not carry, would be needed for an exact level).
 /// * `outliers` are the indices whose standardised residual exceeds
-///   [`OUTLIER_Z_SCORE`].
+///   `OUTLIER_Z_SCORE`.
 ///
 /// Each statistic is `NaN` (or, for `outliers`, empty) when the sample cannot
 /// support it.

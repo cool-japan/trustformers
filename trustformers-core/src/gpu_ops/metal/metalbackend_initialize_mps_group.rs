@@ -62,7 +62,7 @@ impl MetalBackend {
     /// from the transient intermediates the `*_gpu_to_gpu` ops mint. Release it with
     /// [`remove_persistent_buffer`](Self::remove_persistent_buffer) or
     /// [`clear_buffer_cache`](Self::clear_buffer_cache), or unpin it with
-    /// [`set_buffer_pinned`](Self::set_buffer_pinned) to make it reclaimable.
+    /// [`set_buffer_tier`](Self::set_buffer_tier) to make it reclaimable.
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
         let buffer = Arc::new(self.create_buffer(data)?);
         let buffer_id = BufferId::new();

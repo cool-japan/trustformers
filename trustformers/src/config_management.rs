@@ -91,7 +91,7 @@ impl ConfigurationManager {
     /// `1.0.0 -> 2.0.0` and `2.0.0 -> 3.0.0` migrations are registered, with
     /// no direct `1.0.0 -> 3.0.0` migration -- and the result does not
     /// depend on the order migrations were registered in (see
-    /// [`Self::find_migration_path`]).
+    /// `Self::find_migration_path`).
     ///
     /// # Errors
     ///

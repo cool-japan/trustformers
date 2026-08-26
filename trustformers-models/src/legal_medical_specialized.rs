@@ -51,10 +51,10 @@
 //! and [`LegalMedicalMLP`] applies a SiLU-gated feed-forward. The rest of the
 //! domain-specific surface lives in submodules:
 //!
-//! - [`generation`]: byte-level tokenizer, autoregressive `generate`, and the
+//! - `generation`: byte-level tokenizer, autoregressive `generate`, and the
 //!   confidentiality-aware attention mask.
-//! - [`redaction`]: pattern-based PII redaction (`redact_sensitive_info`).
-//! - [`analysis`]: document/citation/compliance heuristics.
+//! - `redaction`: pattern-based PII redaction (`redact_sensitive_info`).
+//! - `analysis`: document/citation/compliance heuristics.
 //!
 //! ## Example Usage
 //!

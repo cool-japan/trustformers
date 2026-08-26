@@ -2,7 +2,7 @@
 //!
 //! `HubUploader` speaks the real Hub upload protocol (repo existence check,
 //! repo creation, and the NDJSON commit API) via `reqwest`, behind the
-//! `hub` feature — see [`api`] for the wire-level detail. Without a token,
+//! `hub` feature — see `api` for the wire-level detail. Without a token,
 //! every operation fails fast with [`HubError::MissingCredentials`] /
 //! [`TrustformersError::Hub`] instead of proceeding. Without the `hub`
 //! feature (no networking compiled in), every operation fails with
@@ -227,7 +227,7 @@ impl HubUploader {
     ///
     /// Creates the repository first if [`UploadConfig::create_if_missing`]
     /// is set and it doesn't already exist. Any file at or above
-    /// [`api::LFS_INLINE_THRESHOLD_BYTES`] is refused *before* any network
+    /// `api::LFS_INLINE_THRESHOLD_BYTES` is refused *before* any network
     /// request — this module doesn't implement the real Git-LFS object
     /// upload (a separate preupload + batch-upload exchange), so silently
     /// either truncating it, inlining a huge base64 blob, or fabricating an

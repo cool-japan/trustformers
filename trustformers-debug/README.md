@@ -1,6 +1,6 @@
 # TrustformeRS Debug
 
-**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Tests:** ~899 as of 2026-07-09, not independently re-run this pass | **SLoC:** 88,454 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from ~101,000 likely reflects measurement scope rather than code change; not investigated) | **Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** ~899 as of 2026-07-09, not independently re-run this pass | **SLoC:** 88,454 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from ~101,000 likely reflects measurement scope rather than code change; not investigated) | **Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
 
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
 

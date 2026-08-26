@@ -5,7 +5,7 @@
 //! for extra metadata keys.
 //!
 //! Like every exporter in this crate it writes the model's **real** parameters,
-//! taken from [`Model::named_tensors`](crate::traits::Model::named_tensors). A
+//! taken from [`Model::named_tensors`]. A
 //! previous revision of this file ignored the model and emitted a hard-coded
 //! 12-block GPT-2 skeleton of `0.1f32` weights; that code is gone.
 

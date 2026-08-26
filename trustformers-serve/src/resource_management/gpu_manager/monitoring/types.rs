@@ -532,6 +532,7 @@ impl GpuMonitoringSystem {
     ///         shader_clock_mhz: Some(1900),
     ///     },
     ///     fan_speeds: vec![50.0],
+    ///     total_memory_mb: Some(16384),
     /// };
     ///
     /// monitoring_system.update_metrics(0, metrics).await?;

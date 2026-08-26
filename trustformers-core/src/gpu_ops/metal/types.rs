@@ -3,7 +3,7 @@
 //! # Lifetime management
 //!
 //! Every GPU-resident intermediate produced by a `*_gpu_to_gpu` op is parked in a
-//! process-global [`BufferCache`]. Historically that cache was a plain
+//! process-global `BufferCache`. Historically that cache was a plain
 //! `HashMap<BufferId, Arc<Buffer>>` with no eviction and no callers of
 //! `remove_persistent_buffer`, so *every* intermediate stayed resident until the
 //! process exited - a decode loop leaked six buffers per attention call.
@@ -51,7 +51,7 @@
 //! simply forgets would occupy the cache until `clear_buffer_cache`. The composite
 //! ops in this module release their own intermediates, so the hot attention path
 //! never accumulated; the remaining case was every op that stores its GPU result id
-//! straight into a `Tensor::Metal`. [`MetalTensorData`] (`tensor/mod.rs`) now holds a
+//! straight into a `Tensor::Metal`. [`MetalTensorData`](crate::tensor::MetalTensorData) (`tensor/mod.rs`) now holds a
 //! [`MetalBufferHandle`] instead of a bare `BufferId` - the same change
 //! `gpu_ops::cuda::BufferHandle` already got in `CudaTensorData` - obtained through
 //! [`MetalBackend::retain_buffer`](crate::gpu_ops::metal::MetalBackend::retain_buffer)

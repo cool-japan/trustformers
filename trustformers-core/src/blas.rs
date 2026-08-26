@@ -35,7 +35,7 @@ pub struct BlasConfig {
     /// Tile extent used by the blocked GEMM kernels.
     ///
     /// This is what [`BlasOptimizer::auto_tune`] searches over, and it really
-    /// changes the loop structure: see [`BlasOptimizer::sequential_gemm`].
+    /// changes the loop structure: see `BlasOptimizer::sequential_gemm`.
     pub block_size: usize,
 }
 

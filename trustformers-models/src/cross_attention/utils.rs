@@ -557,9 +557,9 @@ pub fn pool_mask_key_axis(mask: Tensor, pooling_factor: usize) -> Result<Tensor>
 /// Pooling methods for hierarchical attention.
 #[derive(Debug, Clone)]
 pub enum PoolingMethod {
-    /// Average pooling (implemented; see [`average_pool_1d`]).
+    /// Average pooling (implemented; see `average_pool_1d`).
     Average,
-    /// Max pooling (implemented; see [`max_pool_1d`]).
+    /// Max pooling (implemented; see `max_pool_1d`).
     Max,
     /// Learned pooling weights. **Not implemented by [`pool_tensor`]**: this free function has
     /// no parameter through which to supply learned weights, so selecting this variant returns
@@ -668,9 +668,9 @@ pub fn interpolate_tensor(
 /// Interpolation methods.
 #[derive(Debug, Clone)]
 pub enum InterpolationMethod {
-    /// Linear interpolation (implemented; see [`linear_interpolate`]).
+    /// Linear interpolation (implemented; see `linear_interpolate`).
     Linear,
-    /// Nearest neighbor interpolation (implemented; see [`nearest_interpolate`]).
+    /// Nearest neighbor interpolation (implemented; see `nearest_interpolate`).
     Nearest,
 }
 

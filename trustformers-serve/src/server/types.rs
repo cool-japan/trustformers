@@ -564,9 +564,9 @@ fn default_device() -> String {
 ///
 /// Renamed from `MockTokenRequest` in 0.2.1. The name and its "for testing"
 /// doc comment outlived the handler they described:
-/// [`auth_token_handler`](crate::server::functions::auth_token_handler) has
+/// `auth_token_handler` has
 /// authenticated against the configured
-/// [`AuthService`](crate::auth::AuthService) since the canned-token path was
+/// [`AuthService`] since the canned-token path was
 /// removed, and a type called `Mock*` sitting on the crate's real
 /// credential-accepting endpoint invited exactly the wrong conclusion about
 /// what that endpoint does.

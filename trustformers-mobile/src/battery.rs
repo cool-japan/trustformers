@@ -151,7 +151,7 @@ impl BatteryReading {
     /// A timestamped reading that carries no measurements.
     ///
     /// Returned when the running target exposes no battery source this crate
-    /// can read (see [`BatteryMonitor::read_battery_info`]). Deliberately
+    /// can read (see `BatteryMonitor::read_battery_info`). Deliberately
     /// distinct from a zeroed reading: `None` means "not measured", whereas a
     /// `0` would claim an empty battery.
     pub fn unavailable() -> Self {
@@ -954,7 +954,7 @@ impl MobileBatteryManager {
     ///
     /// `None` when the running target exposes no readable battery gauge (every
     /// non-Linux, non-Android target -- see
-    /// [`BatteryMonitor::read_battery_info`]) or when monitoring has not taken
+    /// `BatteryMonitor::read_battery_info`) or when monitoring has not taken
     /// a reading yet. Charging status is deliberately *not* used to guess a
     /// level: "charging" says nothing about how full the cell is.
     pub fn get_current_battery_level(&self) -> Option<f32> {

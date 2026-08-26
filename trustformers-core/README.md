@@ -9,9 +9,9 @@ Core infrastructure crate providing fundamental abstractions and utilities for t
 
 ## Current State
 
-**Version 0.2.1 (unreleased) — last verified 2026-08-24**
+**Version 0.2.1 — last verified 2026-08-24**
 
-This crate is **stable and production-ready** for its real (CPU/CUDA/Metal) compute paths, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. The last workspace-level test run reported to this documentation pass measured 20,629 passed / 43 skipped / 0 failed across the whole workspace (default features, 2026-08-24) — this crate's own share was not re-measured separately this pass; see `TODO.md` for the crate's detailed, dated status (including which GPU backends are real vs. feature-flag facades).
+This crate is **stable and production-ready** for its real (CPU/CUDA/Metal) compute paths, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. The last workspace-level test run reported to this documentation pass measured 21,370 passed / 41 skipped / 0 failed across the whole workspace (default features, 2026-08-26) — this crate's own share was not re-measured separately this pass; see `TODO.md` for the crate's detailed, dated status (including which GPU backends are real vs. feature-flag facades).
 
 ## Features
 
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Testing
 
-The crate includes comprehensive test coverage. Workspace-wide (default features), `cargo nextest run --workspace` most recently measured 20,629 passed / 43 skipped / 0 failed (2026-08-24; see root `README.md`/`TODO.md` for the current figure, as this grows over time and this crate's own share was not separately re-measured this pass):
+The crate includes comprehensive test coverage. Workspace-wide (default features), `cargo nextest run --workspace` most recently measured 21,370 passed / 41 skipped / 0 failed (2026-08-26; see root `README.md`/`TODO.md` for the current figure, as this grows over time and this crate's own share was not separately re-measured this pass):
 - Property-based testing with proptest
 - Memory leak detection
 - Performance benchmarks

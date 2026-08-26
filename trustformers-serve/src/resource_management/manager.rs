@@ -171,8 +171,8 @@ impl AllocationLedger {
     /// Ports, temporary directories and database connections are deliberately
     /// *not* checked: a [`ResourceRequirement`] carries only a count for them,
     /// and the concrete port numbers and paths are chosen by
-    /// [`NetworkPortManager`](super::port_management::NetworkPortManager) and
-    /// [`TempDirectoryManager`](super::directory_management::TempDirectoryManager)
+    /// [`NetworkPortManager`] and
+    /// [`TempDirectoryManager`]
     /// *after* this check runs. Those managers hand out disjoint resources and
     /// fail loudly when their pool is exhausted, so the exclusivity guarantee
     /// lives there rather than being guessed at here.

@@ -908,7 +908,7 @@ pub trait ThreadAnalysisAlgorithm: std::fmt::Debug + Send + Sync {
 /// pattern it found, `None` when the shape is genuinely absent from the
 /// recorded interactions, or an error when there is nothing recorded to
 /// analyse. Implementations live in
-/// [`core::pattern_algorithms`](super::core::pattern_algorithms).
+/// [`core::pattern_algorithms`].
 pub trait PatternDetectionAlgorithm: std::fmt::Debug + Send + Sync {
     /// Looks for this algorithm's pattern in `test_data`.
     fn detect(

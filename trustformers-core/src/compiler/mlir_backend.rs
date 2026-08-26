@@ -675,7 +675,7 @@ impl MlirBackend {
     /// Only quantities this backend actually measures are populated: the pass names the
     /// caller applied, elapsed wall-clock time, and the byte length of the MLIR text before
     /// and after optimization (`code_before`/`code_after` are the actual strings/bytes that
-    /// went into and came out of [`Self::apply_mlir_passes`] or [`Self::apply_custom_pipeline`]
+    /// went into and came out of `Self::apply_mlir_passes` or `Self::apply_custom_pipeline`
     /// -- pass the real values, not placeholders). Fused-operation, loop, and
     /// memory-access-optimization counts would require parsing and diffing MLIR IR structure,
     /// which this module does not implement; those fields are `None` rather than a fabricated

@@ -284,7 +284,7 @@ impl ConfigurationManager {
 
     /// Names of `TRUSTFORMERS_*` environment variables present in the process
     /// environment that [`Self::from_environment`] does not recognize (i.e.
-    /// absent from [`Self::default_env_mappings`]).
+    /// absent from `Self::default_env_mappings`).
     ///
     /// Useful for surfacing a likely-misspelled override before it is
     /// silently ignored by `from_environment`.

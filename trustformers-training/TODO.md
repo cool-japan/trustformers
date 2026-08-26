@@ -1,6 +1,6 @@
 # trustformers-training TODO List
 
-**Version:** 0.2.1 (unreleased) | **Last reviewed:** 2026-08-24 (file-split and SLoC-total items refreshed; the detailed "72 compiled files / 58,207 SLoC / 1,673 public API items" breakdown below is unchanged since 2026-07-09 and is now stale on the file count specifically — this wave split 2 of those 72 files into 15, see the file-size correction below)
+**Version:** 0.2.1 | **Last reviewed:** 2026-08-24 (file-split and SLoC-total items refreshed; the detailed "72 compiled files / 58,207 SLoC / 1,673 public API items" breakdown below is unchanged since 2026-07-09 and is now stale on the file count specifically — this wave split 2 of those 72 files into 15, see the file-size correction below)
 
 ## Overview
 
@@ -14,7 +14,7 @@ plus elastic and multi-cloud orchestration).
 
 ## Current Status (verified 2026-07-01)
 
-- **~1,010 tests passing** as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24)
+- **~1,010 tests passing** as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26)
 - **1,673 public API items** reachable from `lib.rs` as of 2026-07-09, not re-verified — the underlying file count (72 compiled `.rs` files) is stale: this wave split 2 of those files (`data_pipeline.rs`, `auto_parallelism.rs`) into 15 files total, so the true compiled-file count today is higher, not recounted. Whole-crate SLoC (compiled + orphaned, `tokei`, verified 2026-08-24): **83,319** — close to but not identical to the 2026-07-09 "full `src/` tree on disk is 83,317 lines" figure, consistent with real edits since (not itself evidence the orphaned-code inventory below is stale, but it wasn't re-run this pass).
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder") in compiled code
 - **0 `.unwrap()` calls** in compiled production code

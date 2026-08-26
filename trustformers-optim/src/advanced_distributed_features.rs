@@ -767,7 +767,7 @@ impl TrendAnalyzer {
     }
 
     /// Sets the assumed cadence [`Self::update`] is called at (see the
-    /// field doc on [`Self::sample_interval`]). Panics-free for any
+    /// field doc on `Self::sample_interval`). Panics-free for any
     /// positive `Duration`; a zero interval is rejected by
     /// [`Self::predict`] instead (there is no sane "steps per zero
     /// seconds" conversion).
@@ -789,7 +789,7 @@ impl TrendAnalyzer {
     /// Fits `value ~ slope * index + intercept` over the retained window
     /// (`index` is each sample's position in the window, oldest = 0) and
     /// extrapolates to `index = (window_len - 1) + horizon / sample_interval`
-    /// -- one window position per [`Self::sample_interval`], so a longer
+    /// -- one window position per `Self::sample_interval`, so a longer
     /// horizon produces a genuinely different prediction instead of always
     /// predicting "the next sample" regardless of how far ahead the caller
     /// asked for.

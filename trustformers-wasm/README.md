@@ -2,7 +2,7 @@
 
 WebAssembly bindings for the TrustformeRS transformer library, enabling transformer models to run directly in web browsers and Node.js environments with WebGPU hardware acceleration.
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~130 as of 2026-07-09, not independently re-run this pass | **SLoC:** 48,359 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from 55,721 likely reflects measurement scope rather than code change; not investigated) | **Last Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~130 as of 2026-07-09, not independently re-run this pass | **SLoC:** 48,359 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from 55,721 likely reflects measurement scope rather than code change; not investigated) | **Last Updated:** 2026-08-24 (SLoC/date only; not otherwise reviewed this pass)
 
 ## Features
 

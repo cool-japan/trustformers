@@ -394,7 +394,7 @@ impl MixtureOfDepthsPipeline {
     }
 
     /// Override the layer-execution cache's maximum entry count (default
-    /// [`DEFAULT_LAYER_CACHE_CAPACITY`]).
+    /// `DEFAULT_LAYER_CACHE_CAPACITY`).
     ///
     /// A capacity of `0` disables caching entirely: every call to
     /// `execute_layer` recomputes.
@@ -538,9 +538,9 @@ impl MixtureOfDepthsPipeline {
     /// `execute_layer` checks this cache before running the attached
     /// [`TransformerLayerExecutor`] and inserts into it after a real
     /// execution, keyed on `(layer_index, content_hash(inputs,
-    /// routing_mask))` (see [`layer_cache_key`]). Entries beyond
+    /// routing_mask))` (see `layer_cache_key`). Entries beyond
     /// [`Self::with_layer_cache_capacity`]'s bound (default
-    /// [`DEFAULT_LAYER_CACHE_CAPACITY`]) are evicted least-recently-used
+    /// `DEFAULT_LAYER_CACHE_CAPACITY`) are evicted least-recently-used
     /// first.
     pub async fn cached_layer_count(&self) -> usize {
         self.layer_cache.read().await.len()

@@ -161,7 +161,7 @@ unsafe impl Sync for AlignedAllocator {}
 /// Momentum and variance for *every* registered parameter live in two contiguous
 /// arrays rather than in per-parameter allocations, so a sweep over one moment
 /// touches consecutive cache lines. Each parameter owns the half-open range
-/// `[momentum_offset, momentum_offset + size)` of [`SoAOptimizerState::momentum`]
+/// `[momentum_offset, momentum_offset + size)` of `SoAOptimizerState::momentum`
 /// (and likewise for the variance array); ranges are padded up to a cache-line
 /// boundary so no two parameters share a cache line.
 ///

@@ -26,7 +26,7 @@ type Result<T> = std::result::Result<T, TrustformersError>;
 ///
 /// Despite the name (kept for API continuity with callers that select
 /// `CommunicationBackend::Nccl`), this performs real collective math over
-/// an in-process [`InProcessGroup`] rather than talking to a GPU or a real
+/// an in-process `InProcessGroup` rather than talking to a GPU or a real
 /// NCCL runtime - see the module docs.
 #[cfg(feature = "nccl")]
 pub struct NcclCommunicator {
@@ -80,7 +80,7 @@ impl NcclCommunicator {
     /// Initialize NCCL-shaped communicators for all processes.
     ///
     /// Builds `world_size` communicators that share one real
-    /// [`InProcessGroup`], with ranks `0..world_size` - e.g. hand each
+    /// `InProcessGroup`, with ranks `0..world_size` - e.g. hand each
     /// returned communicator to its own thread to exercise real multi-rank
     /// collectives in-process.
     pub fn init_all(world_size: usize, device_ids: &[i32]) -> Result<Vec<Self>> {

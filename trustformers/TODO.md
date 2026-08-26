@@ -1,6 +1,6 @@
 # trustformers TODO List
 
-**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Updated:** 2026-08-24 (SLoC/test figures below refreshed; narrative sections largely last touched 2026-07-01/07-09, see inline dates)
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-08-24 (SLoC/test figures below refreshed; narrative sections largely last touched 2026-07-01/07-09, see inline dates)
 
 ## Overview
 
@@ -45,7 +45,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 ### Metrics (SLoC/tests refreshed 2026-08-24; narrative below re-verified 2026-07-01, not redone this pass)
 
 - **SLoC:** 123,252 (`tokei`, verified 2026-08-24 — up from ~109,369 on 2026-07-01; this cycle's `src/hub_offline_packs.rs` split into a 6-file directory module, plus several dead-code items turned into real accessors, both contribute)
-- **Tests:** ~2,261 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24)
+- **Tests:** ~2,261 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26)
 - **File-size policy, checked 2026-08-24**: `src/hub_offline_packs.rs` (previously flagged elsewhere as exceeding 2,000 lines at 2,009 lines) is now split into `src/hub_offline_packs/` (6 files). Three files not previously tracked here now exceed the 2,000-line limit: `src/hub_ui.rs` (2,026), `src/hub.rs` (2,013), `src/pipeline/conversational/summarization.rs` (2,001) — see root `TODO.md` P1 for detail.
 - **Doctests:** 5 passed, 164 ignored (intentionally `rust,ignore` — see README.md Testing section)
 - **Pipeline modules:** 54 `pub mod` declarations under `src/pipeline/` (38 task pipelines, 6 backends, 10 composition/optimization modules) — re-verified 2026-07-09 against `grep -c "^pub mod " src/pipeline/mod.rs`

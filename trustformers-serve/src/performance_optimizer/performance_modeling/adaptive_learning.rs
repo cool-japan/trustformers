@@ -857,7 +857,7 @@ impl OnlineGradientDescentLearner {
 impl OnlineLearner for OnlineGradientDescentLearner {
     /// Norm of the gradient this learner last applied.
     ///
-    /// [`Self::update_weights`] records it on every update; before 0.2.1 it was
+    /// `Self::update_weights` records it on every update; before 0.2.1 it was
     /// recorded and never read, while the engine published `0.0`, `0.5` or
     /// `0.8` depending on which of its three code paths built the metrics.
     /// `None` before the first update, when there is no gradient yet.

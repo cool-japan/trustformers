@@ -15,7 +15,7 @@
 //!   **separate** `MTLCommandQueue` (`oxicuda-metal-0.5.5/src/device.rs:49`), and
 //!   Metal orders nothing across queues.
 //!
-//! Every asynchronous commit now goes through [`MetalBackend::commit_async`], which
+//! Every asynchronous commit now goes through `MetalBackend::commit_async`, which
 //! records the command buffer. [`MetalBackend::flush`] waits on all recorded
 //! buffers, and is called before any CPU readback and before every hand-off to
 //! oxicuda's queue.

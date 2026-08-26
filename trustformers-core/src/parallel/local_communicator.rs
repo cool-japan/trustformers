@@ -6,7 +6,7 @@
 //! Real multi-node collectives need a network transport - see the
 //! `trustformers-training` crate's TCP backend for that. Within a single OS
 //! process, though, multiple "ranks" can share state directly: every
-//! participating thread holds an [`InProcessGroup`] (via `Arc`) plus its own
+//! participating thread holds an `InProcessGroup` (via `Arc`) plus its own
 //! rank index, and collectives rendezvous through a pair of reusable
 //! barriers so that data really moves between ranks instead of being echoed
 //! back to its own sender or replaced with zeros.
@@ -219,7 +219,7 @@ fn elementwise_sum(tensors: &[Tensor]) -> Result<Tensor> {
     Ok(acc)
 }
 
-/// A [`super::Communicator`] backed by [`InProcessGroup`]: every rank in the
+/// A [`super::Communicator`] backed by `InProcessGroup`: every rank in the
 /// group lives in this process (possibly on a different thread), and
 /// collectives move real per-rank data through shared, rank-indexed buffers
 /// instead of faking success. See the module docs for what this does and

@@ -863,7 +863,7 @@ void gemm_kernel(sycl::queue& q, const float* A, const float* B, float* C,
 
     /// Generate optimized DPC++ kernel for convolution.
     ///
-    /// As with [`Self::generate_gemm_kernel`], the channel counts and kernel
+    /// As with [`generate_gemm_kernel`], the channel counts and kernel
     /// size are runtime parameters of the emitted kernel rather than
     /// compile-time constants, so `input_channels`/`output_channels`/
     /// `kernel_size` do not change the generated arithmetic - but they

@@ -1,7 +1,7 @@
 //! FlashAttention and its multi-query / grouped-query variants.
 //!
 //! All three layers share the block-tiled kernel in
-//! [`crate::layers::attention::flash_kernel`]: the full `seq_q x seq_k`
+//! `crate::layers::attention::flash_kernel`: the full `seq_q x seq_k`
 //! attention matrix is never materialised and the online softmax keeps
 //! per-query-row statistics.
 

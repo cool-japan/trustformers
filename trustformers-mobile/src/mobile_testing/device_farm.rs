@@ -457,7 +457,7 @@ impl DeviceFarmManager {
     /// `Ok(None)` when the session is unknown, and an empty device list plus
     /// an unaggregatable error when no task on it produced a real result --
     /// which is the case for every session today, because
-    /// [`Self::run_test_on_device`] has no device channel to execute through.
+    /// `Self::run_test_on_device` has no device channel to execute through.
     ///
     /// The previous body synthesised one `DeviceTestResult` per completed task
     /// with `success_rate: 0.95`, a 60 s duration and a fixed timing

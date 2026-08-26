@@ -1389,7 +1389,7 @@ impl<M, T> BasePipeline<M, T> {
     /// `batch_size`, `latency_ms`, `throughput_rps`, and `memory_usage_mb`
     /// are the caller's own measurements of the batch that was just run.
     /// `cpu_utilization` is a real host reading taken here via `sysinfo`
-    /// (see [`sampled_cpu_utilization`]). `gpu_utilization` and
+    /// (see `sampled_cpu_utilization`). `gpu_utilization` and
     /// `gpu_memory_mb` are honestly `0.0` ("not measured") on every device:
     /// no GPU telemetry source (NVML/rocm-smi/IOKit/Metal performance
     /// counters/...) is wired into this workspace, so inventing a plausible

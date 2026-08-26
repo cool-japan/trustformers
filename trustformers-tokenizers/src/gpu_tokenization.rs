@@ -185,7 +185,7 @@ pub enum PaddingStrategy {
 pub struct BatchProcessingConfig {
     /// Maximum batch size (mirrors [`GpuTokenizerConfig::batch_size`])
     pub max_batch_size: usize,
-    /// Padding strategy actually applied by [`GpuTokenizer::apply_padding`]
+    /// Padding strategy actually applied by `GpuTokenizer::apply_padding`
     pub padding_strategy: PaddingStrategy,
 }
 

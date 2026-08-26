@@ -8,7 +8,7 @@
 //!
 //! GEMM dispatch (see `blas_sgemm` below, and the COOLJAPAN policy banning
 //! OpenBLAS/MKL/Accelerate as direct dependencies):
-//! - macOS: [`oxiblas_blas::level3::gemm`] (OxiBLAS), a pure-Rust BLAS
+//! - macOS: [`oxiblas_blas::level3::gemm()`] (OxiBLAS), a pure-Rust BLAS
 //! - Elsewhere: `scirs2_core::simd_ops`'s SIMD GEMM (`f32::simd_gemm`),
 //!   which selects AVX-512/AVX2/NEON/... based on platform capabilities
 

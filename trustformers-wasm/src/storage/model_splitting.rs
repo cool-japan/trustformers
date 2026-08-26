@@ -879,7 +879,7 @@ impl ModelLoadingSession {
 
     /// Load chunks by priority. This stays `async fn` only to keep the
     /// existing public API stable for JS callers that already `await` it —
-    /// see [`Self::load_by_priority_inner`] for why loading itself does
+    /// see `Self::load_by_priority_inner` for why loading itself does
     /// not need to await anything.
     pub async fn load_by_priority(&mut self) -> Result<f64, JsValue> {
         // A plain `Vec<String>`, read directly off the (same-module) private

@@ -54,7 +54,7 @@ impl OfflineModelPackManager {
     ///
     /// Model metadata comes from the real Hub API (`get_model_info`, behind
     /// the `hub` feature) or, without it, an honestly-empty `ModelInfo` — see
-    /// [`build_pack`](Self::build_pack) for how that combines with each
+    /// `build_pack` for how that combines with each
     /// model's real on-disk files.
     pub async fn create_pack(
         &mut self,
@@ -794,7 +794,7 @@ impl OfflineModelPackManager {
     /// Unlike [`create_pack`](Self::create_pack) (which uses the plain
     /// `/api/models/{id}` lookup), each model's [`ModelInfo`] here comes from
     /// `hub_integration.get_hub_model_info` (the model card). Both funnel
-    /// into the same [`build_pack`](Self::build_pack), so the real file
+    /// into the same `build_pack`, so the real file
     /// resolution, archiving, and size accounting are identical — only the
     /// metadata source differs.
     pub async fn create_pack_from_hub(

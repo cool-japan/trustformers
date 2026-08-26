@@ -60,7 +60,7 @@ pub struct PerformanceMetrics {
     /// arbitrary `T` for its heap-allocated payload size), so a queued
     /// item whose data lives on the heap (e.g. a `String`'s bytes, a
     /// `Tensor`'s backing buffer) is undercounted: this is a real lower
-    /// bound, not a true total. See [`DynamicBatcher::queued_shallow_bytes`].
+    /// bound, not a true total. See `DynamicBatcher::queued_shallow_bytes`.
     pub queued_shallow_bytes: u64,
     /// This batcher has no visibility into GPU telemetry -- it only ever
     /// sees queued requests and measured latencies, never anything from

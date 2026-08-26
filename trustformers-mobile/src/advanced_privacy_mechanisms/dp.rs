@@ -256,7 +256,7 @@ impl GaussianMechanism {
     /// ```
     ///
     /// found by bisection on the monotone left-hand side. The result is exact
-    /// to within [`ANALYTIC_SIGMA_TOLERANCE`] relative error, always on the
+    /// to within `ANALYTIC_SIGMA_TOLERANCE` relative error, always on the
     /// conservative (larger `σ`, more private) side.
     pub fn sigma(&self) -> f64 {
         analytic_gaussian_sigma(self.l2_sensitivity, self.epsilon, self.delta)

@@ -778,7 +778,7 @@ impl MathSpecializedForCausalLM {
     }
 
     /// Solve a mathematical problem step-by-step using a real
-    /// recursive-descent expression evaluator (see [`evaluator`]).
+    /// recursive-descent expression evaluator (see `evaluator`).
     ///
     /// Two problem shapes are actually solved, with every number in the
     /// output computed rather than templated:

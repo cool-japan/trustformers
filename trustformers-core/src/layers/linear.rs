@@ -372,7 +372,7 @@ impl Linear {
     /// transposed buffer). Handing out `&mut Tensor` means the caller can mutate
     /// the weight without going through [`Linear::set_weight`], so both caches are
     /// dropped *pessimistically* before the borrow is returned;
-    /// [`Linear::transposed_weight`] then recomputes the transpose on the next
+    /// `Linear::transposed_weight` then recomputes the transpose on the next
     /// forward pass. Keeping the stale transpose instead would make every
     /// subsequent forward silently wrong.
     pub fn weight_mut(&mut self) -> &mut Tensor {

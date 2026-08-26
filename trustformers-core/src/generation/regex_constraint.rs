@@ -50,7 +50,7 @@ impl RegexConstraint {
     /// Compile `pattern` for constrained decoding.
     ///
     /// Fails when the pattern is not valid, or when it cannot be turned into a
-    /// prefix automaton within [`PREFIX_DFA_SIZE_LIMIT`].  Failing is
+    /// prefix automaton within `PREFIX_DFA_SIZE_LIMIT`.  Failing is
     /// deliberate: a constraint that cannot be enforced must not silently
     /// degrade into "accept everything".
     pub fn new(pattern: &str) -> Result<Self> {

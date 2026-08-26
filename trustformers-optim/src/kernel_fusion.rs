@@ -130,7 +130,7 @@ impl KernelFusionConfig {
 /// allocation, no kernel launch and no device memory. What the module really provides
 /// is a *blocked, cache-friendly, vectorizable* Adam over an interleaved layout, and
 /// the accounting below describes that layout — see
-/// [`FusedAdamState::planned_layout_bytes`].
+/// `FusedAdamState::planned_layout_bytes`.
 #[derive(Debug)]
 pub struct FusedAdamState {
     /// Fused parameter data (parameters, momentum, variance interleaved)

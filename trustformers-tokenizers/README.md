@@ -2,7 +2,7 @@
 
 Tokenization library for transformer models, providing Byte-Pair Encoding (BPE), WordPiece, SentencePiece (Unigram), TikToken, and Fairseq-dictionary tokenizers, plus language-specific (Arabic, Chinese, Japanese, Korean, Thai) and domain-specific (Chemical, Music, Math, Code, BIO, Multimodal) tokenizers for the TrustformeRS ecosystem. Version 0.2.1 — Development.
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~500 as of 2026-07-09, not independently re-run this pass (this crate's own `workspace_hygiene` suite is 9/9 as of a 2026-08-24 fix elsewhere in the workspace — see root `TODO.md`) | **SLoC:** 45,324 (`tokei`, whole crate, verified 2026-08-24) | **Last Updated:** 2026-08-24
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~500 as of 2026-07-09, not independently re-run this pass (this crate's own `workspace_hygiene` suite is 9/9 as of a 2026-08-24 fix elsewhere in the workspace — see root `TODO.md`) | **SLoC:** 45,324 (`tokei`, whole crate, verified 2026-08-24) | **Last Updated:** 2026-08-24
 
 ## Current State
 

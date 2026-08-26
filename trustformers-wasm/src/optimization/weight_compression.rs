@@ -240,7 +240,7 @@ impl WeightCompressor {
 
     /// Analyze model sensitivity to compression
     /// Analyze per-layer compression sensitivity, estimated from the real
-    /// weight data (see [`compute_layer_sensitivities`]).
+    /// weight data (see `compute_layer_sensitivities`).
     pub fn analyze_sensitivity(&mut self, model_data: &[u8]) -> Result<Vec<f32>, JsValue> {
         let weights = self.bytes_to_f32_slice(model_data);
         let num_layers = self.estimate_layer_count(model_data);

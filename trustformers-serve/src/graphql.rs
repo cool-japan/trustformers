@@ -47,7 +47,7 @@ pub struct DetailedHealthInfo {
 /// Per-subsystem health, each field derived from that subsystem's own state.
 ///
 /// None of these are constants. Every value is computed by
-/// [`service_health`] from a live reading, and a subsystem that cannot serve
+/// `service_health` from a live reading, and a subsystem that cannot serve
 /// says so rather than reporting `"healthy"`.
 #[derive(SimpleObject, Debug, Serialize)]
 pub struct ServiceHealthInfo {

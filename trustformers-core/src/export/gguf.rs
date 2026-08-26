@@ -2,7 +2,7 @@
 //!
 //! GGUF is a tensor container (header + metadata + tensor directory + data). It
 //! carries no operation graph, so a model's *real* parameters — obtained from
-//! [`Model::named_tensors`](crate::traits::Model::named_tensors) — are all that is
+//! [`Model::named_tensors`] — are all that is
 //! needed to write a faithful file.
 //!
 //! The binary format itself lives in [`super::gguf_format`]; this module only turns

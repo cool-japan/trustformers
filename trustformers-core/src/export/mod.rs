@@ -50,7 +50,7 @@ use anyhow::{anyhow, Result};
 ///
 /// Every exporter in this module routes through this function so that no exporter
 /// can ever write invented weights: a model that does not override
-/// [`Model::named_tensors`](crate::traits::Model::named_tensors) yields an error
+/// [`Model::named_tensors`] yields an error
 /// instead of a plausible-looking file.
 ///
 /// # Errors

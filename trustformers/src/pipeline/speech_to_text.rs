@@ -5,7 +5,7 @@
 //! ## What is real here
 //!
 //! * **Container decoding** — RIFF/WAVE (PCM 8/16/24/32-bit and IEEE float
-//!   32/64-bit, any channel count) via [`media::audio_dsp::decode_wav`].
+//!   32/64-bit, any channel count) via [`audio_dsp::decode_wav`].
 //!   Base64 payloads are decoded with the `base64` crate and then *sniffed*,
 //!   not assumed to be WAV.
 //! * **Resampling** — linear interpolation to the configured rate.

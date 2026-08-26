@@ -498,7 +498,7 @@ impl SecureAggregation {
     /// Uses the standard pairwise-masking construction for secure
     /// aggregation (Bonawitz et al.): for every OTHER id in
     /// `all_client_ids`, `client_id` and that client derive the same seed
-    /// (via [`Self::pairwise_seed`]) and therefore the same pseudorandom
+    /// (via `Self::pairwise_seed`) and therefore the same pseudorandom
     /// values -- `client_id` adds them to its mask if it sorts before the
     /// other id, subtracts them otherwise. Summing every participant's mask
     /// together then cancels exactly (up to floating-point rounding): each

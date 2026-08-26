@@ -142,7 +142,7 @@ pub struct StreamingDataset {
     pub config: StreamingDatasetConfig,
     pub buffer: VecDeque<DataSample>,
     pub stats: StreamingStats,
-    /// Whether [`DataPipeline::get_batch`] may draw from this dataset.
+    /// Whether [`DataPipeline::get_batch`](crate::data_pipeline::pipeline::DataPipeline::get_batch) may draw from this dataset.
     pub active: bool,
 }
 impl StreamingDataset {

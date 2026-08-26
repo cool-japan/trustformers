@@ -407,7 +407,7 @@ pub struct ComparativePerformance {
 /// `precision`, `recall` and `f1_score`
 ///
 /// The only producer of this struct is
-/// [`adaptive_parallelism::learning_model::AdaptiveLearningModel::get_performance_metrics`],
+/// [`AdaptiveLearningModel::get_performance_metrics`](crate::performance_optimizer::types_ml::AdaptiveLearningModel::get_performance_metrics),
 /// and it had no validation split, no held-out test set and no labelled
 /// classification outcomes to derive any of those six numbers from. It filled
 /// them in anyway — `validation_accuracy` was `training_accuracy * 0.95`,
@@ -466,7 +466,7 @@ pub enum ConvergenceStatus {
 ///
 /// Both were `f32` fields that no code on this build could measure. The one
 /// producer,
-/// [`adaptive_parallelism::AdaptiveParallelismController::get_current_system_state`],
+/// `adaptive_parallelism::AdaptiveParallelismController::get_current_system_state`,
 /// filled them with the literals `2.0` and `0.1`, and the one consumer,
 /// `performance_modeling::LinearRegressionModel::extract_prediction_features`,
 /// fed both straight into a prediction feature vector — so the model was

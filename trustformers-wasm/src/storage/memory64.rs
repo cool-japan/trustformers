@@ -481,7 +481,7 @@ impl Memory64Manager {
     /// Previously this took only a `size_bytes: usize` count and discarded
     /// the caller's actual data - so nothing was ever available for
     /// `get_model_data` to return. It now takes the real bytes and stores
-    /// them (see [`Self::allocate_for_model_core`]).
+    /// them (see `Self::allocate_for_model_core`).
     pub fn allocate_for_model(&mut self, model_id: &str, data: &[u8]) -> Result<u32, JsValue> {
         self.allocate_for_model_core(model_id, data).map_err(|e| JsValue::from_str(&e))
     }

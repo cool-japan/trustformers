@@ -4,7 +4,7 @@
 //! FlashAttention algorithm. The full `seq_q x seq_k` attention matrix is never
 //! materialised: memory scales with the tile size instead of `O(N^2)`.
 //!
-//! The numerical core lives in [`super::flash_kernel`] and is shared with
+//! The numerical core lives in `super::flash_kernel` and is shared with
 //! [`super::multi_head::MultiHeadAttention`]'s memory-efficient path.
 
 use super::common::{AttentionConfig, AttentionProjections, AttentionUtils};
@@ -24,7 +24,7 @@ use crate::traits::Layer;
 ///
 /// # FlashAttention-1 vs FlashAttention-2
 ///
-/// Both versions run the *same* CPU kernel ([`super::flash_kernel`]), which
+/// Both versions run the *same* CPU kernel (`super::flash_kernel`), which
 /// already uses the FlashAttention-2 style deferred normalisation (the output
 /// accumulator is divided by the running row sum once, after the last key
 /// block, rather than after every block). The only difference between the two

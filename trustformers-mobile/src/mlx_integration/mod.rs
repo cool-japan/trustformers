@@ -1,6 +1,6 @@
 //! MLX-style graph execution for Apple Silicon, implemented on Metal and CPU.
 //!
-//! **This module does not link Apple's MLX framework.** See [`mlx_types`] for the
+//! **This module does not link Apple's MLX framework.** See `mlx_types` for the
 //! full statement. The `Mlx*` type names are retained for source compatibility and
 //! mean "MLX-style API", not "MLX-backed".
 

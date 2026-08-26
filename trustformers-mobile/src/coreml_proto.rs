@@ -49,7 +49,7 @@
 //! precision or the model is rejected) was discovered by writing candidate
 //! bytes to disk and running Apple's own `xcrun coremlcompiler compile`
 //! against them on this development machine until it exited 0 and produced
-//! a `.mlmodelc`. [`encode_model`]'s output shape follows exactly what that
+//! a `.mlmodelc`. [`encode_model`](crate::coreml_proto::encode_model)'s output shape follows exactly what that
 //! process validated. The crate's own test suite re-runs the same
 //! `coremlcompiler` check when it is available (see
 //! `coreml_converter::tests::real_mlmodel_bytes_are_accepted_by_apples_own_compiler`),

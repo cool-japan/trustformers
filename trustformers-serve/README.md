@@ -1,6 +1,6 @@
 # TrustformeRS Serve
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** 5,572 passed, 1 skipped, 0 failed as of 2026-08-18, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 273,756 (`tokei`, verified 2026-08-24 — down from 278,397 on 2026-08-18, mainly the `resource_manager/` placeholder tree, 5,972 lines, deleted outright this cycle) | **Updated:** 2026-08-24
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** 5,572 passed, 1 skipped, 0 failed as of 2026-08-18, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26) | **SLoC:** 273,756 (`tokei`, verified 2026-08-24 — down from 278,397 on 2026-08-18, mainly the `resource_manager/` placeholder tree, 5,972 lines, deleted outright this cycle) | **Updated:** 2026-08-24
 
 High-performance inference server for TrustformeRS models with advanced batching, multi-protocol APIs, cloud-native deployment, and comprehensive observability.
 

@@ -1192,7 +1192,7 @@ impl SafetyFilter {
         self.assessment_cache.get_mut().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
-    /// Get violation history recorded so far by [`Self::handle_violation`].
+    /// Get violation history recorded so far by `Self::handle_violation`.
     pub fn get_violation_history(&self) -> Vec<EnhancedSafetyViolation> {
         self.violation_history.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }

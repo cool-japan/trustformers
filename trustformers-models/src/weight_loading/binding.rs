@@ -7,7 +7,7 @@
 //! that by hand per model is how a loader ends up quietly skipping a parameter,
 //! so the primitives live here and each model contributes only its name map.
 //!
-//! The strictness of [`WeightBinder`](super::checkpoint::WeightBinder) is
+//! The strictness of [`WeightBinder`](crate::weight_loading::checkpoint::WeightBinder) is
 //! preserved throughout: a tensor the checkpoint does not hold is *recorded as
 //! missing* and the parameter is left untouched, never filled with a
 //! substitute, and `WeightBinder::finish` turns the accumulated gaps into one

@@ -293,7 +293,7 @@ pub struct PowerInfo {
     pub is_charging: bool,
     /// Power save mode active. `None` when this cannot be verified on the
     /// current platform (see
-    /// [`MobileDeviceDetector::is_power_save_mode_active`]) -- distinct
+    /// `MobileDeviceDetector::is_power_save_mode_active`) -- distinct
     /// from `Some(false)`, which asserts a real check found it inactive.
     pub power_save_mode: Option<bool>,
     /// Low power mode available

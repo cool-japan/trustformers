@@ -5,7 +5,7 @@
 //! rules. The condition text is free-form and user-authored (schema
 //! authors, not end users, write these), so it needs a real grammar rather
 //! than a hand-rolled substring search. This module implements exactly that:
-//! a tokenizer, a recursive-descent parser producing an [`Expr`] AST, and an
+//! a tokenizer, a recursive-descent parser producing an `Expr` AST, and an
 //! evaluator that runs the AST against a JSON config object.
 //!
 //! # Grammar

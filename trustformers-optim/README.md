@@ -1,6 +1,6 @@
 # trustformers-optim
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~995 as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24) | **Public API:** ~1,925 items as of 2026-07-09, not re-verified | **Updated:** 2026-08-24 (SLoC/date and the `genie`/`lora_rite`/`sofo` filename correction below only; remainder unreviewed since 2026-07-09)
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~995 as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24) | **Public API:** ~1,925 items as of 2026-07-09, not re-verified | **Updated:** 2026-08-24 (SLoC/date and the `genie`/`lora_rite`/`sofo` filename correction below only; remainder unreviewed since 2026-07-09)
 
 Comprehensive optimization algorithms, learning rate schedulers, and distributed/advanced training
 infrastructure for training transformer models in the TrustformeRS ecosystem.

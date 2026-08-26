@@ -226,7 +226,7 @@ impl Dropout {
     /// eval mode (`training == false`) or when `p == 0.0`, this is an
     /// identity pass-through, matching standard framework semantics.
     ///
-    /// Draws come from [`Self::real_uniform_draws`] rather than
+    /// Draws come from `Self::real_uniform_draws` rather than
     /// [`WasmTensor::random_uniform`] deliberately: `random_uniform`'s error
     /// path silently substitutes a *fixed*-seed pseudo-random sequence
     /// (the same sequence every call) when the real entropy source is

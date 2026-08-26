@@ -1311,7 +1311,7 @@ pub struct GpuHealthAnalytics {
     /// `health_trend_slope`: how much of the score's variance the linear
     /// trend explains, in `[0.0, 1.0]`. Zero before there are at least two
     /// samples, and zero (not one) when the history has no variance to
-    /// explain -- see [`GpuHealthMonitor::update_analytics_metrics`].
+    /// explain -- see `GpuHealthMonitor::update_analytics_metrics`.
     pub trend_r_squared: f32,
     /// Time series health analysis
     pub trend_analysis: HealthTrendAnalysis,

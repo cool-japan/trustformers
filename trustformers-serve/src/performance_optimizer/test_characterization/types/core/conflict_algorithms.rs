@@ -15,7 +15,7 @@
 //!
 //! * [`StaticConflictDetectionAlgorithm`] compares the declared access types on
 //!   a resource against that resource's declared sharing capability.
-//! * [`DynamicConflictDetectionAlgorithm`] reads the [`ContentionEvent`]s that
+//! * [`DynamicConflictDetectionAlgorithm`] reads the [`ContentionEvent`](crate::performance_optimizer::test_characterization::types::locking::ContentionEvent)s that
 //!   were actually recorded during the run.
 //! * [`PredictiveConflictDetectionAlgorithm`] projects the recorded per-access
 //!   timing forward and looks for overlapping future access windows.

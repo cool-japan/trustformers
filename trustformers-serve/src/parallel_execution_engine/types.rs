@@ -65,7 +65,7 @@ impl LoadBalancer {
 ///
 /// 0.2.1: this used to be a `Default`-constructed all-zero struct that nothing
 /// ever read. It now carries measured/configured capacity — see
-/// [`AvailableResources::detect`] — and [`ResourceManager::can_allocate`]
+/// [`AvailableResources::detect`] — and [`ResourceManager::can_allocate`](super::resources::ResourceManager::can_allocate)
 /// actually checks against it. Every field is either measured from the running
 /// host or taken from the operator-supplied [`ResourcePoolConfig`]; none is
 /// invented.
@@ -296,7 +296,7 @@ pub struct AlertDestination {
     /// Alert levels for this destination
     pub alert_levels: Vec<AlertLevel>,
 }
-/// Queue statistics, all measured by [`PriorityQueue`] from its own traffic.
+/// Queue statistics, all measured by [`PriorityQueue`](super::scheduling::PriorityQueue) from its own traffic.
 #[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
     /// Total items enqueued
@@ -797,7 +797,7 @@ pub struct WorkerConfig {
 pub struct QueueConfig {
     /// Maximum queue size; 0 means unbounded.
     pub max_size: usize,
-    /// Whether [`PriorityQueue::pop`] honours priority (otherwise plain FIFO).
+    /// Whether [`PriorityQueue::pop`](super::scheduling::PriorityQueue::pop) honours priority (otherwise plain FIFO).
     pub priority_enabled: bool,
 }
 impl Default for QueueConfig {
@@ -842,7 +842,7 @@ pub struct SchedulingEvent {
 }
 /// Scheduler performance metrics.
 ///
-/// The first two fields are counted and timed by [`TestScheduler`] on every
+/// The first two fields are counted and timed by [`TestScheduler`](super::scheduling::TestScheduler) on every
 /// real decision. The remaining four are `Option` and stay `None`: judging
 /// scheduling *accuracy*, queue *efficiency* or priority *effectiveness*
 /// requires an outcome oracle this crate does not have, and nothing here

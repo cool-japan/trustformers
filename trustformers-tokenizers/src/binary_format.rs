@@ -130,7 +130,7 @@ pub struct BinaryTokenizer {
 
     /// Additional tokenizer-specific configuration.
     ///
-    /// Encoded on the wire as JSON text per entry (see [`json_value_map`])
+    /// Encoded on the wire as JSON text per entry (see `json_value_map`)
     /// rather than passed through serde generically: `serde_json::Value`'s
     /// `Deserialize` impl requires `deserialize_any` (runtime type
     /// introspection), which `oxicode`'s non-self-describing binary format
@@ -150,7 +150,7 @@ pub struct BinaryTokenizer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizationRule {
     pub rule_type: String,
-    /// See [`json_value_map`] for why this needs a custom (de)serializer.
+    /// See `json_value_map` for why this needs a custom (de)serializer.
     #[serde(with = "json_value_map")]
     pub parameters: HashMap<String, serde_json::Value>,
 }

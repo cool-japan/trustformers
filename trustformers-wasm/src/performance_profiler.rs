@@ -181,7 +181,7 @@ impl PerformanceProfiler {
     /// `js_sys::Reflect`/`js_sys::Function` the same way as
     /// `device_capability::DeviceCapabilityDetector::get_battery_info` -
     /// so this doesn't need a typed `web_sys::BatteryManager` binding
-    /// either. Updates [`Self::cached_battery_level`]'s backing field on
+    /// either. Updates `Self::cached_battery_level`'s backing field on
     /// success; leaves it untouched (never fabricates a reading) when the
     /// window/navigator/API is unavailable, which is always the case off
     /// the wasm32 target. A previous version of the removed

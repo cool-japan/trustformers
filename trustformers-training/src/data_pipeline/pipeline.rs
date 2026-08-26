@@ -218,7 +218,7 @@ impl DataPipeline {
     /// Validate a batch of samples against the configured validator.
     ///
     /// Every sample is checked against the declarative rules in `DataValidationConfig.rules`
-    /// **and** against every registered [`Validator`] trait object; the returned vector is
+    /// **and** against every registered [`Validator`](crate::data_pipeline::validation::Validator) trait object; the returned vector is
     /// aligned one-to-one with `samples`.
     pub async fn validate_batch(&self, samples: &[DataSample]) -> Result<Vec<ValidationResult>> {
         let mut validator =

@@ -1,6 +1,6 @@
 # trustformers-serve TODO List
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~4,321 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **Public API Items:** 7,319 as of 2026-07-09, not re-verified | **SLoC:** 273,756 (`tokei`, verified 2026-08-24; was 283,692/278,397 on 2026-07-09/2026-08-18 — this cycle's `resource_manager/` placeholder-tree deletion, 5,972 lines, is the largest single driver of the drop) | **Updated:** 2026-08-24
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~4,321 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (21,370 passed / 41 skipped / 0 failed, 2026-08-26) | **Public API Items:** 7,319 as of 2026-07-09, not re-verified | **SLoC:** 273,756 (`tokei`, verified 2026-08-24; was 283,692/278,397 on 2026-07-09/2026-08-18 — this cycle's `resource_manager/` placeholder-tree deletion, 5,972 lines, is the largest single driver of the drop) | **Updated:** 2026-08-24
 
 ## Overview
 
@@ -32,7 +32,7 @@ This is the largest crate in the `trustformers` workspace by public API surface:
 ### Implementation Status
 - [x] **PRODUCTION-READY** - Complete serving infrastructure
 - [x] **ZERO COMPILATION ERRORS** - Clean compilation
-- [x] **COMPREHENSIVE TESTING** - ~4,321 tests as of 2026-07-01 (stale figure, not independently re-run this pass; see root `TODO.md` for the current workspace-wide baseline, 20,629 passed / 43 skipped / 0 failed as of 2026-08-24)
+- [x] **COMPREHENSIVE TESTING** - ~4,321 tests as of 2026-07-01 (stale figure, not independently re-run this pass; see root `TODO.md` for the current workspace-wide baseline, 21,370 passed / 41 skipped / 0 failed as of 2026-08-26)
 - [x] **REQUEST QUEUING** - Priority queue with deadline awareness and cancellation (`queue` module)
 - [x] **PRIORITY SCHEDULING** - WRR, EDF, fair queuing, priority, and FIFO strategies (`scheduler` module)
 - [x] **HARDWARE ACCELERATED** - CUDA and Metal support real and hardware-verified elsewhere in this workspace; ROCm real but not hardware-verified here (see "Hardware Acceleration" below, corrected 2026-08-24)

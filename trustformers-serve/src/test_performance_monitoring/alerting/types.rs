@@ -744,7 +744,7 @@ impl AlertCorrelator {
 /// 0.2.1: this held four `Arc` sub-components -- `RuleExecutor`,
 /// `ConditionEvaluator`, `RuleScheduler` and `EvaluationContext` -- constructed
 /// from a `&Default::default()` monitoring config and never used by any method
-/// on this type. Rule evaluation happens inline in [`Self::evaluate_rule`]; the
+/// on this type. Rule evaluation happens inline in `Self::evaluate_rule`; the
 /// four are gone rather than left implying a scheduler and an evaluation
 /// context that never ran.
 #[derive(Debug)]

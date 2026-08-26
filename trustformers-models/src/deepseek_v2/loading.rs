@@ -24,7 +24,7 @@
 //! | `{P}layers.{i}.mlp.experts.{j}.{gate,up,down}_proj.weight` | MoE layers |
 //! | `{P}layers.{i}.mlp.shared_experts.{gate,up,down}_proj.weight` | MoE layers, fused across the shared experts |
 //! | `{P}norm.weight` | `[hidden_size]` |
-//! | `lm_head.weight` | `[vocab_size, hidden_size]` — bound by [`DeepSeekV2ForCausalLM`], not by the backbone |
+//! | `lm_head.weight` | `[vocab_size, hidden_size]` — bound by [`DeepSeekV2ForCausalLM`](super::tasks::DeepSeekV2ForCausalLM), not by the backbone |
 //!
 //! # Two places the reference model and this one differ
 //!

@@ -447,7 +447,7 @@ impl NeonOptimizations {
 /// feature check this crate has no portable way to perform outside a real
 /// device -- rather than assume those extensions are present (the
 /// documented reason `AdvSimd` capability detection in
-/// [`SimdOptimizer::detect_capabilities`] is conservative about them), this
+/// `SimdOptimizer::detect_capabilities` is conservative about them), this
 /// uses a real, portable, always-correct implementation: `half::f16`
 /// arithmetic (via the already-present `half` crate, the same one
 /// `crate::optimization::quantization` uses for real FP16 storage) for the

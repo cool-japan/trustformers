@@ -9,7 +9,7 @@
 //! no way to actually run, skip, or change the precision of an individual
 //! layer of an arbitrary `P`. Given that constraint:
 //!
-//! - [`InputAnalyzer::analyze_input`] is real: for textual input (the
+//! - `InputAnalyzer::analyze_input` is real: for textual input (the
 //!   overwhelmingly common `Pipeline::Input` in this crate) it computes
 //!   genuine, deterministic, content-derived measurements (word count,
 //!   vocabulary diversity, per-token importance, ...). It never returns a
@@ -31,7 +31,7 @@
 //! - Resource telemetry (`memory_peak_mb`, `energy_consumed_watts`, CPU
 //!   headroom folded into `resource_efficiency`) is sampled via
 //!   [`crate::profiler::read_process_memory`] and
-//!   [`crate::pipeline::sampled_cpu_utilization`] -- real host measurements,
+//!   `crate::pipeline::sampled_cpu_utilization` -- real host measurements,
 //!   not fixed constants. There is no energy telemetry source wired into
 //!   this workspace, so `energy_consumed_watts` is honestly `0.0`.
 
@@ -229,7 +229,7 @@ pub struct LayerAnalysis {
 }
 
 /// Input analysis for adaptive decisions. Produced by
-/// [`InputAnalyzer::analyze_input`] -- real, content-derived values for
+/// `InputAnalyzer::analyze_input` -- real, content-derived values for
 /// textual input; a documented conservative default otherwise (see that
 /// method).
 #[derive(Debug, Clone)]
@@ -278,7 +278,7 @@ pub struct InputAnalyzer {
 ///
 /// `cpu_usage` and `memory_usage` are real, sampled measurements, refreshed
 /// by [`AdaptiveInferenceEngine::adaptive_inference`] via
-/// [`crate::pipeline::sampled_cpu_utilization`] and
+/// `crate::pipeline::sampled_cpu_utilization` and
 /// [`crate::profiler::read_process_memory`]. `energy_consumption` is
 /// honestly `0.0`: no energy telemetry source (RAPL / powermetrics /
 /// battery counters / ...) is wired into this workspace, the same

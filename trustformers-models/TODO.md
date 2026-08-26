@@ -1,6 +1,6 @@
 # trustformers-models TODO List
 
-**Version:** 0.2.1 (Alpha, unreleased) | **Date:** 2026-08-24 | **Tests:** ~4,479 as of 2026-07-09, not independently re-run this pass (root `TODO.md` recorded 1,681/1,681 for this crate on 2026-08-18; see root `TODO.md` for the current workspace-wide baseline) | **SLoC:** 188,417 (`tokei`, verified 2026-08-24 — up from 151,766 on 2026-07-09, largely real checkpoint-binding work landed since, see "Per-Model Weight Loading Status" below) | **Stubs:** 0 as of 2026-07-09, not re-verified | **Public API items:** ~5,165 as of 2026-07-09, not re-verified
+**Version:** 0.2.1 (Alpha) | **Date:** 2026-08-24 | **Tests:** ~4,479 as of 2026-07-09, not independently re-run this pass (root `TODO.md` recorded 1,681/1,681 for this crate on 2026-08-18; see root `TODO.md` for the current workspace-wide baseline) | **SLoC:** 188,417 (`tokei`, verified 2026-08-24 — up from 151,766 on 2026-07-09, largely real checkpoint-binding work landed since, see "Per-Model Weight Loading Status" below) | **Stubs:** 0 as of 2026-07-09, not re-verified | **Public API items:** ~5,165 as of 2026-07-09, not re-verified
 
 ## Overview
 

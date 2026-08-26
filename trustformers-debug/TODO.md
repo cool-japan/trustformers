@@ -1,6 +1,6 @@
 # trustformers-debug TODO List
 
-**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Tests:** 1696 passing / 0 failing (`cargo nextest run -p trustformers-debug --no-fail-fast`, measured 2026-08-25) | **SLoC:** 88,454 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from ~101,000 likely reflects measurement scope rather than code change; not investigated) | **Updated:** 2026-08-25
+**Version:** 0.2.1 | **Status:** Alpha | **Tests:** 1696 passing / 0 failing (`cargo nextest run -p trustformers-debug --no-fail-fast`, measured 2026-08-25) | **SLoC:** 88,454 (`tokei`, verified 2026-08-24 — this crate had no wave-4 work item, so the change from ~101,000 likely reflects measurement scope rather than code change; not investigated) | **Updated:** 2026-08-25
 
 ## Overview
 

@@ -4,7 +4,7 @@
 //!
 //! The diffusion *maths* in [`TextToImageProcessor`] — forward noising
 //! (`x_t = √ᾱ_t·x_0 + √(1-ᾱ_t)·ε`) and classifier-free guidance
-//! (`u + s·(c - u)`) — plus the [`NoiseScheduler`] variants and the
+//! (`u + s·(c - u)`) — plus the `NoiseScheduler` variants and the
 //! [`GeneratedImage`] container. These are exact formulas and work on any
 //! latents you supply.
 //!

@@ -20,7 +20,7 @@ pub struct ExecutionPlan {
     /// A `HashMap<String, Tensor>` has no defined iteration order, so an
     /// engine that walked `model_weights` directly would apply layers in a
     /// different (arbitrary, hash-seed-dependent) order on every run. This
-    /// list is computed once, in [`MobileInferenceEngine::load_model`], with
+    /// list is computed once, in [`MobileInferenceEngine::load_model`](crate::inference::engine::MobileInferenceEngine::load_model), with
     /// a "natural" sort (numeric runs inside a name compare numerically, so
     /// `"h.2"` sorts before `"h.10"`) so the same checkpoint always executes
     /// the same way.

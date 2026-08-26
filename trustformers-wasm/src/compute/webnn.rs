@@ -18,7 +18,7 @@
 //!
 //! What *is* honestly detectable without typed bindings is **presence**:
 //! whether `navigator.ml` exists at all, checked via `js_sys::Reflect` on
-//! wasm32 (see [`detect_navigator_ml_available`]). Everything downstream of
+//! wasm32 (see `detect_navigator_ml_available`). Everything downstream of
 //! that - [`WebNNContext::capabilities`] in particular - reports only that
 //! single real signal plus conservative `false`/empty defaults for anything
 //! that would require an actual `createContext()` round trip. Reporting
@@ -263,7 +263,7 @@ impl WebNNContext {
     /// Check if the WebNN API is available.
     ///
     /// Real detection: on wasm32, whether `navigator.ml` exists (see
-    /// [`detect_navigator_ml_available`]); on native, structurally `false`,
+    /// `detect_navigator_ml_available`); on native, structurally `false`,
     /// since there is no `navigator` to query.
     pub fn is_available() -> bool {
         detect_navigator_ml_available()
@@ -333,7 +333,7 @@ impl WebNNCapabilities {
 
     /// Whether `navigator.ml` was detected as present. This is the only
     /// field on this type backed by a real runtime check (see
-    /// [`detect_navigator_ml_available`]).
+    /// `detect_navigator_ml_available`).
     pub fn ml_api_available(&self) -> bool {
         self.ml_api_available
     }

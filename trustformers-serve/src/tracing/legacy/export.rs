@@ -391,7 +391,7 @@ impl ZipkinAnnotation {
 ///
 /// The wire names are camelCase (`traceId`, `parentId`, `localEndpoint`) and the
 /// ids are fixed-width lowercase hex; both are enforced by the `serde` renames
-/// and [`normalize_hex_id`] rather than left to the caller.
+/// and `normalize_hex_id` rather than left to the caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZipkinSpan {
     #[serde(rename = "traceId")]

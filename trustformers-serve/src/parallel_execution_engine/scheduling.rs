@@ -174,7 +174,7 @@ impl<T> PriorityQueue<T> {
 /// 0.2.1: every method here was a no-op -- `schedule_test` discarded its
 /// argument and returned `Ok(())`, `get_next_test` always returned `Ok(None)`
 /// and `is_queue_empty` always returned `true`. The consequence was that
-/// [`ParallelExecutionEngine::execute_parallel`] silently dropped every test
+/// [`ParallelExecutionEngine::execute_parallel`](super::engine::ParallelExecutionEngine::execute_parallel) silently dropped every test
 /// handed to it and reported success over an empty result set. The queue is
 /// real now: tests are stored, ordered by the priority the engine computed for
 /// them, and handed back one at a time.

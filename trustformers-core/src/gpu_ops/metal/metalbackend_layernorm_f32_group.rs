@@ -21,7 +21,7 @@ impl MetalBackend {
     /// This is a host-in / host-out entry point: the result is read straight out
     /// of the output `MTLBuffer` before returning, so the command buffer must be
     /// **waited on**, not merely committed. It previously used
-    /// [`commit_async`](Self::commit_async) and then read `contents()`
+    /// `commit_async` and then read `contents()`
     /// immediately, which raced the GPU and — because a freshly allocated
     /// `StorageModeShared` buffer starts zeroed — returned an all-zero vector
     /// essentially every time. Any model whose `LayerNorm` took the 2-D

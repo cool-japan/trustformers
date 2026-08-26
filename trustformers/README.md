@@ -1,6 +1,6 @@
 # trustformers
 
-**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Updated:** 2026-08-24
+**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-08-24
 
 Main integration crate providing high-level APIs, pipelines, and Hugging Face Hub integration for the TrustformeRS ecosystem.
 
@@ -9,7 +9,7 @@ Main integration crate providing high-level APIs, pipelines, and Hugging Face Hu
 This crate serves as the **primary entry point** for users, offering HuggingFace-compatible APIs for common NLP tasks. It includes comprehensive pipeline implementations, auto model classes, and integration points with the Hugging Face Model Hub.
 
 - **SLoC:** 123,252 (`tokei`, verified 2026-08-24 — up from ~109,369 on 2026-07-01)
-- **Tests:** ~2,261 as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (20,629 passed / 43 skipped / 0 failed workspace-wide, default features, 2026-08-24)
+- **Tests:** ~2,261 as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (21,370 passed / 41 skipped / 0 failed workspace-wide, default features, 2026-08-26)
 - **File-size policy:** `src/hub_offline_packs.rs` (previously 2,009 lines) is now split into a 6-file `src/hub_offline_packs/` directory module. Three files not previously flagged now exceed the 2,000-line policy: `src/hub_ui.rs` (2,026), `src/hub.rs` (2,013), `src/pipeline/conversational/summarization.rs` (2,001) — see `TODO.md`.
 - **Doctests:** 5 passed, 164 ignored by design (see [Testing](#testing))
 - **Public API (prelude):** 76 exports under default features (`bert` + `async`); 83 with `hub` also enabled

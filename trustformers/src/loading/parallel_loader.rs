@@ -4,7 +4,7 @@
 //! loading time for large models with many shards. Each shard is parsed for
 //! real: `.safetensors` headers are read and every tensor is sliced out of
 //! its own `data_offsets` range (memory-mapped for files at or above
-//! [`MMAP_THRESHOLD_BYTES`] when [`ParallelLoaderConfig::use_mmap`] is set);
+//! `MMAP_THRESHOLD_BYTES` when [`ParallelLoaderConfig::use_mmap`] is set);
 //! `.gguf` files go through `trustformers-models`' real `GGUFLoader`; legacy
 //! `.bin`/`.pt`/`.pth` PyTorch checkpoints go through `trustformers-core`'s
 //! real ZIP + pickle `PyTorchReader`. A file that doesn't parse as a real

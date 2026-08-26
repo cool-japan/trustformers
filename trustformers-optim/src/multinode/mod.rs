@@ -532,7 +532,7 @@ impl MultiNodeStats {
         report
     }
 
-    /// Write [`Self::stats_report`] to stdout.
+    /// Write `Self::stats_report` to stdout.
     ///
     /// This is an explicit, caller-initiated escape hatch for binaries and
     /// examples; nothing on the training path writes to stdout. Library
@@ -543,7 +543,7 @@ impl MultiNodeStats {
         println!("{}", self.stats_report());
     }
 
-    /// Emit [`Self::stats_report`] at `info` level through the `log` facade.
+    /// Emit `Self::stats_report` at `info` level through the `log` facade.
     pub fn log_stats(&self) {
         log::info!("{}", self.stats_report());
     }

@@ -590,7 +590,7 @@ pub enum PhaseResult {
     ///
     /// This used to carry a `Box<TestCharacteristics>` that the phase filled
     /// with `TestCharacteristics::default()` — every field zeroed — and
-    /// [`AnalysisOrchestrator::combine_phase_results`] then merged those zeros
+    /// `AnalysisOrchestrator::combine_phase_results` then merged those zeros
     /// into the real analysis. The real-time profiler has no method that
     /// derives test characteristics, so the variant now carries the
     /// [`ProfilingStatistics`] it genuinely measures.

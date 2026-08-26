@@ -376,7 +376,7 @@ where
     /// Extract key-value pairs from already-extracted document text.
     ///
     /// Real regex matching over `Key: Value`, `Key = Value`, `Key - Value` and
-    /// whitespace-separated forms, scored by [`Self::calculate_kv_confidence`]
+    /// whitespace-separated forms, scored by `Self::calculate_kv_confidence`
     /// and de-duplicated by normalised key.
     ///
     /// # Errors
