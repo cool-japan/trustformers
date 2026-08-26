@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "trustformers-tokenizers"
-version = "0.2.1"
+version = "0.2.2"
 description = "High-performance tokenizers for transformer models"
 authors = [
     {name = "COOLJAPAN OU (Team KitaSan)", email = "contact@cooljapan.tech"},

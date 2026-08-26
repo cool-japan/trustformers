@@ -92,7 +92,7 @@ This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a co
 
 ```toml
 [dependencies]
-trustformers-training = "0.2.1"
+trustformers-training = "0.2.2"
 ```
 
 - `default = []` — no backend feature is enabled by default.

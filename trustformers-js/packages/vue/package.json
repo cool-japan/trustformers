@@ -1,6 +1,6 @@
 {
   "name": "@trustformers/vue",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Vue.js composition functions and components for TrustformeRS",
   "main": "dist/index.cjs.js",
   "module": "dist/index.esm.js",
@@ -55,7 +55,7 @@
   "sideEffects": false,
   "peerDependencies": {
     "vue": ">=3.0.0",
-    "@trustformers/core": "^0.2.1"
+    "@trustformers/core": "^0.2.2"
   },
   "dependencies": {},
   "devDependencies": {

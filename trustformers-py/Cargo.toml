@@ -1,6 +1,6 @@
 [package]
 name = "trustformers-py"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.89"
 authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
@@ -90,15 +90,15 @@ scirs2-core = { version = "0.5.1", default-features = false, features = ["python
 # bans` fails with `error[wildcard]` ("crates.io disallows path dependencies"
 # for a wildcard/path-only dependency of a publishable crate) -- see TODO.md's
 # "Dependency pins" section. The version must track the workspace's own
-# `[workspace.package] version` (currently 0.2.1) since these are the same
+# `[workspace.package] version` (currently 0.2.2) since these are the same
 # repository's sibling crates, resolved locally via `path` in this standalone
 # build and would need to resolve from crates.io by `version` alone if this
 # crate were ever published without them being co-published first.
-trustformers-core = { path = "../trustformers-core", version = "0.2.1", default-features = false }
-trustformers-models = { path = "../trustformers-models", version = "0.2.1", default-features = false, features = ["bert", "gpt2", "t5", "llama", "mamba", "rwkv"] }
-trustformers-tokenizers = { path = "../trustformers-tokenizers", version = "0.2.1", default-features = false }
-trustformers-optim = { path = "../trustformers-optim", version = "0.2.1", default-features = false }
-trustformers-training = { path = "../trustformers-training", version = "0.2.1", default-features = false }
+trustformers-core = { path = "../trustformers-core", version = "0.2.2", default-features = false }
+trustformers-models = { path = "../trustformers-models", version = "0.2.2", default-features = false, features = ["bert", "gpt2", "t5", "llama", "mamba", "rwkv"] }
+trustformers-tokenizers = { path = "../trustformers-tokenizers", version = "0.2.2", default-features = false }
+trustformers-optim = { path = "../trustformers-optim", version = "0.2.2", default-features = false }
+trustformers-training = { path = "../trustformers-training", version = "0.2.2", default-features = false }
 # NOTE: the `trustformers` umbrella crate is deliberately NOT listed here. The
 # bindings never referenced it (the only mentions left in `src/` are three
 # commented-out `use` lines), and `cargo tree -e features -p trustformers-core`

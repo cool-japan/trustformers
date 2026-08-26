@@ -82,7 +82,7 @@ Default feature is `bert`. 55 architecture-specific flags plus `all`, `metal`, `
 
 ```toml
 [dependencies]
-trustformers-models = { version = "0.2.1", features = ["bert", "llama", "mistral", "clip"] }
+trustformers-models = { version = "0.2.2", features = ["bert", "llama", "mistral", "clip"] }
 ```
 
 `bert`, `roberta`, `distilbert`, `gpt2`, `gpt_neo`, `gpt_j`, `t5`, `albert`, `electra`, `deberta`, `vit`, `swin`, `deit`, `llama`, `llama2`, `llama3`, `codellama`, `deepseek`, `gpt_neox`, `mistral`, `clip`, `gemma`, `qwen`, `phi3`, `gemma2`, `mamba`, `rwkv`, `s4`, `stablelm`, `falcon`, `blip2`, `llava`, `dalle`, `flamingo`, `linformer`, `internlm2`, `falcon2`, `deepseek_v2`, `qwen2_5`, `opt`, `granite`, `aya`, `jamba`, `jamba2`, `sd3`, `llama3_2`, `mistral_v3`, `mixtral`, `phi2`, `mamba2`, `phi4`, `nemotron`, `whisper`, `yi`, `starcoder2`

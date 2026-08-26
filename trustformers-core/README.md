@@ -1,6 +1,6 @@
 # trustformers-core
 
-![Version](https://img.shields.io/badge/version-0.2.1-blue)
+![Version](https://img.shields.io/badge/version-0.2.2-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
 ![SLoC](https://img.shields.io/badge/SLoC-178%2C532-informational)
 ![Date](https://img.shields.io/badge/updated-2026--08--24-lightgrey)

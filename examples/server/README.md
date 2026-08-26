@@ -67,7 +67,7 @@ question-answering and text-generation over real checkpoints, built on Axum.
 ```
 GET /health
 ```
-`{"status": "healthy", "version": "0.2.1"}`. Always available, does not
+`{"status": "healthy", "version": "0.2.2"}`. Always available, does not
 depend on any model being loaded.
 
 ### Model management

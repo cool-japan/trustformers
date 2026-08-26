@@ -184,7 +184,7 @@ float[] output = engine.Inference(inputTensor);
 
 ## Installation
 
-Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.2.1` release; verify against each package's own manifest before pinning.
+Sub-packages currently version independently (`1.0.0`) and do not track the workspace's `0.2.2` release; verify against each package's own manifest before pinning.
 
 ### iOS (CocoaPods)
 
@@ -223,7 +223,7 @@ Add `com.trustformers.mobile` via the Unity Package Manager (Git URL or local `u
 
 ```toml
 [dependencies]
-trustformers-mobile = { version = "0.2.1", features = ["on-device-training"] }
+trustformers-mobile = { version = "0.2.2", features = ["on-device-training"] }
 ```
 
 ## Architecture
@@ -352,7 +352,7 @@ cd android-lib && ./gradlew test
 - Alpha status: API surface may still change before a Stable designation
 - **Updated 2026-08-18** (this line previously said "simplified/mock reference code"; it no longer is): `advanced_security.rs` implements real ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f (FIPS 203/204/205, via the `ml-kem`/`ml-dsa`/`slh-dsa` RustCrypto crates), real Paillier additively-homomorphic encryption, and real Shamir secret sharing — each with regression tests. Genuinely unimplemented pieces (full FHE, Classic McEliece, Falcon, circuit proof systems, garbled circuits) return a structured error naming what's actually available rather than a placeholder. Real remaining caveats: the RustCrypto PQC crates state they haven't been independently audited, and the Paillier/Schnorr code's `num-bigint`-based `modpow` isn't constant-time, so it isn't hardened against a local timing attacker — keep both in mind before depending on this for real confidentiality guarantees.
 - `react-native-example/` in this repository contains a usage example (`TrustformersCompleteExample.tsx`) only — there is no `package.json` or module source here, so React Native integration is not yet an installable package from this repo. The directory was named `react-native-plugin/` until 2026-08-24; it was renamed because the old name read as a publishable package.
-- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.1` release
+- Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.2` release
 - `tflite_nnapi_delegate.rs` is fully written but has no `pub mod` declaration anywhere in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing (orphaned, same pattern as the now-fixed `swin`/`deit` in `trustformers-models` before this release, or the now-deleted `android_renderscript.rs` here). Not yet triaged: wire it up or delete it.
 - **Fixed 2026-08-24**: `battery.rs` no longer returns hardcoded telemetry. Battery level, charging status, voltage, current, temperature and power draw are read from the kernel `power_supply` sysfs class on Linux and Android (the only source reachable without platform FFI, and the same node layout on both); every other target — iOS, macOS, Windows, wasm — reports `None` for each field rather than the previous invented `Some(2500.0)`/`Some(2200.0)`/`Some(1800.0)` wattages and `Some(75)`% level. `get_current_battery_level` returns `Option<f32>` and no longer guesses a level from charging status; `predict_power_consumption` extrapolates the mean of measured readings and errors when none exist, instead of extrapolating a fixed 2.5 W.
 - **Fixed 2026-08-24**: the `mobile_performance_profiler/` subsystem reports measurements or absence, never constants. Memory (process RSS + system available) and CPU (usage, frequency, temperature where sensors exist) come from `sysinfo`; GPU, network and battery families have no source reachable from this crate's dependencies and are reported as `None` on `MobileMetricsSnapshot` rather than as zeroed structs. Bottleneck detection, alerting and health scoring now evaluate real threshold rules against those snapshots — all three previously operated on empty rule lists or hardcoded component scores and could not report anything. iOS-, Android- and generic-specific collectors returning three different sets of invented constants were replaced by one real implementation.

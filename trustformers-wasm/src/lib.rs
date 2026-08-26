@@ -250,7 +250,7 @@ impl TrustformersWasm {
 
     #[wasm_bindgen(getter)]
     pub fn version(&self) -> String {
-        "0.2.1".to_string()
+        "0.2.2".to_string()
     }
 
     #[wasm_bindgen(getter)]
@@ -1521,7 +1521,7 @@ mod tests {
     fn test_initialization() {
         let tf = TrustformersWasm::new();
         assert!(tf.initialized());
-        assert_eq!(tf.version(), "0.2.1");
+        assert_eq!(tf.version(), "0.2.2");
     }
 
     #[test]

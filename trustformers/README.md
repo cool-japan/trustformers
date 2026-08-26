@@ -187,7 +187,7 @@ let result = chain.__call__("Very long document text...".to_string())?;
 
 ### Hub Integration
 
-Requires the `hub` feature (`trustformers = { version = "0.2.1", features = ["hub"] }`):
+Requires the `hub` feature (`trustformers = { version = "0.2.2", features = ["hub"] }`):
 
 ```rust
 use trustformers::hub::{download_model, HubOptions};

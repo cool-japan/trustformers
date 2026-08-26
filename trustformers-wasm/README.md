@@ -46,7 +46,7 @@ async function run() {
     await init();
 
     const tf = new TrustformersWasm();
-    console.log('Version:', tf.version);  // "0.2.1"
+    console.log('Version:', tf.version);  // "0.2.2"
 
     // Create and manipulate tensors
     const tensor = WasmTensor.new([1, 2, 3, 4], [2, 2]);
@@ -92,7 +92,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.2.1"
+console.log(tf.version);     // "0.2.2"
 console.log(tf.initialized); // true
 ```
 

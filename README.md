@@ -1,7 +1,7 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.2.1-blue.svg)](https://github.com/cool-japan/trustformers)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
@@ -55,7 +55,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.2.1"
+trustformers = "0.2.2"
 ```
 
 ### Basic Usage

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Copyright 2025-2026 COOLJAPAN OU (Team KitaSan)
 
+## [0.2.2] - Unreleased
+
 ## [0.2.1] - 2026-08-26
 
 A production-grade honesty and correctness pass: replacing fabricated/placeholder logic with real implementations or structured errors, deleting unsound and orphaned code, fixing several deadlocks, and tightening dependency hygiene. Verified against the tree across three checkpoints — 2026-08-18 (workspace test count grown from 14,887 to 20,629+), 2026-08-24 (20,629 passed / 43 skipped / 0 failed), and final validation on 2026-08-26 (`cargo nextest run --workspace`: 21,370 passed / 41 skipped / 0 failed on default features, 25,883 passed / 113 skipped / 0 failed on `--all-features`; `cargo clippy --all-features --all-targets -- -D warnings` and `cargo test --doc --workspace --all-features` both clean). Every item this entry once listed as still open — the 7 `cargo deny check advisories` findings, the `--features metal` compile break, three files newly over the 2,000-line policy limit, and two smaller documentation/manifest hygiene gaps — is resolved; see `TODO.md` for the full wave-by-wave audit trail.

@@ -29,7 +29,7 @@ A Rust client library for TrustformeRS serving infrastructure.
 
 ```toml
 [dependencies]
-trustformers-client = "0.2.1"
+trustformers-client = "0.2.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
