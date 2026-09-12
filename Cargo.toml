@@ -288,10 +288,10 @@ pyo3 = "0.29"
 oxicode = { version = "0.2.6", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.2"
-oxiarc-zstd = { version = "0.4.1" }
-oxiarc-deflate = { version = "0.4.1" }
-oxiarc-lz4 = { version = "0.4.1" }
-oxiarc-archive = { version = "0.4.1" }
+oxiarc-zstd = { version = "0.4.2" }
+oxiarc-deflate = { version = "0.4.2" }
+oxiarc-lz4 = { version = "0.4.2" }
+oxiarc-archive = { version = "0.4.2" }
 # Pure-Rust SQLite-compatible backend (COOLJAPAN OxiSQL ecosystem, C-free fork of Limbo).
 # Used for real SQLite-format export in trustformers-debug. NEVER use rusqlite/libsqlite3.
 oxisql-sqlite-compat = { version = "0.4.1", features = ["blocking"] }
