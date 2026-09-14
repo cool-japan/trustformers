@@ -1,6 +1,6 @@
 //! [`ProcessGroup`] implementations backed by real collective communication.
 //!
-//! Both groups delegate to [`trustformers_optim::collective::Collective`],
+//! Both groups delegate to [`trustformers_core::parallel::collective::Collective`],
 //! which implements ring all-reduce / all-gather / reduce-scatter and binomial
 //! broadcast / reduce over a pluggable point-to-point transport. Nothing here
 //! simulates, scales, or sleeps.
@@ -20,11 +20,11 @@ use crate::distributed::{DistributedError, ProcessGroup};
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use trustformers_core::tensor::Tensor;
-use trustformers_optim::collective::{Collective, ReduceOp};
-use trustformers_optim::transport::{
+use trustformers_core::parallel::collective::{Collective, ReduceOp};
+use trustformers_core::parallel::transport::{
     join_in_process_session, InProcessSession, InProcessTransport, TcpTransport, Transport,
 };
+use trustformers_core::tensor::Tensor;
 
 /// A [`ProcessGroup`] over any [`Transport`].
 ///

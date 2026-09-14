@@ -6,11 +6,27 @@
 //! - Hybrid parallelism
 //! - NUMA-aware optimization
 
+/// Ring collective algorithms (all-reduce, all-gather, reduce-scatter) and
+/// binomial broadcast/reduce built on top of [`transport`].
+///
+/// Moved here from `trustformers-optim` so that `trustformers-core` can build a
+/// real multi-node [`Communicator`]: the dependency direction is
+/// optim -> core, so these could not stay in optim and still be reachable from
+/// core. `trustformers-optim` re-exports them for API compatibility.
+pub mod collective;
 pub mod local_communicator;
 pub mod model_parallel;
 pub mod parallel_layers;
 pub mod pipeline_parallel;
 pub mod tensor_parallel;
+/// Pure-Rust point-to-point transports (shared-memory and TCP) that back the
+/// collective algorithms in [`collective`].
+///
+/// Moved here from `trustformers-optim` so that `trustformers-core` can build a
+/// real multi-node [`Communicator`]: the dependency direction is
+/// optim -> core, so these could not stay in optim and still be reachable from
+/// core. `trustformers-optim` re-exports them for API compatibility.
+pub mod transport;
 
 pub mod mpi_communicator;
 
@@ -37,8 +53,13 @@ pub use pipeline_parallel::{
     PipelineStage,
 };
 
+pub use collective::{Collective, CollectiveError, ReduceOp};
 pub use local_communicator::LocalCommunicator;
 pub use mpi_communicator::{mpi_utils, MpiCommunicatorImpl};
+pub use transport::{
+    join_in_process_session, InProcessSession, InProcessTransport, TcpTransport, Transport,
+    TransportError,
+};
 
 #[cfg(feature = "nccl")]
 pub use nccl_communicator::{create_nccl_communicator, NcclCommunicator};

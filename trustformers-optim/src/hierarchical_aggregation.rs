@@ -2,8 +2,19 @@
 // retained intentionally for in-progress features; not yet on active call paths.
 #![allow(dead_code)]
 
-pub mod collective;
-pub mod transport;
+/// Real collective communication algorithms (ring all-reduce, ring all-gather,
+/// ring reduce-scatter, binomial broadcast/reduce, barrier).
+///
+/// Moved to [`trustformers_core::parallel::collective`] so that
+/// `trustformers-core` can build a real multi-node communicator on top of it
+/// (the dependency direction is optim -> core). Re-exported here for API
+/// compatibility.
+///
+/// Pure-Rust point-to-point transports — shared-memory (multi-threaded ranks)
+/// and TCP (multi-process / multi-host ranks) — moved to
+/// [`trustformers_core::parallel::transport`] for the same reason and
+/// re-exported here for API compatibility.
+pub use trustformers_core::parallel::{collective, transport};
 
 use anyhow::Result;
 use collective::{Collective, ReduceOp};

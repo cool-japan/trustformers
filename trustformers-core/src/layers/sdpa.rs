@@ -150,8 +150,20 @@ pub(crate) fn blas_sgemm_nt(
 ) {
     let b_arr =
         scirs2_core::ndarray::ArrayView2::from_shape((n, k), b).expect("BLAS input shape mismatch");
-    let b_transposed = b_arr.t().to_owned();
-    let b_data = b_transposed.as_slice().expect("freshly allocated transpose is contiguous");
+    // `b_arr.t()` is a (k, n) view with swapped (F-order) strides over `b`'s
+    // own (n, k) row-major storage; naively `.to_owned()`-ing that view
+    // preserves its existing memory order (ndarray avoids a copy where it
+    // can), so the result is F-contiguous, not C-contiguous, and plain
+    // `.as_slice()` (which only ever succeeds for standard/C layout) then
+    // always returns `None`. `as_standard_layout()` is the ndarray primitive
+    // for exactly this: it guarantees a standard (row-major) layout,
+    // permuting into a fresh buffer if (as here) the source isn't already
+    // one, so `.as_slice()` on its result can never fail.
+    let b_transposed = b_arr.t();
+    let b_standard = b_transposed.as_standard_layout();
+    let b_data = b_standard
+        .as_slice()
+        .expect("as_standard_layout() guarantees a standard (row-major) layout");
     blas_sgemm(alpha, a, b_data, beta, c, m, k, n);
 }
 

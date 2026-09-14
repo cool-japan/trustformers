@@ -12,7 +12,7 @@
 //!   (optionally on separate hosts), communicating over TCP sockets.
 //!
 //! Both are built on the transport/collective layer in
-//! [`trustformers_optim::collective`], which implements ring all-reduce,
+//! [`trustformers_core::parallel::collective`], which implements ring all-reduce,
 //! ring all-gather, ring reduce-scatter, binomial broadcast/reduce and a
 //! rendezvous barrier.
 //!

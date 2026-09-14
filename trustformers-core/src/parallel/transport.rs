@@ -30,6 +30,15 @@ pub const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default time spent retrying an outgoing TCP connection before giving up.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Queued byte payloads for a single `(source rank, tag)` pair.
+///
+/// The outer [`HashMap`] is keyed by `(source rank, tag)`; the inner
+/// [`VecDeque`] holds the payloads deposited for that pair, in arrival
+/// order. Using a queue (rather than overwriting a single slot) is what
+/// makes repeated messages sent on the same `(source, tag)` pair delivered
+/// FIFO instead of clobbering one another.
+type MailboxSlots = HashMap<(usize, u64), VecDeque<Vec<u8>>>;
+
 /// Errors raised by the transport layer.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -146,7 +155,7 @@ impl<T: Transport + ?Sized> Transport for Arc<T> {
 /// Per-rank inbox keyed by `(source rank, tag)`.
 #[derive(Debug, Default)]
 struct Mailbox {
-    slots: Mutex<HashMap<(usize, u64), VecDeque<Vec<u8>>>>,
+    slots: Mutex<MailboxSlots>,
     arrival: Condvar,
 }
 

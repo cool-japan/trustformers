@@ -58,9 +58,11 @@ use std::arch::aarch64::{vdupq_n_f32, vfmaq_f32, vld1q_f32, vst1q_f32};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
-    __m256, _mm256_add_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_setzero_ps, _mm256_storeu_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_set1_ps,
-    _mm512_setzero_ps, _mm512_storeu_ps,
+    __m256, _mm256_add_epi32, _mm256_add_ps, _mm256_castsi256_ps, _mm256_cvttps_epi32,
+    _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_max_ps, _mm256_min_ps, _mm256_mul_ps, _mm256_round_ps,
+    _mm256_set1_epi32, _mm256_set1_ps, _mm256_setzero_ps, _mm256_slli_epi32, _mm256_storeu_ps,
+    _mm256_sub_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_set1_ps, _mm512_setzero_ps,
+    _mm512_storeu_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
 };
 
 pub struct SIMDMatrixOps {
@@ -426,7 +428,30 @@ impl SIMDMatrixOps {
     }
 }
 
-/// Fast polynomial approximation of exp(x) using AVX2 SIMD.
+/// Accurate polynomial approximation of `exp(x)` for eight `f32` lanes at
+/// once, using AVX2 SIMD.
+///
+/// # Numerical method
+///
+/// A bare low-degree Taylor series for `exp` is only trustworthy extremely
+/// close to zero. Softmax calls this with `x - max`, which is `<= 0` and
+/// routinely has a magnitude well past 2 (e.g. `-7`); a truncated series
+/// there isn't just imprecise, it can land on the wrong order of magnitude
+/// or even go negative. This uses the standard range-reduction technique
+/// instead (the classic Cephes `expf` algorithm, as ported to AVX by Julien
+/// Pommier's `avx_mathfun`):
+///
+/// 1. Write `x = n * ln(2) + r`, `n` an integer and `|r| <= ln(2) / 2`, by
+///    rounding `x * log2(e)` to the nearest integer `n`.
+/// 2. Approximate `exp(r)` with a degree-5 minimax polynomial, accurate to
+///    a few ULP over that small range.
+/// 3. Reconstruct `exp(x) = 2^n * exp(r)` by adding `n` directly to the
+///    biased exponent field of an IEEE-754 `f32` (`2^n` as a float is just
+///    the bit pattern `(n + 127) << 23`).
+///
+/// `ln(2)` is split into a high and low part (`ln2_hi + ln2_lo == ln(2)`, to
+/// more bits than a single `f32` can hold) so that subtracting `n * ln(2)`
+/// from `x` does not lose the precision `r` depends on.
 ///
 /// # Safety
 ///
@@ -436,20 +461,56 @@ impl SIMDMatrixOps {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 pub unsafe fn simd_exp_approx(x: __m256) -> __m256 {
-    // Fast exp approximation using polynomial
-    // exp(x) ≈ 1 + x + x²/2 + x³/6 (truncated Taylor series)
+    // Clamp so the exponent reconstruction below can never overflow/underflow
+    // an f32. Softmax only ever passes x <= 0, so only the lower bound is
+    // load-bearing, but both are kept so the function is correct standalone.
+    let exp_hi = _mm256_set1_ps(88.376_26);
+    let exp_lo = _mm256_set1_ps(-88.376_26);
+    let x = _mm256_max_ps(_mm256_min_ps(x, exp_hi), exp_lo);
+
+    let log2e = _mm256_set1_ps(std::f32::consts::LOG2_E);
     let one = _mm256_set1_ps(1.0);
-    let half = _mm256_set1_ps(0.5);
-    let sixth = _mm256_set1_ps(1.0 / 6.0);
 
-    let x2 = _mm256_mul_ps(x, x);
-    let x3 = _mm256_mul_ps(x2, x);
+    // n = round(x / ln2) = round(x * log2(e)), rounded to nearest (ties to
+    // even) by the hardware rather than the historical floor(x + 0.5) hack,
+    // which is both simpler and avoids that hack's own rounding-boundary
+    // corner cases.
+    let fx = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(_mm256_mul_ps(
+        x, log2e,
+    ));
 
-    let term1 = x;
-    let term2 = _mm256_mul_ps(x2, half);
-    let term3 = _mm256_mul_ps(x3, sixth);
+    // r = x - n*ln2, subtracted as two steps against a hi/lo split of ln(2)
+    // so the cancellation doesn't wash out the low bits of r.
+    let ln2_hi = _mm256_set1_ps(0.693_359_4);
+    let ln2_lo = _mm256_set1_ps(-2.121_944_4e-4);
+    let r = _mm256_sub_ps(
+        _mm256_sub_ps(x, _mm256_mul_ps(fx, ln2_hi)),
+        _mm256_mul_ps(fx, ln2_lo),
+    );
+    let r2 = _mm256_mul_ps(r, r);
 
-    let result = _mm256_add_ps(one, term1);
-    let result = _mm256_add_ps(result, term2);
-    _mm256_add_ps(result, term3)
+    // Degree-5 minimax polynomial for exp(r) on r in [-ln2/2, ln2/2]
+    // (standard Cephes single-precision expf coefficients).
+    let p0 = _mm256_set1_ps(1.987_569_1e-4);
+    let p1 = _mm256_set1_ps(1.398_199_9e-3);
+    let p2 = _mm256_set1_ps(8.333_452_3e-3);
+    let p3 = _mm256_set1_ps(4.166_579_5e-2);
+    let p4 = _mm256_set1_ps(1.666_666_6e-1);
+    let p5 = _mm256_set1_ps(5.0e-1);
+
+    let mut y = p0;
+    y = _mm256_add_ps(_mm256_mul_ps(y, r), p1);
+    y = _mm256_add_ps(_mm256_mul_ps(y, r), p2);
+    y = _mm256_add_ps(_mm256_mul_ps(y, r), p3);
+    y = _mm256_add_ps(_mm256_mul_ps(y, r), p4);
+    y = _mm256_add_ps(_mm256_mul_ps(y, r), p5);
+    y = _mm256_add_ps(_mm256_mul_ps(y, r2), r);
+    y = _mm256_add_ps(y, one);
+
+    // Build 2^n by writing n directly into the exponent field of an f32.
+    let n_i = _mm256_cvttps_epi32(fx);
+    let bias = _mm256_set1_epi32(127);
+    let pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n_i, bias), 23));
+
+    _mm256_mul_ps(y, pow2n)
 }
