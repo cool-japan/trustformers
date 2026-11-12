@@ -485,7 +485,7 @@ View detailed results in `target/criterion/report/index.html`
 
 ## Sponsorship
 
-TrustFormers is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+TrustFormers is developed and maintained by **COOLJAPAN OU (Team KitaSan)**.
 
 If you find TrustFormers useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
 
